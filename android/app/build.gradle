@@ -21,7 +21,8 @@ android {
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.release
+            def ks = System.getenv("MUCHI_KEYSTORE_FILE")
+            if (ks) signingConfig signingConfigs.release
         }
     }
     signingConfigs {
