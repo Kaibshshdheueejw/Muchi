@@ -1,5 +1,9 @@
 package app.muchi.music;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.ComponentName;
 import android.content.Intent;
@@ -9,17 +13,18 @@ import android.graphics.BitmapFactory;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 
 import androidx.annotation.NonNull;
+import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import androidx.media3.common.MediaItem;
-import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.session.MediaSession;
-import androidx.media3.session.MediaSessionService;
-import androidx.media3.session.SessionToken;
+import androidx.media.session.MediaSessionCompat;
+import androidx.media.session.PlaybackStateCompat;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -28,21 +33,25 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * MUCHI native background audio — Media3 (ExoPlayer) + MediaSession.
+ * MUCHI native background audio — ExoPlayer inside a foreground Service,
+ * with a MediaSessionCompat for the OS media notification and lock-screen
+ * controls (the same notification/session pattern proven in this repo by
+ * capacitor-music-controls-plugin).
  *
- * Plays one track/URL at a time in a foreground service so the music keeps
- * going when the screen is locked or the app is in the background, with the
- * OS media notification and lock-screen controls for free.
- *
- * The PLAYLIST is owned by the web app (public/app.js). This service never
- * auto-advances: lock-screen next/previous/ended/error are echoed back to
- * the web layer as `muchiControls` events, and the web layer answers by
- * calling `MuchiAudio.play(url)` with the next track.
+ * Plays one track/URL at a time; the music keeps going when the screen is
+ * locked or the app is in the background. The PLAYLIST is owned by the web
+ * app (public/app.js): next/previous/ended/error are echoed back to the web
+ * layer as `muchiControls` events and the web layer answers by calling
+ * `MuchiAudio.play(url)` with the next track. No auto-advance here.
  *
  * Talk to it through {@link MuchiAudioPlugin} (bind + {@link LocalBinder}).
  */
 @UnstableApi
-public class MuchiAudioService extends MediaSessionService {
+public class MuchiAudioService extends Service {
+
+    private static final String CHANNEL_ID = "muchi_media";
+    private static final int NOTIFICATION_ID = 1;
+    private static final String SESSION_TAG = "Muchi Audio";
 
     public static final String ACTION_PLAY = "app.muchi.music.action.PLAY";
     public static final String ACTION_STOP = "app.muchi.music.action.STOP";
@@ -72,30 +81,35 @@ public class MuchiAudioService extends MediaSessionService {
     private final Handler ticker = new Handler(Looper.getMainLooper());
 
     private ExoPlayer player;
-    private MediaSession session;
+    private MediaSessionCompat session;
+    private NotificationManager notificationManager;
     private PluginListener listener;
     private volatile boolean endedNotified = false;
+    private String trackTitle = "Muchi";
+    private String trackArtist = "";
+    private Bitmap artworkBitmap;
 
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
             ticker.removeCallbacks(tick);
-            if (player == null) return;
-            if (session != null && session.isActive()) {
-                if (listener != null) {
-                    listener.onProgress(
-                            player.getCurrentPosition(),
-                            Math.max(0L, player.getDuration()),
-                            player.getPlaybackState() == Player.STATE_PLAYING);
-                }
-                ticker.postDelayed(tick, 1000);
-            }
+            if (player == null || session == null) return;
+            long positionMs = player.getCurrentPosition();
+            long durationMs = Math.max(0L, player.getDuration());
+            boolean playing = player.getPlaybackState() == Player.STATE_PLAYING;
+            if (listener != null) listener.onProgress(positionMs, durationMs, playing);
+            updatePlaybackState(playing, positionMs);
+            ticker.postDelayed(tick, 1000);
         }
     };
 
+    /* ── lifecycle ─────────────────────────────────────────────────── */
+
     @Override
-    protected int getForegroundServiceType() {
-        return ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK;
+    public void onCreate() {
+        super.onCreate();
+        notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        createChannel();
     }
 
     @Override
@@ -118,23 +132,45 @@ public class MuchiAudioService extends MediaSessionService {
         return START_STICKY;
     }
 
-    /** Start/reload a track. Only called from the main thread. */
-    private synchronized void loadTrack(String url, String title, String artist,
-                                        String artwork, long durationMs) {
-        ensureSession();
-        MediaMetadata.Builder md = new MediaMetadata.Builder()
-                .setTitle(title != null && !title.isEmpty() ? title : "Muchi")
-                .setArtist(artist != null && !artist.isEmpty() ? artist : "Muchi");
-        if (durationMs > 0) md.setPlaybackDuration(durationMs);
-        MediaItem item = MediaItem.fromUri(url).setMediaMetadata(md.build()).build();
-        endedNotified = false;
-        player.setMediaItem(item);
-        player.prepare();
-        player.play();
-        if (artwork != null && !artwork.isEmpty()) fetchArtwork(artwork);
+    @Override
+    public IBinder onBind(Intent intent) {
+        return binder;
     }
 
-    private synchronized void ensureSession() {
+    @Override
+    public boolean onUnbind(Intent intent) {
+        // Keep playing when the WebView side unbinds (app in background).
+        return false;
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // Swiped away from recents → stop the music.
+        stopPlaybackInternal();
+    }
+
+    @Override
+    public void onDestroy() {
+        ticker.removeCallbacks(tick);
+        io.shutdown();
+        if (player != null) {
+            player.release();
+            player = null;
+        }
+        if (session != null) {
+            session.release();
+            session = null;
+        }
+        super.onDestroy();
+    }
+
+    /* ── playback ──────────────────────────────────────────────────── */
+
+    private synchronized void loadTrack(String url, String title, String artist,
+                                        String artwork, long durationMs) {
+        trackTitle = title != null && !title.isEmpty() ? title : "Muchi";
+        trackArtist = artist != null ? artist : "";
+
         if (player == null) {
             player = new ExoPlayer.Builder(this).build();
             player.addListener(new Player.Listener() {
@@ -153,66 +189,61 @@ public class MuchiAudioService extends MediaSessionService {
             });
         }
         if (session == null) {
-            session = new MediaSession.Builder(this, new MediaMetadata.Builder().build(),
-                    new MediaSession.Callback() {
-                        @Override
-                        public void onPlay() {
-                            if (player != null) player.play();
-                            emitControls("play", 0L);
-                        }
+            session = new MediaSessionCompat(this, SESSION_TAG, null, null);
+            session.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS
+                    | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
+            session.setCallback(new MediaSessionCompat.Callback() {
+                @Override
+                public void onPlay() {
+                    super.onPlay();
+                    if (player != null) player.play();
+                    emitControls("play", 0L);
+                }
 
-                        @Override
-                        public void onPause() {
-                            if (player != null) player.pause();
-                            emitControls("pause", 0L);
-                        }
+                @Override
+                public void onPause() {
+                    super.onPause();
+                    if (player != null) player.pause();
+                    emitControls("pause", 0L);
+                }
 
-                        @Override
-                        public void onNext() {
-                            // Web layer owns the queue.
-                            emitControls("next", 0L);
-                        }
+                @Override
+                public void onNext() {
+                    // Web layer owns the queue.
+                    emitControls("next", 0L);
+                }
 
-                        @Override
-                        public void onPrevious() {
-                            // Web layer owns the queue.
-                            emitControls("previous", 0L);
-                        }
+                @Override
+                public void onPrevious() {
+                    // Web layer owns the queue.
+                    emitControls("previous", 0L);
+                }
 
-                        @Override
-                        public void onSeekTo(long position) {
-                            if (player != null) player.seekTo(position);
-                        }
-                    })
-                    .build();
-            session.setSessionActivity(new ComponentName(this, MainActivity.class));
+                @Override
+                public void onSeekTo(long position) {
+                    if (player != null) player.seekTo(position);
+                }
+
+                @Override
+                public void onStop() {
+                    stopPlaybackInternal();
+                }
+            });
             session.setActive(true);
-            ticker.removeCallbacks(tick);
-            ticker.post(tick);
         }
-    }
 
-    @Override
-    public void onGetSession(SessionToken sessionToken) {
-        // A MediaController (e.g. system UI) connected before we built a session.
-        ensureSession();
-    }
+        endedNotified = false;
+        player.setMediaItem(MediaItem.fromUri(url));
+        player.prepare();
+        player.play();
 
-    @Override
-    public IBinder onBind(Intent intent) {
-        return binder;
-    }
+        session.setMetadata(buildMetadata(durationMs));
+        updatePlaybackState(true, 0L);
+        showNotification();
 
-    @Override
-    public boolean onUnbind(Intent intent) {
-        // Keep playing when the WebView side unbinds (app in background).
-        return false;
-    }
-
-    @Override
-    public void onTaskRemoved(Intent rootIntent) {
-        // Swiped away from recents → stop the music.
-        stopPlaybackInternal();
+        if (artwork != null && !artwork.isEmpty()) fetchArtwork(artwork);
+        ticker.removeCallbacks(tick);
+        ticker.post(tick);
     }
 
     private synchronized void stopPlaybackInternal() {
@@ -227,30 +258,88 @@ public class MuchiAudioService extends MediaSessionService {
             session.release();
             session = null;
         }
+        artworkBitmap = null;
         emitControls("stop", 0L);
+        stopInForeground();
+        stopSelf();
+    }
+
+    /* ── notification / session metadata ───────────────────────────── */
+
+    private void createChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_DEFAULT);
+            channel.setDescription("MUCHI background playback controls");
+            notificationManager.createNotificationChannel(channel);
+        }
+    }
+
+    private androidx.media.app.MediaMetadataCompat buildMetadata(long durationMs) {
+        androidx.media.app.MediaMetadataCompat.Builder md = new androidx.media.app.MediaMetadataCompat.Builder()
+                .putString(androidx.media.app.MediaMetadataCompat.METADATA_KEY_TITLE, trackTitle)
+                .putString(androidx.media.app.MediaMetadataCompat.METADATA_KEY_ARTIST,
+                        trackArtist.isEmpty() ? "Muchi" : trackArtist);
+        if (durationMs > 0) md.putLong(androidx.media.app.MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+        if (artworkBitmap != null) md.putBitmap(androidx.media.app.MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
+        return md.build();
+    }
+
+    private void updatePlaybackState(boolean playing, long positionMs) {
+        if (session == null) return;
+        long actions = PlaybackStateCompat.ACTION_PLAY
+                | PlaybackStateCompat.ACTION_PAUSE
+                | PlaybackStateCompat.ACTION_PLAY_PAUSE
+                | PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+                | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                | PlaybackStateCompat.ACTION_SEEK_TO;
+        session.setPlaybackState(new PlaybackStateCompat.Builder()
+                .setActions(actions)
+                .setState(playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
+                        Math.max(0, positionMs), 1f)
+                .build());
+    }
+
+    private void showNotification() {
+        if (notificationManager == null) return;
+        Intent contentIntent = new Intent(this, MainActivity.class);
+        contentIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent pi = PendingIntent.getActivity(this, 0, contentIntent,
+                Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0);
+
+        androidx.media.app.NotificationCompat.MediaStyle style =
+                new androidx.media.app.NotificationCompat.MediaStyle();
+        if (session != null) style.setMediaSession(session.getSessionToken());
+
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_muchi)
+                .setContentTitle(trackTitle)
+                .setContentText(trackArtist.isEmpty() ? "Muchi" : trackArtist)
+                .setLargeIcon(artworkBitmap)
+                .setContentIntent(pi)
+                .setOngoing(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setStyle(style)
+                .build();
+        notificationManager.notify(NOTIFICATION_ID, notification);
+
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        } else if (Build.VERSION.SDK_INT >= 26) {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+    }
+
+    private void stopInForeground() {
         if (Build.VERSION.SDK_INT >= 33) {
             stopForeground(Service.STOP_FOREGROUND_REMOVE);
         } else {
             stopForeground(true);
         }
-        stopSelf();
-    }
-
-    @Override
-    public void onDestroy() {
-        ticker.removeCallbacks(tick);
-        io.shutdown();
-        synchronized (this) {
-            if (player != null) {
-                player.release();
-                player = null;
-            }
-            if (session != null) {
-                session.release();
-                session = null;
-            }
+        if (notificationManager != null) {
+            notificationManager.cancel(NOTIFICATION_ID);
         }
-        super.onDestroy();
     }
 
     private void emitControls(String message, long positionMs) {
@@ -258,7 +347,7 @@ public class MuchiAudioService extends MediaSessionService {
         if (l != null) l.onControls(message, positionMs);
     }
 
-    /** Download notification artwork off the main thread, then attach it. */
+    /** Download notification/session artwork off the main thread. */
     private void fetchArtwork(String artworkUrl) {
         io.execute(() -> {
             Bitmap bmp = null;
@@ -287,13 +376,10 @@ public class MuchiAudioService extends MediaSessionService {
             }
             final Bitmap finalBmp = bmp;
             ticker.post(() -> {
-                ExoPlayer p = player;
-                if (p == null || finalBmp == null) return;
-                try {
-                    MediaMetadata current = p.getCurrentMediaItem().getMediaMetadata();
-                    p.setMediaMetadata(new MediaMetadata.Builder(current).setArtwork(finalBmp).build());
-                } catch (Exception ignored) {
-                }
+                if (finalBmp == null) return;
+                artworkBitmap = finalBmp;
+                if (session != null) session.setMetadata(buildMetadata(player != null ? Math.max(0, player.getDuration()) : 0L));
+                showNotification();
             });
         });
     }

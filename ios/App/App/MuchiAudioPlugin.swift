@@ -20,16 +20,27 @@ import UIKit
  *         stop(), seekTo({position}), emit({action,...})
  * Events: muchiControls {message, position}, muchiProgress {positionMs, durationMs, playing}
  */
+@objc(MUCHI_MuchiAudioPlugin)
 public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
-    public static let pluginId: String = "MuchiAudio"
+    public let identifier = "MUCHI_MuchiAudioPlugin"
+    public let jsName = "MuchiAudio"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "play", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "pause", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "resume", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "seekTo", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "emit", returnType: CAPPluginReturnPromise)
+    ]
 
     private var player: AVPlayer?
     private var currentItem: AVPlayerItem?
     private var ticker: Timer?
     private var errorSent = false
 
-    public init() {
-        super.init()
+    /* ── lifecycle ─────────────────────────────────────────────────── */
+
+    override public func load() {
         setupRemoteCommands()
     }
 
@@ -56,7 +67,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            self?.notify("muchiControls", ["message": "ended", "position": 0])
+            self?.notifyListeners("muchiControls", data: ["message": "ended", "position": 0])
         }
 
         p.replaceCurrentItem(with: item)
@@ -112,7 +123,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPRemoteCommandCenter.shared().target = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        notify("muchiControls", ["message": "stop", "position": 0])
+        notifyListeners("muchiControls", data: ["message": "stop", "position": 0])
     }
 
     private func configureAudioSession() {
@@ -132,12 +143,12 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let self = self, let p = self.player, let item = self.currentItem else { return }
             if item.status == .failed && !self.errorSent {
                 self.errorSent = true
-                self.notify("muchiControls", ["message": "error", "position": 0])
+                self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
                 return
             }
             let pos = p.currentTime()
             let dur = item.duration.isNumeric ? item.duration.seconds : 0
-            self.notify("muchiProgress", [
+            self.notifyListeners("muchiProgress", data: [
                 "positionMs": Int(pos.seconds * 1000.0),
                 "durationMs": Int(dur * 1000.0),
                 "playing": p.rate > 0
@@ -194,15 +205,16 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.nextTrackCommand.isEnabled = true
         cc.previousTrackCommand.isEnabled = true
         cc.changePlaybackPositionCommand.isEnabled = true
+        cc.beginReceivingRemoteCommands()
 
         cc.playCommand.addTarget { [weak self] _ in
-            self?.notify("muchiControls", ["message": "play", "position": 0])
+            self?.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
             self?.player?.play()
             self?.updateRate()
             return .success
         }
         cc.pauseCommand.addTarget { [weak self] _ in
-            self?.notify("muchiControls", ["message": "pause", "position": 0])
+            self?.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
             self?.player?.pause()
             self?.updateRate()
             return .success
@@ -210,10 +222,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self = self else { return .noAction }
             if self.player?.rate ?? 0 > 0 {
-                self.notify("muchiControls", ["message": "pause", "position": 0])
+                self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
                 self.player?.pause()
             } else {
-                self.notify("muchiControls", ["message": "play", "position": 0])
+                self.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
                 self.player?.play()
             }
             self.updateRate()
@@ -221,11 +233,11 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         // Web layer owns the queue — only echo the intent, don't advance locally.
         cc.nextTrackCommand.addTarget { [weak self] _ in
-            self?.notify("muchiControls", ["message": "next", "position": 0])
+            self?.notifyListeners("muchiControls", data: ["message": "next", "position": 0])
             return .success
         }
         cc.previousTrackCommand.addTarget { [weak self] _ in
-            self?.notify("muchiControls", ["message": "previous", "position": 0])
+            self?.notifyListeners("muchiControls", data: ["message": "previous", "position": 0])
             return .success
         }
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
