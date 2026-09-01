@@ -85,7 +85,7 @@ async function createKV(name) {
     }
   } catch {}
   const out = run(["kv", "namespace", "create", name]);
-  const m = out.match(/"id"\s*:\s*"([^"]+)"/);
+  const m = out.match(/id\s*=\s*"([^"]+)"/) || out.match(/"id"\s*:\s*"([^"]+)"/);
   if (!m) throw new Error(`Could not parse KV namespace id from: ${out}`);
   console.log(`  KV "${name}" created (${m[1]})`);
   return m[1];
