@@ -13,8 +13,8 @@
 // drop single-use state). KV is used only for the long-TTL bounded caches.
 
 import { createHmac, randomBytes } from "node:crypto";
-import { APP_NAME, APP_VERSION, authConfig, SESSION_TTL_MS, corsHeaders } from "./config.js";
-import { json, redirect } from "./util.js";
+import { APP_NAME, APP_VERSION, authConfig, SESSION_TTL_MS } from "./config.js";
+import { json, redirect, corsHeaders } from "./util.js";
 import { decodeIdToken } from "./parse.js";
 import { sidFromToken, sessionToken } from "./auth.js";
 import { getSession, putSession, deleteSession, putOAuthState, takeOAuthState } from "./db.js";

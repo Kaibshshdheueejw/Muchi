@@ -1,20 +1,25 @@
-# MUCHI — Workers Static Assets header rules (copied into public/ at package
-# build time). Mirrors the Node server's serveStatic() Cache-Control behavior:
-#   .html/.js/.css -> no-store (the service worker always gets fresh copies)
-#   everything else -> public, max-age=86400
-# Workers-only config; the app code is untouched.
+# MUCHI — Workers Static Assets header rules.
+#
+# IMPORTANT: Workers applies ALL matching rules to a request (values are
+# appended into one Cache-Control header), and when both are present
+# `no-store` wins over `public`. So the app shell files that the service
+# worker must always revalidate (html/js/css) get an explicit no-store rule,
+# while everything else (images, manifest) gets public caching.
+#
+#   .html/.js/.css (+ /)  -> no-store (the service worker always gets fresh copies)
+#   everything else       -> public, max-age=86400
 
-/*
+/
   Cache-Control: no-store, max-age=0
 
-/logo.png
-  Cache-Control: public, max-age=86400
+/*.html
+  Cache-Control: no-store, max-age=0
 
-/logo.svg
-  Cache-Control: public, max-age=86400
+/*.js
+  Cache-Control: no-store, max-age=0
 
-/cover-default.png
-  Cache-Control: public, max-age=86400
+/*.css
+  Cache-Control: no-store, max-age=0
 
-/manifest.json
+/*
   Cache-Control: public, max-age=86400

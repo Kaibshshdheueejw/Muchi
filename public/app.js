@@ -1758,10 +1758,10 @@
       if (url && /^https?:\/\//i.test(url) && !API_BASE) url = `/api/stream?url=${encodeURIComponent(url)}`;
     }
     if (!url) throw new Error("No stream");
-    // Real native background playback: http(s) streams are handed to the
-    // foreground Media3 service so audio survives Home / app switch /
-    // screen-off / lock. Offline blob: URLs and failures fall back to the
-    // WebView <audio> element (existing behaviour).
+    // Optional native background playback: if the native shell installs a
+    // MuchiAudio plugin, http(s) streams are handed to its Media3 foreground
+    // service. This build has no such plugin, so audio plays in the WebView
+    // <audio> element (MusicControls notification/controls stay active).
     if (nativePlayer() && /^https?:\/\//i.test(url)) {
       if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
         setWantPlay(true);
@@ -2405,14 +2405,15 @@
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     return window.Capacitor.Plugins;
   }
-  /* ── Real native background player (Android, Media3/ExoPlayer) ────────
-     The MuchiAudio plugin (android/app/src/main/java/app/muchi/music/)
-     runs a foreground MediaSessionService that keeps playing while the
-     app is backgrounded, on the lock screen and when the screen is off.
-     The WebView JS stays the single source of truth for WHAT plays:
-     the plugin only renders audio + the OS media notification/controls,
-     and every system action (play/pause/next/prev/seek) is echoed back
-     into the app's own playback functions. */
+  /* ── Optional native background player (Android, Media3/ExoPlayer) ────
+     This build does NOT ship a MuchiAudio plugin: nativePlayer() returns
+     null and every audio track plays through the WebView <audio> element
+     (below), with the capacitor-music-controls-plugin providing the media
+     notification, MediaSession, lock-screen and media-button controls.
+     If a MuchiAudio plugin (a foreground MediaSessionService that renders
+     audio + OS notification and echoes play/pause/next/prev/seek back into
+     this app's own playback functions) is added to the Android project
+     later, it is picked up automatically here — no other web changes. */
   let npActive = false;   // native player is the current audio sink
   let npPlaying = false;  // last known native playback state
   let npPos = 0;          // last known position (s)

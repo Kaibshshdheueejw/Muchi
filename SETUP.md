@@ -16,21 +16,10 @@ Windows (Git Bash / PowerShell) or macOS/Linux with Node 18+ installed.
 
 ## 2. Upload the ZIP contents
 
-> **One-time structural step (why):** this archive is delivered from a
-> GitHub App that cannot push `.github/workflows/` files, so the three
-> workflow files ship at the repo root in `workflows/`. On your new repo
-> they must live at `.github/workflows/`:
-
-```bash
-# after uploading everything (or before pushing — either is fine):
-mkdir -p .github/workflows
-mv workflows/deploy.yml .github/workflows/deploy.yml
-mv workflows/android-capacitor.yml .github/workflows/android-capacitor.yml
-mv workflows/ios-capacitor.yml .github/workflows/ios-capacitor.yml
-rmdir workflows
-git add -A && git commit -m "Workflows to .github/workflows"
-git push
-```
+> **Note (done already):** this project started life as a ZIP upload whose
+> GitHub App couldn't push `.github/workflows/`, so the workflow files were
+> moved into `.github/workflows/` in commit `7319b26`. The current repo
+> already has them in the right place — no move needed.
 
 Option A (recommended, keeps history):
 ```bash
@@ -115,9 +104,10 @@ npx wrangler secret put GOOGLE_REDIRECT_URI --env staging
 npx wrangler secret put MUCHI_SESSION_SECRET --env staging
 ```
 
-`GOOGLE_REDIRECT_URI` must be:
-- production: `https://<your-subdomain>.<account>.workers.dev/api/auth/google/callback`
-- staging: `https://muchi-staging.<account>.workers.dev/api/auth/google/callback`
+`GOOGLE_REDIRECT_URI` must be (`<SUB>` = your account's workers.dev subdomain,
+e.g. `muchi` → `*.muchi.workers.dev`):
+- production: `https://muchi.<SUB>.workers.dev/api/auth/google/callback`
+- staging: `https://muchi-staging.<SUB>.workers.dev/api/auth/google/callback`
 
 **Google Console (only for the test/staging Worker for now):** Google Cloud
 Console → APIs & Services → Credentials → OAuth 2.0 Client (the *web* client
@@ -151,8 +141,9 @@ CI applies them before every deploy. Migration files: `migrations/`.
 
 ## 9. Open the deployed Worker
 
-- Production: `https://<name>.<account>.workers.dev/`
-- Staging: `https://muchi-staging.<account>.workers.dev/`
+(`<SUB>` = your account's workers.dev subdomain)
+- Production: `https://muchi.<SUB>.workers.dev/`
+- Staging: `https://muchi-staging.<SUB>.workers.dev/`
 
 You should see the MUCHI app shell. `https://<url>/api/health` should return
 `{"ok":true,"name":"Muchi","version":"1.2.1",...}`.
