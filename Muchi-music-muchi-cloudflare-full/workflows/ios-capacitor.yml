@@ -1,0 +1,64 @@
+name: Build Muchi Mobile (Capacitor iOS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, staging]
+    paths:
+      - "public/**"
+      - "ios/**"
+      - "capacitor.config.ts"
+      - "package.json"
+      - "package-lock.json"
+
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync Capacitor (web → native)
+        run: npx cap sync ios
+
+      - name: Build unsigned archive (works without Apple credentials)
+        working-directory: ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ./DerivedData \
+            -archivePath ./output/Muchi.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            archive
+
+      - name: Export unsigned IPA
+        working-directory: ios/App
+        run: |
+          mkdir -p output/export
+          xcodebuild -exportArchive \
+            -archivePath ./output/Muchi.xcarchive \
+            -exportOptionsPlist ./export-options.plist \
+            -exportPath ./output/export \
+            CODE_SIGNING_ALLOWED=NO \
+            || true
+          ls -la output/export || echo "Export skipped (requires signing) — archive is ready for Xcode/App Store Connect."
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: muchi-ios-archive
+          path: ios/App/output/Muchi.xcarchive
+          if-no-files-found: warn
+
+      # To publish to the App Store, add these secrets and enable the job:
+      #   APPLE_CERT_B64, APPLE_CERT_PASSWORD, APPLE_PROFILE_B64,
+      #   APPLE_KEY_ID, APPLE_ISSUER_ID, APPLE_KEY_B64 (App Store Connect API)
+      # then run: xcodebuild -exportArchive with a signing export-options.plist.

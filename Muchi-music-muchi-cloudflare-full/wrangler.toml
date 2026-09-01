@@ -1,0 +1,53 @@
+# MUCHI — Cloudflare Worker configuration (complete backend port).
+#
+# Prod Worker:   muchi.<account>.workers.dev
+# Staging Worker: muchi-staging.<account>.workers.dev
+#
+# SETUP (one-time): run `npm run setup` (creates D1 + KV namespaces, patches
+# the REPLACE_ME ids below, applies remote migrations) — then run the
+# `npx wrangler secret put …` commands it prints (see SETUP.md §5).
+#
+# Secrets are NEVER in this file: they live in Cloudflare via
+# `npx wrangler secret put NAME [--env staging]` (see .dev.vars.example).
+
+name = "muchi"
+main = "src/index.js"
+compatibility_date = "2026-08-31"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# Static assets (the Liquid Glass frontend from public/). /api/* always hits
+# the Worker first (run_worker_first) — critical for the OAuth callbacks,
+# which arrive as browser navigation requests; without this, a compat date
+# >= 2025-04-01 would serve index.html instead of running the Worker.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# ── Production bindings (ids filled by `npm run setup`) ──
+[[d1_databases]]
+binding = "DB"
+database_name = "muchi"
+database_id = "REPLACE_ME_D1_PRODUCTION"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_ME_KV_PRODUCTION"
+
+# ── Staging environment (muchi-staging.<account>.workers.dev) ──
+# Separate D1 + KV so staging tests never touch production data.
+[env.staging]
+name = "muchi-staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "muchi-staging"
+database_id = "REPLACE_ME_D1_STAGING"
+migrations_dir = "migrations"
+
+[[env.staging.kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_ME_KV_STAGING"

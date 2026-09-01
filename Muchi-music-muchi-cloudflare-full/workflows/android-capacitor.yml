@@ -1,0 +1,82 @@
+name: Build Muchi Mobile (Capacitor Android)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, staging]
+    paths:
+      - "public/**"
+      - "android/**"
+      - "capacitor.config.ts"
+      - "package.json"
+      - "package-lock.json"
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync Capacitor (web → native)
+        run: npx cap sync android
+
+      # Signing material is NEVER in the repo. Add these secrets to
+      # Settings → Secrets and variables → Actions:
+      #   MUCHI_KEYSTORE_B64      base64 of the release keystore (.jks/.p12)
+      #   MUCHI_KEYSTORE_PASSWORD keystore + key password
+      #   MUCHI_KEYSTORE_ALIAS    key alias (optional, default "muchi")
+      - name: Restore signing keystore from secrets
+        id: keystore
+        env:
+          MUCHI_KEYSTORE_B64: ${{ secrets.MUCHI_KEYSTORE_B64 }}
+          MUCHI_KEYSTORE_PASSWORD: ${{ secrets.MUCHI_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$MUCHI_KEYSTORE_B64" ]; then
+            mkdir -p "$RUNNER_TEMP/muchi"
+            echo "$MUCHI_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/muchi/muchi-release.p12"
+            echo "MUCHI_KEYSTORE_FILE=$RUNNER_TEMP/muchi/muchi-release.p12" >> "$GITHUB_ENV"
+            echo "signed=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact will be signed with the DEBUG key (not for Play)."
+            echo "signed=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release APK + AAB
+        working-directory: android
+        run: |
+          ./gradlew assembleRelease bundleRelease --no-daemon
+          echo "APK: $(ls -la app/build/outputs/apk/release/*.apk 2>/dev/null | wc -l) file(s)"
+          echo "AAB: $(ls -la app/build/outputs/bundle/release/*.aab 2>/dev/null | wc -l) file(s)"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: muchi-android-apk-${{ steps.keystore.outputs.signed }}
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload AAB artifact (Google Play)
+        uses: actions/upload-artifact@v4
+        with:
+          name: muchi-android-aab-${{ steps.keystore.outputs.signed }}
+          path: android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error

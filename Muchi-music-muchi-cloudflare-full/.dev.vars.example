@@ -1,0 +1,7 @@
+# Copy to `.dev.vars` for LOCAL `wrangler dev` only — never commit the real file.
+# Production values go through `wrangler secret put …` (never in Git).
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=https://muchi.<your-account>.workers.dev/api/auth/google/callback
+MUCHI_SESSION_SECRET=
+MUCHI_GITHUB=
