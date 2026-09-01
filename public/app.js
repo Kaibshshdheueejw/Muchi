@@ -1758,10 +1758,11 @@
       if (url && /^https?:\/\//i.test(url) && !API_BASE) url = `/api/stream?url=${encodeURIComponent(url)}`;
     }
     if (!url) throw new Error("No stream");
-    // Optional native background playback: if the native shell installs a
-    // MuchiAudio plugin, http(s) streams are handed to its Media3 foreground
-    // service. This build has no such plugin, so audio plays in the WebView
-    // <audio> element (MusicControls notification/controls stay active).
+    // Optional native background playback: the native Android/iOS shells ship
+    // a MuchiAudio plugin (a foreground media service that keeps playing with
+    // the screen locked, with the OS media notification + lock-screen
+    // controls), so http(s) streams are handed to it. On the web there is no
+    // native plugin, so audio plays in the WebView <audio> element.
     if (nativePlayer() && /^https?:\/\//i.test(url)) {
       if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
         setWantPlay(true);
@@ -2405,15 +2406,15 @@
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     return window.Capacitor.Plugins;
   }
-  /* ── Optional native background player (Android, Media3/ExoPlayer) ────
-     This build does NOT ship a MuchiAudio plugin: nativePlayer() returns
-     null and every audio track plays through the WebView <audio> element
-     (below), with the capacitor-music-controls-plugin providing the media
-     notification, MediaSession, lock-screen and media-button controls.
-     If a MuchiAudio plugin (a foreground MediaSessionService that renders
-     audio + OS notification and echoes play/pause/next/prev/seek back into
-     this app's own playback functions) is added to the Android project
-     later, it is picked up automatically here — no other web changes. */
+  /* ── Optional native background player (Android + iOS) ───────────────
+     The native shells ship a MuchiAudio plugin: on Android a Media3
+     (ExoPlayer) MediaSessionService foreground player, on iOS an AVPlayer
+     with AVAudioSession + now-playing/lock-screen controls. It renders
+     audio + the OS media notification and echoes play/pause/next/prev/
+     seek/ended/error back into this app's own playback functions.
+     nativePlayer() returns it on Android/iOS (null on the web, where every
+     track plays through the WebView <audio> element below). The plugin is
+     picked up automatically here — no other web changes. */
   let npActive = false;   // native player is the current audio sink
   let npPlaying = false;  // last known native playback state
   let npPos = 0;          // last known position (s)
@@ -2421,7 +2422,8 @@
   function nativePlayer() {
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     try {
-      if (window.Capacitor.getPlatform && window.Capacitor.getPlatform() !== "android") return null;
+      const p = window.Capacitor.getPlatform ? window.Capacitor.getPlatform() : "";
+      if (p !== "android" && p !== "ios") return null;
       return window.Capacitor.Plugins.MuchiAudio || null;
     } catch { return null; }
   }

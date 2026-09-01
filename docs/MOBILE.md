@@ -20,16 +20,21 @@ public/ (Liquid Glass UI — one codebase)
   (`capacitor-music-controls-plugin`) and the status bar / app / share /
   notifications plugins (`@capacitor/*` v8) — wired in `public/app.js`
   `initNativeBridge()`.
-- **Android playback**: audio plays in the WebView `<audio>` element (with
-  the MusicControls notification + lock-screen/media-button controls active,
-  and a screen wake lock while playing). The `nativePlayTrack()` bridge in
-  app.js targets an optional `MuchiAudio` Media3 foreground service that is
-  **not included in this repository** — it degrades cleanly to the WebView
-  path.
-- **iOS background audio**: WebKit media session keeps playing with the
-  screen off (`UIBackgroundModes = audio` in Info.plist) and exposes
-  Now Playing / lock-screen / remote controls; the plugin bridge forwards
-  control events back to the app.
+- **Android playback**: the app ships a native `MuchiAudio` plugin
+  (`MuchiAudioPlugin` + `MuchiAudioService`: Media3/ExoPlayer inside a
+  `MediaSessionService` foreground service, `mediaPlayback` type). The
+  `nativePlayTrack()` bridge in app.js hands http(s) streams to it, so the
+  music keeps playing with the screen locked / app in background, with the
+  OS media notification + lock-screen controls; the playlist stays owned by
+  the web layer (next/prev/ended are echoed back as `muchiControls` events).
+  Without the plugin (e.g. web) it degrades cleanly to the WebView
+  `<audio>` path + MusicControls.
+- **iOS background audio**: the app ships a native `MuchiAudio` plugin
+  (`AVPlayer` + `AVAudioSession .playback` + `MPRemoteCommandCenter` /
+  `MPNowPlayingInfoCenter`); `UIBackgroundModes = audio` in Info.plist
+  keeps playback running with the app in the background and the lock screen
+  shows Now Playing + controls. Same web-layer playlist contract as
+  Android.
 
 ## Deep-link auth (`muchi://`) — included in this repository
 

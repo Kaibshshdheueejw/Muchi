@@ -60,7 +60,7 @@ real-world verification (code path complete, needs deployed Worker).
 | Feature | Status | Note |
 |---|---|---|
 | Android project (Capacitor 8) | ✅ | `android/` complete (Gradle, manifest, resources, launcher icons) |
-| Android audio + notification/lock-screen controls | ✅ | WebView audio + `capacitor-music-controls-plugin`; the `MuchiAudio` Media3 service is NOT shipped (bridge in app.js keeps its interface — see MIGRATION.md §7) |
+| Android audio + notification/lock-screen controls | ✅ | Native `MuchiAudio` plugin shipped (Media3/ExoPlayer `MediaSessionService` foreground service → background playback + OS notification + lock-screen controls; web fallback = WebView `<audio>` + MusicControls) — see MIGRATION.md §7 |
 | Android notification + lock-screen controls | ✅ | plugin-managed MediaSession; `.longValue()` duration fix present in plugin 8.0.0 (pinned) |
 | Android build/signing config | ✅ | env/secret-driven signing (`MUCHI_KEYSTORE_*`); debug fallback |
 | iOS project (Capacitor 8) | ✅ | `ios/` complete (Xcode project, assets, storyboards) |
