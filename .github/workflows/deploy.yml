@@ -1,26 +1,22 @@
 # MUCHI — deploy to Cloudflare Workers (GitHub Actions + Wrangler).
 #
-# Why GitHub Actions (not Workers Builds) — see docs/CLOUDFLARE-GITHUB.md.
+# Branch mapping (staging-first, by design):
+#   push to main   -> test + PRODUCTION deploy  (muchi.<account>.workers.dev)
+#   push to other  -> test + STAGING deploy     (muchi-staging.<account>.workers.dev)
+#   manual run     -> choose staging or production
 #
-# Flow:
-#   push to main        -> test + PRODUCTION deploy (muchi.<account>.workers.dev)
-#   push to other branch -> test + STAGING deploy  (muchi-staging.<account>.workers.dev)
-#   manual run          -> choose staging or production
-#
-# GitHub secrets required (Settings -> Secrets and variables -> Actions):
-#   CLOUDFLARE_API_TOKEN   (see docs/CLOUDFLARE-GITHUB.md for exact permissions)
+# GitHub secrets required:
+#   CLOUDFLARE_API_TOKEN  (Workers Scripts Edit, Workers R2 Edit, Workers KV
+#                          Edit, D1 Edit, Account Settings Read)
 #   CLOUDFLARE_ACCOUNT_ID
-#
 # Worker secrets (GOOGLE_CLIENT_ID/SECRET, GOOGLE_REDIRECT_URI,
-# MUCHI_SESSION_SECRET) are configured ONCE in Cloudflare via
-# `npx wrangler secret put …` — they never live in GitHub.
+# MUCHI_SESSION_SECRET) live only in Cloudflare — never in GitHub.
 
 name: Deploy MUCHI Worker
 
 on:
   push:
-    branches:
-      - "**"
+    branches: ["**"]
   workflow_dispatch:
     inputs:
       environment:
@@ -39,12 +35,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci
+      - name: Toolchain versions
+        run: |
+          node --version
+          npm --version
+          npx wrangler --version
       - name: Unit tests (pure, no network)
         run: npm test
 
@@ -55,12 +56,18 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci
+
+      - name: Toolchain versions (deploy job)
+        run: |
+          node --version
+          npm --version
+          npx wrangler --version
 
       - name: Determine environment
         id: env
@@ -73,6 +80,25 @@ jobs:
           else
             echo "target=staging" >> "$GITHUB_OUTPUT"
           fi
+          echo "Target: $(cat $GITHUB_OUTPUT | grep '^target=' | cut -d= -f2)"
+
+      - name: Cloudflare auth check (wrangler whoami)
+        run: npx wrangler whoami
+
+      - name: Preflight — workers.dev subdomain registered
+        shell: bash
+        run: |
+          RESP=$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" || true)
+          SUB=$(echo "$RESP" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const r=JSON.parse(d);console.log((r.result&&r.result.subdomain)||'')}catch{console.log('')}})")
+          if [ -z "$SUB" ]; then
+            echo "::error::workers.dev subdomain is NOT registered on this Cloudflare account. Register it once: dash.cloudflare.com → Workers & Pages → 'Create a Worker' (follow the subdomain prompt) → then re-run this workflow."
+            exit 1
+          fi
+          echo "workers.dev subdomain: $SUB"
+
+      - name: Wrangler config check (dry-run)
+        run: npx wrangler deploy --dry-run
 
       - name: Ensure D1 + KV resources (idempotent)
         run: node scripts/setup.mjs --ci
@@ -85,17 +111,27 @@ jobs:
         if: steps.env.outputs.target == 'production'
         run: npx wrangler d1 migrations apply DB --remote
 
-      - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
+      - name: Deploy Worker (staging)
+        if: steps.env.outputs.target == 'staging'
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy ${{ steps.env.outputs.target == 'staging' && '--env staging' || '' }}
+          command: deploy --env staging
+          workingDirectory: .
+
+      - name: Deploy Worker (production)
+        if: steps.env.outputs.target == 'production'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+          workingDirectory: .
 
       - name: Smoke test deployed Worker
         shell: bash
         run: |
-          # workers.dev subdomain of the account (e.g. "my-account.workers.dev")
           SUB=$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
             | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{console.log(JSON.parse(d).result.subdomain)})")
