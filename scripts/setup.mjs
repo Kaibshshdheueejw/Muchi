@@ -18,18 +18,24 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const WRANGLER = path.join(ROOT, "wrangler.toml");
+const WRANGLER_CLI = path.join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
 const CI = process.argv.includes("--ci");
 const MIGRATE = process.argv.includes("--migrate");
 
 function run(args, opts = {}) {
-  const cmd = process.platform === "win32" ? "npx.cmd" : "npx";
-  const out = execFileSync(cmd, ["wrangler", ...args], {
+  // Run the local wrangler CLI directly with the current Node binary.
+  // Do NOT spawn `npx`/`npx.cmd` from execFileSync: on Windows, Node
+  // cannot launch .cmd files without a shell and dies with EINVAL.
+  if (!existsSync(WRANGLER_CLI)) {
+    throw new Error("wrangler not found in node_modules — run `npm ci` first");
+  }
+  const out = execFileSync(process.execPath, [WRANGLER_CLI, ...args], {
     cwd: ROOT,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
@@ -46,12 +52,25 @@ function toml() {
 function patch(ids) {
   let t = toml();
   for (const [placeholder, value] of Object.entries(ids)) {
-    if (!value) continue;
+    if (!value) {
+      console.warn(`  ! no id resolved for ${placeholder}`);
+      continue;
+    }
     if (!t.includes(placeholder)) {
       console.warn(`  ! placeholder ${placeholder} not found in wrangler.toml (already patched?)`);
       continue;
     }
     t = t.replace(placeholder, value);
+  }
+  // HARD GATE: a "successful" setup that leaves any REPLACE_ME_* behind used
+  // to sail into `wrangler deploy` and die there with Cloudflare error 10042
+  // ("KV namespace 'REPLACE_ME_...' is not valid"). Fail here instead, where
+  // the cause is obvious.
+  const leftovers = t.match(/REPLACE_ME_\w+/g);
+  if (leftovers) {
+    console.error("FATAL: wrangler.toml still contains REPLACE_ME_* placeholders after patching: " + [...new Set(leftovers)].join(", "));
+    console.error("Refusing to continue — a deploy with placeholder ids is guaranteed to fail. Fix resource resolution (network/auth) and re-run, or fill the ids in wrangler.toml manually.");
+    process.exit(1);
   }
   writeFileSync(WRANGLER, t);
 }
@@ -63,8 +82,11 @@ async function createD1(name) {
     const rows = JSON.parse(list);
     const hit = rows.find((r) => r.name === name);
     if (hit) {
-      console.log(`  D1 "${name}" already exists (${hit.uuid})`);
-      return hit.uuid;
+      // wrangler 4.x `d1 list --json` rows carry `id` (older builds used `uuid`).
+      const uuid = hit.id || hit.uuid;
+      if (!uuid) throw new Error(`D1 "${name}" exists but its list row has no id: ${JSON.stringify(hit)}`);
+      console.log(`  D1 "${name}" already exists (${uuid})`);
+      return uuid;
     }
   } catch {}
   const out = run(["d1", "create", name]);
@@ -80,8 +102,10 @@ async function createKV(name) {
     const rows = JSON.parse(list);
     const hit = rows.find((r) => r.title === name);
     if (hit) {
-      console.log(`  KV "${name}" already exists (${hit.id})`);
-      return hit.id;
+      const id = hit.id || hit.namespace_id;
+      if (!id) throw new Error(`KV "${name}" exists but its list row has no id: ${JSON.stringify(hit)}`);
+      console.log(`  KV "${name}" already exists (${id})`);
+      return id;
     }
   } catch {}
   const out = run(["kv", "namespace", "create", name]);
@@ -112,7 +136,7 @@ async function main() {
   console.log("Next — configure Worker secrets (run each command, paste the value, Enter):");
   console.log("  npx wrangler secret put GOOGLE_CLIENT_ID");
   console.log("  npx wrangler secret put GOOGLE_CLIENT_SECRET");
-  console.log("  npx wrangler secret put GOOGLE_REDIRECT_URI   # https://muchi.<account>.workers.dev/api/auth/google/callback");
+  console.log("  npx wrangler secret put GOOGLE_REDIRECT_URI   # https://muchi.<SUB>.workers.dev/api/auth/google/callback  (<SUB> = your workers.dev subdomain)");
   console.log("  npx wrangler secret put MUCHI_SESSION_SECRET  # any long random string");
   console.log("  # staging (only if you will test auth on the staging worker):");
   console.log("  npx wrangler secret put GOOGLE_CLIENT_ID --env staging");

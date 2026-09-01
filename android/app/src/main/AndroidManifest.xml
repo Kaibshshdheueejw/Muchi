@@ -34,6 +34,14 @@
 
         </activity>
 
+        <!-- MUCHI background audio: Media3 foreground service (kept playing
+             with screen locked / app in background; OS media notification +
+             lock-screen controls). Typed as mediaPlayback (Android 14+). -->
+        <service
+            android:name=".MuchiAudioService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

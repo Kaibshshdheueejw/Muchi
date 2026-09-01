@@ -107,11 +107,15 @@ The final Cloudflare repository contains the **complete mobile projects**
 (`android/`, `ios/`, `capacitor.config.ts`) — they are no longer
 "unchanged elsewhere":
 
-- **Android** — Capacitor 8 app (`app.muchi.music`). Native audio via the
-  `capacitor-music-controls-plugin` v8 Media3 service (background playback,
-  notification + lock-screen controls), driven from `public/app.js`
-  (`P.MusicControls` + `P.MuchiAudio` bridge). The v83.1 `.longValue()`
-  duration fix is present in the shipped plugin version
+- **Android** — Capacitor 8 app (`app.muchi.music`). Background playback is
+  native: the repo ships the `MuchiAudio` plugin (`MuchiAudioPlugin` +
+  `MuchiAudioService`, Media3/ExoPlayer in a `MediaSessionService`
+  foreground service) that `nativePlayTrack()` targets — audio keeps playing
+  with the screen locked, OS notification + lock-screen controls, playlist
+  still owned by the web layer (`muchiControls`/`muchiProgress` events).
+  `capacitor-music-controls-plugin` v8 remains as the web-only fallback
+  surface. The v8
+  `.longValue()` duration fix is present in the plugin
   (`MusicControlsInfos.java:50` parses duration as `long`) — pinned in
   `package-lock.json`. Release signing is env/secret-driven
   (`MUCHI_KEYSTORE_FILE/PASSWORD/ALIAS`), never in the repo.

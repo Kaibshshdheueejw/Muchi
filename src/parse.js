@@ -366,26 +366,3 @@ export function walkCatalog(node, bag, visiting = new Set()) {
   }
   for (const v of Object.values(node)) walkCatalog(v, bag, visiting);
 }
-
-// Finds the "load more" token inside a playlist browse response.
-export function findPlaylistToken(node) {
-  const cont = (n) => {
-    if (!n || typeof n !== "object") return null;
-    if (n.continuationItemRenderer && n.continuationItemRenderer.continuationEndpoint) {
-      const cmd = n.continuationItemRenderer.continuationEndpoint.continuationCommand;
-      if (cmd && cmd.token) return cmd.token;
-    }
-    if (n.continuationCommand && n.continuationCommand.token) return n.continuationCommand.token;
-    for (const v of Object.values(n)) {
-      const t = cont(v);
-      if (t) return t;
-    }
-    return null;
-  };
-  if (!node || typeof node !== "object") return null;
-  if (node.playlistVideoListRenderer) {
-    const t = cont(node.playlistVideoListRenderer);
-    if (t) return t;
-  }
-  return cont(node);
-}

@@ -32,16 +32,24 @@ async function pipeUrl(request, src, accept) {
   const range = request.headers.get("range");
   if (range) headers.Range = range;
 
+  // Connect + headers timeout ONLY (45 s). The body stream itself is
+  // unbounded — long-lived radio must survive for hours.
+  // IMPORTANT (workerd-verified): the fetch AbortSignal cancels the response
+  // BODY stream too once it fires, so the timer must be cleared as soon as
+  // headers arrive (fetch() resolves at headers, before any body reads).
+  const ctrl = new AbortController();
+  const connectTimer = setTimeout(() => ctrl.abort(), 45000);
   let r;
   try {
     r = await fetch(src, {
       headers,
       redirect: "follow",
-      signal: AbortSignal.timeout(45000), // connect-only; the stream itself is unbounded
+      signal: ctrl.signal,
     });
   } catch {
     return json(502, { error: "stream failed" });
   }
+  clearTimeout(connectTimer);
   if (!r.ok || !r.body) return json(r.status || 502, { error: "stream failed" });
 
   const ct = r.headers.get("content-type") || "application/octet-stream";

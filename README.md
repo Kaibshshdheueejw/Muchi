@@ -29,10 +29,10 @@ src/                       Cloudflare Worker backend (all 23 route groups)
   auth.js, util.js, config.js   HMAC tokens, caches, env config
 migrations/0001_initial.sql     D1 schema (sessions + oauth_state)
 public/                    The complete MUCHI web app (Liquid Glass PWA)
-android/                   Capacitor Android app (native audio/background)
+android/                   Capacitor Android app (WebView audio + media notification/lock-screen controls)
 ios/                       Capacitor iOS app (background audio, lock screen)
 capacitor.config.ts        Shared Capacitor config (webDir: public)
-workflows/                 GitHub Actions (→ move to .github/workflows/):
+.github/workflows/         GitHub Actions:
   deploy.yml               test → D1 migrate → deploy → smoke (Cloudflare)
   android-capacitor.yml    Android APK/AAB build + signing
   ios-capacitor.yml        iOS archive build

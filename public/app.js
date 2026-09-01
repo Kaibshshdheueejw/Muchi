@@ -1758,10 +1758,11 @@
       if (url && /^https?:\/\//i.test(url) && !API_BASE) url = `/api/stream?url=${encodeURIComponent(url)}`;
     }
     if (!url) throw new Error("No stream");
-    // Real native background playback: http(s) streams are handed to the
-    // foreground Media3 service so audio survives Home / app switch /
-    // screen-off / lock. Offline blob: URLs and failures fall back to the
-    // WebView <audio> element (existing behaviour).
+    // Optional native background playback: the native Android/iOS shells ship
+    // a MuchiAudio plugin (a foreground media service that keeps playing with
+    // the screen locked, with the OS media notification + lock-screen
+    // controls), so http(s) streams are handed to it. On the web there is no
+    // native plugin, so audio plays in the WebView <audio> element.
     if (nativePlayer() && /^https?:\/\//i.test(url)) {
       if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
         setWantPlay(true);
@@ -2405,14 +2406,15 @@
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     return window.Capacitor.Plugins;
   }
-  /* ── Real native background player (Android, Media3/ExoPlayer) ────────
-     The MuchiAudio plugin (android/app/src/main/java/app/muchi/music/)
-     runs a foreground MediaSessionService that keeps playing while the
-     app is backgrounded, on the lock screen and when the screen is off.
-     The WebView JS stays the single source of truth for WHAT plays:
-     the plugin only renders audio + the OS media notification/controls,
-     and every system action (play/pause/next/prev/seek) is echoed back
-     into the app's own playback functions. */
+  /* ── Optional native background player (Android + iOS) ───────────────
+     The native shells ship a MuchiAudio plugin: on Android a Media3
+     (ExoPlayer) MediaSessionService foreground player, on iOS an AVPlayer
+     with AVAudioSession + now-playing/lock-screen controls. It renders
+     audio + the OS media notification and echoes play/pause/next/prev/
+     seek/ended/error back into this app's own playback functions.
+     nativePlayer() returns it on Android/iOS (null on the web, where every
+     track plays through the WebView <audio> element below). The plugin is
+     picked up automatically here — no other web changes. */
   let npActive = false;   // native player is the current audio sink
   let npPlaying = false;  // last known native playback state
   let npPos = 0;          // last known position (s)
@@ -2420,7 +2422,8 @@
   function nativePlayer() {
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     try {
-      if (window.Capacitor.getPlatform && window.Capacitor.getPlatform() !== "android") return null;
+      const p = window.Capacitor.getPlatform ? window.Capacitor.getPlatform() : "";
+      if (p !== "android" && p !== "ios") return null;
       return window.Capacitor.Plugins.MuchiAudio || null;
     } catch { return null; }
   }

@@ -60,7 +60,7 @@ real-world verification (code path complete, needs deployed Worker).
 | Feature | Status | Note |
 |---|---|---|
 | Android project (Capacitor 8) | ✅ | `android/` complete (Gradle, manifest, resources, launcher icons) |
-| Android native audio / background playback | ✅ | `capacitor-music-controls-plugin` Media3 service via frontend bridge |
+| Android audio + notification/lock-screen controls | ✅ | Native `MuchiAudio` plugin shipped (Media3/ExoPlayer `MediaSessionService` foreground service → background playback + OS notification + lock-screen controls; web fallback = WebView `<audio>` + MusicControls) — see MIGRATION.md §7 |
 | Android notification + lock-screen controls | ✅ | plugin-managed MediaSession; `.longValue()` duration fix present in plugin 8.0.0 (pinned) |
 | Android build/signing config | ✅ | env/secret-driven signing (`MUCHI_KEYSTORE_*`); debug fallback |
 | iOS project (Capacitor 8) | ✅ | `ios/` complete (Xcode project, assets, storyboards) |
@@ -137,8 +137,8 @@ Run exactly as a new user with ONLY the ZIP:
 8. Static checks: no symlinks, no secrets, no keystores, no
    `node_modules`/`.wrangler`/`.dev.vars` in the archive, no Render backend
    files, android/ios present
-9. Workflow files present (under `workflows/` — moved to
-   `.github/workflows/` on the new repo per SETUP.md §2)
+9. Workflow files present under `.github/workflows/` (moved there from a
+   root-level `workflows/` in commit 7319b26 — see SETUP.md §2)
 
 Result: **all steps pass** (137/137 live, dry-run OK, scans clean).
 
@@ -154,7 +154,7 @@ Result: **all steps pass** (137/137 live, dry-run OK, scans clean).
 | `scripts/setup.mjs` | idempotent D1/KV creation + id patching + secret commands |
 | `test/smoke.mjs` | 137-check regression suite |
 | `package.json` / `package-lock.json` | merged toolchain (wrangler + Capacitor) |
-| `workflows/deploy.yml` | test → D1 migrate → deploy → smoke (GitHub Actions) |
+| `.github/workflows/deploy.yml` | test → D1 migrate → deploy → smoke (GitHub Actions) |
 | `public/_headers`, `public/_redirects` | Workers static-assets cache/redirect parity |
 | `docs/CLOUDFLARE-GITHUB.md`, `docs/CUTOVER.md`, `docs/TESTING.md`, `docs/API-CONFIG.md`, `docs/MOBILE.md`, `docs/AUDIT.md` | setup/ops documentation |
 | `README.md`, `SETUP.md`, `MIGRATION.md`, `.dev.vars.example`, `.gitignore` | Cloudflare-first project docs and hygiene |
