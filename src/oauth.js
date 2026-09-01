@@ -214,6 +214,26 @@ export async function handleGoogleCallback(request, env, url) {
   if (!tok) return redirect(errHome);
   const id = decodeIdToken(tok.id_token);
   if (!id || id.aud !== env.GOOGLE_CLIENT_ID) return redirect(errHome);
+  // The youtube step lands HERE too: both flows share the single registered
+  // redirect URI (GOOGLE_REDIRECT_URI), so a youtube-scope authorization code
+  // arrives at this callback. Attach the token to the EXISTING session instead
+  // of creating a fresh yt:null one — the old behavior silently dropped the
+  // YouTube token, so the Library never loaded. Mirrors handleYoutubeCallback.
+  if (st.step === "youtube") {
+    let s = st.sid ? await getSession(env, st.sid) : null;
+    if (!s) s = await readSession(request, env);
+     if (!s) return redirect(errHome);
+    s.yt = {
+      access: tok.access_token,
+      refresh: tok.refresh_token || "",
+      expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),,
+      at: Date.now(),,
+    };
+    await putSession(env, s);
+    ytCache.delete(s.sid);
+    const ytHome = platform === "native" ? "muchi://youtube/success" : "/?youtube=success";
+    return redirect(ytHome);
+  }
   const sid = randomBytes(24).toString("hex");
   const session = {
     sid,
