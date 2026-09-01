@@ -18,18 +18,24 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const WRANGLER = path.join(ROOT, "wrangler.toml");
+const WRANGLER_CLI = path.join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
 const CI = process.argv.includes("--ci");
 const MIGRATE = process.argv.includes("--migrate");
 
 function run(args, opts = {}) {
-  const cmd = process.platform === "win32" ? "npx.cmd" : "npx";
-  const out = execFileSync(cmd, ["wrangler", ...args], {
+  // Run the local wrangler CLI directly with the current Node binary.
+  // Do NOT spawn `npx`/`npx.cmd` from execFileSync: on Windows, Node
+  // cannot launch .cmd files without a shell and dies with EINVAL.
+  if (!existsSync(WRANGLER_CLI)) {
+    throw new Error("wrangler not found in node_modules — run `npm ci` first");
+  }
+  const out = execFileSync(process.execPath, [WRANGLER_CLI, ...args], {
     cwd: ROOT,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
