@@ -97,11 +97,15 @@ jobs:
           fi
           echo "workers.dev subdomain: $SUB"
 
+      - name: Ensure D1 + KV resources (idempotent)
+        # MUST run before the dry-run: it patches the REPLACE_ME_* ids in
+        # wrangler.toml with real D1/KV ids. The dry-run below then validates
+        # the fully-resolved config. (Before this fix the dry-run always ran
+        # against the placeholders and failed, so nothing ever deployed.)
+        run: node scripts/setup.mjs --ci
+
       - name: Wrangler config check (dry-run)
         run: npx wrangler deploy --dry-run
-
-      - name: Ensure D1 + KV resources (idempotent)
-        run: node scripts/setup.mjs --ci
 
       - name: Apply D1 migrations (staging)
         if: steps.env.outputs.target == 'staging'
