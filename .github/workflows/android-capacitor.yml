@@ -58,6 +58,7 @@ jobs:
           else
             echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact will be signed with the DEBUG key (not for Play)."
             echo "signed=no" >> "$GITHUB_OUTPUT"
+         fi
          
       - name: Clean Gradle cache and refresh dependencies
         working-directory: android
