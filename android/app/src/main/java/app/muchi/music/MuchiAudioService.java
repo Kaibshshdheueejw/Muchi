@@ -208,13 +208,13 @@ public class MuchiAudioService extends Service {
                 }
 
                 @Override
-                public void onNext() {
+                public void onSkipToNext() {
                     // Web layer owns the queue.
                     emitControls("next", 0L);
                 }
 
                 @Override
-                public void onPrevious() {
+                public void onSkipToPrevious() {
                     // Web layer owns the queue.
                     emitControls("previous", 0L);
                 }
