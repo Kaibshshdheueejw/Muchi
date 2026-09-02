@@ -2692,6 +2692,23 @@
   let npPlaying = false;  // last known native playback state
   let npPos = 0;          // last known position (s)
   let npDur = 0;          // last known duration (s)
+  let npPermAsked = false; // one-time native notification permission ask
+  function nativeEnsureNotifyPermission() {
+    // Android 13+ POST_NOTIFICATIONS for the background media notification
+    // (lock-screen controls still work without it; only the notification
+    // banner waits for the grant). Canonical Capacitor flow: the plugin
+    // declares the permission natively, JS asks once. Never blocks playback.
+    const NP = nativePlayer();
+    if (npPermAsked || !NP || typeof NP.checkPermissions !== "function") return;
+    npPermAsked = true;
+    NP.checkPermissions()
+      .then((st) => {
+        if (st && st.muchi_audio === "prompt" && typeof NP.requestPermissions === "function") {
+          NP.requestPermissions().catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }
   function nativePlayer() {
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     try {
@@ -2709,6 +2726,7 @@
   function nativePlayTrack(url, title, artist, artwork, durationSec) {
     const NP = nativePlayer();
     if (!NP) return false;
+    nativeEnsureNotifyPermission();
     // The Media3 notification replaces the legacy MusicControls one.
     const P = nativePlugins();
     const MC = P && P.MusicControls;

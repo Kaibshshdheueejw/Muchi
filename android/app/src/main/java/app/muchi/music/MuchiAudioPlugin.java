@@ -5,17 +5,15 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.IBinder;
-
-import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
 
 /**
  * MUCHI native background audio bridge (JS ↔ {@link MuchiAudioService}).
@@ -29,9 +27,19 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  * Events emitted to JS:
  *   muchiControls  {message: play|pause|next|previous|seek|ended|error|stop, position}
  *   muchiProgress  {positionMs, durationMs, playing}
+ *
+ * POST_NOTIFICATIONS (Android 13+): declared on @CapacitorPlugin below. The
+ * web layer asks once via MuchiAudio.checkPermissions()/requestPermissions()
+ * before first play — playback is never blocked on the dialog.
  */
-@CapacitorPlugin(name = "MuchiAudio")
+@CapacitorPlugin(
+        name = "MuchiAudio",
+        permissions = @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = MUCHI_AUDIO_NOTIFICATION)
+)
 public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.PluginListener {
+
+    /** Permission alias — JS asks via MuchiAudio.checkPermissions()/requestPermissions(). */
+    public static final String MUCHI_AUDIO_NOTIFICATION = "muchi_audio";
 
     private MuchiAudioService.LocalBinder service;
     private boolean bound = false;
@@ -57,7 +65,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         // WebView is the whole point. The web layer calls stop() explicitly.
         if (bound) {
             try {
-                unbindService(conn);
+                getContext().unbindService(conn);
             } catch (Exception ignored) {
             }
             bound = false;
@@ -68,7 +76,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     private void ensureService() {
         if (service == null && !bound) {
             try {
-                bindService(new Intent(getContext(), MuchiAudioService.class), conn, 0);
+                getContext().bindService(new Intent(getContext(), MuchiAudioService.class), conn, Context.BIND_AUTO_CREATE);
             } catch (Exception ignored) {
             }
         }
@@ -89,24 +97,13 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         }
     }
 
-    private void ensureNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= 33
-                && ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS)
-                        != PackageManager.PERMISSION_GRANTED) {
-            requestPermissionsForResource(
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    "MUCHI uses a media notification for background playback and lock-screen controls.");
-        }
-    }
-
-    @PluginMethod(returnsByValue = false)
+    @PluginMethod
     public void play(PluginCall call) {
         String url = call.getString("url", "");
         if (url.isEmpty()) {
             call.reject("MuchiAudio: missing url");
             return;
         }
-        ensureNotificationPermission();
         Intent i = new Intent(getContext(), MuchiAudioService.class);
         i.setAction(MuchiAudioService.ACTION_PLAY);
         i.putExtra(MuchiAudioService.EXTRA_URL, url);
@@ -119,21 +116,21 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         call.resolve();
     }
 
-    @PluginMethod(returnsByValue = false)
+    @PluginMethod
     public void pause(PluginCall call) {
         ensureService();
         if (service != null) service.pausePlayback();
         call.resolve();
     }
 
-    @PluginMethod(returnsByValue = false)
+    @PluginMethod
     public void resume(PluginCall call) {
         ensureService();
         if (service != null) service.resumePlayback();
         call.resolve();
     }
 
-    @PluginMethod(returnsByValue = false)
+    @PluginMethod
     public void stop(PluginCall call) {
         doStop();
         call.resolve();
@@ -150,7 +147,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         }
     }
 
-    @PluginMethod(returnsByValue = false)
+    @PluginMethod
     public void seekTo(PluginCall call) {
         long position = call.getLong("position", 0L);
         ensureService();
@@ -158,7 +155,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         call.resolve();
     }
 
-    @PluginMethod(returnsByValue = false)
+    @PluginMethod
     public void emit(PluginCall call) {
         // Simple action passthrough from the web layer.
         String action = call.getString("action", "");
