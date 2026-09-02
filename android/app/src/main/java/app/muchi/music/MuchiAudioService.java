@@ -307,20 +307,21 @@ public class MuchiAudioService extends Service {
         PendingIntent pi = PendingIntent.getActivity(this, 0, contentIntent,
                 Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0);
 
-        Notification notification = new Notification.Builder(this);
-        if (Build.VERSION.SDK_INT >= 26) notification.setChannelId(CHANNEL_ID);
-        notification.setSmallIcon(R.drawable.ic_stat_muchi);
+        Notification.Builder builder = new Notification.Builder(this);
+        if (Build.VERSION.SDK_INT >= 26) builder.setChannelId(CHANNEL_ID);
+        builder.setSmallIcon(R.drawable.ic_stat_muchi);
 
-        notification.setContentTitle(trackTitle);
-        notification.setContentText(trackArtist.isEmpty() ? "Muchi" : trackArtist);
-        if (artworkBitmap != null) notification.setLargeIcon(artworkBitmap);
-        notification.setContentIntent(pi);
-        notification.setOngoing(true);
-        notification.setVisibility(Notification.VISIBILITY_PUBLIC);
+        builder.setContentTitle(trackTitle);
+        builder.setContentText(trackArtist.isEmpty() ? "Muchi" : trackArtist);
+        if (artworkBitmap != null) builder.setLargeIcon(artworkBitmap);
+        builder.setContentIntent(pi);
+        builder.setOngoing(true);
+        builder.setVisibility(Notification.VISIBILITY_PUBLIC);
         if (session != null) {
-            notification.setStyle(new android.app.Notification.MediaStyle()
+            builder.setStyle(new android.app.Notification.MediaStyle()
                     .setMediaSession((android.media.session.MediaSession.Token) session.getSessionToken().getToken()));
         }
+        Notification notification = builder.build();
         notificationManager.notify(NOTIFICATION_ID, notification);
 
         if (Build.VERSION.SDK_INT >= 29) {
