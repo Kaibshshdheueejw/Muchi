@@ -54,52 +54,70 @@
   color-scheme: dark;
 }
 
+/* Light mode — "Pearl": a soft mid-tone sage canvas (NOT a flat near-white)
+   so the same liquid-glass identity reads correctly in light: bright
+   frosted cards float over a clearly tinted surface, with soft warm shadows. */
 html[data-theme="light"] {
   color-scheme: light;
   --md-sys-color-primary: #006b56;
   --md-sys-color-on-primary: #ffffff;
-  --md-sys-color-primary-container: #8ff0d4;
+  --md-sys-color-primary-container: #9de2c8;
   --md-sys-color-on-primary-container: #002018;
   --md-sys-color-secondary: #4c635c;
   --md-sys-color-on-secondary: #ffffff;
-  --md-sys-color-secondary-container: #cee9df;
+  --md-sys-color-secondary-container: #c9ded3;
   --md-sys-color-on-secondary-container: #082019;
   --md-sys-color-tertiary: #406278;
   --md-sys-color-on-tertiary: #ffffff;
-  --md-sys-color-tertiary-container: #c4e7ff;
+  --md-sys-color-tertiary-container: #c2d9e6;
   --md-sys-color-error: #ba1a1a;
-  --md-sys-color-surface: #f3f6f4;
-  --md-sys-color-surface-dim: #d4d8d6;
-  --md-sys-color-surface-bright: #f3f6f4;
-  --md-sys-color-surface-container-lowest: #ffffff;
-  --md-sys-color-surface-container-low: #eef1ef;
-  --md-sys-color-surface-container: #e8ebe9;
-  --md-sys-color-surface-container-high: #e2e6e4;
-  --md-sys-color-surface-container-highest: #dce0de;
-  --md-sys-color-on-surface: #191c1b;
-  --md-sys-color-on-surface-variant: #3f4945;
+  --md-sys-color-surface: #e6eae6;
+  --md-sys-color-surface-dim: #c7cdc7;
+  --md-sys-color-surface-bright: #edf0ec;
+  --md-sys-color-surface-container-lowest: #f4f6f3;
+  --md-sys-color-surface-container-low: #dfe4df;
+  --md-sys-color-surface-container: #d9dfd9;
+  --md-sys-color-surface-container-high: #d1d8d1;
+  --md-sys-color-surface-container-highest: #c9d0c9;
+  --md-sys-color-on-surface: #1a1e1b;
+  --md-sys-color-on-surface-variant: #47524c;
   --md-sys-color-outline: #6f7975;
-  --md-sys-color-outline-variant: #bfc9c4;
+  --md-sys-color-outline-variant: #b4beb7;
   --md-sys-color-inverse-surface: #2d312f;
   --md-sys-color-inverse-on-surface: #eff1ef;
   --md-sys-color-inverse-primary: #7dd3bb;
   --md-sys-color-scrim: #000000;
   --song-primary: #006b56;
   --song-on-primary: #ffffff;
-  --song-container: #e8ebe9;
-  --song-glow: rgba(0, 107, 86, 0.18);
+  --song-container: #dfe4df;
+  --song-glow: rgba(0, 107, 86, 0.15);
   --yt: #ba1a1a;
   --au: #006b56;
   --rd: #406278;
+  --theme-glow-a: rgba(0, 107, 86, 0.09);
+  --theme-glow-b: rgba(64, 98, 120, 0.07);
+  /* Soft, warm-tinted shadows (pure-black MD shadows look harsh on light). */
+  --md-elevation-1: 0 1px 2px rgba(20, 26, 23, 0.06), 0 1px 3px 1px rgba(20, 26, 23, 0.04);
+  --md-elevation-2: 0 1px 2px rgba(20, 26, 23, 0.06), 0 2px 6px 2px rgba(20, 26, 23, 0.05);
+  --md-elevation-3: 0 4px 8px 3px rgba(20, 26, 23, 0.06), 0 1px 3px rgba(20, 26, 23, 0.07);
 }
 html[data-theme="light"] body {
   background:
-    radial-gradient(900px 420px at 0% 0%, rgba(0, 107, 86, 0.08), transparent 55%),
-    radial-gradient(700px 380px at 100% 0%, rgba(64, 98, 120, 0.08), transparent 50%),
+    radial-gradient(900px 420px at 0% 0%, rgba(0, 107, 86, 0.06), transparent 55%),
+    radial-gradient(700px 380px at 100% 0%, rgba(64, 98, 120, 0.05), transparent 50%),
     var(--md-sys-color-surface);
 }
+/* Ambient fields + grain: the dark-mode neon washes would look washed-out
+   on a light canvas, so calm them to a faint tint matching the app. */
+html[data-theme="light"] body::before {
+  background:
+    radial-gradient(58vw 42vh at 6% -8%, rgba(0, 107, 86, 0.08), transparent 62%),
+    radial-gradient(50vw 40vh at 97% 2%, rgba(255, 77, 109, 0.05), transparent 60%),
+    radial-gradient(46vw 38vh at 74% 108%, rgba(124, 92, 255, 0.05), transparent 64%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E") 0 0 / 140px 140px;
+}
 html[data-theme="light"] input[type="range"] {
-  background: color-mix(in srgb, var(--song-primary) 28%, #d4d8d6);
+  background: color-mix(in srgb, var(--song-primary) 28%, #c7cdc7);
 }
 html[data-theme="light"] .player {
   background: color-mix(in srgb, var(--song-container) 92%, #fff);
@@ -3070,8 +3088,9 @@ html[data-ui="glass"] .player {
   -webkit-backdrop-filter: blur(40px) saturate(180%);
 }
 html[data-theme="light"][data-ui="glass"] .player {
-  background: rgba(255, 255, 255, 0.58);
-  border-color: rgba(255, 255, 255, 0.7);
+  background: rgba(250, 252, 249, 0.62);
+  border-color: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 12px 40px rgba(20, 26, 23, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 html[data-ui="glass"] .player-wash { opacity: 0.28; }
 html[data-ui="glass"] .dock-nav {
@@ -3084,7 +3103,9 @@ html[data-ui="glass"] .dock-nav {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 html[data-theme="light"][data-ui="glass"] .dock-nav {
-  background: rgba(255, 255, 255, 0.55);
+  background: rgba(250, 252, 249, 0.66);
+  border-color: rgba(255, 255, 255, 0.74);
+  box-shadow: 0 12px 34px -12px rgba(20, 26, 23, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 html[data-ui="glass"] .dock-nav button {
   border-radius: 18px;
@@ -3126,8 +3147,8 @@ html[data-theme="light"][data-ui="glass"] .mood,
 html[data-theme="light"][data-ui="glass"] .queue-panel,
 html[data-theme="light"][data-ui="glass"] .modal-card,
 html[data-theme="light"][data-ui="glass"] .search-wrap {
-  background: rgba(255, 255, 255, 0.55);
-  border-color: rgba(255, 255, 255, 0.7);
+  background: rgba(252, 253, 250, 0.55);
+  border-color: rgba(255, 255, 255, 0.65);
 }
 html[data-ui="glass"] .pl-ed-cover-btn,
 html[data-ui="glass"] .lib-cover-btn {
@@ -3829,6 +3850,22 @@ button.set-go .material-symbols-outlined,
     border: 1px solid rgba(255,255,255,0.2);
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), 0 10px 28px rgba(0,0,0,0.28);
   }
+}
+/* Light mode: flip the compact glass player + dock to frosted white so
+   dark text stays readable on every device class. */
+html[data-theme="light"] .player,
+html[data-theme="light"][data-ui="glass"] .player {
+  background: rgba(250, 252, 249, 0.62) !important;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 12px 40px rgba(20, 26, 23, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+html[data-theme="light"] .dock-nav,
+html[data-theme="light"][data-ui="glass"] .dock-nav {
+  background: rgba(250, 252, 249, 0.66) !important;
+  border: 1px solid rgba(255, 255, 255, 0.74);
+  box-shadow: 0 12px 34px -12px rgba(20, 26, 23, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+@media (max-width: 980px), (pointer: coarse) {
   .player-wash { filter: blur(16px) saturate(1.15); opacity: 0.26; }
 }
 
@@ -4020,8 +4057,22 @@ html[data-ui="glass"] .queue-panel {
 }
 html[data-theme="light"] .queue-panel,
 html[data-theme="light"][data-ui="glass"] .queue-panel {
-  background: rgba(255, 255, 255, 0.8) !important;
-  border-color: rgba(255, 255, 255, 0.7);
+  background: rgba(251, 253, 250, 0.88) !important;
+  border-color: rgba(255, 255, 255, 0.75);
+  box-shadow: 0 18px 50px rgba(20, 26, 23, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+/* Light mode: the dark overlay panels above must flip to frosted pearl,
+   or dark text (light-mode on-surface) lands on a dark panel. */
+html[data-theme="light"] .modal-card,
+html[data-theme="light"] .modal.sheet .modal-card,
+html[data-theme="light"] .crop-card,
+html[data-theme="light"] .profile-menu {
+  background: rgba(251, 253, 250, 0.88) !important;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 18px 50px rgba(20, 26, 23, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+html[data-theme="light"] .sheet-handle {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 28%, transparent);
 }
 .sheet-item {
   border-radius: 14px;
@@ -4296,51 +4347,52 @@ html[data-ui="glass"] .sk {
   border: 1px solid rgba(255, 255, 255, 0.07);
 }
 
-/* ——— Light theme adaptations ——— */
+/* ——— Light theme adaptations (Pearl: colored hero + frosted surfaces over
+       a mid-tone sage canvas — the app's identity, not a white page) ——— */
 html[data-theme="light"] .home-hero {
   background:
-    radial-gradient(130% 95% at 12% -12%, var(--song-primary, #4cc9f0) 0%, rgba(255, 255, 255, 0.55) 58%),
-    radial-gradient(75% 90% at 96% 112%, #c77dff 0%, rgba(255, 255, 255, 0.5) 62%),
-    rgba(255, 255, 255, 0.55);
-  border-color: rgba(255, 255, 255, 0.65);
+    radial-gradient(130% 95% at 12% -12%, var(--song-primary, #4cc9f0) 0%, rgba(248, 250, 246, 0.55) 58%),
+    radial-gradient(75% 90% at 96% 112%, #c77dff 0%, rgba(248, 250, 246, 0.5) 62%),
+    rgba(248, 250, 246, 0.55);
+  border-color: rgba(255, 255, 255, 0.6);
   box-shadow:
-    0 26px 70px -26px rgba(0, 0, 0, 0.35),
+    0 26px 70px -26px rgba(20, 26, 23, 0.25),
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 html[data-theme="light"] .home-bar {
-  background: color-mix(in srgb, var(--md-sys-color-surface) 60%, transparent);
-  border-bottom-color: rgba(0, 0, 0, 0.06);
+  background: color-mix(in srgb, var(--md-sys-color-surface) 55%, transparent);
+  border-bottom-color: rgba(20, 26, 23, 0.05);
 }
 html[data-theme="light"] .avatar-btn {
-  background: rgba(255, 255, 255, 0.55);
-  border-color: rgba(255, 255, 255, 0.75);
+  background: rgba(250, 252, 249, 0.6);
+  border-color: rgba(255, 255, 255, 0.7);
 }
 html[data-theme="light"] .taste-tabs {
-  background: rgba(255, 255, 255, 0.5);
-  border-color: rgba(255, 255, 255, 0.68);
+  background: rgba(250, 252, 249, 0.55);
+  border-color: rgba(255, 255, 255, 0.66);
 }
 html[data-theme="light"] .taste-tabs .chip.active {
-  background: rgba(0, 0, 0, 0.07);
+  background: rgba(20, 26, 23, 0.06);
   color: var(--md-sys-color-on-surface);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 html[data-theme="light"] .disc-banner {
   background:
-    radial-gradient(120% 160% at 0% 0%, var(--song-primary, #4cc9f0) 0%, rgba(255, 255, 255, 0.55) 58%),
-    rgba(255, 255, 255, 0.5);
+    radial-gradient(120% 160% at 0% 0%, var(--song-primary, #4cc9f0) 0%, rgba(250, 252, 249, 0.55) 58%),
+    rgba(250, 252, 249, 0.5);
   border-color: var(--song-primary, #4cc9f0);
 }
 html[data-theme="light"] .dock-nav,
 html[data-theme="light"][data-ui="glass"] .dock-nav {
-  background: rgba(255, 255, 255, 0.6);
-  border-color: rgba(255, 255, 255, 0.72);
+  background: rgba(250, 252, 249, 0.66);
+  border-color: rgba(255, 255, 255, 0.74);
   box-shadow:
-    0 16px 44px -14px rgba(0, 0, 0, 0.28),
+    0 16px 44px -14px rgba(20, 26, 23, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.85);
 }
 html[data-theme="light"] .dock-nav button.active .nav-ico,
 html[data-theme="light"][data-ui="glass"] .dock-nav button.active .nav-ico {
-  background: rgba(0, 0, 0, 0.07);
+  background: rgba(20, 26, 23, 0.07);
   color: var(--md-sys-color-on-surface);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
@@ -4349,8 +4401,16 @@ html[data-theme="light"][data-ui="glass"] .set-card,
 html[data-theme="light"][data-ui="glass"] .panel,
 html[data-theme="light"][data-ui="glass"] .lib-row,
 html[data-theme="light"][data-ui="glass"] .track-row {
-  background: rgba(255, 255, 255, 0.5);
+  background: rgba(252, 253, 250, 0.55);
   border-color: rgba(255, 255, 255, 0.62);
+}
+/* Skeleton shimmer on light glass: the dark-mode white shimmer would vanish
+   on pearl cards, so use a faint warm-gray sweep instead. */
+html[data-theme="light"][data-ui="glass"] .sk,
+html[data-theme="light"] .sk {
+  background: linear-gradient(90deg, rgba(20, 26, 23, 0.05), rgba(20, 26, 23, 0.1), rgba(20, 26, 23, 0.05));
+  background-size: 200% 100%;
+  border: 1px solid rgba(20, 26, 23, 0.05);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -4539,4 +4599,141 @@ html[data-native="1"] .filled-btn {
   font-size: 13px;
   line-height: 1.45;
   color: var(--md-sys-color-on-surface-variant);
+}
+
+/* ===== Update modal (platform tiles) ===== */
+.upd-ver {
+  margin: 2px 0 14px;
+  font-size: 14px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.upd-ver strong { color: var(--md-sys-color-on-surface); font-weight: 600; }
+.upd-ver em { font-style: normal; color: var(--md-sys-color-primary); }
+.upd-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  transition: opacity 180ms ease;
+}
+.upd-tiles.dim { opacity: 0.38; pointer-events: none; }
+.upd-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 20px 12px 16px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 80%, transparent);
+  background:
+    radial-gradient(120% 90% at 50% 0%, var(--theme-glow-a), transparent 60%),
+    var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface);
+  cursor: pointer;
+  font: inherit;
+  opacity: 0;
+  transform: translateY(14px) scale(0.96);
+  animation: tileIn 340ms var(--md-motion) forwards;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+.upd-tile:hover { transform: translateY(-2px) scale(1.01); border-color: color-mix(in srgb, var(--md-sys-color-primary) 45%, var(--md-sys-color-outline-variant)); box-shadow: 0 6px 20px -8px var(--song-glow); }
+.upd-tile:active { transform: translateY(0) scale(0.985); }
+@keyframes tileIn { to { opacity: 1; transform: translateY(0) scale(1); } }
+.upd-tile-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent);
+  color: var(--md-sys-color-primary);
+  margin-bottom: 6px;
+}
+.upd-tile-icon.ios { background: color-mix(in srgb, var(--md-sys-color-tertiary) 16%, transparent); color: var(--md-sys-color-tertiary); }
+.upd-tile-icon .material-symbols-outlined { font-size: 32px; }
+.upd-tile-icon .apple-logo {
+  width: 34px;
+  height: 34px;
+  fill: currentColor;
+  display: block;
+}
+.upd-tile-name { font-size: 16px; font-weight: 600; }
+.upd-tile-sub { font-size: 12px; color: var(--md-sys-color-on-surface-variant); text-align: center; }
+.upd-sub {
+  margin-top: 14px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 80%, transparent);
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-high) 70%, transparent);
+  animation: subIn 260ms var(--md-motion);
+}
+@keyframes subIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.upd-sub-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+.upd-sub-head > .material-symbols-outlined {
+  font-size: 28px;
+  color: var(--md-sys-color-primary);
+  margin-top: 2px;
+}
+.upd-sub-head strong { display: block; font-size: 16px; }
+.upd-sub-head p { margin: 2px 0 0; font-size: 13px; }
+.upd-dl { display: inline-flex; align-items: center; gap: 8px; width: 100%; justify-content: center; margin: 6px 0; text-decoration: none; }
+.upd-pending {
+  margin: 6px 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--md-sys-color-tertiary) 10%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--md-sys-color-tertiary) 35%, transparent);
+}
+.upd-note { margin: 8px 0 0; font-size: 12px; color: var(--md-sys-color-on-surface-variant); }
+
+/* ===== Library: YouTube connect nudge ===== */
+.yt-connect {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px;
+  margin-top: 8px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--yt) 30%, transparent);
+  background: color-mix(in srgb, var(--yt) 8%, var(--md-sys-color-surface-container));
+  animation: subIn 260ms var(--md-motion);
+}
+.yt-connect > .material-symbols-outlined { color: var(--yt); font-size: 26px; margin-top: 1px; }
+.yt-connect .t-title { font-size: 15px; }
+.yt-connect-sub { margin: 4px 0 0; font-size: 13px; color: var(--md-sys-color-on-surface-variant); line-height: 1.45; }
+.yt-connect .chip-btn { flex: none; margin-top: 4px; }
+
+/* ===== Appearance segmented control (Light / Dark / System) ===== */
+.seg {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--md-sys-color-surface-container) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 70%, transparent);
+  margin: 10px 0 4px;
+}
+.seg-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+.seg-btn:hover { color: var(--md-sys-color-on-surface); }
+.seg-btn.on {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  box-shadow: 0 2px 8px -2px var(--song-glow);
 }

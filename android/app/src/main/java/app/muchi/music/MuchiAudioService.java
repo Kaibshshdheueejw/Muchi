@@ -20,11 +20,13 @@ import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
-import android.support.v4.media.session.MediaSessionCompat;
-import android.support.v4.media.session.PlaybackStateCompat;
+import androidx.media.MediaMetadataCompat;
+import androidx.media.session.MediaSessionCompat;
+import androidx.media.session.PlaybackStateCompat;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -96,7 +98,7 @@ public class MuchiAudioService extends Service {
             if (player == null || session == null) return;
             long positionMs = player.getCurrentPosition();
             long durationMs = Math.max(0L, player.getDuration());
-            boolean playing = player.getPlaybackState() == Player.STATE_PLAYING;
+            boolean playing = player.isPlaying();
             if (listener != null) listener.onProgress(positionMs, durationMs, playing);
             updatePlaybackState(playing, positionMs);
             ticker.postDelayed(tick, 1000);
@@ -172,7 +174,21 @@ public class MuchiAudioService extends Service {
         trackArtist = artist != null ? artist : "";
 
         if (player == null) {
-            player = new ExoPlayer.Builder(this).build();
+            player = new ExoPlayer.Builder(this)
+                    // WAKE_LOCK is declared in the manifest — make it effective:
+                    // WAKE_MODE_LOCAL holds a CPU wake lock while the player is
+                    // active so background/lock-screen streaming survives doze.
+                    .setWakeMode(ExoPlayer.C.WAKE_MODE_LOCAL)
+                    // Explicit music audio attributes + explicit audio-focus
+                    // handling (ExoPlayer requests focus on play, abandons on
+                    // pause; other audio ducking/loss is handled by the system).
+                    .setAudioAttributes(
+                            new androidx.media3.common.AudioAttributes.Builder()
+                                    .setContentType(androidx.media3.common.AudioAttributes.CONTENT_TYPE_MUSIC)
+                                    .setUsage(androidx.media3.common.AudioAttributes.USAGE_MEDIA)
+                                    .build(),
+                            true)
+                    .build();
             player.addListener(new Player.Listener() {
                 @Override
                 public void onPlaybackStateChanged(int playbackState) {
@@ -183,7 +199,7 @@ public class MuchiAudioService extends Service {
                 }
 
                 @Override
-                public void onPlayerError(@NonNull Player.Error error) {
+                public void onPlayerError(@NonNull PlaybackException error) {
                     emitControls("error", 0L);
                 }
             });
@@ -275,13 +291,13 @@ public class MuchiAudioService extends Service {
         }
     }
 
-    private android.support.v4.media.MediaMetadataCompat buildMetadata(long durationMs) {
-        android.support.v4.media.MediaMetadataCompat.Builder md = new android.support.v4.media.MediaMetadataCompat.Builder()
-                .putString(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_TITLE, trackTitle)
-                .putString(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ARTIST,
+    private MediaMetadataCompat buildMetadata(long durationMs) {
+        MediaMetadataCompat.Builder md = new MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, trackTitle)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST,
                         trackArtist.isEmpty() ? "Muchi" : trackArtist);
-        if (durationMs > 0) md.putLong(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
-        if (artworkBitmap != null) md.putBitmap(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
+        if (durationMs > 0) md.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+        if (artworkBitmap != null) md.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
         return md.build();
     }
 

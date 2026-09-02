@@ -17,8 +17,14 @@ import {
   regionCode, utcDay, LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES,
   moodsForCountry, playlistsOf, uniqPlaylists, buildForYouPlaylists,
 } from "./data.js";
+import { deezerCatalog } from "./deezer.js";
+import { strictSongs } from "./parse.js";
 
 const take = (r) => (r.status === "fulfilled" ? r.value : []);
+// Resolve with `fallback` after ms so one slow upstream (usually Piped)
+// can't stall the whole artist build. The losing promise is abandoned.
+const raceTimeout = (p, ms, fallback = null) =>
+  Promise.race([p, new Promise((res) => setTimeout(() => res(fallback), ms))]);
 
 export async function handleHome(env, url) {
   const gl = regionCode(url.searchParams.get("gl"));
@@ -203,7 +209,11 @@ export async function handleSearch(env, url) {
   delete result.audiusUsers;
   result.artists = artists.slice(0, 20);
   result.playlists = playlists.slice(0, 20);
-  if (Array.isArray(yt)) result.youtube = yt;
+  // STRICT "songs only": search shows single songs — no playlist videos,
+  // Topic re-uploads, 2-hour mixes or non-music. (Audius rows are real
+  // user-uploaded tracks; radio is obviously left alone.)
+  if (Array.isArray(yt)) result.youtube = strictSongs(yt);
+  result.apple = strictSongs(result.apple);
   return json(200, result);
 }
 
@@ -234,66 +244,131 @@ export async function handleArtist(url) {
   const gl = regionCode(url.searchParams.get("gl"));
 
   if (appleId || q) {
-    let artistName = name || q;
-    let artwork = "";
-    let songs = [];
-    let albums = [];
-    if (appleId) {
-      try {
-        const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=album&limit=25`);
-        const rows = (look && look.results) || [];
-        const self = rows.find((r) => r.wrapperType === "artist") || {};
-        artistName = self.artistName || artistName;
-        for (const al of rows) {
-          if (al.wrapperType !== "collection" && al.collectionType !== "Album") continue;
-          if (!artwork && al.artworkUrl100) artwork = String(al.artworkUrl100).replace("100x100bb", "600x600bb");
-          albums.push({
-            id: `album:${al.collectionId}`,
-            kind: "playlist",
-            title: al.collectionName || "Album",
-            artist: al.artistName || artistName,
-            artwork: String(al.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.png",
-            source: "apple",
-            query: `${al.collectionName || ""} ${al.artistName || artistName}`.trim(),
-          });
+    const key = `artist:${appleId || (q || name).toLowerCase()}:${gl}`;
+    const build = async () => {
+      let artistName = name || q;
+      let artwork = "";
+      let albums = [];
+      // ── Three sources IN PARALLEL (was serial — that's what made the
+      //    profile take 15-25s and time out on the client) ─────────────
+      // Apple: lookup by id + iTunes search (songs + albums).
+      const appleJob = (async () => {
+        let art = "";
+        let alb = [];
+        let songs = [];
+        let nm = "";
+        if (appleId) {
+          try {
+            const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=album&limit=25`);
+            const rows = (look && look.results) || [];
+            const self = rows.find((r) => r.wrapperType === "artist") || {};
+            nm = self.artistName || "";
+            for (const al of rows) {
+              if (al.wrapperType !== "collection" && al.collectionType !== "Album") continue;
+              if (!art && al.artworkUrl100) art = String(al.artworkUrl100).replace("100x100bb", "600x600bb");
+              alb.push({
+                id: `album:${al.collectionId}`,
+                kind: "playlist",
+                title: al.collectionName || "Album",
+                artist: al.artistName || nm,
+                artwork: String(al.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.png",
+                source: "apple",
+                query: `${al.collectionName || ""} ${al.artistName || nm}`.trim(),
+              });
+            }
+          } catch {}
+          try {
+            const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=song&limit=30`);
+            for (const t of (look && look.results) || []) {
+              if (!t.trackId || t.wrapperType === "artist") continue;
+              songs.push({
+                id: `apple:${t.trackId}`,
+                source: "apple",
+                title: t.trackName || "Song",
+                artist: t.artistName || nm,
+                album: t.collectionName || "",
+                duration: Math.round((t.trackTimeMillis || 0) / 1000),
+                artwork: String(t.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.png",
+                playQuery: `${t.trackName || ""} ${t.artistName || nm} official audio`.trim(),
+              });
+            }
+          } catch {}
         }
-      } catch {}
-      try {
-        const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=song&limit=30`);
-        for (const t of (look && look.results) || []) {
-          if (!t.trackId || t.wrapperType === "artist") continue;
-          songs.push({
-            id: `apple:${t.trackId}`,
-            source: "apple",
-            title: t.trackName || "Song",
-            artist: t.artistName || artistName,
-            album: t.collectionName || "",
-            duration: Math.round((t.trackTimeMillis || 0) / 1000),
-            artwork: String(t.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.png",
-            playQuery: `${t.trackName || ""} ${t.artistName || artistName} official audio`.trim(),
-          });
+        if (!songs.length && (q || name)) {
+          try {
+            const pack = await itunesSearch(q || name);
+            if (!art && pack.artists[0]) art = pack.artists[0].artwork;
+            if (!nm && pack.artists[0]) nm = pack.artists[0].name;
+            songs = pack.songs || [];
+            if (!alb.length) alb = pack.playlists || [];
+          } catch {}
         }
-      } catch {}
-    }
-    if (!songs.length && (q || name)) {
-      try {
-        const pack = await itunesSearch(q || name);
-        if (!artwork && pack.artists[0]) artwork = pack.artists[0].artwork;
-        if (!artistName && pack.artists[0]) artistName = pack.artists[0].name;
-        songs = pack.songs || [];
-        if (!albums.length) albums = pack.playlists || [];
-      } catch {}
-    }
-    let ytSongs = [];
-    if (q || name) {
-      try {
-        ytSongs = (await searchYouTube(`${q || name} official audio`, gl, true) || []).slice(0, 16);
-      } catch {}
-    }
-    const haveYt = new Set(ytSongs.map((t) => String(t.title || "").toLowerCase()));
-    const appleRest = songs.filter((t) => !haveYt.has(String(t.title || "").toLowerCase()));
-    songs = [...ytSongs, ...appleRest];
-    return json(200, { name: artistName || q || name, artwork, songs: songs.slice(0, 40), albums: albums.slice(0, 24), tracks: songs.slice(0, 16), latest: songs[0] || null });
+        return { art, alb, songs, nm };
+      })();
+      // YouTube fast search — hard-capped at 9s: Piped is often slow, and
+      // Apple + Deezer still give a full profile without it.
+      const ytJob = (async () => {
+        try {
+          const rows = await raceTimeout(searchYouTube(`${q || name} official audio`, gl, true), 9000, []);
+          return Array.isArray(rows) ? rows.slice(0, 16) : [];
+        } catch {
+          return [];
+        }
+      })();
+      // Deezer discography (METADATA ONLY — no audio, no previews).
+      // Complete album list + per-album track order, so the profile shows
+      // the artist's real catalogue instead of "a few songs".
+      const dzJob = (async () => {
+        try {
+          return await raceTimeout(deezerCatalog(artistName || q || name, {}), 20000, null);
+        } catch {
+          return null;
+        }
+      })();
+      const [ap, ytRows, dz] = await Promise.all([appleJob, ytJob, dzJob]);
+      artwork = ap.art || "";
+      if (ap.nm && ap.nm.toLowerCase() !== (artistName || "").toLowerCase()) artistName = ap.nm;
+      albums = ap.alb;
+      const normKey = (t) => `${String(t.title || "").toLowerCase()}|${String(t.artist || "").toLowerCase()}`;
+      const haveYt = new Set(ytRows.map((t) => normKey(t)));
+      const appleRest = ap.songs.filter((t) => !haveYt.has(normKey(t)));
+      let songs = [...ytRows, ...appleRest];
+      if (dz) {
+        if (!artwork && dz.artist.artwork) artwork = dz.artist.artwork;
+        if (dz.artist.name) artistName = dz.artist.name; // Deezer canonical name
+        const seenAlb = new Set(albums.map((al) => String(al.title || "").toLowerCase()));
+        for (const al of dz.albums) {
+          if (seenAlb.has(String(al.title || "").toLowerCase())) continue;
+          seenAlb.add(String(al.title || "").toLowerCase());
+          albums.push(al);
+        }
+        const seenSong = new Set(songs.map((t) => normKey(t)));
+        for (const t of dz.songs) {
+          const k = normKey(t);
+          if (seenSong.has(k)) continue;
+          seenSong.add(k);
+          songs.push(t);
+        }
+      }
+      // STRICT "songs only": Topic re-uploads, "Top … Playlist" videos,
+      // 2-hour mixes and other non-songs never reach the profile.
+      songs = strictSongs(songs);
+      if (!songs.length && !albums.length) throw new Error("artist upstream empty");
+      return {
+        name: artistName || q || name,
+        artwork,
+        songs: songs.slice(0, 500),
+        albums: albums.slice(0, 120),
+        tracks: songs.slice(0, 16),
+        latest: songs[0] || null,
+      };
+    };
+    // Repeat visits are instant (6h in-isolate cache + in-flight dedupe).
+    const data = await cached(key, 6 * 3600 * 1000, build).catch(() => null);
+    if (data) return json(200, data);
+    // Every upstream failed: honest thin response — the client tops up via
+    // /api/search so the profile never opens blank.
+    return json(200, { name: name || q, artwork: "", songs: [], albums: [], tracks: [], latest: null });
   }
 
   let audius = [];

@@ -24,14 +24,17 @@ There is a single named constant in the frontend:
 
 ```js
 // public/app.js — THE one line to change for native apps
-const MUCHI_API_BASE_FALLBACK = "https://muchi-music.onrender.com";
+const MUCHI_API_BASE_FALLBACK = "https://muchi.twiarimascord.workers.dev";
 ```
 
 | Environment | Value to use |
 |---|---|
-| Today (pre-cutover) | `"https://muchi-music.onrender.com"` (Render — works now) |
+| Production Worker (current default, since the cutover) | `"https://muchi.twiarimascord.workers.dev"` |
 | Staging Worker | `"https://muchi-staging.<account>.workers.dev"` |
-| Production Worker | `"https://muchi.<account>.workers.dev"` |
+
+> The old Render backend (`muchi-music.onrender.com`) is intentionally left
+> running for already-installed pre-cutover APKs only. No new build may use
+> it. See docs/CUTOVER.md for the rollback plan.
 
 To test native apps against the staging Worker, set the constant to the
 staging URL, run `npm run mobile:sync` (or `cap sync android && cap sync

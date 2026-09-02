@@ -7,10 +7,11 @@
   // Web (browser): the Worker serves this app, so API_BASE stays "" and API
   //   calls go to the SAME ORIGIN. Nothing to change.
   // Native (Android/iOS WebView): the app has no origin, so it must call an
-  //   absolute backend URL. Set the fallback below at cutover:
+  //   absolute backend URL. Current default is the production Worker:
   //     Staging:     "https://muchi-staging.<account>.workers.dev"
-  //     Production:  "https://muchi.<account>.workers.dev"
-  //   Render remains the fallback until the Cloudflare cutover completes.
+  //     Production:  "https://muchi.twiarimascord.workers.dev"
+  //   (The old Render backend is only kept alive for pre-cutover APKs —
+  //   see docs/CUTOVER.md. Never point new builds at Render.)
   const MUCHI_API_BASE_FALLBACK = "https://muchi.twiarimascord.workers.dev";
   // ═══════════════════════════════════════════════════════════════════════
   // Native shell (Capacitor) detection — the native apps load this same web
@@ -66,6 +67,7 @@
       speed: 1,
       spatial: "phone",
       quality: "high",
+      appearance: "system",
       theme: "dark",
       crossfade: 0,
       resume: true,
@@ -94,6 +96,17 @@
     settingsPage: null,
     catalogPlaylist: null,
   };
+  // One-time migration: the old theme values "light"/"dark"/"system" were the
+  // appearance mode itself — move them into the new `appearance` preference
+  // so existing users keep exactly what they had. Only fires when the user
+  // actually SAVED such a pref (not on the built-in default, which must keep
+  // meaning "system" for brand-new users).
+  const _savedPrefs = load("aura.prefs", {});
+  if (_savedPrefs && ["system", "light", "dark"].includes(_savedPrefs.theme) && !_savedPrefs.appearance) {
+    state.prefs.appearance = _savedPrefs.theme;
+    state.prefs.theme = "dark";
+  }
+  if (!state.prefs.appearance) state.prefs.appearance = "system";
   const APP_VERSION = "1.2.1";
 
   const COUNTRIES = [
@@ -142,7 +155,7 @@
     { id: "midnight", name: "Midnight", blurb: "True black", group: "classic", surface: "#000000", a: "#c4b5fd", b: "#5865f2" },
     { id: "ash", name: "Ash", blurb: "Cool slate", group: "classic", surface: "#1a1c1e", a: "#b8c4d4", b: "#c6b8d6" },
     { id: "mono", name: "Mono", blurb: "Ink & paper", group: "classic", surface: "#0a0a0a", a: "#f2f2f2", b: "#888888" },
-    { id: "light", name: "Daylight", blurb: "Soft light", group: "classic", surface: "#f3f6f4", a: "#006b56", b: "#406278" },
+    { id: "light", name: "Daylight", blurb: "Soft light", group: "classic", surface: "#e6eae6", a: "#006b56", b: "#406278" },
     { id: "sunset", name: "Sunset", blurb: "Orange dusk", group: "color", surface: "#1a1014", a: "#ffb086", b: "#ff6b9a" },
     { id: "chroma", name: "Chroma", blurb: "Cyan glow", group: "color", surface: "#0c1018", a: "#64f0ff", b: "#ff8ad8" },
     { id: "candy", name: "Cotton candy", blurb: "Pink & sky", group: "color", surface: "#1a1220", a: "#ffb3e0", b: "#9ad8ff" },
@@ -166,6 +179,9 @@
     { id: "peach", name: "Peach", blurb: "Soft fruit", group: "color", surface: "#1c1210", a: "#fdba74", b: "#fda4af" },
   ];
   const THEME_IDS = THEMES.map((t) => t.id).concat("custom");
+  const BASE_THEME_IDS = ["system", "light", "dark"];
+  const SKIN_IDS = new Set(THEME_IDS.filter((id) => !BASE_THEME_IDS.includes(id)));
+  const isBaseThemeId = (id) => BASE_THEME_IDS.includes(id);
   const CUSTOM_VARS = [
     "--md-sys-color-primary", "--md-sys-color-on-primary", "--md-sys-color-primary-container", "--md-sys-color-on-primary-container",
     "--md-sys-color-secondary", "--md-sys-color-on-secondary", "--md-sys-color-secondary-container", "--md-sys-color-on-secondary-container",
@@ -256,13 +272,38 @@
 
   function resolvedTheme() {
     const t = state.prefs.theme || "dark";
-    if (t === "custom") return "custom";
-    if (t === "system") return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-    return THEME_IDS.includes(t) ? t : "dark";
+    if (t === "custom" || SKIN_IDS.has(t)) return t;
+    const ap = state.prefs.appearance || "system";
+    if (ap === "light") return "light";
+    if (ap === "dark") return "dark";
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   }
   function isSkinTheme() {
     const t = resolvedTheme();
-    return t !== "dark" && t !== "light";
+    return t === "custom" || SKIN_IDS.has(t);
+  }
+  let systemMQL = null;
+  function watchSystemTheme() {
+    // In System mode, react live to OS light/dark changes — no restart needed.
+    try {
+      if (systemMQL || !window.matchMedia) return;
+      systemMQL = window.matchMedia("(prefers-color-scheme: light)");
+      systemMQL.addEventListener("change", () => {
+        if ((state.prefs.appearance || "system") === "system" && !isSkinTheme()) applyTheme();
+      });
+    } catch { systemMQL = null; }
+  }
+  function syncNativeStatusBar(t) {
+    // Keep the Android status bar consistent with the in-app theme
+    // (Capacitor StatusBar plugin; no-op on web/iOS).
+    const P = nativePlugins();
+    const SB = P && P.StatusBar;
+    if (!SB || !window.Capacitor || !window.Capacitor.getPlatform || window.Capacitor.getPlatform() !== "android") return;
+    const light = t === "light";
+    try {
+      SB.setStyle({ style: light ? "DARK" : "LIGHT" });
+      SB.setBackgroundColor({ color: light ? "#e6eae6" : "#101413" });
+    } catch {}
   }
   function applyTheme() {
     const root = document.documentElement.style;
@@ -274,11 +315,14 @@
     if (t === "custom") {
       applyCustomVars(customTheme());
       if (meta) meta.content = customTheme().surface;
+      syncNativeStatusBar("dark");
       applyUi();
       return;
     }
     const pack = THEMES.find((x) => x.id === t);
-    if (meta) meta.content = (pack && pack.surface) || (t === "light" ? "#f3f6f4" : "#101413");
+    if (meta) meta.content = (pack && pack.surface) || (t === "light" ? "#e6eae6" : "#101413");
+    syncNativeStatusBar(t);
+    watchSystemTheme();
     applyUi();
   }
   function applyUi() {
@@ -298,10 +342,12 @@
   function themeLabel() {
     if (state.prefs.theme === "custom") return customTheme().name || "Custom";
     const pack = THEMES.find((x) => x.id === state.prefs.theme);
-    return pack ? pack.name : "Muchi";
+    if (pack && SKIN_IDS.has(pack.id)) return pack.name;
+    const ap = state.prefs.appearance || "system";
+    return ap === "light" ? "Light" : ap === "dark" ? "Dark" : "System";
   }
   function themeCardHTML(th, on) {
-    const bg = th.surface || (window.matchMedia("(prefers-color-scheme: light)").matches ? "#f3f6f4" : "#101413");
+    const bg = th.surface || (window.matchMedia("(prefers-color-scheme: light)").matches ? "#e6eae6" : "#101413");
     return `<button type="button" class="theme-card ${on ? "on" : ""}" data-set-theme="${th.id}">
       <div class="theme-preview" style="background:${bg};--tp-a:${th.a};--tp-b:${th.b}">
         <i class="tp-bar"></i><i class="tp-row"></i><i class="tp-row dim"></i><i class="tp-pill"></i>
@@ -1551,6 +1597,231 @@
   }
 
   let relatedGen = 0;
+  let artistGen = 0;
+
+  // ── Browser-side artist catalogue (Deezer, METADATA ONLY) ──────────────
+  // The profile must show the artist's REAL discography — all songs, their
+  // most popular tracks and every album — for every artist. The worker's
+  // /api/artist is the primary source; when it comes back thin or fails
+  // (old deployment, cold start), we complete the catalogue straight from
+  // the Deezer public API in the browser: artist search → top tracks
+  // (Deezer's own popularity ranking) → full album list → newest albums'
+  // track lists. No audio is ever fetched from Deezer — no preview URLs
+  // are read or played. Every track carries a playQuery that resolves
+  // through MUCHI's existing playback pipeline for the FULL track.
+  const DZ_BASE = "https://api.deezer.com";
+  async function dzFetch(path, ms = 9000) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
+      if (!r.ok) throw new Error("deezer " + r.status);
+      return await r.json();
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  const dzFold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+
+  async function deezerBrowserCatalog(name) {
+    const want = dzFold(name);
+    if (!want) return null;
+    // Same matching rule as the worker: exact (accent-folded) name, else
+    // the shortest "starts with" candidate — never a blind first row
+    // ("adele" must not resolve to the duo "Adèle & Robin").
+    const sj = await dzFetch(`/search/artist?q=${encodeURIComponent(String(name).slice(0, 80))}&limit=10`);
+    const rows = (sj && sj.data) || [];
+
+    let a = rows.find((r) => dzFold(r.name) === want);
+    if (!a) {
+      const cands = rows.filter((r) => dzFold(r.name).startsWith(want));
+      if (cands.length) a = cands.sort((x, y) => dzFold(x.name).length - dzFold(y.name).length)[0];
+    }
+    if (!a || !a.id) return null;
+    const artist = { name: a.name || name, artwork: a.picture_medium || "" };
+    const dzSong = (t, srcArt) => (!t || !t.title) ? null : {
+      id: `deezer:${t.id}`,
+      source: "deezer",
+      title: t.title,
+      artist: (t.artist && t.artist.name) || artist.name,
+      album: (t.album && t.album.title) || "",
+      duration: Number(t.duration || 0),
+      artwork: (t.album && t.album.cover_medium) || srcArt || "",
+      playQuery: `${t.title} ${(t.artist && t.artist.name) || artist.name} official audio`.trim(),
+    };
+    // 1) Most popular tracks (Deezer ranks the artist's top list by popularity).
+    const top = [];
+    try {
+      const tj = await dzFetch(`/artist/${a.id}/top?limit=50`);
+      for (const t of (tj && tj.data) || []) { const s = dzSong(t, artist.artwork); if (s) top.push(s); }
+    } catch {}
+    // 2) Complete discography (offset pagination, capped at 100 albums).
+    const albums = [];
+    let index = 0;
+    for (let page = 0; page < 3; page++) {
+      let aj;
+      try { aj = await dzFetch(`/artist/${a.id}/albums?limit=100&index=${index}`); } catch { break; }
+      const list = (aj && aj.data) || [];
+      if (!list.length) break;
+      for (const al of list) {
+        if (!al || !al.id) continue;
+        const rt = String(al.record_type || "").toLowerCase();
+        albums.push({
+          id: `deezer-album:${al.id}`,
+          kind: "playlist",
+          title: al.title || "Album",
+          artist: artist.name,
+          artwork: al.cover_medium || al.cover_big || "",
+          source: "deezer",
+          query: `${al.title || ""} ${artist.name}`.trim(),
+          year: al.release_date ? String(al.release_date).slice(0, 4) : "",
+          recordType: rt === "single" ? "Single" : rt === "ep" ? "EP" : "Album",
+        });
+      }
+      index += list.length;
+      if (index >= Number(aj.total || 0) || index >= 100) break;
+    }
+    // 3) Newest 8 albums → full track lists (correct order + album).
+    const all = [...top];
+    const seen = new Set(all.map((t) => dzFold(t.title) + "|" + dzFold(t.artist)));
+    const expand = albums.slice(0, 8);
+    for (let i = 0; i < expand.length; i += 4) {
+      const chunk = expand.slice(i, i + 4);
+      const res = await Promise.all(chunk.map((al) => dzFetch(`/album/${String(al.id).replace("deezer-album:", "")}`).catch(() => null)));
+      for (const r of res) {
+        const rows2 = (r && r.data && r.data.tracks && r.data.tracks.data) || [];
+        for (const t of rows2) {
+          const s = dzSong(t, (r && r.data && r.data.cover_medium) || artist.artwork);
+          if (!s) continue;
+          const k = dzFold(s.title) + "|" + dzFold(s.artist);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          all.push(s);
+        }
+      }
+    }
+    return { artist, popular: top, songs: all, albums };
+  }
+
+  // ── iTunes Search (worldwide catalogue, CORS-open, no key) ─────────────
+  // Backbone for the browser-side catalogue: up to 200 songs + 200 albums
+  // per artist. Metadata only — playback resolves through the app's
+  // normal search pipeline via playQuery, exactly like the Deezer rows.
+  const ITUNES_BASE = "https://itunes.apple.com";
+  async function itFetch(path, ms = 9000) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const r = await fetch(ITUNES_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
+      if (!r.ok) throw new Error("itunes " + r.status);
+      return await r.json();
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  async function itunesBrowserCatalog(name) {
+    const want = dzFold(name);
+    if (!want) return null;
+    const country = String((state.prefs && state.prefs.country) || "IN");
+    // iTunes Search (verified API surface: term/entity/limit/country only —
+    // there is no artist entity and no attribute param). Step 1 pulls the
+    // artist's songs; the canonical artist name is derived from the
+    // dominant artistName among rows that actually relate to the query,
+    // so "post malone" never resolves to the Sam Feldt track that merely
+    // features him.
+    const ssj = await itFetch(`/search?term=${encodeURIComponent(String(name).slice(0, 80))}&entity=song&limit=200&country=${country}`);
+    const rows = (ssj && ssj.results) || [];
+    const related = rows.filter((t) => {
+      const na = dzFold(t.artistName);
+      return na && (na === want || na.includes(want) || want.includes(na));
+    });
+    if (!related.length) return null;
+    const freq = new Map();
+    for (const t of related.slice(0, 50)) {
+      const na = dzFold(t.artistName);
+      freq.set(na, (freq.get(na) || 0) + 1);
+    }
+    let an = "";
+    let best = 0;
+    for (const [k, v] of freq) if (v > best || (v === best && k.length > an.length)) { an = k; best = v; }
+    const orig = related.find((t) => dzFold(t.artistName) === an) || related[0];
+    const artistName = orig.artistName || name;
+    const art = String(orig.artworkUrl100 || "").replace("100x100bb", "500x500bb");
+    const itSong = (t) => (!t || !t.trackName) ? null : {
+      id: `itunes:${t.trackId}`,
+      source: "itunes",
+      title: t.trackName,
+      artist: t.artistName || artistName,
+      album: t.collectionName || "",
+      duration: Math.round(Number(t.trackTimeMillis || 0) / 1000),
+      artwork: String(t.artworkUrl100 || "").replace("100x100bb", "300x300bb"),
+      playQuery: `${t.trackName} ${t.artistName || artistName} official audio`.trim(),
+    };
+    // Strict artist match: the row's artist IS the canonical name or a
+    // collaboration with it ("Post Malone & Swae Lee" keeps; a track that
+    // merely mentions the name in its title does not).
+    const byArtist = (na) => na === an || na.includes(an);
+    const songs = [];
+    for (const t of rows) if (byArtist(dzFold(t.artistName))) { const s = itSong(t); if (s) songs.push(s); }
+    const sj2 = await itFetch(`/search?term=${encodeURIComponent(artistName.slice(0, 80))}&entity=album&limit=200&country=${country}`).catch(() => null);
+    const albums = [];
+    for (const t of (sj2 && sj2.results) || []) {
+      if (!t || !t.collectionName) continue;
+      // Album rows carry the collection's artist in artistName — an album
+      // that only features the queried artist belongs to its main artist.
+      if (!byArtist(dzFold(t.artistName))) continue;
+      albums.push({
+        id: `itunes-album:${t.collectionId}`,
+        kind: "playlist",
+        title: t.collectionName,
+        artist: t.artistName || artistName,
+        artwork: String(t.artworkUrl100 || "").replace("100x100bb", "300x300bb"),
+        source: "itunes",
+        query: `${t.collectionName} ${t.artistName || artistName}`.trim(),
+        year: t.releaseDate ? String(t.releaseDate).slice(0, 4) : "",
+        recordType: "Album",
+      });
+    }
+    return { artist: { name: artistName, artwork: art }, popular: null, songs, albums };
+  }
+
+  // ── Worker search merge + YouTube playlists ────────────────────────────
+  // The worker's /api/search returns the best YouTube/Apple/Audius rows
+  // for the name plus the artist's YouTube playlists (kind:"playlist").
+  // Rows pass the same strict looksLikeSong filter as everywhere else.
+  async function artistSearchCatalog(name) {
+    const want = dzFold(String(name || ""));
+    if (!want) return { songs: [], playlists: [] };
+    const s = await api(`/api/search?q=${encodeURIComponent(String(name).slice(0, 80))}&${glq()}`, 25000);
+    const qwords = want.split(/\s+/).filter((w) => w.length > 2);
+    const songs = [];
+    for (const t of [].concat(s.youtube || [], s.apple || [], s.audius || [])) {
+      if (!t || !looksLikeSong(t)) continue; // strict: real songs only
+      const hay = `${dzFold(t.title)} ${dzFold(t.artist)}`;
+      if (!hay.includes(want) && !qwords.some((w) => hay.includes(w))) continue;
+      songs.push(t);
+      if (songs.length >= 150) break;
+    }
+    const playlists = [];
+    for (const p of [].concat(s.playlists || [])) {
+      if (!p || !p.title) continue;
+      const hay = dzFold(p.title);
+      if (!hay.includes(want) && !qwords.some((w) => hay.includes(w))) continue;
+      playlists.push({
+        id: `ytpl:${p.playlistId || p.id || ""}`,
+        kind: "playlist",
+        title: p.title,
+        artist: p.artist && p.artist !== "YouTube" ? p.artist : name,
+        artwork: p.artwork || "",
+        source: "youtube",
+        playlistId: p.playlistId || "",
+        query: p.title,
+      });
+      if (playlists.length >= 12) break;
+    }
+    return { songs, playlists };
+  }
+
   let plRecs = { key: "", tracks: [], loading: false };
 
   function relatedSkip(seed) {
@@ -1567,7 +1838,9 @@
     const title = String(t.title || "").toLowerCase();
     if (/^(episode|podcast|clip|news|trailer|various artists|various)$/i.test(artist.trim())) return false;
     const text = `${title} ${artist}`;
-    if (/\b(episode|podcast|trailer|full movie|gameplay|nato|imran khan)\b/i.test(text)) return false;
+    if (/\b(episode|podcast|trailer|full movie|gameplay|nato|imran khan|vlog|tutorial|reaction|unboxing|live stream)\b/i.test(text)) return false;
+    // YouTube auto "Topic" channels re-upload with garbage metadata.
+    if (/\btopic\b/i.test(artist)) return false;
     // YouTube search surfaces a lot of junk — hour-long mixes, compilations,
     // mashups, karaoke/instrumental covers, "best of" collections, re-upload
     // channels. Keep playlists/queues listing real songs like Spotify's.
@@ -2407,8 +2680,8 @@
     return window.Capacitor.Plugins;
   }
   /* ── Optional native background player (Android + iOS) ───────────────
-     The native shells ship a MuchiAudio plugin: on Android a Media3
-     (ExoPlayer) MediaSessionService foreground player, on iOS an AVPlayer
+     The native shells ship a MuchiAudio plugin: on Android a foreground media
+     service (ExoPlayer + MediaSessionCompat notification/controls), on iOS an AVPlayer
      with AVAudioSession + now-playing/lock-screen controls. It renders
      audio + the OS media notification and echoes play/pause/next/prev/
      seek/ended/error back into this app's own playback functions.
@@ -2707,8 +2980,12 @@
   async function loadYtLiked(force) {
     if (!state.auth || !state.auth.youtube || !state.auth.youtube.connected) return;
     if (!force && state.ytLiked) return;
+    if (state.ytBusy) return;
     state.ytBusy = true;
-    if (state.view === "library") render();
+    // NOTE: no render() here — rendering synchronously re-enters
+    // renderLibrary(), which calls loadYtLiked() again before the fetch
+    // resolves (infinite recursion). The UI already shows a "Loading"
+    // placeholder while state.ytLiked is null.
     try {
       const d = await api("/api/youtube/liked");
       state.ytLiked = { tracks: (d && d.tracks) || [], truncated: !!(d && d.truncated) };
@@ -2780,16 +3057,16 @@
   }
   async function initAuth() {
     // Web: the OAuth callback redirects back to "/?auth=success" etc.
+    let touched = false;
     try {
       const params = new URLSearchParams(window.location.search || "");
-      let touched = false;
       if (params.get("auth") === "success") { touched = true; toast("Signed in with Google"); }
       else if (params.get("youtube") === "success") { touched = true; toast("YouTube connected"); }
       else if (params.get("auth") === "error" || params.get("youtube") === "error") { touched = true; toast("Google sign-in was cancelled or failed"); }
       if (touched) history.replaceState(null, "", window.location.pathname + window.location.hash);
     } catch {}
-    // Retry a few times: Render's free tier can take ~30-60s to wake from
-    // sleep, and the first /api/auth/status call may fail while it boots.
+    // Retry a few times: the first /api/auth/status call can race the
+    // Worker's cold start, so give it a couple of attempts.
     for (let i = 0; i < 4; i++) {
       await refreshAuth(true);
       if (state.auth && state.auth.configured !== undefined) break;
@@ -3263,6 +3540,13 @@
     const recents = state.recents.slice(0, 10);
     const local = h.youtubeLocal && h.youtubeLocal.length ? h.youtubeLocal : h.youtubeIndia;
     const region = countryName(h.country || state.prefs.country);
+    // Remote preview: make the connection state visible in the hero so a slow
+    // first paint reads as "loading", never as a broken/empty page.
+    const liveNote = API_BASE && state.apiStatus === "connecting"
+      ? " · connecting to the live catalog…"
+      : API_BASE && state.apiStatus === "slow"
+        ? " · catalog is slow — rows are filling in"
+        : "";
     const shelves = FALLBACK_SHELVES.map((fb) => {
       const hit = (h.shelves || []).find((s) => s.id === fb.id);
       return {
@@ -3278,7 +3562,7 @@
         <div class="hero-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
         <div>
           <h1>${greeting()}</h1>
-          <p>English hits · pop, hip-hop, rock, R&amp;B, dance · a little from ${escapeHTML(region)}</p>
+          <p>English hits · pop, hip-hop, rock, R&amp;B, dance · a little from ${escapeHTML(region)}${liveNote}</p>
         </div>
       </div>
       <div class="section">
@@ -3548,11 +3832,15 @@
   }
 
   function playlistHitHTML(p) {
+    const kind = p.recordType || (p.source === "apple" ? "Album" : p.source === "deezer" ? "Album" : "Playlist");
+    const extra = [];
+    if (p.year) extra.push(`${p.year}`);
+    if (p.trackCount) extra.push(`${p.trackCount} songs`);
     return `<button type="button" class="lib-row" data-ytpl="${escapeAttr(p.playlistId || "")}" data-pl-q="${escapeAttr(p.query || p.title || "")}">
       <img src="${escapeAttr(p.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
       <div>
         <div class="t-title">${escapeHTML(p.title)}</div>
-        <div class="t-sub">${p.source === "apple" ? "Album" : "Playlist"}${p.artist ? " · " + escapeHTML(p.artist) : ""}</div>
+        <div class="t-sub">${kind}${p.artist ? " · " + escapeHTML(p.artist) : ""}${extra.length ? " · " + escapeHTML(extra.join(" · ")) : ""}</div>
       </div>
     </button>`;
   }
@@ -3573,7 +3861,7 @@
   function renderArtistPage() {
     const a = state.artistPage;
     if (!a) return "";
-    const songs = a.songs || [];
+    const songs = (a.songs || []).filter(looksLikeSong);
     const albums = a.albums || [];
     return `
       <button class="chip-btn" id="artistBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
@@ -3593,8 +3881,26 @@
         </div>
       </div>
       ${a.loading ? skeleton() : `
-        ${songs.length ? `<div class="section"><div class="section-head"><h2>Popular</h2></div><div class="list">${songs.map((t, i) => rowHTML(t, i)).join("")}</div></div>` : ""}
-        ${albums.length ? `<div class="section"><div class="section-head"><h2>Albums</h2></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+        ${(a.popular || []).filter(looksLikeSong).length >= 3 ? (() => {
+          const pop = (a.popular || []).filter(looksLikeSong).slice(0, 20);
+          return `<div class="section"><div class="section-head"><h2>Popular</h2><span>${pop.length} most played</span></div><div class="list">${pop.map((t, i) => rowHTML(t, i)).join("")}</div></div>`;
+        })() : ""}
+        ${songs.length ? (() => {
+          const shown = Math.min(Number(a.shown || 40), songs.length);
+          const slice = songs.slice(0, shown);
+          const rest = songs.length - shown;
+          return `<div class="section"><div class="section-head"><h2>All songs</h2><span>${songs.length}${songs.length > 40 ? " · showing " + shown : ""}</span></div><div class="list">${slice.map((t, i) => rowHTML(t, i)).join("")}</div>${rest > 0 ? `<div class="set-row" style="padding:10px 8px"><button type="button" class="chip-btn" id="artistMore"><span class="material-symbols-outlined">unfold_more</span> Show ${Math.min(60, rest)} more (${rest} left)</button></div>` : ""}</div>`;
+        })() : ""}
+        ${albums.length ? (() => {
+          const shown = Math.min(Number(a.albumsShown || 40), albums.length);
+          const slice = albums.slice(0, shown);
+          const rest = albums.length - shown;
+          return `<div class="section"><div class="section-head"><h2>Albums</h2><span>${albums.length}${albums.length > 40 ? " · showing " + shown : ""}</span></div><div class="lib-list">${slice.map(playlistHitHTML).join("")}</div>${rest > 0 ? `<div class="set-row" style="padding:10px 8px"><button type="button" class="chip-btn" id="albumMore"><span class="material-symbols-outlined">unfold_more</span> Show ${Math.min(60, rest)} more (${rest} left)</button></div>` : ""}</div>`;
+        })() : ""}
+        ${(a.playlists || []).length ? (() => {
+          const pls = a.playlists;
+          return `<div class="section"><div class="section-head"><h2>Playlists</h2><span>${pls.length} on YouTube</span></div><div class="lib-list">${pls.map(playlistHitHTML).join("")}</div></div>`;
+        })() : ""}
         ${!songs.length && !albums.length ? `<div class="empty"><h3>Nothing in the catalogue yet</h3><p>Try searching the name as a song.</p></div>` : ""}
       `}
     `;
@@ -3895,6 +4201,19 @@
           ${likedRowYt}
           ${plsYt}
         </div>`;
+    } else if (state.auth && state.auth.signedIn) {
+      ytRows = `
+        <div class="yt-group">
+          <div class="yt-head"><h2>YouTube</h2></div>
+          <div class="yt-connect">
+            <span class="material-symbols-outlined">link</span>
+            <div>
+              <div class="t-title">Connect YouTube</div>
+              <p class="yt-connect-sub">Your Google sign-in covers your account, but it does <strong>not</strong> include access to YouTube — that's a second, one-time permission. Tap Connect, approve once on YouTube's page, and your YouTube likes &amp; playlists will appear here.</p>
+            </div>
+            <button type="button" class="chip-btn" id="ytConnectNow"><span class="material-symbols-outlined">open_in_new</span> Connect</button>
+          </div>
+        </div>`;
     }
     let body = "";
     if (f === "playlists") {
@@ -3956,64 +4275,106 @@
   }
   function updateLine() {
     const u = state.update;
-    if (!u) return "Tap Check to look for an Android update.";
-    if (u.available) return `Version ${u.tag} is ready. Tap Update — it installs over this app.`;
-    if (u.latest) return "You're on the latest version.";
-    return "This is the version on this device.";
+    if (!u) return "Checking for updates…";
+    if (u.error) return "Couldn't reach the update server — check your connection.";
+    if (u.available) return `Version ${u.latest} is available — tap Update.`;
+    if (u.latest) return `Current ${u.current} · Latest ${u.latest} · Up to date`;
+    return `Version ${u.current} on this device`;
   }
+  /* Update system v2 — the app asks ITS OWN backend (/api/version) for the
+     latest release. No user-entered GitHub URL, no GitHub scraping. When the
+     release pipeline publishes a new version it updates the Worker metadata
+     (and optionally android.apkUrl / ios.appStoreUrl), which this UI reads. */
   async function checkUpdates(quiet) {
-    const gh = githubRepo();
-    if (!gh) {
-      state.update = { available: false, error: "GitHub is not linked." };
-      if (!quiet && state.view === "settings") render();
-      return;
-    }
-    let latest = null;
+    let meta = null;
     try {
-      const r = await fetch(`https://api.github.com/repos/${gh.owner}/${gh.repo}/releases/latest`, {
-        headers: { Accept: "application/vnd.github+json" },
-      });
-      if (r.ok) {
-        const d = await r.json();
-        latest = { tag: d.tag_name || d.name, url: d.html_url, name: d.name, apk: apkFromRelease(d) };
-      }
+      const d = await api("/api/version", 12000);
+      if (d && d.version) meta = d;
     } catch {}
-    if (!latest) {
-      try {
-        const r = await fetch(`https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/main/package.json`);
-        if (r.ok) {
-          const d = await r.json();
-          if (d && d.version) latest = { tag: d.version, url: `${gh.url}/releases`, name: d.version, apk: `${gh.url}/releases/latest/download/Muchi.apk` };
-        }
-      } catch {}
-    }
+    const latest = meta && meta.version ? String(meta.version) : "";
     state.update = {
+      current: APP_VERSION,
       latest,
-      tag: latest && latest.tag,
-      url: latest && latest.url,
-      apk: latest && latest.apk,
-      available: !!(latest && verNewer(latest.tag, APP_VERSION)),
+      available: !!latest && verNewer(latest, APP_VERSION),
+      apkUrl: latest ? String((meta.android && meta.android.apkUrl) || "") : "",
+      appStoreUrl: latest ? String((meta.ios && meta.ios.appStoreUrl) || "") : "",
+      error: !meta,
     };
     if (state.update.available) {
-      if (!quiet || !state.update.seen) toast(`Muchi ${state.update.tag} is available`);
+      if (!quiet || !state.update.seen) toast(`Muchi ${state.update.latest} is available`);
       state.update.seen = true;
-    } else if (!quiet) {
-      toast(latest ? "You're up to date" : "No GitHub release yet");
+    } else if (!meta && !quiet) {
+      toast("Couldn't check for updates");
     }
     if (state.view === "settings") render();
   }
-  function installApkUpdate() {
-    const url = apkUrl();
-    if (isMuchiApp() && window.MuchiAndroid && MuchiAndroid.installUpdate && url) {
-      toast("Downloading update…");
-      try { MuchiAndroid.installUpdate(url); } catch { toast("Could not start download", true, "error"); }
-      return;
+  function updateModalBody() {
+    const u = state.update || {};
+    const status = u.error ? "offline" : u.available ? "update available" : (u.latest ? "up to date" : "checking");
+    return `
+      <p class="upd-ver">Current <strong>${escapeHTML(u.current || APP_VERSION)}</strong>${u.latest ? ` · Latest <strong>${escapeHTML(u.latest)}</strong>` : ""} · <em>${status}</em></p>
+      <div class="upd-tiles">
+        <button type="button" class="upd-tile" id="updAndroid" style="animation-delay:.05s">
+          <span class="upd-tile-icon"><span class="material-symbols-outlined">android</span></span>
+          <span class="upd-tile-name">Android</span>
+          <span class="upd-tile-sub">Download &amp; install the APK</span>
+        </button>
+        <button type="button" class="upd-tile" id="updIos" style="animation-delay:.16s">
+          <span class="upd-tile-icon ios">
+            <svg class="apple-logo" viewBox="0 0 384 512" role="img" aria-label="Apple" xmlns="http://www.w3.org/2000/svg"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+          </span>
+          <span class="upd-tile-name">iOS</span>
+          <span class="upd-tile-sub">App Store / TestFlight</span>
+        </button>
+      </div>
+      <div class="upd-sub" id="updSub" hidden></div>`;
+  }
+  function showUpdatePlatform(which) {
+    const sub = document.getElementById("updSub");
+    const tiles = document.querySelector("#modal .upd-tiles");
+    if (!sub) return;
+    const u = state.update || {};
+    if (which === "android") {
+      sub.innerHTML = `
+        <div class="upd-sub-head">
+          <span class="material-symbols-outlined">android</span>
+          <div><strong>Android update</strong><p>Installs over this app — your likes, playlists and settings stay.</p></div>
+        </div>
+        ${u.apkUrl
+          ? `<a class="filled-btn upd-dl" href="${escapeAttr(u.apkUrl)}" target="_blank" rel="noopener"><span class="material-symbols-outlined filled">download</span> Download Muchi ${escapeHTML(u.latest || "")}</a>`
+          : `<p class="upd-pending">${u.available
+              ? "The Android release is being prepared — the download link appears here the moment it is published."
+              : "You're on the latest published Android version."}</p>`}
+        <p class="upd-note">If your phone asks for permission, allow “Install unknown apps” for this app (Android 8+ security rule).</p>`;
+    } else {
+      sub.innerHTML = `
+        <div class="upd-sub-head">
+          <span class="material-symbols-outlined">smartphone_iphone</span>
+          <div><strong>iOS update</strong><p>iPhone apps update through Apple's App Store or TestFlight.</p></div>
+        </div>
+        ${u.appStoreUrl
+          ? `<a class="filled-btn upd-dl" href="${escapeAttr(u.appStoreUrl)}" target="_blank" rel="noopener"><span class="material-symbols-outlined filled">open_in_new</span> Open in the App Store</a>`
+          : `<p class="upd-pending">MUCHI isn't on the App Store yet. Once it's published, this button opens the App Store automatically — iPhones can't side-load apps, and we won't pretend otherwise.</p>`}`;
     }
-    if (url) {
-      window.open(url, "_blank", "noopener");
-      return;
-    }
-    installApp();
+    sub.hidden = false;
+    if (tiles) tiles.classList.add("dim");
+  }
+  function openUpdateModal() {
+    const modal = $("modal");
+    const card = $("modalCard");
+    clearTimeout(hideModal._t);
+    modal.classList.add("sheet");
+    card.innerHTML = `<div class="sheet-handle" aria-hidden="true"></div><h2>Update Muchi</h2>${updateModalBody()}<div class="modal-actions"><button class="btn ghost" id="mCancel">Close</button></div>`;
+    showEl(modal, true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => modal.classList.add("in"));
+    });
+    $("mCancel").onclick = () => hideModal();
+    modal.onclick = (e) => { if (e.target === modal) hideModal(); };
+    const a = card.querySelector("#updAndroid");
+    const i = card.querySelector("#updIos");
+    if (a) a.onclick = () => showUpdatePlatform("android");
+    if (i) i.onclick = () => showUpdatePlatform("ios");
   }
   async function reloadApp() {
     toast("Reloading…");
@@ -4033,9 +4394,11 @@
   function renderAppearance() {
     const p = state.prefs;
     const c = customTheme();
-    const classic = THEMES.filter((t) => t.group === "classic");
+    const skins = THEMES.filter((t) => !isBaseThemeId(t.id));
     const color = THEMES.filter((t) => t.group === "color");
     const customOn = p.theme === "custom";
+    const ap = p.appearance || "system";
+    const apBtn = (id, label) => `<button type="button" class="seg-btn${ap === id ? " on" : ""}" data-appearance="${id}" role="radio" aria-checked="${ap === id}">${label}</button>`;
     return `
       <div class="hero">
         <div>
@@ -4049,14 +4412,18 @@
       </div>
       <div class="settings">
         <div class="set-card">
-          <h3>Classic</h3>
-          <p class="set-lead">Night, day, and a match for this device.</p>
-          <div class="theme-grid">${classic.map((th) => themeCardHTML(th, p.theme === th.id)).join("")}</div>
+          <h3>Light / Dark / System</h3>
+          <p class="set-lead">Choose how MUCHI appears. System follows this device — and keeps following it live, without a restart.</p>
+          <div class="seg" role="radiogroup" aria-label="Appearance">
+            ${apBtn("light", "Light")}
+            ${apBtn("dark", "Dark")}
+            ${apBtn("system", "System")}
+          </div>
         </div>
         <div class="set-card">
-          <h3>Colorful</h3>
-          <p class="set-lead">Livelier skins — tap one to try it.</p>
-          <div class="theme-grid">${color.map((th) => themeCardHTML(th, p.theme === th.id)).join("")}</div>
+          <h3>Theme skins</h3>
+          <p class="set-lead">Optional color skins on top of the appearance above. ${color.length} colorful + classic skins.</p>
+          <div class="theme-grid">${skins.map((th) => themeCardHTML(th, p.theme === th.id)).join("")}</div>
         </div>
         <div class="set-card">
           <h3>Custom theme</h3>
@@ -4429,11 +4796,10 @@
             <div><strong>Muchi ${APP_VERSION}</strong><p>${updateLine()}</p></div>
           </div>
           <div class="set-row">
-            <div><strong>Updates</strong><p>Check GitHub. Update installs over this app — no uninstall after 1.2.1.</p></div>
+            <div><strong>Updates</strong><p>Check for a new version, or restart the app.</p></div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="chip-btn" id="checkUpdates" type="button">Check</button>
-              <button class="chip-btn" id="installNow" type="button">${state.update && state.update.available ? "Update" : "Get APK"}</button>
-              <button class="chip-btn" id="reloadApp" type="button">Reload site</button>
+              <button class="chip-btn" id="updateBtn" type="button"><span class="material-symbols-outlined">system_update</span>Update</button>
+              <button class="chip-btn" id="reloadApp" type="button"><span class="material-symbols-outlined">refresh</span>Reload App</button>
             </div>
           </div>
           <div class="set-row">
@@ -4754,6 +5120,20 @@
     });
     const artistBack = viewEl.querySelector("#artistBack");
     if (artistBack) artistBack.addEventListener("click", requestBack);
+    const artistMore = viewEl.querySelector("#artistMore");
+    if (artistMore && state.artistPage) {
+      artistMore.addEventListener("click", () => {
+        state.artistPage.shown = Math.min(((Number(state.artistPage.shown) || 40) + 60), ((state.artistPage.songs || []).length));
+        render();
+      });
+    }
+    const albumMore = viewEl.querySelector("#albumMore");
+    if (albumMore && state.artistPage) {
+      albumMore.addEventListener("click", () => {
+        state.artistPage.albumsShown = Math.min(((Number(state.artistPage.albumsShown) || 40) + 60), ((state.artistPage.albums || []).length));
+        render();
+      });
+    }
     const playArtist = viewEl.querySelector("#playArtist");
     if (playArtist) {
       playArtist.addEventListener("click", () => {
@@ -4834,6 +5214,8 @@
     });
     const ytReconnectBtn = viewEl.querySelector("#ytReconnectBtn");
     if (ytReconnectBtn) ytReconnectBtn.addEventListener("click", connectYouTube);
+    const ytConnectNow = viewEl.querySelector("#ytConnectNow");
+    if (ytConnectNow) ytConnectNow.addEventListener("click", connectYouTube);
     const playYtLiked = viewEl.querySelector("#playYtLiked");
     if (playYtLiked) playYtLiked.addEventListener("click", () => playTrackList((state.ytLiked && state.ytLiked.tracks) || [], 0));
     const playYtPl = viewEl.querySelector("#playYtPl");
@@ -5061,8 +5443,11 @@
         if (state.view === "settings") render();
       });
     }
-    const checkBtn = viewEl.querySelector("#checkUpdates");
-    if (checkBtn) checkBtn.addEventListener("click", () => checkUpdates(false));
+    const updBtn = viewEl.querySelector("#updateBtn");
+    if (updBtn) updBtn.addEventListener("click", () => {
+      openUpdateModal();
+      checkUpdates(true);
+    });
     const reloadBtn = viewEl.querySelector("#reloadApp");
     if (reloadBtn) reloadBtn.addEventListener("click", reloadApp);
     viewEl.querySelectorAll("[data-dl]").forEach((el) => {
@@ -5073,8 +5458,7 @@
         if (track) downloadTrack(track);
       });
     });
-    const installNow = viewEl.querySelector("#installNow");
-    if (installNow) installNow.addEventListener("click", installApkUpdate);
+
     viewEl.querySelectorAll("[data-pref]").forEach((el) => {
       el.addEventListener("click", () => {
         const key = el.dataset.pref;
@@ -5195,6 +5579,22 @@
         if (state.view === "settings") render();
       });
     });
+    viewEl.querySelectorAll("[data-appearance]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const mode = el.dataset.appearance;
+        if (!["light", "dark", "system"].includes(mode)) return;
+        state.prefs.appearance = mode;
+        // A mode selection means "base look" — clear any color skin so the
+        // Light/Dark/System choice is what the user actually sees.
+        state.prefs.theme = "dark";
+        savePrefs();
+        applyTheme();
+        themedId = "";
+        themeFromTrack(current());
+        toast(mode === "light" ? "Light appearance" : mode === "dark" ? "Dark appearance" : "Following this device");
+        if (state.view === "settings") render();
+      });
+    });
     const setFade = viewEl.querySelector("#setFade");
     if (setFade) {
       setFade.addEventListener("change", () => {
@@ -5277,6 +5677,7 @@
       hasArtist: !!state.artistPage,
       hasDetail: !!state.detailTrack,
       hasCatalog: !!(state.catalogPlaylist && state.activePlaylist === "catalog"),
+      catalogMeta: state.catalogMeta || null,
       queue: !!state.showQueue,
       profile: !!state.showProfile,
       homeScroll: state.homeScroll || 0,
@@ -5306,6 +5707,11 @@
     showEl($("queuePanel"), !!state.showQueue);
     if ($("queuePanel")) $("queuePanel").classList.toggle("open", !!state.showQueue);
     showEl($("ytWrap"), !!state.showVideo);
+    // Scrim must track queue/sidebar on EVERY nav path — the popstate
+    // restore (applyNav) otherwise leaves the dimming layer on screen
+    // after the queue closes, blocking taps until the user clicks it.
+    const sideEl = $("sidebar");
+    showEl($("scrim"), !!state.showQueue || (sideEl && sideEl.classList.contains("open")));
     render();
     syncPlayerVisibility();
     restoreScroll(!!fromBack);
@@ -5325,7 +5731,23 @@
     if (!s.hasDetail) state.detailTrack = null;
     if (!s.hasCatalog && state.activePlaylist === "catalog") {
       state.catalogPlaylist = null;
+      state.catalogMeta = null;
       if (s.activePlaylist === "catalog") state.activePlaylist = null;
+    } else if (s.hasCatalog) {
+      if (s.catalogMeta) state.catalogMeta = s.catalogMeta;
+      // Data lost while we were on another screen (e.g. lyrics) — show the
+      // loading state and re-fetch this exact playlist instead of stranding
+      // the user on a permanent "Loading songs…".
+      const lost = !state.catalogPlaylist || (!state.catalogPlaylist.loading && !(state.catalogPlaylist.tracks && state.catalogPlaylist.tracks.length) && !state.catalogPlaylist.playlistId && !state.catalogPlaylist.shelfId && !state.catalogPlaylist.query);
+      const stale = state.catalogPlaylist && state.catalogPlaylist.loading && !(state.catalogPlaylist.tracks && state.catalogPlaylist.tracks.length);
+      if ((lost || stale) && state.catalogMeta) {
+        if (!state.catalogPlaylist) state.catalogPlaylist = { title: state.catalogMeta.title || "Playlist", tracks: [], loading: true };
+        navSilent = false; // refill re-enters async work; don't leave pushes muted
+        paintNav(true);
+        const m = state.catalogMeta;
+        openCatalogPlaylist(m, { refill: true });
+        return true;
+      }
     }
     state.showQueue = !!s.queue;
     state.showProfile = !!s.profile;
@@ -5423,9 +5845,14 @@
     if (name !== "search" && name !== "now" && name !== "settings" && name !== "detail") state.artistPage = null;
     if (name !== "detail") state.detailTrack = null;
     state.view = name;
-    if (name !== "library") {
+    // "now" (lyrics) and "detail" (track page) are transient overlays on
+    // top of the current view — going back must land the user exactly
+    // where they were, playlist included.
+    if (name !== "library" && name !== "now" && name !== "detail") {
       state.activePlaylist = null;
-      state.catalogPlaylist = null;
+      // Keep state.catalogPlaylist as an in-memory cache: nav history may
+      // still point at it (e.g. home → playlist → lyrics → back). Nulling
+      // it here used to strand the playlist in a permanent "Loading songs…".
     }
     if (name !== "settings") state.settingsPage = null;
     closeOverlays();
@@ -5464,29 +5891,116 @@
 
   async function openArtistProfile(artist) {
     if (!artist) return;
+    const gen = ++artistGen;
     if (!state.artistPage) state.artistFrom = state.view;
     state.view = "search";
-    state.artistPage = { name: artist.name, artwork: artist.artwork, id: artist.id, source: artist.source, songs: [], albums: [], loading: true };
+    state.artistPage = { name: artist.name, artwork: artist.artwork, id: artist.id, source: artist.source, songs: [], albums: [], popular: [], playlists: [], loading: true };
     navPush();
     paintNav();
+    const q = artist.query || artist.name;
+    const songs = [];
+    const albums = [];
+    let popular = [];
+    const norm = (t) => `${dzFold(t && t.title)}|${dzFold(t && t.artist)}`;
+    const haveN = new Set();
+    const haveA = new Set();
+    const addSongs = (list) => {
+      for (const t of list || []) {
+        if (!t || !looksLikeSong(t)) continue; // strict: real songs only
+        const k = norm(t);
+        if (haveN.has(k)) continue;
+        haveN.add(k);
+        songs.push(t);
+        if (songs.length >= 500) return;
+      }
+    };
+    const addAlbums = (list) => {
+      for (const a of list || []) {
+        if (!a || !a.title) continue;
+        const k = dzFold(a.title);
+        if (haveA.has(k)) continue;
+        haveA.add(k);
+        albums.push(a);
+        if (albums.length >= 300) return;
+      }
+    };
+    const paint = () => {
+      if (gen !== artistGen || !state.artistPage) return;
+      state.artistPage.songs = songs.slice(0, 500);
+      state.artistPage.albums = albums.slice(0, 300);
+      state.artistPage.popular = popular.slice(0, 20);
+      if (songs.length || albums.length) state.artistPage.loading = false;
+      render();
+    };
+    // 1) Primary: the worker's artist build (parallel Apple + YouTube +
+    //    Deezer, cached).
+    let data = null;
     try {
       const appleId = String(artist.id || "").startsWith("artist:apple:") ? String(artist.id).slice("artist:apple:".length) : "";
-      const data = await api(`/api/artist?q=${encodeURIComponent(artist.query || artist.name)}&id=${encodeURIComponent(appleId)}&${glq()}`);
-      state.artistPage = {
-        name: data.name || artist.name,
-        artwork: data.artwork || artist.artwork,
-        id: artist.id,
-        source: artist.source,
-        songs: data.songs || [],
-        albums: data.albums || [],
-        loading: false,
-      };
-    } catch {
-      state.artistPage.loading = false;
-      state.artistPage.songs = ((state.search && state.search.youtube) || []).slice(0, 12);
-      toast("Couldn't load the full catalogue", true, "error");
+      data = await api(`/api/artist?q=${encodeURIComponent(q)}&id=${encodeURIComponent(appleId)}&${glq()}`, 30000);
+    } catch {}
+    if (data && data.name) state.artistPage.name = data.name;
+    if (data && data.artwork && !state.artistPage.artwork) state.artistPage.artwork = data.artwork;
+    addSongs((data && data.songs) || []);
+    addAlbums((data && data.albums) || []);
+    popular = songs.slice(0, 20); // worker lists the best matches first
+    paint(); // fast first paint, then keep completing in the background
+    // 2) Complete the discography in the browser whenever the API came
+    //    back thin (old deployment, cold start) — all songs, popular
+    //    tracks, every album and the artist's YouTube playlists, for
+    //    every artist. Three independent sources, in parallel:
+    //   • Deezer — richest metadata (top tracks + complete album list);
+    //     metadata only, never audio;
+    //   • iTunes — worldwide catalogue (up to 200 songs + 200 albums),
+    //     CORS-open — the reliable backbone;
+    //   • MUCHI  — the worker's own search rows + YouTube playlists.
+    if (gen === artistGen && (songs.length < 20 || !albums.length)) {
+      const nm = state.artistPage.name || q;
+      const [dz, it, sr] = await Promise.all([
+        deezerBrowserCatalog(nm).catch(() => null),
+        itunesBrowserCatalog(nm).catch(() => null),
+        artistSearchCatalog(nm).catch(() => null),
+      ]);
+      if (gen !== artistGen || !state.artistPage) return;
+      addSongs(dz && dz.songs);
+      addSongs(it && it.songs);
+      addSongs(sr && sr.songs);
+      addAlbums(dz && dz.albums);
+      addAlbums(it && it.albums);
+      if (dz && dz.artist.name) state.artistPage.name = dz.artist.name;
+      else if (it && it.artist.name) state.artistPage.name = it.artist.name;
+      if (it && it.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = it.artist.artwork;
+      else if (dz && dz.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = dz.artist.artwork;
+      // Popular: Deezer's real popularity ranking when available,
+      // otherwise the best-first merged list (worker rows first).
+      if (dz && dz.popular && dz.popular.length) popular = dz.popular;
+      else popular = songs.slice(0, 20);
+      if (sr && sr.playlists && sr.playlists.length) state.artistPage.playlists = sr.playlists;
+      paint();
     }
-    render();
+    // 3) Last resort (Deezer blocked or unknown artist): top up from
+    //    /api/search so the profile never opens blank, no matter where
+    //    the user tapped the artist from (home, queue, player, search).
+    if (gen === artistGen && songs.length < 8) {
+      try {
+        const s = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}`, 25000);
+        const rows = [].concat(s.youtube || [], s.apple || [], s.audius || []);
+        const ql = dzFold(state.artistPage.name || q);
+        const qwords = ql.split(/\s+/).filter((w) => w.length > 2);
+        for (const t of rows) {
+          if (!t || !looksLikeSong(t)) continue;
+          const hay = `${dzFold(t.title)} ${dzFold(t.artist)}`;
+          if (!hay.includes(ql) && !qwords.some((w) => hay.includes(w))) continue;
+          addSongs([t]);
+          if (songs.length >= 60) break;
+        }
+      } catch {}
+    }
+    if (gen === artistGen && state.artistPage) {
+      state.artistPage.loading = false;
+      paint();
+      if (!songs.length && !albums.length) toast("Couldn't load this artist's catalogue", true, "error");
+    }
   }
 
   async function runSearch(q) {
@@ -5563,9 +6077,23 @@
     return good.length >= 3 ? good : list;
   }
 
-  async function openCatalogPlaylist(meta) {
+  // Home rows prefer real songs (Spotify-style), but a degraded provider must
+  // never leave a Home row empty: if fewer than 3 songs survive the junk
+  // filter, keep the best available rows (same "never starve" rule as
+  // vertical playlists). Playback itself still filters via looksLikeSong.
+  function keepBestTracks(a) {
+    if (!Array.isArray(a)) return a;
+    const good = a.filter((t) => t && looksLikeSong(t));
+    return good.length >= 3 ? good : a;
+  }
+
+  async function openCatalogPlaylist(meta, opts) {
     if (!meta) return;
-    rememberScroll();
+    // refill=true: re-fetch for a catalog view that is ALREADY current
+    // (e.g. restored from history whose data was lost) — no nav push, no
+    // view change, the caller has already painted the loading state.
+    const refill = !!(opts && opts.refill);
+    if (!refill) rememberScroll();
     const preview = cleanPlaylistTracks(Array.isArray(meta.tracks) ? meta.tracks.slice() : []);
     const playlistId = meta.playlistId || "";
     const fallbackQ = meta.query || meta.title || "";
@@ -5583,11 +6111,23 @@
       tracks: preview,
       loading: needFill,
     };
-    state.prevView = state.view === "library" ? (state.prevView || "home") : state.view;
-    state.view = "library";
-    state.activePlaylist = "catalog";
-    navPush();
-    paintNav(false);
+    // Small, JSON-safe meta so a history restore can re-fetch this exact
+    // playlist if the in-memory data was ever lost.
+    state.catalogMeta = {
+      title: meta.title || "Playlist",
+      playlistId,
+      query: fallbackQ,
+      shelfId,
+      forYouMix,
+      fyIndex,
+    };
+    if (!refill) {
+      state.prevView = state.view === "library" ? (state.prevView || "home") : state.view;
+      state.view = "library";
+      state.activePlaylist = "catalog";
+      navPush();
+      paintNav(false);
+    }
     if (!needFill) {
       if (state.catalogPlaylist) state.catalogPlaylist.loading = false;
       return;
@@ -5729,6 +6269,22 @@
     return new Date().toISOString().slice(0, 10);
   }
 
+  function seedHome() {
+    return {
+      moods: [],
+      day: utcDayClient(),
+      shelves: FALLBACK_SHELVES.map((s) => ({ ...s, tracks: [] })),
+      youtubeCharts: [],
+      youtubeIndia: [],
+      youtubeLocal: [],
+      countryPlaylists: [],
+      globalPlaylists: [],
+      audius: [],
+      underground: [],
+      radio: [],
+    };
+  }
+
   async function loadHome(force) {
     if (!force && state.home && Date.now() - homeFetchedAt < 86400000 && state.home.day === utcDayClient()) {
       if (state.view === "home") render();
@@ -5740,40 +6296,50 @@
       state.apiStatus = "connecting";
     }
     render();
+    // Seed the Home shell immediately and start filling empty shelves in
+    // PARALLEL with the full /api/home call. This is what makes the preview
+    // feel alive: rows appear within seconds even when the aggregate endpoint
+    // is slow (Worker cold start, provider latency) — no long dead skeleton
+    // and no permanently empty rows.
+    if (!state.home) {
+      state.home = seedHome();
+      render();
+    }
+    hydrateShelves();
     try {
-      // Remote APIs (Render free tier) can take a while to wake from sleep —
-      // give them more room than the same-origin default.
-      state.home = await api(`/api/home?${glq()}`, API_BASE ? 35000 : 22000);
+      // Remote APIs can take a while to wake from sleep — give them more room
+      // than the same-origin default.
+      const data = await api(`/api/home?${glq()}`, API_BASE ? 45000 : 25000);
+      if (!data) throw new Error("empty home");
       state.apiStatus = "ok";
-      // Homepage rows must never show 1–2 hour combined videos — drop junk
-      // strictly (no fallback): an all-junk row simply stays empty instead
-      // of listing mixes. Queue and vertical playlists share looksLikeSong.
+      // Keep shelves the background hydration already filled if the worker
+      // returned them empty (provider degradation).
+      const prev = state.home;
+      if (prev && Array.isArray(prev.shelves) && data.shelves && data.shelves.length) {
+        const filled = {};
+        prev.shelves.forEach((s) => { if (s.tracks && s.tracks.length) filled[s.id] = s.tracks; });
+        data.shelves.forEach((s) => {
+          if ((!s.tracks || !s.tracks.length) && filled[s.id]) s.tracks = filled[s.id];
+        });
+      }
+      state.home = data;
+      // Home rows list real songs (Spotify-style). If a provider is degraded
+      // and fewer than 3 songs survive, keep the best available rows so a
+      // Home row is never left empty (queue + vertical playlists share
+      // looksLikeSong and stay strict).
       if (state.home) {
-        const clean = (a) => (Array.isArray(a) ? a.filter((t) => t && looksLikeSong(t)) : a);
         if (Array.isArray(state.home.shelves)) {
-          state.home.shelves = state.home.shelves.map((s) => ({ ...s, tracks: clean(s.tracks) }));
+          state.home.shelves = state.home.shelves.map((s) => ({ ...s, tracks: keepBestTracks(s.tracks) }));
         }
-        state.home.youtubeLocal = clean(state.home.youtubeLocal);
-        state.home.youtubeIndia = clean(state.home.youtubeIndia);
-        state.home.youtubeCharts = clean(state.home.youtubeCharts);
+        state.home.youtubeLocal = keepBestTracks(state.home.youtubeLocal);
+        state.home.youtubeIndia = keepBestTracks(state.home.youtubeIndia);
+        state.home.youtubeCharts = keepBestTracks(state.home.youtubeCharts);
       }
       homeRetries = 0;
       clearTimeout(homeRetryT);
     } catch (e) {
       state.apiStatus = "slow";
-      state.home = {
-        moods: [],
-        day: utcDayClient(),
-        shelves: FALLBACK_SHELVES.map((s) => ({ ...s, tracks: [] })),
-        youtubeCharts: [],
-        youtubeIndia: [],
-        youtubeLocal: [],
-        countryPlaylists: [],
-        globalPlaylists: [],
-        audius: [],
-        underground: [],
-        radio: [],
-      };
+      if (!state.home) state.home = seedHome();
       if (homeRetries === 0) toast("Catalogs are slow — filling rows in the background.");
       // Auto-retry with backoff: a sleeping free-tier API can take ~30-60s to
       // wake, so keep trying until it answers instead of leaving an empty page.
@@ -5817,17 +6383,29 @@
       if (!q) return;
       try {
         const data = await api(`/api/shelf?id=${encodeURIComponent(s.id || "")}&q=${encodeURIComponent(q)}&gl=US`, 16000);
-        s.tracks = data.tracks || [];
+        const tracks = data.tracks || [];
+        s.tracks = tracks;
         if (!s.title && data.title) s.title = data.title;
+        // /api/home may have resolved while this fetch was in flight and
+        // swapped state.home — forward the rows into the CURRENT home so
+        // nothing is dropped when the worker returned that shelf empty.
+        if (state.home !== h && state.home) {
+          const cur = (state.home.shelves || []).find((x) => String(x.id) === String(s.id));
+          if (cur && !(cur.tracks && cur.tracks.length) && tracks.length) {
+            cur.tracks = tracks;
+            if (!cur.title && data.title) cur.title = data.title;
+          }
+        }
         paintHomeSoon();
       } catch {}
     }));
-    const localEmpty = !(h.youtubeLocal && h.youtubeLocal.length) && !(h.youtubeIndia && h.youtubeIndia.length);
+    const cur = state.home || h;
+    const localEmpty = !(cur.youtubeLocal && cur.youtubeLocal.length) && !(cur.youtubeIndia && cur.youtubeIndia.length);
     if (localEmpty) {
       try {
         const data = await api(`/api/youtube/search?q=${encodeURIComponent("english pop hits official audio")}&gl=US`, 16000);
-        if (!h.shelves.some((s) => s.id === "today" && s.tracks && s.tracks.length)) {
-          h.youtubeCharts = data.tracks || [];
+        if (!cur.shelves.some((s) => s.id === "today" && s.tracks && s.tracks.length)) {
+          cur.youtubeCharts = data.tracks || [];
         }
         paintHomeSoon();
       } catch {}
@@ -6480,6 +7058,7 @@
     const c = $("sparkLayer");
     if (!c) return;
     const ctx = c.getContext("2d");
+    if (!ctx) return; // no 2D context (headless test env) — skip the effect
     const dpr = () => Math.min(2, window.devicePixelRatio || 1);
     function resize() {
       const p = dpr();
@@ -6567,8 +7146,11 @@
       applyYtQuality();
     });
   }
+  // Live OS light/dark follow for System appearance (the watchSystemTheme
+  // listener in applyTheme covers theme/meta; this also re-derives the
+  // per-song accent colors).
   window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
-    if (state.prefs.theme === "system") {
+    if ((state.prefs.appearance || "system") === "system" && !isSkinTheme()) {
       applyTheme();
       themedId = "";
       themeFromTrack(current());

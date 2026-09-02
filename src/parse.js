@@ -165,6 +165,41 @@ export function isLikelyMusic(t, loose) {
   return true;
 }
 
+// ── Strict "songs only" filter (all providers) ───────────────────────────
+// Search, artist and playlist surfaces must list single songs — not
+// playlist videos, 2-hour mixes, Topic-channel re-uploads or non-music
+// content. Mirrors the client's looksLikeSong() so server and client
+// agree on what counts as a song.
+const JUNK_TEXT = /\b(episode|podcast|trailer|teaser|full movie|full length|gameplay|walkthrough|playthrough|watch online|vlog|tutorial|how to|unboxing|reaction|highlights?|minecraft|fortnite|roblox|gta\s*5|documentary|full match|press conference|nato|imran khan|#shorts?)\b/i;
+const JUNK_TITLE = /\b(non[- ]?stop|full album|entire album|album mix|megamix|compilation|collection|dj set|live set|greatest hits|best of|billboard|top ?(?:10|20|40|50|100) ?songs?|hits ?(?:19\d\d|20\d\d|vol\.?\s*\d)|1 ?hour|one hour|hour mix|karaoke|sped ?up|slowed|reverb|mashup|medley|mixtape|mix tape|playlist|sleep mix|lofi mix)\b/i;
+const JUNK_ARTIST = /\b(topic|mix|remix|hits|top|live|radio|station|compilation|various artists)\b/i;
+
+export function isSongRow(t) {
+  if (!t || !t.title) return false;
+  const title = String(t.title);
+  const artist = String(t.artist || "");
+  const dur = Number(t.duration) || 0;
+  if (dur > 1200) return false; // 20+ minutes = mix/compilation, not a song
+  if (JUNK_TEXT.test(`${title} ${artist}`)) return false;
+  if (JUNK_TITLE.test(title)) return false;
+  if (JUNK_ARTIST.test(artist)) return false;
+  return true;
+}
+
+// Filter + dedupe (title|artist) across providers.
+export function strictSongs(list) {
+  const out = [];
+  const seen = new Set();
+  for (const t of list || []) {
+    if (!isSongRow(t)) continue;
+    const k = `${String(t.title || "").toLowerCase()}|${String(t.artist || "").toLowerCase()}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
+
 export function walkCollect(node, out, seen, visiting = new Set(), opts = {}) {
   if (!node || typeof node !== "object") return;
   if (visiting.has(node)) return;

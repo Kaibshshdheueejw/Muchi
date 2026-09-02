@@ -21,8 +21,8 @@ public/ (Liquid Glass UI — one codebase)
   notifications plugins (`@capacitor/*` v8) — wired in `public/app.js`
   `initNativeBridge()`.
 - **Android playback**: the app ships a native `MuchiAudio` plugin
-  (`MuchiAudioPlugin` + `MuchiAudioService`: Media3/ExoPlayer inside a
-  `MediaSessionService` foreground service, `mediaPlayback` type). The
+  (`MuchiAudioPlugin` + `MuchiAudioService`: ExoPlayer inside a foreground
+  service with `mediaPlayback` type + `MediaSessionCompat` media notification). The
   `nativePlayTrack()` bridge in app.js hands http(s) streams to it, so the
   music keeps playing with the screen locked / app in background, with the
   OS media notification + lock-screen controls; the playlist stays owned by

@@ -42,6 +42,59 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     override public func load() {
         setupRemoteCommands()
+        setupSessionObservers()
+    }
+
+    /* ── system audio events ─────────────────────────────────────────
+     * Official Apple pattern (AVAudioSession docs): listen for
+     * interruptions (phone calls, Siri, other apps grabbing audio) and
+     * route changes (headphones unplugged/plugged in) so the app's UI
+     * state stays in sync with what the OS does to the player.
+     */
+    private func setupSessionObservers() {
+        let session = AVAudioSession.sharedInstance()
+        let center = NotificationCenter.default
+
+        center.addObserver(forName: AVAudioSession.interruptionNotification,
+                           object: session, queue: .main) { [weak self] note in
+            guard let self = self else { return }
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            switch type {
+            case .began:
+                // The system took the audio (call/Siri). Pause and tell the
+                // web layer so its UI no longer claims "playing".
+                if self.player?.rate ?? 0 > 0 {
+                    self.player?.pause()
+                    self.updateRate()
+                    self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
+                }
+            case .ended:
+                let optsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                let options = AVAudioSession.InterruptionOptions(rawValue: optsRaw)
+                if options.contains(.shouldResume) && self.currentItem != nil {
+                    self.player?.play()
+                    self.updateRate()
+                    self.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
+                }
+            @unknown default:
+                break
+            }
+        }
+
+        center.addObserver(forName: AVAudioSession.routeChangeNotification,
+                           object: session, queue: .main) { [weak self] note in
+            guard let self = self else { return }
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+            if reason == .oldDeviceUnavailable, self.player?.rate ?? 0 > 0 {
+                // Headphones unplugged (or Bluetooth device lost) — the iOS
+                // convention is to stop audio, not blast it into the speaker.
+                self.player?.pause()
+                self.updateRate()
+                self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
+            }
+        }
     }
 
     /* ── JS → native ───────────────────────────────────────────────── */
@@ -121,6 +174,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         player = nil
         currentItem = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        MPRemoteCommandCenter.shared().target = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         notifyListeners("muchiControls", data: ["message": "stop", "position": 0])
     }
@@ -204,6 +258,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.nextTrackCommand.isEnabled = true
         cc.previousTrackCommand.isEnabled = true
         cc.changePlaybackPositionCommand.isEnabled = true
+        cc.beginReceivingRemoteCommands()
 
         cc.playCommand.addTarget { [weak self] _ in
             self?.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
@@ -218,7 +273,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return .success
         }
         cc.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self = self else { return .commandFailed }
+            guard let self = self else { return .noAction }
             if self.player?.rate ?? 0 > 0 {
                 self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
                 self.player?.pause()
@@ -243,7 +298,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self?.player?.seek(to: CMTime(seconds: posEvent.positionTime, preferredTimescale: 600))
                 return .success
             }
-            return .commandFailed
+            return .noAction
         }
     }
 
