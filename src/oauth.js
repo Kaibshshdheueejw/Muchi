@@ -222,12 +222,12 @@ export async function handleGoogleCallback(request, env, url) {
   if (st.step === "youtube") {
     let s = st.sid ? await getSession(env, st.sid) : null;
     if (!s) s = await readSession(request, env);
-     if (!s) return redirect(errHome);
+    if (!s) return redirect(errHome);
     s.yt = {
       access: tok.access_token,
       refresh: tok.refresh_token || "",
-      expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),,
-      at: Date.now(),,
+      expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),
+      at: Date.now(),
     };
     await putSession(env, s);
     ytCache.delete(s.sid);
