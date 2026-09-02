@@ -121,7 +121,6 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         player = nil
         currentItem = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        MPRemoteCommandCenter.shared().target = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         notifyListeners("muchiControls", data: ["message": "stop", "position": 0])
     }
@@ -205,7 +204,6 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.nextTrackCommand.isEnabled = true
         cc.previousTrackCommand.isEnabled = true
         cc.changePlaybackPositionCommand.isEnabled = true
-        cc.beginReceivingRemoteCommands()
 
         cc.playCommand.addTarget { [weak self] _ in
             self?.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
@@ -220,7 +218,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return .success
         }
         cc.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self = self else { return .noAction }
+            guard let self = self else { return .commandFailed }
             if self.player?.rate ?? 0 > 0 {
                 self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
                 self.player?.pause()
@@ -245,7 +243,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self?.player?.seek(to: CMTime(seconds: posEvent.positionTime, preferredTimescale: 600))
                 return .success
             }
-            return .noAction
+            return .commandFailed
         }
     }
 
