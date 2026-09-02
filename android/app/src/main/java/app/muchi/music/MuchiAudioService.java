@@ -23,8 +23,8 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media.session.MediaSessionCompat;
-import androidx.media.session.PlaybackStateCompat;
+import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -275,13 +275,13 @@ public class MuchiAudioService extends Service {
         }
     }
 
-    private androidx.media.app.MediaMetadataCompat buildMetadata(long durationMs) {
-        androidx.media.app.MediaMetadataCompat.Builder md = new androidx.media.app.MediaMetadataCompat.Builder()
-                .putString(androidx.media.app.MediaMetadataCompat.METADATA_KEY_TITLE, trackTitle)
-                .putString(androidx.media.app.MediaMetadataCompat.METADATA_KEY_ARTIST,
+    private android.support.v4.media.MediaMetadataCompat buildMetadata(long durationMs) {
+        android.support.v4.media.MediaMetadataCompat.Builder md = new android.support.v4.media.MediaMetadataCompat.Builder()
+                .putString(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_TITLE, trackTitle)
+                .putString(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ARTIST,
                         trackArtist.isEmpty() ? "Muchi" : trackArtist);
-        if (durationMs > 0) md.putLong(androidx.media.app.MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
-        if (artworkBitmap != null) md.putBitmap(androidx.media.app.MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
+        if (durationMs > 0) md.putLong(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+        if (artworkBitmap != null) md.putBitmap(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
         return md.build();
     }
 
@@ -307,9 +307,9 @@ public class MuchiAudioService extends Service {
         PendingIntent pi = PendingIntent.getActivity(this, 0, contentIntent,
                 Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0);
 
-        androidx.media.app.NotificationCompat.MediaStyle style =
-                new androidx.media.app.NotificationCompat.MediaStyle();
-        if (session != null) style.setMediaSession(session.getSessionToken());
+        android.app.Notification.MediaStyle style =
+                new android.app.Notification.MediaStyle();
+        if (session != null) style.setMediaSession(session.getSessionToken().getToken());
 
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_muchi)
