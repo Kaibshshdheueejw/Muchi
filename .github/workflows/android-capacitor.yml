@@ -58,14 +58,14 @@ jobs:
           else
             echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact will be signed with the DEBUG key (not for Play)."
             echo "signed=no" >> "$GITHUB_OUTPUT"
-         fi
-         
+          fi
+
       - name: Clean Gradle cache and refresh dependencies
         working-directory: android
         run: |
           ./gradlew clean --refresh-dependencies
           rm -rf .gradle build app/build
-          
+
       - name: Build release APK + AAB
         working-directory: android
         run: |
@@ -84,5 +84,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: muchi-android-aab-${{ steps.keystore.outputs.signed }}
-          path: android/app/build/outputs/bundle/release/*.aab
-          if-no-files-found: error
+          path: android/app/build/](#)
