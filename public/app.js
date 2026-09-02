@@ -11,7 +11,7 @@
   //     Staging:     "https://muchi-staging.<account>.workers.dev"
   //     Production:  "https://muchi.<account>.workers.dev"
   //   Render remains the fallback until the Cloudflare cutover completes.
-  const MUCHI_API_BASE_FALLBACK = "https://muchi-music.onrender.com";
+  const MUCHI_API_BASE_FALLBACK = "https://muchi.twiarimascord.workers.dev";
   // ═══════════════════════════════════════════════════════════════════════
   // Native shell (Capacitor) detection — the native apps load this same web
   // code inside a WebView with no server-side injection, so they always
