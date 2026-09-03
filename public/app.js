@@ -294,15 +294,19 @@
     } catch { systemMQL = null; }
   }
   function syncNativeStatusBar(t) {
-    // Keep the Android status bar consistent with the in-app theme
-    // (Capacitor StatusBar plugin; no-op on web/iOS).
+    // Keep the native status bar consistent with the in-app theme
+    // (Capacitor StatusBar plugin; no-op on web). On iOS this flips the
+    // status bar text light/dark so Light mode stays readable; on Android
+    // it also recolors the bar itself.
     const P = nativePlugins();
     const SB = P && P.StatusBar;
-    if (!SB || !window.Capacitor || !window.Capacitor.getPlatform || window.Capacitor.getPlatform() !== "android") return;
+    if (!SB || !window.Capacitor || !window.Capacitor.getPlatform) return;
+    const plat = window.Capacitor.getPlatform();
+    if (plat !== "android" && plat !== "ios") return;
     const light = t === "light";
     try {
       SB.setStyle({ style: light ? "DARK" : "LIGHT" });
-      SB.setBackgroundColor({ color: light ? "#e6eae6" : "#101413" });
+      if (plat === "android") SB.setBackgroundColor({ color: light ? "#e6eae6" : "#101413" });
     } catch {}
   }
   function applyTheme() {
@@ -2305,6 +2309,12 @@
     if (open) {
       navPush();
       renderQueue();
+    } else {
+      // Rewriting the entry that navPush() added on open is mandatory:
+      // leaving a stale "queue: true" entry in the stack means a later
+      // back navigation (e.g. closing Lyrics) restores that entry and
+      // re-opens the Queue on its own.
+      navReplace();
     }
     syncPlayerVisibility();
   }
@@ -3267,10 +3277,20 @@
   function closeOverlays() {
     const side = $("sidebar");
     if (side) side.classList.remove("open");
+    const hadQueue = state.showQueue;
     state.showQueue = false;
     showEl($("queuePanel"), false);
     if ($("queuePanel")) $("queuePanel").classList.remove("open");
     showEl($("scrim"), false);
+    if (hadQueue) {
+      // Same stale-entry guard as setQueueOpen(false): clear the "queue: true"
+      // flag on the current history entry so a later popstate (closing
+      // Lyrics / a detail page) can't resurrect the Queue.
+      try {
+        const s = history.state;
+        if (s && s.muchi && s.queue) history.replaceState(Object.assign({}, s, { queue: false }), "");
+      } catch {}
+    }
     syncPlayerVisibility();
   }
 
@@ -3340,6 +3360,10 @@
       lyBtn.title = state.view === "now" ? "Close lyrics" : "Lyrics";
     }
     showEl($("eqBars"), state.playing);
+    // CSS reads this to pause the glass "shine" sweep when playback is idle
+    // (a continuously animating gradient layer is pure GPU cost when the
+    // player is paused).
+    document.body.dataset.playing = state.playing ? "1" : "";
     $("volume").value = state.volume;
     updateWakeLock();
     document.querySelectorAll("[data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
@@ -6751,7 +6775,16 @@
       };
     }
     $("searchInput").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && e.target.value.trim()) runSearch(e.target.value.trim());
+      if ((e.key === "Enter" || e.key === "search") && e.target.value.trim()) {
+        runSearch(e.target.value.trim());
+        // On phones, dismiss the on-screen keyboard once the search runs —
+        // results stay visible, and tapping the bar refocuses (and reopens
+        // the keyboard). Desktop keyboard behavior is untouched.
+        const onPhone =
+          (window.Capacitor && window.Capacitor.getPlatform && window.Capacitor.getPlatform() !== "web") ||
+          (window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+        if (onPhone) e.target.blur();
+      }
     });
     window.addEventListener("popstate", (e) => {
       if (e.state && e.state.muchi) {
@@ -7071,6 +7104,9 @@
         hue: i % 2 ? 340 + Math.random() * 18 : 300 + Math.random() * 40,
       });
     }
+    // The particle loop self-suspends when it has nothing to draw — wake it
+    // so the burst is actually rendered (also works when the loop idled off).
+    try { if (window.kickSparks) window.kickSparks(); } catch {}
   }
   (function startSparks() {
     const c = $("sparkLayer");
@@ -7104,10 +7140,22 @@
       });
     }
     let sparkOn = true;
-    function tick() {
+    // Phones: gate the particle loop to ~12fps (same pattern as the
+    // seek-wave loop) and scale per-frame deltas by dt, so drift speed and
+    // the ambient spawn cadence are visually identical at ~1/5 the canvas
+    // work. Desktop keeps the full 60fps loop.
+    const sparkSlow = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    let sparkLast = 0;
+    function tick(now) {
       if (document.hidden) {
         sparkOn = false;
         return;
+      }
+      let dt = 1;
+      if (sparkSlow) {
+        if (now - sparkLast < 80) { requestAnimationFrame(tick); return; }
+        sparkLast = now;
+        dt = 5;
       }
       const need = sparkBits.length || state.view === "home";
       if (!need) {
@@ -7116,15 +7164,15 @@
         return;
       }
       ctx.clearRect(0, 0, c.width, c.height);
-      if (state.view === "home" && sparkBits.length < 20 && Math.random() < 0.03) spawnAmbient();
+      if (state.view === "home" && sparkBits.length < 20 && Math.random() < 0.03 * dt) spawnAmbient();
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const p = dpr();
       for (let i = sparkBits.length - 1; i >= 0; i--) {
         const b = sparkBits[i];
-        b.x += b.vx;
-        b.y += b.vy;
-        b.life -= b.decay;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        b.life -= b.decay * dt;
         if (b.life <= 0) {
           sparkBits.splice(i, 1);
           continue;

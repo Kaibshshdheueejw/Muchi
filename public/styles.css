@@ -1277,6 +1277,11 @@ img { max-width: 100%; display: block; }
   border-radius: 6px;
   padding: 2px 7px;
 }
+/* The "/" is a physical-keyboard shortcut hint — it looks out of place on a
+   phone where there is no key to press, so hide it on touch devices. */
+@media (pointer: coarse) {
+  .search-wrap kbd { display: none; }
+}
 .top-right { display: flex; align-items: center; gap: 8px; }
 
 .icon-btn {
@@ -2634,6 +2639,11 @@ body[data-view="now"] .view {
   border-radius: 18px;
   background: color-mix(in srgb, var(--song-container, #1a1a1a) 70%, #000);
 }
+/* Light mode: the base rule mixes 30% black, which reads as a dark slab on
+   the light canvas — use the same soft light mix as the docked player. */
+html[data-theme="light"] .ly-screen {
+  background: color-mix(in srgb, var(--song-container) 88%, #fff);
+}
 .ly-bg {
   position: absolute;
   inset: -24px;
@@ -3240,9 +3250,15 @@ html[data-ui="glass"] .player::before {
   position: absolute;
   inset: -40% -20%;
   background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.16) 48%, transparent 62%);
-  animation: glassShine 7s ease-in-out infinite;
+  /* The shine only animates while something is playing (JS sets
+     body[data-playing="1"]); a perpetually animating gradient layer is
+     pure GPU cost on an idle player. When paused the static sheen stays. */
+  animation: none;
   pointer-events: none;
   z-index: 0;
+}
+html[data-ui="glass"] body[data-playing="1"] .player::before {
+  animation: glassShine 7s ease-in-out infinite;
 }
 @keyframes glassShine {
   0%, 100% { transform: translateX(-12%) rotate(8deg); opacity: 0.35; }
@@ -3273,6 +3289,12 @@ html[data-player="bar"] .player {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: color-mix(in srgb, var(--song-container) 94%, #000);
+}
+/* This rule appears after the light-mode .player override (top of file) at
+   equal specificity, so the dark mix would win for the bar style — re-assert
+   the light mix with higher specificity. */
+html[data-theme="light"][data-player="bar"] .player {
+  background: color-mix(in srgb, var(--song-container) 94%, #fff);
 }
 html[data-player="bar"] .player::before { display: none; }
 .ui-pick-preview.player-pill { background: linear-gradient(90deg, rgba(255,255,255,0.25), #3d5afe); border-radius: 20px; }
