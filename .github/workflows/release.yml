@@ -1,0 +1,120 @@
+name: Release Muchi Mobile (Android + iOS)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Install dependencies
+        run: npm ci
+      - name: Sync Capacitor (web → native)
+        run: npx cap sync android
+      - name: Restore signing keystore from secrets
+        id: keystore
+        env:
+          MUCHI_KEYSTORE_B64: ${{ secrets.MUCHI_KEYSTORE_B64 }}
+          MUCHI_KEYSTORE_PASSWORD: ${{ secrets.MUCHI_KEYSTORE_PASSWORD }}
+          MUCHI_KEYSTORE_ALIAS: ${{ secrets.MUCHI_KEYSTORE_ALIAS }}
+        run: |
+          if [ -n "$MUCHI_KEYSTORE_B64" ]; then
+            mkdir -p "$RUNNER_TEMP/muchi"
+            echo "$MUCHI_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/muchi/muchi-release.p12"
+            echo "MUCHI_KEYSTORE_FILE=$RUNNER_TEMP/muchi/muchi-release.p12" >> "$GITHUB_ENV"
+            echo "signed=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact signed with DEBUG key (not for Play)."
+            echo "signed=no" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Clean Gradle cache and refresh dependencies
+        working-directory: android
+        run: |
+          ./gradlew clean --refresh-dependencies
+          rm -rf .gradle build app/build
+      - name: Build release APK + AAB
+        working-directory: android
+        run: |
+          ./gradlew assembleRelease bundleRelease --no-daemon
+          mkdir -p release-assets
+          cp app/build/outputs/apk/release/*.apk "release-assets/Muchi-${GITHUB_REF_NAME}.apk" || true
+          cp app/build/outputs/bundle/release/*.aab "release-assets/Muchi-${GITHUB_REF_NAME}.aab" || true
+          ls -la release-assets
+      - name: Upload Android assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: muchi-android-assets
+          path: android/release-assets
+          if-no-files-found: error
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Sync Capacitor (web → native)
+        run: npx cap sync ios
+      - name: Build archive (works without Apple credentials)
+        working-directory: ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ./DerivedData \
+            -archivePath ./output/Muchi.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            archive
+      - name: Package archive for release
+        working-directory: ios/App
+        run: |
+          mkdir -p release-assets
+          if [ -d output/Muchi.xcarchive ]; then
+            (cd output && zip -r "../release-assets/Muchi-${GITHUB_REF_NAME}-ios.xcarchive.zip" Muchi.xcarchive)
+          fi
+          ls -la release-assets
+      - name: Upload iOS assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: muchi-ios-assets
+          path: ios/App/release-assets
+          if-no-files-found: warn
+
+  release:
+    needs: [android, ios]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: muchi-*-assets
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: release-assets/**
+          fail_on_unmatched_files: false
