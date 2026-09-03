@@ -950,6 +950,9 @@
     if (src === "audius") return `<span class="badge au">Audius</span>`;
     if (src === "download") return `<span class="badge au">Saved</span>`;
     if (src === "preview") return `<span class="badge rd">Sample</span>`;
+    if (src === "itunes" || src === "apple") return `<span class="badge au">iTunes</span>`;
+    if (src === "deezer") return `<span class="badge au">Deezer</span>`;
+    if (src === "radio") return `<span class="badge rd">Radio</span>`;
     return `<span class="badge rd">Radio</span>`;
   }
 
