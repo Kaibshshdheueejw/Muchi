@@ -49,11 +49,14 @@ jobs:
         env:
           MUCHI_KEYSTORE_B64: ${{ secrets.MUCHI_KEYSTORE_B64 }}
           MUCHI_KEYSTORE_PASSWORD: ${{ secrets.MUCHI_KEYSTORE_PASSWORD }}
+          MUCHI_KEYSTORE_ALIAS: ${{ secrets.MUCHI_KEYSTORE_ALIAS }}
         run: |
           if [ -n "$MUCHI_KEYSTORE_B64" ]; then
             mkdir -p "$RUNNER_TEMP/muchi"
             echo "$MUCHI_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/muchi/muchi-release.p12"
             echo "MUCHI_KEYSTORE_FILE=$RUNNER_TEMP/muchi/muchi-release.p12" >> "$GITHUB_ENV"
+            echo "MUCHI_KEYSTORE_ALIAS=$MUCHI_KEYSTORE_ALIAS" >> "$GITHUB_ENV"
+            echo "MUCHI_KEYSTORE_PASSWORD=$MUCHI_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "signed=yes" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact will be signed with the DEBUG key (not for Play)."

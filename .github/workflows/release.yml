@@ -37,6 +37,8 @@ jobs:
             mkdir -p "$RUNNER_TEMP/muchi"
             echo "$MUCHI_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/muchi/muchi-release.p12"
             echo "MUCHI_KEYSTORE_FILE=$RUNNER_TEMP/muchi/muchi-release.p12" >> "$GITHUB_ENV"
+            echo "MUCHI_KEYSTORE_ALIAS=$MUCHI_KEYSTORE_ALIAS" >> "$GITHUB_ENV"
+            echo "MUCHI_KEYSTORE_PASSWORD=$MUCHI_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "signed=yes" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact signed with DEBUG key (not for Play)."
@@ -54,6 +56,8 @@ jobs:
           mkdir -p release-assets
           cp app/build/outputs/apk/release/*.apk "release-assets/Muchi-${GITHUB_REF_NAME}.apk" || true
           cp app/build/outputs/bundle/release/*.aab "release-assets/Muchi-${GITHUB_REF_NAME}.aab" || true
+          # Stable, always-current name so the in-app updater link always resolves.
+          cp app/build/outputs/apk/release/*.apk "release-assets/Muchi.apk" || true
           ls -la release-assets
       - name: Upload Android assets
         uses: actions/upload-artifact@v4

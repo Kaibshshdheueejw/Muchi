@@ -193,9 +193,9 @@ if (BASE) {
   // health/version
   const health = await get("/api/health");
   ok("health 200", health.status === 200);
-  ok("health shape", health.body && health.body.ok === true && health.body.name === "Muchi" && health.body.version === "1.2.1");
+  ok("health shape", health.body && health.body.ok === true && health.body.name === "Muchi" && health.body.version === "1.3.1");
   const version = await get("/api/version");
-  ok("version shape", version.body && version.body.name === "Muchi" && version.body.version === "1.2.1");
+  ok("version shape", version.body && version.body.name === "Muchi" && version.body.version === "1.3.1");
 
   // moods (full table)
   const moods = await get("/api/moods");
