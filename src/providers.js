@@ -237,6 +237,50 @@ export async function youtubePlaylistTracks(playlistId) {
   }
 }
 
+// ── YouTube → direct audio stream (background/native playback) ──────────
+// Resolves a YouTube videoId to a direct audio stream URL so the song can be
+// handed to the native foreground media service (background play + OS media
+// notification) instead of the WebView iframe player. Tries several Piped
+// instances (search only uses api.piped.private.coffee; stream endpoints are
+// instance-volatile, so we try a rotated list). Returns null on any failure —
+// callers fall back to the iframe player, so a Piped outage never breaks play.
+const PIPED_STREAM_INSTANCES = [
+  "https://api.piped.private.coffee",
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://pipedapi.leptons.xyz",
+];
+export async function youtubeAudioStream(videoId) {
+  const id = String(videoId || "").trim();
+  if (!id) return null;
+  let lastErr = "no audio stream";
+  for (const base of PIPED_STREAM_INSTANCES) {
+    try {
+      const data = await fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, 9000);
+      const streams = (data && data.audioStreams) || [];
+      if (!streams.length) continue;
+      // Prefer m4a/mp4 (best native ExoPlayer/AVPlayer compatibility), then
+      // opus/webm. Lower quality numbers are the "best" on Piped.
+      const byType = (re) => streams.find((s) => s && s.url && re.test(String(s.mimeType || "") + " " + String(s.format || "")));
+      const m4a = byType(/mp4|m4a|mpeg|aac/i);
+      const opus = byType(/opus|webm|ogg|vorbis/i);
+      const best = m4a || opus || streams.find((s) => s && s.url);
+      if (best && best.url) {
+        return {
+          url: best.url,
+          format: best.format || (m4a ? "m4a" : "opus"),
+          mimeType: best.mimeType || "",
+          quality: best.quality || "",
+          duration: (data && data.duration) || 0,
+        };
+      }
+    } catch (e) {
+      lastErr = String((e && e.message) || e);
+    }
+  }
+  throw new Error(lastErr);
+}
+
 export function mapAudiusTrack(t) {
   if (!t || !t.id) return null;
   const user = t.user || {};

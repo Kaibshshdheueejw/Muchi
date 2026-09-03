@@ -75,6 +75,11 @@
       bgPlay: true,
       autoLyrics: false,
       autoVideo: false,
+      // ytAudio: play YouTube as a background audio stream on native shells
+      // (enables OS media notification + lock-screen/background playback).
+      // Default on for native; disabled automatically on web. Set to false to
+      // force the in-app video player instead.
+      ytAudio: null,
       codec: "auto",
       notifyFollows: true,
       github: "",
@@ -559,7 +564,7 @@
     // (which exists precisely to bypass caches).
     const cacheable =
       method === "GET" &&
-      !/\/api\/(auth|health|version|stream|img|radio\/click|audius\/file|audius\/stream)\b/.test(path) &&
+      !/\/api\/(auth|health|version|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream)\b/.test(path) &&
       !/[?&]refresh=1\b/.test(path);
     if (cacheable) {
       const hit = await apiCacheGet(path);
@@ -2089,7 +2094,19 @@
         await resolveYouTubePlay(t);
       }
       if (gen !== playGen) return;
-      if (t.videoId) await playYouTube(t, reset);
+      if (t.videoId) {
+        // On native shells, play YouTube as a background audio stream when
+        // possible so the OS media notification + lock-screen controls work
+        // and music keeps playing with the screen off. Falls back to the
+        // in-app iframe/video player when no audio stream is resolvable (e.g.
+        // Piped outage), so playback never breaks. Disable via prefs.ytAudio.
+        const usedNative = await playYtWithAudio(t, reset);
+        if (usedNative) {
+          // resolved + handed to native player; nothing more to do here
+        } else {
+          await playYouTube(t, reset);
+        }
+      }
       else if (t.source === "youtube") throw new Error("No video");
       else await playAudio(t);
       if (gen !== playGen) return;
@@ -2104,6 +2121,39 @@
       if (gen === playGen) skipFailed("Could not play this track");
     }
     if (state.view === "now" && gen === playGen) render();
+  }
+
+  // Try to play a YouTube track through the native audio pipeline
+  // (foreground media service → background play + notification). Resolves the
+  // videoId to a direct audio URL, then hands it to the native player. Only
+  // runs on native shells and only when the user hasn't asked for the video
+  // panel. Returns true if the native player took over; false = keep iframe.
+  async function playYtWithAudio(t, reset) {
+    if (!t || !t.videoId) return false;
+    if (!IS_NATIVE || !nativePlayer()) return false;
+    if (state.prefs.ytAudio === false) return false;
+    // If the video panel is explicitly open (user wants the music video),
+    // don't silently switch to audio-only — honor their choice.
+    if (state.showVideo) return false;
+    let url = "";
+    let dur = t.duration || 0;
+    try {
+      // Short, bounded timeout so a Piped outage falls back to the iframe
+      // player fast instead of stalling playback. Production Piped is sub-sec;
+      // the server also caches the resolved stream for 15 min.
+      const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}`, 6000);
+      // Resolve only returns a real url; anything empty = no stream available.
+      if (data && data.url) {
+        url = data.url;
+        if (data.duration) dur = Number(data.duration);
+      }
+    } catch { url = ""; }
+    if (!url) return false; // fall back to the iframe player (safe)
+    t.streamUrl = url;
+    t.duration = dur;
+    // playAudio hands https URLs to the native player and sets playback state.
+    await playAudio(t);
+    return !!nativePlayer() && npActive;
   }
 
   function stopOthers(keep) {

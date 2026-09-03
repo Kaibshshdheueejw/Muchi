@@ -9,7 +9,8 @@
 
 import { json, cached, kvCached, fetchJSON } from "./util.js";
 import {
-  searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, itunesSearch,
+  searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
+  itunesSearch,
   audiusSearch, audiusTrending, audiusUnderground, audiusUserSearch, audiusUserTracks,
   radioSearch, radioBrowser, lyricsFor, resolveShelfPlaylist,
 } from "./providers.js";
@@ -241,6 +242,27 @@ export async function handleYtPlaylist(url) {
   }).catch(() => null);
   if (data) return json(200, data);
   return json(200, { tracks: [], playlistId: id });
+}
+
+export async function handleYtStream(url) {
+  const id = url.searchParams.get("v") || url.searchParams.get("id") || "";
+  if (!id) return json(400, { error: "Missing videoId" });
+  // Cache the resolved stream URL briefly so re-taps are instant and we
+  // don't hammer the Piped instances. 15 min TTL + in-flight dedupe.
+  try {
+    const stream = await cached(`ytstream:${id}`, 15 * 60 * 1000, () => youtubeAudioStream(id));
+    // audioStream URL is opaque/long-lived; no need to expose Piped internals.
+    return json(200, {
+      url: stream.url,
+      format: stream.format || "",
+      mimeType: stream.mimeType || "",
+      quality: stream.quality || "",
+      duration: stream.duration || 0,
+    });
+  } catch (e) {
+    // Always 200 with empty so the client falls back to the iframe player.
+    return json(200, { url: "", error: String((e && e.message) || e) });
+  }
 }
 
 export async function handleArtist(url) {

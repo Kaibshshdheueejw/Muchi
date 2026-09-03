@@ -26,7 +26,7 @@ import {
 import {
   handleHome, handleShelf, handleSearch, handleYoutubeSearch, handleYtPlaylist,
   handleArtist, handleRadio, handleRadioClick, handleDiscover, handleRelated,
-  handleLyrics,
+  handleLyrics, handleYtStream,
 } from "./aggregate.js";
 import { handleStream, handleImg, handleAudiusStream, handleAudiusFile } from "./stream.js";
 import { maybeSweep } from "./db.js";
@@ -127,6 +127,7 @@ async function handleApi(request, env, url) {
   if (p === "/api/search") return handleSearch(env, url);
   if (p === "/api/youtube/search") return handleYoutubeSearch(url);
   if (p === "/api/yt/playlist") return handleYtPlaylist(url);
+  if (p === "/api/yt/stream") return handleYtStream(url);
   if (p === "/api/artist") return handleArtist(url);
   if (p === "/api/radio") return handleRadio(url);
   if (p.startsWith("/api/radio/click/")) return handleRadioClick(url);
