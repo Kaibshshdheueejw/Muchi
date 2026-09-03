@@ -2022,10 +2022,31 @@
     setTimeout(() => next(true), 450);
   }
 
+  // In-memory resolution cache: playQuery -> {videoId, artwork}. Keeping the
+  // resolved YouTube id here means re-tapping a Deezer/iTunes/catalog song
+  // starts instantly (no repeat of the slow YouTube search). This is a small
+  // bounded Map — it never grows unbounded and is per-app-run.
+  const ytResolveCache = new Map();
+  const YT_RESOLVE_CACHE_MAX = 500;
+  function ytResolveStore(q, videoId, artwork) {
+    if (ytResolveCache.size >= YT_RESOLVE_CACHE_MAX) {
+      const first = ytResolveCache.keys().next().value;
+      if (first !== undefined) ytResolveCache.delete(first);
+    }
+    ytResolveCache.set(q, { videoId, artwork: artwork || "" });
+  }
   async function resolveYouTubePlay(t) {
     if (!t || t.videoId) return t;
     const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
     if (!q) throw new Error("No playable version");
+    // Instant path: already resolved this exact query this session.
+    const cachedHit = ytResolveCache.get(q);
+    if (cachedHit && cachedHit.videoId) {
+      t.videoId = cachedHit.videoId;
+      t.source = "youtube";
+      if ((!t.artwork || t.artwork === "/cover-default.png") && cachedHit.artwork) t.artwork = cachedHit.artwork;
+      return t;
+    }
     let rows = [];
     try {
       const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 14000);
@@ -2042,6 +2063,7 @@
     t.videoId = hit.videoId;
     t.source = "youtube";
     if (!t.artwork || t.artwork === "/cover-default.png") t.artwork = hit.artwork;
+    ytResolveStore(q, t.videoId, t.artwork);
     return t;
   }
 
@@ -3005,6 +3027,12 @@
     const NP = P.MuchiAudio;
     if (NP) {
       try {
+        // Ask for POST_NOTIFICATIONS the first time the app launches on
+        // Android 13+, not just on the first native audio play. Before this,
+        // the permission dialog only appeared if/when a track was handed to
+        // the native player — so playing YouTube tracks never triggered it,
+        // and the media notification never showed.
+        nativeEnsureNotifyPermission();
         NP.addListener("muchiControls", (e) => nativeHandleControls(e || {}));
         NP.addListener("muchiProgress", (e) => {
           const v = e || {};

@@ -116,6 +116,41 @@ function allTracks() {
   return POOL.map((p, i) => mkTrack(p, POOL_TAGS[i]));
 }
 
+// Metadata-only catalog rows (iTunes + Deezer) so the preview exercises the
+// real catalog path: these have NO streamUrl/videoId, so tapping one goes
+// through resolveYouTubePlay() → the same code the real app uses. With
+// MUCHI_PREVIEW_SEED set, the YouTube search below is also seeded, so they
+// resolve to a playable preview track instantly.
+const CATALOG = [
+  { source: "itunes", title: "Bad Habits", artist: "Ed Sheeran", duration: 231 },
+  { source: "itunes", title: "Blinding Lights", artist: "The Weeknd", duration: 200 },
+  { source: "itunes", title: "Save Your Tears", artist: "The Weeknd", duration: 215 },
+  { source: "deezer", title: "Shallow", artist: "Lady Gaga & Bradley Cooper", duration: 215 },
+  { source: "deezer", title: "Sixtynine", artist: "The 1975", duration: 253 },
+  { source: "deezer", title: "HUMBLE.", artist: "Kendrick Lamar", duration: 177 },
+];
+function mkCatalogTrack(c) {
+  seq += 1;
+  return {
+    id: `${c.source}:${seq}`,
+    source: c.source,
+    title: c.title,
+    artist: c.artist,
+    album: "",
+    duration: c.duration,
+    artwork: ARTWORK,
+    // Give it a streamUrl so the PREVIEW can actually start audio (the tone)
+    // when it's tapped. In the real app (no seed) catalog songs have no
+    // streamUrl/videoId, so they route through resolveYouTubePlay() to a real
+    // YouTube stream — the exact path these represent.
+    streamUrl: AUDIO_URL,
+    playQuery: `${c.title} ${c.artist} official audio`,
+  };
+}
+function catalogTracks() {
+  return CATALOG.map(mkCatalogTrack);
+}
+
 // ── /api/home ───────────────────────────────────────────────────────────
 export function previewHome(gl) {
   const shelves = SHELVES.map((s) => {
@@ -173,10 +208,16 @@ function matchTracks(q) {
 
 export function previewSearch(q) {
   const tracks = matchTracks(q);
+  // Surface the iTunes catalog rows too so the preview shows "apple" results
+  // (the real worker returns these from itunesSearch; here we seed them).
+  const needle = String(q || "").toLowerCase().trim();
+  const apple = catalogTracks().filter((t) =>
+    !needle || `${t.title} ${t.artist}`.toLowerCase().includes(needle)
+  );
   return {
     tracks: tracks.slice(0, 20),
     youtube: tracks.slice(0, 20),
-    apple: [],
+    apple,
     audius: [],
   };
 }
