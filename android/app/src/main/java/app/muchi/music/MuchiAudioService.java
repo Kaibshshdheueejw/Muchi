@@ -19,14 +19,15 @@ import android.os.Looper;
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
+import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media.MediaMetadataCompat;
-import androidx.media.session.MediaSessionCompat;
-import androidx.media.session.PlaybackStateCompat;
+import android.support.v4.media.MediaMetadataCompat;
+import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -178,14 +179,14 @@ public class MuchiAudioService extends Service {
                     // WAKE_LOCK is declared in the manifest — make it effective:
                     // WAKE_MODE_LOCAL holds a CPU wake lock while the player is
                     // active so background/lock-screen streaming survives doze.
-                    .setWakeMode(ExoPlayer.C.WAKE_MODE_LOCAL)
+                    .setWakeMode(C.WAKE_MODE_LOCAL)
                     // Explicit music audio attributes + explicit audio-focus
                     // handling (ExoPlayer requests focus on play, abandons on
                     // pause; other audio ducking/loss is handled by the system).
                     .setAudioAttributes(
                             new androidx.media3.common.AudioAttributes.Builder()
-                                    .setContentType(androidx.media3.common.AudioAttributes.CONTENT_TYPE_MUSIC)
-                                    .setUsage(androidx.media3.common.AudioAttributes.USAGE_MEDIA)
+                                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                                    .setUsage(C.USAGE_MEDIA)
                                     .build(),
                             true)
                     .build();

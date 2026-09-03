@@ -34,7 +34,7 @@ import com.getcapacitor.annotation.Permission;
  */
 @CapacitorPlugin(
         name = "MuchiAudio",
-        permissions = @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = MUCHI_AUDIO_NOTIFICATION)
+        permissions = @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "muchi_audio")
 )
 public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.PluginListener {
 
