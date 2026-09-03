@@ -251,9 +251,15 @@ export async function handleYtStream(url) {
   // don't hammer the Piped instances. 15 min TTL + in-flight dedupe.
   try {
     const stream = await cached(`ytstream:${id}`, 15 * 60 * 1000, () => youtubeAudioStream(id));
-    // audioStream URL is opaque/long-lived; no need to expose Piped internals.
+    // Route the (IP/token-restricted) Googlevideo URL through the /api/stream
+    // proxy. Handing a raw Googlevideo URL straight to the device's player
+    // often 403s because it is locked to the resolver's IP; the Worker fetches
+    // it with proper headers and streams it back, which is what makes native
+    // background play + the OS media notification actually work. The proxy URL
+    // is stable and cacheable, so re-taps reuse it instantly.
+    const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}`;
     return json(200, {
-      url: stream.url,
+      url: proxied,
       format: stream.format || "",
       mimeType: stream.mimeType || "",
       quality: stream.quality || "",

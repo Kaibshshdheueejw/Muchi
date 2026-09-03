@@ -2188,11 +2188,11 @@
       if (url && /^https?:\/\//i.test(url) && !API_BASE) url = `/api/stream?url=${encodeURIComponent(url)}`;
     }
     if (!url) throw new Error("No stream");
-    // Optional native background playback: the native Android/iOS shells ship
-    // a MuchiAudio plugin (a foreground media service that keeps playing with
-    // the screen locked, with the OS media notification + lock-screen
-    // controls), so http(s) streams are handed to it. On the web there is no
-    // native plugin, so audio plays in the WebView <audio> element.
+    // Proxy URLs from the API (e.g. /api/stream?url=… from /api/yt/stream) are
+    // same-origin relative paths. The native player needs an absolute URL, so
+    // resolve them against API_BASE before handing over. On the web there is no
+    // native plugin, so audio plays in the WebView <audio> element instead.
+    if (url.startsWith("/")) url = API_BASE + url;
     if (nativePlayer() && /^https?:\/\//i.test(url)) {
       if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
         setWantPlay(true);

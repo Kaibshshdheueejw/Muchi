@@ -244,41 +244,56 @@ export async function youtubePlaylistTracks(playlistId) {
 // instances (search only uses api.piped.private.coffee; stream endpoints are
 // instance-volatile, so we try a rotated list). Returns null on any failure —
 // callers fall back to the iframe player, so a Piped outage never breaks play.
+// The stream endpoints are instance-volatile, so we fan out to ALL of them in
+// PARALLEL and take the first that returns a usable stream. Calling them one
+// at a time (each 9 s) meant a single slow/dead instance could stall the whole
+// request for ~36 s — which made an iTunes tap feel like it "took so long" and
+// could time out the native handoff entirely. Parallel + short timeouts means
+// /api/yt/stream answers in ~2 s if any instance is up.
 const PIPED_STREAM_INSTANCES = [
   "https://api.piped.private.coffee",
   "https://pipedapi.kavin.rocks",
   "https://pipedapi.adminforge.de",
   "https://pipedapi.leptons.xyz",
+  "https://pipedapi.reallyaweso.me",
+  "https://pipedapi.ducks.party",
 ];
+const PIPED_API_TIMEOUT = 5000;
+
+export function pickPipedStream(data) {
+  const streams = (data && data.audioStreams) || [];
+  if (!streams.length) return null;
+  // Prefer m4a/mp4 (best native ExoPlayer/AVPlayer compatibility), then
+  // opus/webm. Lower quality numbers are the "best" on Piped.
+  const byType = (re) => streams.find((s) => s && s.url && re.test(String(s.mimeType || "") + " " + String(s.format || "")));
+  const m4a = byType(/mp4|m4a|mpeg|aac/i);
+  const opus = byType(/opus|webm|ogg|vorbis/i);
+  const best = m4a || opus || streams.find((s) => s && s.url);
+  if (!best || !best.url) return null;
+  return {
+    url: best.url,
+    format: best.format || (m4a ? "m4a" : "opus"),
+    mimeType: best.mimeType || "",
+    quality: best.quality || "",
+    duration: (data && data.duration) || 0,
+  };
+}
+
 export async function youtubeAudioStream(videoId) {
   const id = String(videoId || "").trim();
   if (!id) return null;
-  let lastErr = "no audio stream";
-  for (const base of PIPED_STREAM_INSTANCES) {
-    try {
-      const data = await fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, 9000);
-      const streams = (data && data.audioStreams) || [];
-      if (!streams.length) continue;
-      // Prefer m4a/mp4 (best native ExoPlayer/AVPlayer compatibility), then
-      // opus/webm. Lower quality numbers are the "best" on Piped.
-      const byType = (re) => streams.find((s) => s && s.url && re.test(String(s.mimeType || "") + " " + String(s.format || "")));
-      const m4a = byType(/mp4|m4a|mpeg|aac/i);
-      const opus = byType(/opus|webm|ogg|vorbis/i);
-      const best = m4a || opus || streams.find((s) => s && s.url);
-      if (best && best.url) {
-        return {
-          url: best.url,
-          format: best.format || (m4a ? "m4a" : "opus"),
-          mimeType: best.mimeType || "",
-          quality: best.quality || "",
-          duration: (data && data.duration) || 0,
-        };
-      }
-    } catch (e) {
-      lastErr = String((e && e.message) || e);
-    }
+  const attempts = PIPED_STREAM_INSTANCES.map((base) =>
+    fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, PIPED_API_TIMEOUT)
+  );
+  try {
+    const data = await Promise.any(attempts);
+    const picked = pickPipedStream(data);
+    if (picked) return picked;
+  } catch (e) {
+    // Promise.any rejects only if ALL instances failed.
+    throw new Error("all piped stream instances failed");
   }
-  throw new Error(lastErr);
+  throw new Error("no audio stream");
 }
 
 export function mapAudiusTrack(t) {
