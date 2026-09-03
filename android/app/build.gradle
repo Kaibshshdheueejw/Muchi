@@ -16,22 +16,6 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
-    buildTypes {
-        release {
-            minifyEnabled false
-            shrinkResources false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            def ks = System.getenv("MUCHI_KEYSTORE_FILE")
-            if (ks) {
-                signingConfig signingConfigs.release
-            } else {
-                // No keystore supplied -> sign with the DEBUG key so the APK
-                // is installable on a real device (never for Play distribution).
-                println "WARNING: MUCHI_KEYSTORE_FILE not set - signing release with the DEBUG key (NOT for Play)."
-                signingConfig signingConfigs.debug
-            }
-        }
-    }
     signingConfigs {
         release {
             // Signing material NEVER lives in the repo. The CI workflow
@@ -52,6 +36,24 @@ android {
                 keyPassword System.getenv("MUCHI_KEYSTORE_PASSWORD")
             } else {
                 println "WARNING: MUCHI_KEYSTORE_FILE not set — release build will be signed with the DEBUG key (NOT for Play distribution)."
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            def ks = System.getenv("MUCHI_KEYSTORE_FILE")
+            if (ks) {
+                // signingConfigs.release is defined ABOVE this block, so this
+                // reference resolves during configuration.
+                signingConfig signingConfigs.release
+            } else {
+                // No keystore supplied -> sign with the DEBUG key so the APK
+                // is installable on a real device (never for Play distribution).
+                println "WARNING: MUCHI_KEYSTORE_FILE not set - signing release with the DEBUG key (NOT for Play)."
+                signingConfig signingConfigs.debug
             }
         }
     }
