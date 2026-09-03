@@ -22,7 +22,14 @@ android {
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             def ks = System.getenv("MUCHI_KEYSTORE_FILE")
-            if (ks) signingConfig signingConfigs.release
+            if (ks) {
+                signingConfig signingConfigs.release
+            } else {
+                // No keystore supplied -> sign with the DEBUG key so the APK
+                // is installable on a real device (never for Play distribution).
+                println "WARNING: MUCHI_KEYSTORE_FILE not set - signing release with the DEBUG key (NOT for Play)."
+                signingConfig signingConfigs.debug
+            }
         }
     }
     signingConfigs {
