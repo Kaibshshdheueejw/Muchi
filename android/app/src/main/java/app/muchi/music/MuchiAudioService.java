@@ -124,6 +124,13 @@ public class MuchiAudioService extends Service {
         if (intent != null && ACTION_PLAY.equals(intent.getAction())) {
             String url = intent.getStringExtra(EXTRA_URL);
             if (url != null && !url.isEmpty()) {
+                // Promote to a foreground service IMMEDIATELY (before any
+                // network/prepare work) so Android reliably keeps it alive in
+                // the background and shows the media notification. Without
+                // this, on some devices the OS can kill the service (music
+                // stops when you leave the app) or the notification never
+                // appears.
+                startInForeground();
                 loadTrack(
                         url,
                         intent.getStringExtra(EXTRA_TITLE),
@@ -315,6 +322,29 @@ public class MuchiAudioService extends Service {
                 .setState(playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
                         Math.max(0, positionMs), 1f)
                 .build());
+    }
+
+    private void startInForeground() {
+        // Immediately promote the service to foreground so Android keeps it
+        // alive and shows a notification even before the media session is
+        // ready or a network stream begins loading.
+        if (notificationManager == null) return;
+        Notification.Builder builder = new Notification.Builder(this);
+        if (Build.VERSION.SDK_INT >= 26) builder.setChannelId(CHANNEL_ID);
+        builder.setSmallIcon(R.drawable.ic_stat_muchi);
+        builder.setContentTitle(trackTitle == null || trackTitle.isEmpty() ? "Muchi" : trackTitle);
+        builder.setContentText(trackArtist == null || trackArtist.isEmpty() ? "Muchi" : trackArtist);
+        builder.setOngoing(true);
+        builder.setVisibility(Notification.VISIBILITY_PUBLIC);
+        Notification notification = builder.build();
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        } else if (Build.VERSION.SDK_INT >= 26) {
+            startForeground(NOTIFICATION_ID, notification);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
     }
 
     private void showNotification() {

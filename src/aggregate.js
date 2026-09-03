@@ -231,8 +231,16 @@ export async function handleYoutubeSearch(url) {
 
 export async function handleYtPlaylist(url) {
   const id = url.searchParams.get("id") || "";
-  const tracks = await youtubePlaylistTracks(id);
-  return json(200, { tracks, playlistId: id });
+  if (!id) return json(200, { tracks: [], playlistId: id });
+  // Cache the (often slow, multi-page) playlist browse so repeat opens are
+  // instant. 30 min TTL + in-flight dedupe; user-generated IDs are fine here
+  // (bounded space, reads are what matter).
+  const data = await cached(`ytplaylist:${id}`, 30 * 60 * 1000, async () => {
+    const tracks = await youtubePlaylistTracks(id);
+    return { tracks, playlistId: id };
+  }).catch(() => null);
+  if (data) return json(200, data);
+  return json(200, { tracks: [], playlistId: id });
 }
 
 export async function handleArtist(url) {

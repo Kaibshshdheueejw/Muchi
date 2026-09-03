@@ -30,6 +30,14 @@ import {
 } from "./aggregate.js";
 import { handleStream, handleImg, handleAudiusStream, handleAudiusFile } from "./stream.js";
 import { maybeSweep } from "./db.js";
+// PREVIEW-ONLY seed: active solely when env.MUCHI_PREVIEW_SEED is set (only
+// in the locally git-ignored .dev.vars). In production that env var is never
+// present, so this file and these handlers are inert.
+import {
+  previewHome, previewShelf, previewSearch, previewYtSearch,
+  previewArtist, previewRelated, previewDiscover, previewRadio,
+  previewLyrics, previewAudioWav,
+} from "./preview-seed.js";
 
 export default {
   async fetch(request, env, ctx) {
@@ -62,6 +70,46 @@ export default {
 
 async function handleApi(request, env, url) {
   const p = url.pathname;
+
+  // ── PREVIEW SEED (dev-only) ────────────────────────────────────────────
+  // When MUCHI_PREVIEW_SEED is set (local .dev.vars only), serve curated
+  // sample data instead of calling the real providers. This lets the
+  // workspace preview show populated, tappable, playable content even though
+  // the sandbox has no egress to the music providers. auth/stream/img routes
+  // still flow through their normal handlers untouched.
+  if (env && env.MUCHI_PREVIEW_SEED) {
+    const gl = url.searchParams.get("gl") || "";
+    if (p === "/api/preview/audio") {
+      const wav = previewAudioWav();
+      return new Response(new Uint8Array(wav), {
+        status: 200,
+        headers: {
+          "Content-Type": "audio/wav",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+    if (p === "/api/home") return json(200, previewHome(gl));
+    if (p === "/api/shelf") {
+      return json(200, previewShelf(
+        url.searchParams.get("id") || "",
+        url.searchParams.get("q") || "",
+        gl,
+      ));
+    }
+    if (p === "/api/search") return json(200, previewSearch(url.searchParams.get("q") || ""));
+    if (p === "/api/youtube/search") return json(200, previewYtSearch(url.searchParams.get("q") || url.searchParams.get("query") || ""));
+    if (p === "/api/artist") {
+      return json(200, previewArtist(url.searchParams.get("name") || url.searchParams.get("q") || ""));
+    }
+    if (p === "/api/related") return json(200, previewRelated(url.searchParams.get("title") || ""));
+    if (p === "/api/discover" || p === "/api/for-you") return json(200, previewDiscover(gl));
+    if (p === "/api/radio") return json(200, previewRadio(url.searchParams.get("q") || ""));
+    if (p === "/api/lyrics") {
+      return json(200, previewLyrics(url.searchParams.get("title") || "", url.searchParams.get("artist") || ""));
+    }
+  }
 
   if (p === "/api/health" || p === "/api/version") return handleHealth(env);
   if (p === "/api/auth/status") return handleAuthStatus(request, env);

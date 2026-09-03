@@ -553,13 +553,27 @@
   }
 
   async function api(path, timeoutMs = 18000, opts) {
+    const method = String(((opts && opts.method) || "GET")).toUpperCase();
+    // Only cache safe, anonymous, idempotent GET catalog reads. Never cache
+    // auth/session/version/live endpoints, stream/info URLs, or `refresh=1`
+    // (which exists precisely to bypass caches).
+    const cacheable =
+      method === "GET" &&
+      !/\/api\/(auth|health|version|stream|img|radio\/click|audius\/file|audius\/stream)\b/.test(path) &&
+      !/[?&]refresh=1\b/.test(path);
+    if (cacheable) {
+      const hit = await apiCacheGet(path);
+      if (hit != null) return hit;
+    }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const headers = Object.assign({}, (opts && opts.headers) || {}, authHeaders());
       const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal }, opts || {}, { headers }));
       if (!res.ok) throw new Error(await res.text());
-      return await res.json();
+      const data = await res.json();
+      if (cacheable && apiCacheIsUsable(data)) await apiCachePut(path, data).catch(() => {});
+      return data;
     } finally {
       clearTimeout(timer);
     }
@@ -930,20 +944,75 @@
     if (src === "youtube") return `<span class="badge yt">YouTube</span>`;
     if (src === "audius") return `<span class="badge au">Audius</span>`;
     if (src === "download") return `<span class="badge au">Saved</span>`;
+    if (src === "preview") return `<span class="badge rd">Sample</span>`;
     return `<span class="badge rd">Radio</span>`;
   }
 
   const IDB_NAME = "aura";
   const IDB_STORE = "downloads";
+  const API_STORE = "api";
   function openIdb() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(IDB_NAME, 1);
+      const req = indexedDB.open(IDB_NAME, 2);
       req.onupgradeneeded = () => {
         if (!req.result.objectStoreNames.contains(IDB_STORE)) req.result.createObjectStore(IDB_STORE);
+        if (!req.result.objectStoreNames.contains(API_STORE)) req.result.createObjectStore(API_STORE);
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
+  }
+  // ── Client-side API response cache ────────────────────────────────────
+  // GET /api responses are stored in IndexedDB so a playlist/search/home/
+  // artist the user already opened loads INSTANTLY next time (no network
+  // wait). Only used when the browser/WKWebView has IndexedDB; never blocks
+  // the network fetch — a cache miss falls straight through to the API.
+  const API_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 h (anything longer risks stale)
+  // Never cache an "empty" catalog payload. If a provider is temporarily
+  // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
+  // tracks); caching that would freeze the shelf empty for the whole TTL.
+  // A miss just re-fetches — the safe direction.
+  function apiCacheIsUsable(data) {
+    if (!data || typeof data !== "object") return false;
+    let s = "";
+    try { s = JSON.stringify(data); } catch { return false; }
+    if (s.length < 40) return false; // trivial/empty object
+    if (Array.isArray(data.tracks) && data.tracks.length === 0) return false;
+    if (Array.isArray(data.songs) && data.songs.length === 0) return false;
+    if (Array.isArray(data.albums) && data.albums.length === 0) return false;
+    if (Array.isArray(data.youtube) && data.youtube.length === 0) return false;
+    if (Array.isArray(data.shelves)) {
+      if (data.shelves.length === 0) return false;
+      // A home payload whose every shelf is empty adds nothing.
+      const anyTracks = data.shelves.some((sh) => sh && Array.isArray(sh.tracks) && sh.tracks.length);
+      if (!anyTracks) return false;
+    }
+    return true;
+  }
+  async function apiCacheGet(key) {
+    try {
+      const db = await openIdb();
+      return await new Promise((resolve) => {
+        const req = db.transaction(API_STORE, "readonly").objectStore(API_STORE).get(key);
+        req.onsuccess = () => {
+          const rec = req.result;
+          if (!rec || typeof rec.at !== "number") return resolve(null);
+          resolve(Date.now() - rec.at < API_CACHE_TTL ? rec.value : null);
+        };
+        req.onerror = () => resolve(null);
+      });
+    } catch { return null; }
+  }
+  async function apiCachePut(key, value) {
+    try {
+      const db = await openIdb();
+      await new Promise((resolve) => {
+        const tx = db.transaction(API_STORE, "readwrite");
+        tx.objectStore(API_STORE).put({ at: Date.now(), value }, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    } catch { /* cache is best-effort */ }
   }
   async function idbPut(key, val) {
     const db = await openIdb();
@@ -1985,7 +2054,16 @@
     loadLyrics(t);
     stopTimer();
     try {
-      if (t.source === "apple" || (t.source === "youtube" && !t.videoId)) {
+      // Metadata-only sources (apple/itunes/deezer from the iTunes or Deezer
+      // catalogs, and any youtube row still missing a resolved videoId) have
+      // no direct audio stream — resolve them to a real YouTube stream before
+      // playing. Without this, iTunes-catalog songs hit the audio player with
+      // no URL and silently skip ("can't play"). Audio-native sources
+      // (audius via trackId, radio via streamUrl) are left alone.
+      const needsResolve =
+        !t.videoId && !t.streamUrl && !t.url &&
+        t.source !== "audius" && t.source !== "radio";
+      if (needsResolve) {
         await resolveYouTubePlay(t);
       }
       if (gen !== playGen) return;
