@@ -126,14 +126,19 @@ export async function handleDownload(request, url) {
       return json(502, { error: String((e && e.message) || e) });
     }
   } else if (videoId) {
-    try {
-      const s = await youtubeAudioStream(videoId);
-      if (s && s.url) {
-        src = s.url;
-        if (s.mimeType) mime = s.mimeType;
+    // Resolve the audio URL with a retry — Piped instances are volatile, and a
+    // single transient failure shouldn't fail the whole download. The fan-out
+    // + retry makes real downloads land instead of erroring out.
+    for (let attempt = 0; attempt < 2 && !src; attempt++) {
+      try {
+        const s = await youtubeAudioStream(videoId);
+        if (s && s.url) {
+          src = s.url;
+          if (s.mimeType) mime = s.mimeType;
+        }
+      } catch {
+        /* fall through to retry */
       }
-    } catch {
-      /* fall through to 502 */
     }
     if (!src) return json(502, { error: "No stream available for this track" });
   } else {

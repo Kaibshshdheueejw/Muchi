@@ -1112,7 +1112,11 @@
     return s;
   }
   function downloadFilePath(t) {
-    // URL carrying enough info for the server to stream + name the file.
+    // Prefer a direct stream URL the track already carries (Audius, and the
+    // offline/preview tone). This keeps downloads working even when the worker
+    // can't resolve a fresh YouTube stream, and avoids double-proxying a URL.
+    if (t && t.streamUrl) return t.streamUrl;
+    // Otherwise ask the server to resolve + proxy the audio and name the file.
     if (t && t.source === "audius" && t.trackId) {
       return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`;
     }
@@ -3684,7 +3688,8 @@
     const cleanTitle = String(t.title || "").replace(/\s*[\[(][^)\]]*(official|audio|video|lyric|visualizer)[^)\]]*[)\]]/gi, "").trim() || t.title;
     const artist = artistName(t) || String(t.artist || "").split("·")[0].replace(/youtube/ig, "").trim();
     try {
-      const data = await api(`/api/lyrics?title=${encodeURIComponent(cleanTitle)}&artist=${encodeURIComponent(artist)}`, 14000);
+      const dur = Math.round(Number(t.duration || 0)) || 0;
+      const data = await api(`/api/lyrics?title=${encodeURIComponent(cleanTitle)}&artist=${encodeURIComponent(artist)}${dur ? `&duration=${dur}` : ""}`, 14000);
       if (gen !== lyricsGen) return;
       state.lyrics = { lyrics: (data && data.lyrics) || "", synced: (data && data.synced) || [], key };
     } catch {
@@ -6699,6 +6704,28 @@
     return good.length >= 3 ? good : list;
   }
 
+  // "Made for you" rows must stay English-only. YouTube/regional search leaks
+  // Hindi (Devanagari) and other non-English songs into the cards even when
+  // the query is English — this mirrors the server's isEnglishTrack so the
+  // cards and the opened playlist both stay English. Returns true when a track
+  // looks English (non-Latin script or a listed regional hint = not English).
+  const CLIENT_NON_LATIN = /[\u0900-\u097F\u0B80-\u0BFF\u0C00-\u0C7F\u0D00-\u0D7F\u0980-\u09FF\u0A80-\u0AFF\u0A00-\u0A7F\u0E00-\u0E7F\u0590-\u05FF\u0600-\u06FF\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0400-\u04FF\u1E00-\u1EFF]/;
+  const CLIENT_REGIONAL_HINTS = /\b(bollywood|tollywood|kollywood|tamil|telegu|telugu|malayalam|kannada|maharashtra|desi|marathi|sinhala|thai|punjab|hindi|haryanvi|bhojpuri|garhwali|kumaoni|angrezi|bengali|odia|assamese|punjabi|arijit|atif aslam|shreya ghoshal|neha kakkar|sunidhi|nusrat|rabba|sonu nigam|kishore|dilbar|kesariya|channa mereya|humma humma|lut geya|tum hi ho|ae dil hai|despacito|calma|bailando|macarena|corazon|gangnam style|imran khan|neha|york|t-series)\b/i;
+  function isEnglishTrack(t) {
+    if (!t) return false;
+    const text = `${t.title || ""} ${t.artist || ""} ${t.album || ""}`;
+    return !(CLIENT_NON_LATIN.test(text) || CLIENT_REGIONAL_HINTS.test(text));
+  }
+
+  // Filter a "Made for you" track list down to English songs. Never starve the
+  // card: if fewer than 3 English songs survive, keep the original list so the
+  // row stays populated (same "never starve" rule as everywhere else).
+  function englishOnlyTracks(list) {
+    if (!Array.isArray(list) || !list.length) return list;
+    const good = list.filter((t) => t && isEnglishTrack(t));
+    return good.length >= 3 ? good : list;
+  }
+
   // Home rows prefer real songs (Spotify-style), but a degraded provider must
   // never leave a Home row empty: if fewer than 3 songs survive the junk
   // filter, keep the best available rows (same "never starve" rule as
@@ -6818,7 +6845,10 @@
     }
     if (state.activePlaylist !== "catalog" || !state.catalogPlaylist) return;
     if (got.length) {
-      const tracks = cleanPlaylistTracks(got);
+      // "Made for you" rows stay English-only: filter out Hindi/regional songs
+      // that slip in from the playlist/YouTube search (the reported bug).
+      const filtered = (fyIndex != null || forYouMix) ? englishOnlyTracks(got) : got;
+      const tracks = cleanPlaylistTracks(filtered);
       state.catalogPlaylist.tracks = tracks;
       if (!state.catalogPlaylist.artwork && tracks[0]) state.catalogPlaylist.artwork = tracks[0].artwork;
       // "Made for you" card covers follow the first song inside the playlist.
