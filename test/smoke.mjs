@@ -24,7 +24,10 @@ import {
 } from "../src/data.js";
 import { codecMatch, tidyTitle, tidyArtist } from "../src/util.js";
 import { parseLyricsHit } from "../src/providers.js";
+import { APP_VERSION } from "../src/config.js";
 import { createHmac as nodeHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createContext, runInContext } from "node:vm";
 
 let failures = 0;
 const ok = (name, cond, extra = "") => {
@@ -112,7 +115,7 @@ ok("isLikelyMusic short rejected", !isLikelyMusic({ videoId: "a", title: "Song",
 ok("isLikelyMusic loose accepts short", isLikelyMusic({ videoId: "a", title: "Song", artist: "A", duration: 20 }, true));
 
 ok("lastThumb", lastThumb([{ url: "x" }, { url: "y" }]) === "y");
-ok("lastThumb fallback", lastThumb([]) === "/cover-default.png");
+ok("lastThumb fallback", lastThumb([]) === "/cover-default.jpg");
 
 const artistNode = {
   musicResponsiveListItemRenderer: {
@@ -161,9 +164,15 @@ ok("moods unique ids", new Set(moodsForCountry("IN").map((m) => m.id)).size === 
 ok("uniqPlaylists dedupes", uniqPlaylists([{ playlistId: "a", title: "A" }, { playlistId: "a", title: "A" }, { playlistId: "b", title: "B" }]).length === 2);
 ok("pickPlaylistHit best match", pickPlaylistHit([{ playlistId: "p1", title: "Dance Hits" }, { playlistId: "p2", title: "Chill Vibes" }], "dance hits")?.playlistId === "p1");
 ok("buildForYouPlaylists 10 entries", buildForYouPlaylists([]).length === 10);
-ok("buildForYouPlaylists 8 yt + 2 mix", buildForYouPlaylists([]).filter((p) => p.kind === "yt").length === 8);
-const fy = buildForYouPlaylists([{ status: "fulfilled", value: { playlistId: "PL9", title: "Trending", artwork: "https://a.jpg" } }]);
-ok("buildForYouPlaylists uses resolved", fy[0].playlistId === "PL9" && fy[0].artwork === "https://a.jpg");
+ok("buildForYouPlaylists all 10 distinct-mood yt cards (no mix)", (() => {
+  const pls = buildForYouPlaylists([]);
+  return pls.length === 10 && pls.every((p) => p.kind === "yt") && new Set(pls.map((p) => p.mood)).size === 10;
+})());
+ok("buildForYouPlaylists tracks up to 20 (resolved)", (() => {
+  const fyRes = new Array(10).fill(0).map((_, i) => ({ status: "fulfilled", value: { playlistId: "PL" + i, artwork: "https://a.jpg", tracks: Array.from({ length: 20 }, (_, j) => ({ id: i + "-" + j })) } }));
+  const pls = buildForYouPlaylists(fyRes);
+  return pls.length === 10 && pls.every((p) => p.playlistId.startsWith("PL") && Array.isArray(p.tracks) && p.tracks.length === 20);
+})());
 ok("utcDay format", /^\d{4}-\d{2}-\d{2}$/.test(utcDay()));
 
 // ── 5. Helpers (server.js:1209–1262, 1060–1069) ─────────────────────────────
@@ -180,6 +189,53 @@ ok("parseLyricsHit synced", parseLyricsHit({ syncedLyrics: "[00:12.50]Hello\n[00
 ok("parseLyricsHit plain only", parseLyricsHit({ plainLyrics: "Words" })?.lyrics === "Words");
 ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
 
+// ── 5b. Real download metadata tags (public/meta.js) ────────────────────────
+// Verifies the browser audio tagger writes real ID3v2 (mp3) + MP4 ilst (m4a)
+// frames and reads them back, plus that non-audio containers pass through.
+{
+  const sandbox = { TextEncoder, TextDecoder };
+  createContext(sandbox);
+  runInContext(readFileSync("public/meta.js", "utf8"), sandbox);
+  const M = sandbox.MuchiMeta;
+  const meta = {
+    title: "Kesariya (Test)", artist: "Arijit Singh", album: "Brahmastra", genre: "Pop",
+    picture: { mime: "image/jpeg", data: Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]) },
+  };
+  const mp3Audio = Uint8Array.from([0xff, 0xfb, 0x90, 0x00, 0xde, 0xad, 0xbe, 0xef]);
+  const mp3 = M.embed(mp3Audio, "mp3", meta);
+  const rMp3 = M.read(mp3);
+  ok("meta: MP3 gets ID3v2.3 header", mp3[0] === 0x49 && mp3[1] === 0x44 && mp3[2] === 0x33 && mp3[3] === 3);
+  ok("meta: MP3 title round-trip", rMp3.title === meta.title);
+  ok("meta: MP3 artist round-trip", rMp3.artist === meta.artist);
+  ok("meta: MP3 album round-trip", rMp3.album === meta.album);
+  ok("meta: MP3 genre round-trip", rMp3.genre === meta.genre);
+  ok("meta: MP3 cover art embedded", !!rMp3.picture && rMp3.picture.mime === "image/jpeg" && rMp3.picture.data.length === 8);
+  ok("meta: MP3 audio bytes preserved", Buffer.from(mp3.slice(mp3.length - mp3Audio.length)).equals(Buffer.from(mp3Audio)));
+
+  // Minimal M4A: ftyp + moov + mdat, then embed + read back.
+  const u32be = (n) => [(n >> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255];
+  const mkBox = (t, p) => { const o = new Uint8Array(8 + p.length); o.set(u32be(8 + p.length), 0); o.set(Buffer.from(t), 4); o.set(p, 8); return o; };
+  const ftyp = mkBox("ftyp", Uint8Array.from([...Buffer.from("M4A "), ...u32be(0), ...Buffer.from("M4A mp42isom")]));
+  const moov = mkBox("moov", mkBox("trak", Uint8Array.from([0, 0, 0, 0])));
+  const mdat = mkBox("mdat", Uint8Array.from([0x11, 0x22, 0x33, 0x44]));
+  const m4a = Uint8Array.from([...ftyp, ...moov, ...mdat]);
+  const tagged = M.embed(m4a, "m4a", meta);
+  const rM4a = M.read(tagged);
+  ok("meta: M4A container detected", rM4a.container === "mp4");
+  ok("meta: M4A title round-trip", rM4a.title === meta.title);
+  ok("meta: M4A artist round-trip", rM4a.artist === meta.artist);
+  ok("meta: M4A album round-trip", rM4a.album === meta.album);
+  ok("meta: M4A genre round-trip", rM4a.genre === meta.genre);
+  ok("meta: M4A cover art embedded", !!rM4a.picture && rM4a.picture.data.length === 8);
+  ok("meta: M4A mdat preserved", Buffer.from(tagged.slice(tagged.length - mdat.length)).equals(Buffer.from(mdat)));
+  ok("meta: M4A ftyp untouched", Buffer.from(tagged.slice(4, 8)).toString("latin1") === "ftyp");
+
+  // webm/opus pass-through (container preserved, untagged).
+  const webm = Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x9c, 0x42]);
+  const passthrough = M.embed(webm, "webm", meta);
+  ok("meta: webm passes through untagged", Buffer.from(passthrough).equals(Buffer.from(webm)));
+}
+
 // ── 6. Live worker checks (only when WRANGLER_DEV_URL is set) ───────────────
 const BASE = process.env.WRANGLER_DEV_URL;
 if (BASE) {
@@ -193,9 +249,9 @@ if (BASE) {
   // health/version
   const health = await get("/api/health");
   ok("health 200", health.status === 200);
-  ok("health shape", health.body && health.body.ok === true && health.body.name === "Muchi" && health.body.version === "1.3.1");
+  ok("health shape", health.body && health.body.ok === true && health.body.name === "Muchi" && health.body.version === APP_VERSION);
   const version = await get("/api/version");
-  ok("version shape", version.body && version.body.name === "Muchi" && version.body.version === "1.3.1");
+  ok("version shape", version.body && version.body.name === "Muchi" && version.body.version === APP_VERSION);
 
   // moods (full table)
   const moods = await get("/api/moods");
@@ -272,6 +328,18 @@ if (BASE) {
   // sandbox has no DNS via DoH → graceful 400/502; on the deployed Worker
   // this streams the track. Either way it must be a graceful error here.
   ok("audius/file → graceful error offline", [400, 502].includes(audFile.status) && "error" in audFile.body);
+
+  // ── /api/download (real download endpoint) ────────────────────────────
+  const dlNo = await get("/api/download");
+  ok("download missing params → 400", dlNo.status === 400 && dlNo.body.error === "Missing videoId or trackId");
+  const dlAud = await fetch(BASE + "/api/download?trackId=xyz&name=t");
+  ok("download trackId offline → graceful (400/502) + Content-Disposition", [400, 502].includes(dlAud.status) && (dlAud.headers.get("content-disposition") || "").includes("attachment") && (dlAud.headers.get("access-control-expose-headers") || "").includes("Content-Disposition"));
+  const dlYt = await fetch(BASE + "/api/download?videoId=x&name=t");
+  // When stream resolution itself fails (Piped unreachable) the endpoint
+  // degrades to a graceful JSON error before any streaming, so no
+  // Content-Disposition — that's fine; the client checks res.ok first.
+  const dlYtBody = await dlYt.json().catch(() => ({}));
+  ok("download videoId offline → graceful (400/502) JSON error", [400, 502].includes(dlYt.status) && ("error" in dlYtBody));
 
   const imgPriv = await get("/api/img?url=http://127.0.0.1:8080/x.png");
   ok("img private target → 400", imgPriv.status === 400);

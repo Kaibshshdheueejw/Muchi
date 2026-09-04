@@ -7,7 +7,7 @@
 //     (user-generated keys are NOT KV-cached — KV free allows 1k writes/day)
 // Response shapes are byte-identical to server.js.
 
-import { json, cached, kvCached, fetchJSON } from "./util.js";
+import { json, cached, kvCached, fetchJSON, isEnglishTrack } from "./util.js";
 import {
   searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
   itunesSearch,
@@ -26,6 +26,53 @@ const take = (r) => (r.status === "fulfilled" ? r.value : []);
 // can't stall the whole artist build. The losing promise is abandoned.
 const raceTimeout = (p, ms, fallback = null) =>
   Promise.race([p, new Promise((res) => setTimeout(() => res(fallback), ms))]);
+
+// ── "Trending / Global trending" shelf cards ─────────────────────────────
+// The home shelves must always feel full: cover art is the FIRST song inside
+// the playlist and the card carries the full song list. When a provider
+// returns few real playlist objects (common during cold starts or an outage),
+// we top the shelf up to `count` with generated "Daily mix" cards built from
+// tracks we already fetched — no extra network calls, and never fewer than 8.
+const DAILY_MIX_TITLES = [
+  "Global Top 50", "Worldwide Charts", "Global Trending", "International Hits",
+  "Global Pop", "Global Hip-Hop", "Global Dance", "Global R&B",
+];
+const COUNTRY_DM_TITLES = [
+  "Daily Mix 1", "Daily Mix 2", "Daily Mix 3", "Daily Mix 4",
+  "Daily Mix 5", "Daily Mix 6", "Daily Mix 7", "Daily Mix 8",
+];
+
+function dailyMixCard(title, pool, idx) {
+  const tracks = (pool || []).filter(Boolean).slice(0, 40);
+  return {
+    id: `dmix:${idx}:${title}`,
+    kind: "playlist",
+    title,
+    artist: "Daily mix",
+    artwork: (tracks[0] && tracks[0].artwork) || "",
+    source: "youtube",
+    playlistId: "",
+    query: title,
+    tracks,
+  };
+}
+
+// Ensure a playlist shelf has at least `count` cards, topping up with Daily
+// mixes drawn from the tracks we already have. Never drops real playlists.
+function ensureMinPlaylists(list, pool, titles, count = 8) {
+  const out = (list || []).slice();
+  const seen = new Set(out.map((p) => String((p && p.title) || "").toLowerCase()));
+  let i = 0;
+  const tracks = (pool || []).filter(Boolean);
+  while (out.length < count && tracks.length && i < titles.length) {
+    const title = titles[i++];
+    const key = String(title).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(dailyMixCard(title, tracks, out.length));
+  }
+  return out;
+}
 
 export async function handleHome(env, url) {
   const gl = regionCode(url.searchParams.get("gl"));
@@ -83,11 +130,16 @@ async function buildGlobal(gl, localQ) {
     query: s.query,
     tracks: i < filled.length ? filled[i] : [],
   }));
-  const globalPlaylists = uniqPlaylists([
-    ...playlistsOf(extra[0].status === "fulfilled" ? extra[0].value : []),
-    ...playlistsOf(extra[1].status === "fulfilled" ? extra[1].value : []),
-    ...playlistsOf(extra[2].status === "fulfilled" ? extra[2].value : []),
-  ]).slice(0, 16);
+  const globalPlaylists = ensureMinPlaylists(
+    uniqPlaylists([
+      ...playlistsOf(extra[0].status === "fulfilled" ? extra[0].value : []),
+      ...playlistsOf(extra[1].status === "fulfilled" ? extra[1].value : []),
+      ...playlistsOf(extra[2].status === "fulfilled" ? extra[2].value : []),
+    ]).slice(0, 16),
+    [].concat(...filled),
+    DAILY_MIX_TITLES,
+    8,
+  );
   const audius = take(extra[jobs.length + 1]).slice(0, 18);
   const underground = take(extra[jobs.length + 2]).slice(0, 12);
   const radio = take(extra[jobs.length + 3]).slice(0, 12);
@@ -106,12 +158,18 @@ async function buildLocal(gl, localQ) {
     searchYouTube(localQ, gl, true),
     youtubeMusicSearch(`${localQ} playlist`, gl, 6000, { limit: 40 }),
   ]);
+  const countryPool = [...take(ytLocal), ...take(ytPl)];
   return {
     youtubeLocal: take(ytLocal).slice(0, 18),
-    countryPlaylists: uniqPlaylists([
-      ...playlistsOf(ytLocal.status === "fulfilled" ? ytLocal.value : []),
-      ...playlistsOf(ytPl.status === "fulfilled" ? ytPl.value : []),
-    ]).slice(0, 12),
+    countryPlaylists: ensureMinPlaylists(
+      uniqPlaylists([
+        ...playlistsOf(ytLocal.status === "fulfilled" ? ytLocal.value : []),
+        ...playlistsOf(ytPl.status === "fulfilled" ? ytPl.value : []),
+      ]).slice(0, 12),
+      countryPool,
+      COUNTRY_DM_TITLES,
+      8,
+    ),
   };
 }
 
@@ -307,7 +365,7 @@ export async function handleArtist(url) {
                 kind: "playlist",
                 title: al.collectionName || "Album",
                 artist: al.artistName || nm,
-                artwork: String(al.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.png",
+                artwork: String(al.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
                 source: "apple",
                 query: `${al.collectionName || ""} ${al.artistName || nm}`.trim(),
               });
@@ -324,7 +382,7 @@ export async function handleArtist(url) {
                 artist: t.artistName || nm,
                 album: t.collectionName || "",
                 duration: Math.round((t.trackTimeMillis || 0) / 1000),
-                artwork: String(t.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.png",
+                artwork: String(t.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
                 playQuery: `${t.trackName || ""} ${t.artistName || nm} official audio`.trim(),
               });
             }
@@ -477,6 +535,11 @@ export async function handleDiscover(url) {
         const rows = s.status === "fulfilled" ? s.value : [];
         for (const row of rows || []) {
           if (!row || row.source === "radio") continue;
+          // Keep \"Made for you\" mixes English-only: skip any clearly
+          // non-English (e.g. Hindi/Devanagari) song that slips in from the
+          // taste profile artist/genre queries. This was the reported bug —
+          // the mix turned up Hindi songs mixed in with English ones.
+          if (!isEnglishTrack(row)) continue;
           const k = String(row.videoId || row.id || "");
           if (!k || seen.has(k)) continue;
           seen.add(k);
@@ -484,6 +547,25 @@ export async function handleDiscover(url) {
           if (out.length >= 40) break;
         }
         if (out.length >= 40) break;
+      }
+      // If taste-driven artists/genres returned only non-English results, fall
+      // back to a clean English-only default so the mix is never empty or
+      // full of Hindi/regional tracks.
+      if (!out.length) {
+        for (const q of ["english pop hits official audio", "top english songs this week", "indie pop english songs"]) {
+          try {
+            const rows = (await searchYouTube(q, gl, true)) || [];
+            for (const row of rows) {
+              if (!row || row.source === "radio" || !isEnglishTrack(row)) continue;
+              const k = String(row.videoId || row.id || "");
+              if (!k || seen.has(k)) continue;
+              seen.add(k);
+              out.push(row);
+              if (out.length >= 30) break;
+            }
+          } catch {}
+          if (out.length >= 30) break;
+        }
       }
       let seed = 0;
       const weekSeed = week || "mix";

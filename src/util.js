@@ -127,3 +127,47 @@ export function codecMatch(raw, want) {
   if (want === "opus") return /opus|ogg|vorbis/.test(c);
   return true;
 }
+
+/**
+ * English-only guard for taste/curated mixes (\"Made for you\", discovery).
+ * A track is considered English when it has NO strong non-Latin script in its
+ * title/artist and is not a known regional-language track. This keeps the
+ * mixes from loading Hindi/regional songs when the user's listening history
+ * (taste profile) includes them — the reported bug where \"Made for you\"
+ * turned up mixed Hindi songs instead of English-only.
+ *
+ * Returns true if the text is clearly NOT English (e.g. Devanagari/Hindi,
+ * Hebrew, Arabic, Chinese/Japanese/Korean, Cyrillic).
+ */
+const NON_LATIN = /[\u0900-\u097F\u0B80-\u0BFF\u0C00-\u0C7F\u0D00-\u0D7F\u0980-\u09FF\u0A80-\u0AFF\u0A00-\u0A7F\u0E00-\u0E7F\u0590-\u05FF\u0600-\u06FF\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0400-\u04FF\u1E00-\u1EFF]/;
+const REGIONAL_HINTS = [
+  // Explicit regional-language markers (safe, unambiguous).
+  /\bbollywood\b/i, /\btollywood\b/i, /\bkollywood\b/i, /\btamil\b/i, /\btelegu\b/i,
+  /\btelugu\b/i, /\bmalayalam\b/i, /\bkannada\b/i, /\bmaharashtra\b/i, /\bdesi\b/i,
+  /\bmarathi\b/i, /\bsinhala\b/i, /\bthai\b/i, /\bpunjab\b/i, /\bhindi\b/i,
+  /\bharyanvi\b/i, /\bbhojpuri\b/i, /\bgarhwali\b/i, /\bkumaoni\b/i, /\bangrezi\b/i,
+  /\bbengali\b/i, /\bodia\b/i, /\bassamese\b/i, /\bpunjabi\b/i,
+  // Non-English Latin-script song titles / singers (Indian & worldwide pop)
+  // that would otherwise look English but are not English-language.
+  /\barijit\b/i, /\batif aslam\b/i, /\bshreya ghoshal\b/i, /\bneha kakkar\b/i,
+  /\bsunidhi\b/i, /\bnusrat\b/i, /\brabba\b/i, /\bsonu nigam\b/i, /\bkishore\b/i,
+  /\bdilbar\b/i, /\bkesariya\b/i, /\bchanna mereya\b/i, /\bhumma humma\b/i,
+  /\blut geya\b/i, /\btum hi ho\b/i, /\bae dil hai\b/i,
+  // Spanish/Latin pop (common, not English).
+  /\bdespacito\b/i, /\bcalma\b/i, /\bbailando\b/i, /\bmacarena\b/i, /\bcorazon\b/i,
+  // Korean.
+  /\bgangnam style\b/i,
+];
+
+export function detectsNonEnglish(text) {
+  const s = String(text || "");
+  if (!s) return false;
+  if (NON_LATIN.test(s)) return true; // non-Latin script (Devanagari, CJK, Cyrillic, Arabic, etc.)
+  return REGIONAL_HINTS.some((re) => re.test(s));
+}
+
+/** True when a single track's title/artist are plausibly English. */
+export function isEnglishTrack(t) {
+  if (!t) return false;
+  return !detectsNonEnglish(`${t.title || ""} ${t.artist || ""} ${t.album || ""}`);
+}

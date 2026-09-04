@@ -10,5 +10,6 @@ class MuchiBridgeViewController: CAPBridgeViewController {
     override public func viewDidLoad() {
         super.viewDidLoad()
         bridge?.registerPluginInstance(MuchiAudioPlugin())
+        bridge?.registerPluginInstance(MuchiDownloadPlugin())
     }
 }

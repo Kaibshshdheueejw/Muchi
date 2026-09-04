@@ -25,9 +25,9 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
-import android.support.v4.media.MediaMetadataCompat;
-import android.support.v4.media.session.MediaSessionCompat;
-import android.support.v4.media.session.PlaybackStateCompat;
+import androidx.media.MediaMetadataCompat;
+import androidx.media.session.MediaSessionCompat;
+import androidx.media.session.PlaybackStateCompat;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -138,6 +138,14 @@ public class MuchiAudioService extends Service {
                         intent.getStringExtra(EXTRA_ARTWORK),
                         intent.getLongExtra(EXTRA_DURATION_MS, 0L));
             }
+        } else if (intent == null && player != null) {
+            // START_STICKY restart: the OS recreated us. Re-attach the
+            // foreground notification so background playback survives a
+            // system-initiated process restart (common with aggressive OEM
+            // battery managers).
+            startInForeground();
+            ticker.removeCallbacks(tick);
+            ticker.post(tick);
         }
         return START_STICKY;
     }
@@ -254,6 +262,14 @@ public class MuchiAudioService extends Service {
                 }
             });
             session.setActive(true);
+            // Tapping the notification / lock-screen brings the app back.
+            try {
+                Intent open = new Intent(this, MainActivity.class);
+                open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                session.setSessionActivity(PendingIntent.getActivity(this, 0, open,
+                        Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0));
+            } catch (Exception ignored) {
+            }
         }
 
         endedNotified = false;

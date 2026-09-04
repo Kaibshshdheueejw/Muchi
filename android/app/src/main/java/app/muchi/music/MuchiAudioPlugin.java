@@ -6,7 +6,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -14,6 +16,8 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * MUCHI native background audio bridge (JS ↔ {@link MuchiAudioService}).
@@ -28,6 +32,15 @@ import com.getcapacitor.annotation.Permission;
  *   muchiControls  {message: play|pause|next|previous|seek|ended|error|stop, position}
  *   muchiProgress  {positionMs, durationMs, playing}
  *
+ * The service binds asynchronously (ServiceConnection). Before it is bound,
+ * controls (pause/resume/seek/stop) used to silently no-op — the UI called
+ * them while the WebView was still connecting, and the taps did nothing, so
+ * playback "stopped" from the user's point of view. Now every control is
+ * buffered and replayed as soon as the service connects, so no tap is ever
+ * dropped. play() also blocks resolution until the service bound AND started
+ * playing, so the web layer can fall back to the WebView <audio> element if
+ * the native path could not come up at all.
+ *
  * POST_NOTIFICATIONS (Android 13+): declared on @CapacitorPlugin below. The
  * web layer asks once via MuchiAudio.checkPermissions()/requestPermissions()
  * before first play — playback is never blocked on the dialog.
@@ -41,8 +54,19 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     /** Permission alias — JS asks via MuchiAudio.checkPermissions()/requestPermissions(). */
     public static final String MUCHI_AUDIO_NOTIFICATION = "muchi_audio";
 
+    private static final long BIND_TIMEOUT_MS = 4000;
+
     private MuchiAudioService.LocalBinder service;
     private boolean bound = false;
+
+    // Controls that arrive before the service is bound are replayed in order
+    // on onServiceConnected so none is dropped when the user taps quickly.
+    private final ConcurrentLinkedQueue<Runnable> pending = new ConcurrentLinkedQueue<>();
+    private final Handler main = new Handler(Looper.getMainLooper());
+    // When set, the next onServiceConnected resolves this pending play call.
+    private PluginCall pendingPlay;
+    private long pendingPlayAt = 0L;
+    private Runnable bindTimeout;
 
     private final ServiceConnection conn = new ServiceConnection() {
         @Override
@@ -50,6 +74,18 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             service = (MuchiAudioService.LocalBinder) ibinder;
             service.setListener(MuchiAudioPlugin.this);
             bound = true;
+            // Flush any queued controls in arrival order.
+            Runnable r;
+            while ((r = pending.poll()) != null) {
+                try { r.run(); } catch (Exception ignored) {}
+            }
+            // Resolve a play() that was waiting on the bind.
+            if (pendingPlay != null) {
+                PluginCall pc = pendingPlay;
+                pendingPlay = null;
+                main.removeCallbacks(bindTimeout);
+                pc.resolve();
+            }
         }
 
         @Override
@@ -63,6 +99,13 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     protected void handleOnDestroy() {
         // Do NOT stop the service here — background playback surviving the
         // WebView is the whole point. The web layer calls stop() explicitly.
+        main.removeCallbacks(bindTimeout);
+        if (bindTimeout != null) main.removeCallbacks(bindTimeout);
+        if (pendingPlay != null) {
+            PluginCall pc = pendingPlay;
+            pendingPlay = null;
+            try { pc.resolve(); } catch (Exception ignored) {}
+        }
         if (bound) {
             try {
                 getContext().unbindService(conn);
@@ -71,14 +114,21 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             bound = false;
         }
         service = null;
+        pending.clear();
     }
 
-    private void ensureService() {
-        if (service == null && !bound) {
-            try {
-                getContext().bindService(new Intent(getContext(), MuchiAudioService.class), conn, Context.BIND_AUTO_CREATE);
-            } catch (Exception ignored) {
-            }
+    private void ensureService(Runnable onBound) {
+        if (service != null) {
+            if (onBound != null) onBound.run();
+            return;
+        }
+        if (onBound != null) pending.offer(onBound);
+        if (bound) return;
+        try {
+            getContext().bindService(new Intent(getContext(), MuchiAudioService.class), conn, Context.BIND_AUTO_CREATE);
+        } catch (Exception ignored) {
+            // Bind failed — drop any queued control so it doesn't hang.
+            pending.clear();
         }
     }
 
@@ -112,21 +162,37 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
         i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, call.getLong("duration", 0L));
         startService(i);
-        ensureService();
-        call.resolve();
+
+        // Resolve once the service actually connects (so the web layer can
+        // fall back to <audio> if the native service never comes up). A
+        // timeout keeps the promise from hanging on a dead service.
+        pendingPlay = call;
+        pendingPlayAt = System.currentTimeMillis();
+        ensureService(null);
+        if (bindTimeout != null) main.removeCallbacks(bindTimeout);
+        bindTimeout = new Runnable() {
+            @Override
+            public void run() {
+                bindTimeout = null;
+                if (pendingPlay != null) {
+                    PluginCall pc = pendingPlay;
+                    pendingPlay = null;
+                    try { pc.resolve(); } catch (Exception ignored) {}
+                }
+            }
+        };
+        main.postDelayed(bindTimeout, BIND_TIMEOUT_MS);
     }
 
     @PluginMethod
     public void pause(PluginCall call) {
-        ensureService();
-        if (service != null) service.pausePlayback();
+        ensureService(() -> { if (service != null) service.pausePlayback(); });
         call.resolve();
     }
 
     @PluginMethod
     public void resume(PluginCall call) {
-        ensureService();
-        if (service != null) service.resumePlayback();
+        ensureService(() -> { if (service != null) service.resumePlayback(); });
         call.resolve();
     }
 
@@ -150,8 +216,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     @PluginMethod
     public void seekTo(PluginCall call) {
         long position = call.getLong("position", 0L);
-        ensureService();
-        if (service != null) service.seekToPlayback(position);
+        ensureService(() -> { if (service != null) service.seekToPlayback(position); });
         call.resolve();
     }
 

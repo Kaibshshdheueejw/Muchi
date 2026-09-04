@@ -1707,6 +1707,18 @@ img { max-width: 100%; display: block; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* "Made for you" cards show how many songs are inside (e.g. 20 songs). */
+.fy-count {
+  display: block;
+  margin-top: 3px;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--md-sys-color-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .badge {
   position: absolute;
   left: 8px;
@@ -2626,6 +2638,16 @@ body[data-view="now"] .view {
   height: calc(100dvh - var(--player) - var(--dock));
   max-height: calc(100dvh - var(--player) - var(--dock));
   overflow: hidden;
+}
+/* The "now" screen (song details + lyrics) is a full-bleed immersive view.
+   Hide the bottom navigation (Home/Search/Radio/Library) while it is open so
+   it doesn't cover the lyrics. The in-now back chip returns to the previous
+   screen. */
+body[data-view="now"] .dock-nav {
+  display: none !important;
+}
+body[data-view="now"] .player {
+  bottom: calc(10px + var(--safe-b));
 }
 .ly-screen {
   position: relative;
@@ -4759,3 +4781,76 @@ html[data-native="1"] .filled-btn {
   color: var(--md-sys-color-on-primary);
   box-shadow: 0 2px 8px -2px var(--song-glow);
 }
+
+/* ── Real downloads ─────────────────────────────────────────────── */
+.dl-panel {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%) translateY(12px);
+  width: min(92vw, 460px);
+  z-index: 60;
+  display: grid;
+  gap: 8px;
+  background: color-mix(in srgb, var(--md-sys-color-surface-container) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline) 22%, transparent);
+  border-radius: 16px;
+  padding: 10px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.dl-panel.show { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+.dl-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+.dl-panel-row > .material-symbols-outlined { color: var(--song-primary); }
+.dl-panel-main { flex: 1; min-width: 0; }
+.dl-panel-title {
+  font-size: 0.8rem;
+  color: var(--md-sys-color-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+.dl-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--md-sys-color-outline) 24%, transparent);
+  overflow: hidden;
+}
+.dl-progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--song-primary);
+  transition: width 0.2s ease;
+}
+.dl-card .list { margin-top: 8px; }
+.dl-job {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-top: 1px solid color-mix(in srgb, var(--md-sys-color-outline) 14%, transparent);
+}
+.dl-job > .material-symbols-outlined { color: var(--song-primary); }
+.dl-job.dl-err > .material-symbols-outlined { color: #ff6b6b; }
+.dl-job.dl-cancel > .material-symbols-outlined { color: var(--md-sys-color-outline); }
+.dl-job-main { flex: 1; min-width: 0; }
+.dl-job-title {
+  font-size: 0.82rem;
+  color: var(--md-sys-color-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 5px;
+}
+.dl-stat { font-size: 0.72rem; color: var(--md-sys-color-on-surface-variant); margin-top: 4px; }
+.dl-cancel-btn { opacity: 0.8; }

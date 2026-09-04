@@ -308,7 +308,7 @@ export function mapAudiusTrack(t) {
     artist: user.name || user.handle || (t.permalink || "").split("/")[1] || "Independent artist",
     album: t.genre || "Audius",
     duration: t.duration || 0,
-    artwork: art["480x480"] || art["1000x1000"] || art["150x150"] || "/cover-default.png",
+    artwork: art["480x480"] || art["1000x1000"] || art["150x150"] || "/cover-default.jpg",
     genre: t.genre || "",
     mood: t.mood || "",
     plays: t.play_count || 0,
@@ -337,7 +337,7 @@ export async function itunesSearch(query) {
         artist: t.artistName || "Artist",
         album: t.collectionName || "",
         duration: Math.round((t.trackTimeMillis || 0) / 1000),
-        artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.png",
+        artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
         playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
       });
     }
@@ -349,7 +349,7 @@ export async function itunesSearch(query) {
         id: `artist:apple:${a.artistId || a.artistName}`,
         kind: "artist",
         name: a.artistName,
-        artwork: a.artworkUrl100 || "/cover-default.png",
+        artwork: a.artworkUrl100 || "/cover-default.jpg",
         source: "apple",
         query: a.artistName,
       });
@@ -363,7 +363,7 @@ export async function itunesSearch(query) {
         kind: "playlist",
         title: al.collectionName || "Album",
         artist: al.artistName || "Apple Music",
-        artwork: String(al.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.png",
+        artwork: String(al.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
         source: "apple",
         query: `${al.collectionName || ""} ${al.artistName || ""}`.trim(),
       });
@@ -454,7 +454,7 @@ export async function radioSearch(query, limit = 24, quality, codec) {
       artist: [s.country, s.tags].filter(Boolean).join(" · ") || "Live radio",
       album: s.codec || "Radio",
       duration: 0,
-      artwork: s.favicon || "/cover-default.png",
+      artwork: s.favicon || "/cover-default.jpg",
       streamUrl: s.url_resolved,
       homepage: s.homepage || "",
       bitrate: s.bitrate || 0,
@@ -470,7 +470,7 @@ export async function audiusUserSearch(query) {
     id: u.id,
     handle: u.handle,
     name: u.name || u.handle,
-    artwork: (u.profile_picture && (u.profile_picture["480x480"] || u.profile_picture["150x150"])) || "/cover-default.png",
+    artwork: (u.profile_picture && (u.profile_picture["480x480"] || u.profile_picture["150x150"])) || "/cover-default.jpg",
     followerCount: u.follower_count || 0,
   }));
 }

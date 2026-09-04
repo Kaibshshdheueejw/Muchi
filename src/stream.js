@@ -14,9 +14,22 @@
 import { json, corsHeaders } from "./util.js";
 import { assertPublicUrl } from "./ssrf.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
-import { audiusStreamUrl } from "./providers.js";
+import { audiusStreamUrl, youtubeAudioStream } from "./providers.js";
 
 const PROXY_ACCEPT = "audio/*,*/*";
+
+function sanitizeForFilename(name) {
+  const clean = String(name || "").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim();
+  return (clean || "download").slice(0, 120);
+}
+
+function extFor(mime) {
+  const m = String(mime || "").toLowerCase();
+  if (m.includes("webm") || m.includes("ogg") || m.includes("opus")) return "webm";
+  if (m.includes("mpeg") || m.includes("mp3") || m.includes("audio/mp")) return "mp3";
+  if (m.includes("flac")) return "flac";
+  return "m4a";
+}
 
 async function pipeUrl(request, src, accept) {
   try {
@@ -88,6 +101,52 @@ export async function handleAudiusStream(url) {
   } catch (e) {
     return json(502, { error: String((e && e.message) || e) });
   }
+}
+
+/**
+ * /api/download?videoId=…|trackId=…|name=… — stream a track as an attachment
+ * with a real filename + Content-Disposition so the client can save an actual
+ * audio file (the Spotube-style "download with tagged metadata" flow). It
+ * reuses the same proxying that makes native background playback work: the
+ * raw source URL (Googlevideo / Audius) is fetched edge-side with proper
+ * headers and streamed back, so the client always gets a valid, playable,
+ * storable file.
+ */
+export async function handleDownload(request, url) {
+  const videoId = url.searchParams.get("videoId") || url.searchParams.get("v") || "";
+  const trackId = url.searchParams.get("trackId") || "";
+  const name = sanitizeForFilename(url.searchParams.get("name") || "");
+  let src = "";
+  let mime = "audio/mp4";
+  if (trackId) {
+    try {
+      src = await audiusStreamUrl(trackId);
+      mime = "audio/mpeg";
+    } catch (e) {
+      return json(502, { error: String((e && e.message) || e) });
+    }
+  } else if (videoId) {
+    try {
+      const s = await youtubeAudioStream(videoId);
+      if (s && s.url) {
+        src = s.url;
+        if (s.mimeType) mime = s.mimeType;
+      }
+    } catch {
+      /* fall through to 502 */
+    }
+    if (!src) return json(502, { error: "No stream available for this track" });
+  } else {
+    return json(400, { error: "Missing videoId or trackId" });
+  }
+  const ext = extFor(mime);
+  const orig = await pipeUrl(request, src, PROXY_ACCEPT);
+  const disposition = `attachment; filename="${name}.${ext}"`;
+  const h = new Headers(orig.headers);
+  h.set("Content-Disposition", disposition);
+  if (!h.has("Content-Type")) h.set("Content-Type", mime.split(";")[0]);
+  h.set("Access-Control-Expose-Headers", "Content-Disposition, Content-Length");
+  return new Response(orig.body, { status: orig.status, headers: h });
 }
 
 /** /api/img?url=… — buffered artwork proxy (server.js:2015). */
