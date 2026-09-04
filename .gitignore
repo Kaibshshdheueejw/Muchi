@@ -50,3 +50,4 @@ ios/App/output/
 .vscode/
 .DS_Store
 Thumbs.db
+preview-router.cjs

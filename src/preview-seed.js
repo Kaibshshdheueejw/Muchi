@@ -92,17 +92,44 @@ const AUDIO_URL = "/api/preview/audio";
 const streamUrlFor = (duration) => `${AUDIO_URL}?dur=${Number(duration) || 30}`;
 const ARTWORK = "/cover-default.png";
 
-// Curated "Made for you" cards for the preview home. Same card shape the
-// client expects (see forYouCardHTML): title, subtitle, query, playlistId,
-// artwork. All use the local cover so they always load in the sandbox.
-const FY_DEFAULT_CARDS = [
-  { id: "fy:pop", title: "Pop Hits", subtitle: "Top English pop", query: "pop", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:hiphop", title: "Hip-Hop", subtitle: "Fresh flows", query: "hiphop", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:rnb", title: "R&B", subtitle: "Smooth grooves", query: "rnb", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:rock", title: "Rock", subtitle: "Earworms", query: "rock", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:dance", title: "Dance", subtitle: "Party starters", query: "dance", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:indie", title: "Indie", subtitle: "New discoveries", query: "indie", artwork: ARTWORK, playlistId: "", kind: "yt" },
+// Curated "Made for you" playlists for the preview home — 10 of them, matching
+// the customer's requirement. Same card shape the client expects (see
+// forYouCardHTML): id, title, subtitle, query, playlistId. Each card has a
+// distinct local cover (`cover`); the card artwork is set to its FIRST SONG's
+// artwork (which carries that cover), so every playlist shows its own art that
+// equals the first song inside it.
+const FY_CARDS = [
+  { id: "fy:pop",      title: "Pop Hits",       subtitle: "Top English pop",          query: "pop",      cover: "/covers/cover-pop.png" },
+  { id: "fy:hiphop",   title: "Hip-Hop",        subtitle: "Fresh flows",              query: "hiphop",   cover: "/covers/cover-hiphop.png" },
+  { id: "fy:rnb",      title: "R&B",            subtitle: "Smooth grooves",           query: "rnb",      cover: "/covers/cover-rnb.png" },
+  { id: "fy:rock",     title: "Rock",           subtitle: "Earworms",                 query: "rock",     cover: "/covers/cover-rock.png" },
+  { id: "fy:dance",    title: "Dance Hits",     subtitle: "Party starters",           query: "dance",    cover: "/covers/cover-dance.png" },
+  { id: "fy:indie",    title: "Indie",          subtitle: "New discoveries",          query: "indie",    cover: "/covers/cover-indie.png" },
+  { id: "fy:trending", title: "Trending",       subtitle: "What the world is playing",query: "trending", cover: "/covers/cover-trending.png" },
+  { id: "fy:chill",    title: "Chill Vibes",    subtitle: "Easy listening, all day",  query: "chill",    cover: "/covers/cover-chill.png" },
+  { id: "fy:workout",  title: "Workout Energy", subtitle: "Push through the burn",     query: "workout",  cover: "/covers/cover-workout.png" },
+  { id: "fy:throw",    title: "Throwback",      subtitle: "90s & 2000s classics",      query: "throwback", cover: "/covers/cover-throwback.png" },
 ];
+
+// Resolve the songs for a "Made for you" card, stamping each track with the
+// card's cover as its artwork so `tracks[0].artwork` (the first song's art) is
+// exactly the cover the card shows. This makes the playlist art track the first
+// song inside it, mirroring production behavior.
+function fyTracks(card) {
+  const base = tracksByQuery(card.query);
+  return base.map((t) => ({ ...t, artwork: card.cover }));
+}
+
+// A playlist object (for the "other playlists" / trending shelves) whose art is
+// likewise the first song's artwork.
+function mkPl(title, tracks) {
+  return {
+    title,
+    artist: "Daily mix",
+    artwork: (tracks[0] && tracks[0].artwork) || ARTWORK,
+    tracks,
+  };
+}
 
 let seq = 0;
 function mkTrack([title, artist, duration], tag) {
@@ -196,13 +223,30 @@ export function previewHome(gl) {
     youtubeCharts: allTracks().slice(0, 20),
     youtubeIndia: allTracks().slice(0, 12),
     youtubeLocal: allTracks().slice(0, 10),
-    countryPlaylists: [],
-    globalPlaylists: [],
-    // Curated "Made for you" cards so the section renders real covers in the
-    // preview (the client also builds defaults, but those start with empty
-    // artwork "" which some browsers render as a broken <img>). Using the same
-    // titles as the production buildForYouPlaylists keeps the format identical.
-    forYouPlaylists: FY_DEFAULT_CARDS,
+    // "Other playlists" — art is the first song's art inside each one.
+    countryPlaylists: [
+      mkPl("US Top 40", fyTracks(FY_CARDS[0])),
+      mkPl("Hot Hip-Hop", fyTracks(FY_CARDS[1])),
+      mkPl("Top R&B", fyTracks(FY_CARDS[2])),
+    ],
+    globalPlaylists: [
+      mkPl("Global Dance", fyTracks(FY_CARDS[4])),
+      mkPl("Worldwide Hits", fyTracks(FY_CARDS[6])),
+      mkPl("Indie Radar", fyTracks(FY_CARDS[5])),
+    ],
+    // 10 curated "Made for you" cards, each with artwork = its first song's art.
+    forYouPlaylists: FY_CARDS.map((c) => {
+      const tracks = fyTracks(c);
+      return {
+        id: c.id,
+        title: c.title,
+        subtitle: c.subtitle,
+        query: c.query,
+        artwork: (tracks[0] && tracks[0].artwork) || c.cover,
+        playlistId: "",
+        kind: "yt",
+      };
+    }),
     audius: [],
     underground: allTracks().slice(0, 8),
     radio: [],
@@ -236,9 +280,12 @@ export function previewShelf(id, q, gl) {
     return { id, title: (shelf && shelf.title) || "Songs", query: q || "", tracks };
   }
   // No id → a query-driven playlist ("Made for you" card). Honor the query so
-  // each card resolves to its own songs, not the same list.
-  const tracks = tracksByQuery(q);
-  return { id: "", title: q || "Songs", query: q || "", tracks };
+  // each card resolves to its own songs, not the same list. If the query maps
+  // to one of the curated "Made for you" cards, stamp each track with that
+  // card's cover so the songs carry the same art as the playlist's first song.
+  const card = FY_CARDS.find((c) => c.query === String(q || "").toLowerCase().trim());
+  const tracks = card ? fyTracks(card) : tracksByQuery(q);
+  return { id: "", title: (card && card.title) || q || "Songs", query: q || "", tracks };
 }
 
 // ── /api/search + /api/youtube/search ────────────────────────────────────
