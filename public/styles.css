@@ -2627,6 +2627,16 @@ body[data-view="now"] .view {
   max-height: calc(100dvh - var(--player) - var(--dock));
   overflow: hidden;
 }
+/* The "now" screen (song details + lyrics) is a full-bleed immersive view.
+   Hide the bottom navigation (Home/Search/Radio/Library) while it is open so
+   it doesn't cover the lyrics. The in-now back chip returns to the previous
+   screen. */
+body[data-view="now"] .dock-nav {
+  display: none !important;
+}
+body[data-view="now"] .player {
+  bottom: calc(10px + var(--safe-b));
+}
 .ly-screen {
   position: relative;
   isolation: isolate;

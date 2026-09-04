@@ -7,7 +7,7 @@
 //     (user-generated keys are NOT KV-cached — KV free allows 1k writes/day)
 // Response shapes are byte-identical to server.js.
 
-import { json, cached, kvCached, fetchJSON } from "./util.js";
+import { json, cached, kvCached, fetchJSON, isEnglishTrack } from "./util.js";
 import {
   searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
   itunesSearch,
@@ -477,6 +477,11 @@ export async function handleDiscover(url) {
         const rows = s.status === "fulfilled" ? s.value : [];
         for (const row of rows || []) {
           if (!row || row.source === "radio") continue;
+          // Keep \"Made for you\" mixes English-only: skip any clearly
+          // non-English (e.g. Hindi/Devanagari) song that slips in from the
+          // taste profile artist/genre queries. This was the reported bug —
+          // the mix turned up Hindi songs mixed in with English ones.
+          if (!isEnglishTrack(row)) continue;
           const k = String(row.videoId || row.id || "");
           if (!k || seen.has(k)) continue;
           seen.add(k);
@@ -484,6 +489,25 @@ export async function handleDiscover(url) {
           if (out.length >= 40) break;
         }
         if (out.length >= 40) break;
+      }
+      // If taste-driven artists/genres returned only non-English results, fall
+      // back to a clean English-only default so the mix is never empty or
+      // full of Hindi/regional tracks.
+      if (!out.length) {
+        for (const q of ["english pop hits official audio", "top english songs this week", "indie pop english songs"]) {
+          try {
+            const rows = (await searchYouTube(q, gl, true)) || [];
+            for (const row of rows) {
+              if (!row || row.source === "radio" || !isEnglishTrack(row)) continue;
+              const k = String(row.videoId || row.id || "");
+              if (!k || seen.has(k)) continue;
+              seen.add(k);
+              out.push(row);
+              if (out.length >= 30) break;
+            }
+          } catch {}
+          if (out.length >= 30) break;
+        }
       }
       let seed = 0;
       const weekSeed = week || "mix";

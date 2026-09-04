@@ -85,6 +85,18 @@ const POOL_TAGS = [
 const AUDIO_URL = "/api/preview/audio";
 const ARTWORK = "/cover-default.png";
 
+// Curated "Made for you" cards for the preview home. Same card shape the
+// client expects (see forYouCardHTML): title, subtitle, query, playlistId,
+// artwork. All use the local cover so they always load in the sandbox.
+const FY_DEFAULT_CARDS = [
+  { id: "fy:pop", title: "Pop Hits", subtitle: "Top English pop", query: "pop hits", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:hiphop", title: "Hip-Hop", subtitle: "Fresh flows", query: "hip hop hits", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:rnb", title: "R&B", subtitle: "Smooth grooves", query: "rnb songs", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:rock", title: "Rock", subtitle: "Earworms", query: "rock songs", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:dance", title: "Dance", subtitle: "Party starters", query: "dance hits", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:indie", title: "Indie", subtitle: "New discoveries", query: "indie songs", artwork: ARTWORK, playlistId: "", kind: "yt" },
+];
+
 let seq = 0;
 function mkTrack([title, artist, duration], tag) {
   seq += 1;
@@ -179,7 +191,11 @@ export function previewHome(gl) {
     youtubeLocal: allTracks().slice(0, 10),
     countryPlaylists: [],
     globalPlaylists: [],
-    forYouPlaylists: [],
+    // Curated "Made for you" cards so the section renders real covers in the
+    // preview (the client also builds defaults, but those start with empty
+    // artwork "" which some browsers render as a broken <img>). Using the same
+    // titles as the production buildForYouPlaylists keeps the format identical.
+    forYouPlaylists: FY_DEFAULT_CARDS,
     audius: [],
     underground: allTracks().slice(0, 8),
     radio: [],
@@ -258,17 +274,22 @@ export function previewRadio(q) {
 
 // ── /api/lyrics ──────────────────────────────────────────────────────────
 export function previewLyrics(title, artist) {
+  // Match the contract the client (public/app.js loadLyrics) actually reads:
+  // { lyrics: <string>, synced: <array> }. Previously this returned { synced,
+  // plain } which loadLyrics ignored (it reads .lyrics / .synced), so the
+  // lyrics screen showed "Lyrics aren't available" in the preview. Now the
+  // plain lyrics come through .lyrics and render correctly.
   return {
     title: title || "Song",
     artist: artist || "Artist",
-    synced: null,
-    plain: [
+    lyrics: [
       `♪ ${title || "This song"} ♪`,
       "",
       `— ${artist || "Artist"}`,
       "",
       "(Preview lyrics shown for testing.)",
-    ],
+    ].join("\n"),
+    synced: [],
   };
 }
 
