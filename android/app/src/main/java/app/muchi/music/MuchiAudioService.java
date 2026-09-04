@@ -25,9 +25,9 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media.MediaMetadataCompat;
-import androidx.media.session.MediaSessionCompat;
-import androidx.media.session.PlaybackStateCompat;
+import android.support.v4.media.MediaMetadataCompat;
+import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
