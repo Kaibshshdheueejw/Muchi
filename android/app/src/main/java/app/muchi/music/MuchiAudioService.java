@@ -19,6 +19,7 @@ import android.os.Looper;
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
+import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
@@ -123,6 +124,13 @@ public class MuchiAudioService extends Service {
         if (intent != null && ACTION_PLAY.equals(intent.getAction())) {
             String url = intent.getStringExtra(EXTRA_URL);
             if (url != null && !url.isEmpty()) {
+                // Promote to a foreground service IMMEDIATELY (before any
+                // network/prepare work) so Android reliably keeps it alive in
+                // the background and shows the media notification. Without
+                // this, on some devices the OS can kill the service (music
+                // stops when you leave the app) or the notification never
+                // appears.
+                startInForeground();
                 loadTrack(
                         url,
                         intent.getStringExtra(EXTRA_TITLE),
@@ -130,6 +138,14 @@ public class MuchiAudioService extends Service {
                         intent.getStringExtra(EXTRA_ARTWORK),
                         intent.getLongExtra(EXTRA_DURATION_MS, 0L));
             }
+        } else if (intent == null && player != null) {
+            // START_STICKY restart: the OS recreated us. Re-attach the
+            // foreground notification so background playback survives a
+            // system-initiated process restart (common with aggressive OEM
+            // battery managers).
+            startInForeground();
+            ticker.removeCallbacks(tick);
+            ticker.post(tick);
         }
         return START_STICKY;
     }
@@ -178,14 +194,14 @@ public class MuchiAudioService extends Service {
                     // WAKE_LOCK is declared in the manifest — make it effective:
                     // WAKE_MODE_LOCAL holds a CPU wake lock while the player is
                     // active so background/lock-screen streaming survives doze.
-                    .setWakeMode(ExoPlayer.C.WAKE_MODE_LOCAL)
+                    .setWakeMode(C.WAKE_MODE_LOCAL)
                     // Explicit music audio attributes + explicit audio-focus
                     // handling (ExoPlayer requests focus on play, abandons on
                     // pause; other audio ducking/loss is handled by the system).
                     .setAudioAttributes(
                             new androidx.media3.common.AudioAttributes.Builder()
-                                    .setContentType(androidx.media3.common.AudioAttributes.CONTENT_TYPE_MUSIC)
-                                    .setUsage(androidx.media3.common.AudioAttributes.USAGE_MEDIA)
+                                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                                    .setUsage(C.USAGE_MEDIA)
                                     .build(),
                             true)
                     .build();
@@ -246,6 +262,14 @@ public class MuchiAudioService extends Service {
                 }
             });
             session.setActive(true);
+            // Tapping the notification / lock-screen brings the app back.
+            try {
+                Intent open = new Intent(this, MainActivity.class);
+                open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                session.setSessionActivity(PendingIntent.getActivity(this, 0, open,
+                        Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0));
+            } catch (Exception ignored) {
+            }
         }
 
         endedNotified = false;
@@ -314,6 +338,29 @@ public class MuchiAudioService extends Service {
                 .setState(playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
                         Math.max(0, positionMs), 1f)
                 .build());
+    }
+
+    private void startInForeground() {
+        // Immediately promote the service to foreground so Android keeps it
+        // alive and shows a notification even before the media session is
+        // ready or a network stream begins loading.
+        if (notificationManager == null) return;
+        Notification.Builder builder = new Notification.Builder(this);
+        if (Build.VERSION.SDK_INT >= 26) builder.setChannelId(CHANNEL_ID);
+        builder.setSmallIcon(R.drawable.ic_stat_muchi);
+        builder.setContentTitle(trackTitle == null || trackTitle.isEmpty() ? "Muchi" : trackTitle);
+        builder.setContentText(trackArtist == null || trackArtist.isEmpty() ? "Muchi" : trackArtist);
+        builder.setOngoing(true);
+        builder.setVisibility(Notification.VISIBILITY_PUBLIC);
+        Notification notification = builder.build();
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        } else if (Build.VERSION.SDK_INT >= 26) {
+            startForeground(NOTIFICATION_ID, notification);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
     }
 
     private void showNotification() {

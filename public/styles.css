@@ -1277,6 +1277,11 @@ img { max-width: 100%; display: block; }
   border-radius: 6px;
   padding: 2px 7px;
 }
+/* The "/" is a physical-keyboard shortcut hint — it looks out of place on a
+   phone where there is no key to press, so hide it on touch devices. */
+@media (pointer: coarse) {
+  .search-wrap kbd { display: none; }
+}
 .top-right { display: flex; align-items: center; gap: 8px; }
 
 .icon-btn {
@@ -1698,6 +1703,18 @@ img { max-width: 100%; display: block; }
   margin: 0;
   color: var(--md-sys-color-on-surface-variant);
   font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* "Made for you" cards show how many songs are inside (e.g. 20 songs). */
+.fy-count {
+  display: block;
+  margin-top: 3px;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--md-sys-color-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2622,6 +2639,16 @@ body[data-view="now"] .view {
   max-height: calc(100dvh - var(--player) - var(--dock));
   overflow: hidden;
 }
+/* The "now" screen (song details + lyrics) is a full-bleed immersive view.
+   Hide the bottom navigation (Home/Search/Radio/Library) while it is open so
+   it doesn't cover the lyrics. The in-now back chip returns to the previous
+   screen. */
+body[data-view="now"] .dock-nav {
+  display: none !important;
+}
+body[data-view="now"] .player {
+  bottom: calc(10px + var(--safe-b));
+}
 .ly-screen {
   position: relative;
   isolation: isolate;
@@ -2633,6 +2660,11 @@ body[data-view="now"] .view {
   overflow: hidden;
   border-radius: 18px;
   background: color-mix(in srgb, var(--song-container, #1a1a1a) 70%, #000);
+}
+/* Light mode: the base rule mixes 30% black, which reads as a dark slab on
+   the light canvas — use the same soft light mix as the docked player. */
+html[data-theme="light"] .ly-screen {
+  background: color-mix(in srgb, var(--song-container) 88%, #fff);
 }
 .ly-bg {
   position: absolute;
@@ -3240,9 +3272,15 @@ html[data-ui="glass"] .player::before {
   position: absolute;
   inset: -40% -20%;
   background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.16) 48%, transparent 62%);
-  animation: glassShine 7s ease-in-out infinite;
+  /* The shine only animates while something is playing (JS sets
+     body[data-playing="1"]); a perpetually animating gradient layer is
+     pure GPU cost on an idle player. When paused the static sheen stays. */
+  animation: none;
   pointer-events: none;
   z-index: 0;
+}
+html[data-ui="glass"] body[data-playing="1"] .player::before {
+  animation: glassShine 7s ease-in-out infinite;
 }
 @keyframes glassShine {
   0%, 100% { transform: translateX(-12%) rotate(8deg); opacity: 0.35; }
@@ -3273,6 +3311,12 @@ html[data-player="bar"] .player {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: color-mix(in srgb, var(--song-container) 94%, #000);
+}
+/* This rule appears after the light-mode .player override (top of file) at
+   equal specificity, so the dark mix would win for the bar style — re-assert
+   the light mix with higher specificity. */
+html[data-theme="light"][data-player="bar"] .player {
+  background: color-mix(in srgb, var(--song-container) 94%, #fff);
 }
 html[data-player="bar"] .player::before { display: none; }
 .ui-pick-preview.player-pill { background: linear-gradient(90deg, rgba(255,255,255,0.25), #3d5afe); border-radius: 20px; }
@@ -4737,3 +4781,76 @@ html[data-native="1"] .filled-btn {
   color: var(--md-sys-color-on-primary);
   box-shadow: 0 2px 8px -2px var(--song-glow);
 }
+
+/* ── Real downloads ─────────────────────────────────────────────── */
+.dl-panel {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%) translateY(12px);
+  width: min(92vw, 460px);
+  z-index: 60;
+  display: grid;
+  gap: 8px;
+  background: color-mix(in srgb, var(--md-sys-color-surface-container) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline) 22%, transparent);
+  border-radius: 16px;
+  padding: 10px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.dl-panel.show { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+.dl-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+.dl-panel-row > .material-symbols-outlined { color: var(--song-primary); }
+.dl-panel-main { flex: 1; min-width: 0; }
+.dl-panel-title {
+  font-size: 0.8rem;
+  color: var(--md-sys-color-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+.dl-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--md-sys-color-outline) 24%, transparent);
+  overflow: hidden;
+}
+.dl-progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--song-primary);
+  transition: width 0.2s ease;
+}
+.dl-card .list { margin-top: 8px; }
+.dl-job {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-top: 1px solid color-mix(in srgb, var(--md-sys-color-outline) 14%, transparent);
+}
+.dl-job > .material-symbols-outlined { color: var(--song-primary); }
+.dl-job.dl-err > .material-symbols-outlined { color: #ff6b6b; }
+.dl-job.dl-cancel > .material-symbols-outlined { color: var(--md-sys-color-outline); }
+.dl-job-main { flex: 1; min-width: 0; }
+.dl-job-title {
+  font-size: 0.82rem;
+  color: var(--md-sys-color-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 5px;
+}
+.dl-stat { font-size: 0.72rem; color: var(--md-sys-color-on-surface-variant); margin-top: 4px; }
+.dl-cancel-btn { opacity: 0.8; }

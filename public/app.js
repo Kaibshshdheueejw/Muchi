@@ -75,6 +75,11 @@
       bgPlay: true,
       autoLyrics: false,
       autoVideo: false,
+      // ytAudio: play YouTube as a background audio stream on native shells
+      // (enables OS media notification + lock-screen/background playback).
+      // Default on for native; disabled automatically on web. Set to false to
+      // force the in-app video player instead.
+      ytAudio: null,
       codec: "auto",
       notifyFollows: true,
       github: "",
@@ -86,6 +91,7 @@
     }, load("aura.prefs", {})),
     showProfile: false,
     downloads: [],
+    dlQueue: [],
     following: [],
     forYou: [],
     discovery: load("aura.discovery", { week: "", tracks: [] }),
@@ -107,7 +113,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.2.1";
+  const APP_VERSION = "1.5.1";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -294,15 +300,19 @@
     } catch { systemMQL = null; }
   }
   function syncNativeStatusBar(t) {
-    // Keep the Android status bar consistent with the in-app theme
-    // (Capacitor StatusBar plugin; no-op on web/iOS).
+    // Keep the native status bar consistent with the in-app theme
+    // (Capacitor StatusBar plugin; no-op on web). On iOS this flips the
+    // status bar text light/dark so Light mode stays readable; on Android
+    // it also recolors the bar itself.
     const P = nativePlugins();
     const SB = P && P.StatusBar;
-    if (!SB || !window.Capacitor || !window.Capacitor.getPlatform || window.Capacitor.getPlatform() !== "android") return;
+    if (!SB || !window.Capacitor || !window.Capacitor.getPlatform) return;
+    const plat = window.Capacitor.getPlatform();
+    if (plat !== "android" && plat !== "ios") return;
     const light = t === "light";
     try {
       SB.setStyle({ style: light ? "DARK" : "LIGHT" });
-      SB.setBackgroundColor({ color: light ? "#e6eae6" : "#101413" });
+      if (plat === "android") SB.setBackgroundColor({ color: light ? "#e6eae6" : "#101413" });
     } catch {}
   }
   function applyTheme() {
@@ -403,6 +413,7 @@
     state.recents = asArray(load("aura.recents", state.recents));
     state.following = asArray(load("aura.following", state.following));
     state.downloads = asArray(load("aura.downloads", state.downloads));
+    state.dlQueue = asArray(load("aura.dlQueue", state.dlQueue)).filter((d) => d && d.status === "downloading");
     const pls = asArray(load("aura.playlists", state.playlists)).map((p) => ({
       name: (p && p.name) || "Playlist",
       tracks: asArray(p && p.tracks),
@@ -549,13 +560,28 @@
   }
 
   async function api(path, timeoutMs = 18000, opts) {
+    const method = String(((opts && opts.method) || "GET")).toUpperCase();
+    // Only cache safe, anonymous, idempotent GET catalog reads. Never cache
+    // auth/session/version/live endpoints, stream/info URLs, or `refresh=1`
+    // (which exists precisely to bypass caches).
+    const cacheable =
+      method === "GET" &&
+      !/\/api\/(auth|health|version|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
+      !/[?&]refresh=1\b/.test(path);
+    const cacheKey = cacheable ? `${API_CACHE_V}:${path}` : "";
+    if (cacheable) {
+      const hit = await apiCacheGet(cacheKey);
+      if (hit != null) return hit;
+    }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const headers = Object.assign({}, (opts && opts.headers) || {}, authHeaders());
       const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal }, opts || {}, { headers }));
       if (!res.ok) throw new Error(await res.text());
-      return await res.json();
+      const data = await res.json();
+      if (cacheable && apiCacheIsUsable(data)) await apiCachePut(cacheKey, data).catch(() => {});
+      return data;
     } finally {
       clearTimeout(timer);
     }
@@ -604,6 +630,8 @@
       toast("Removed from Liked Songs");
     }
     if (state.view === "library" || state.view === "home") render();
+    // Liking shifts the taste profile — reorder "Made for you" cards too.
+    paintHomeSoon();
   }
 
   function openLikedFolder() {
@@ -651,7 +679,7 @@
     const liked = isLiked(track);
     const inLiked = where === "liked";
     const inPl = where === "playlist" && typeof state.activePlaylist === "number";
-    const canDl = track.source === "audius";
+    const canDl = !!(track && (track.trackId || track.videoId));
     showModal({
       title: track.title,
       body: `<p>${escapeHTML(track.artist)}</p>
@@ -710,6 +738,9 @@
     const item = { ...track, playedAt: Date.now() };
     state.recents = [item, ...state.recents.filter((t) => t.id !== track.id)].slice(0, 200);
     save("aura.recents", state.recents);
+    // Taste-adaptive "Made for you": a fresh play shifts the taste profile, so
+    // re-render the home row to reorder the mood cards around the listener.
+    paintHomeSoon();
   }
 
   function artistName(t) {
@@ -773,8 +804,12 @@
       const a = artistName(t);
       if (a && a !== "YouTube" && a !== "Live radio") artists[a] = (artists[a] || 0) + 1;
       sources[t.source || "other"] = (sources[t.source || "other"] || 0) + 1;
-      if (t.genre) genres[t.genre] = (genres[t.genre] || 0) + 1;
-      else if (t.album && t.source === "audius") genres[t.album] = (genres[t.album] || 0) + 1;
+      // Genre/mood signals come from several places: explicit `genre` (radio /
+      // curated), the mood tag carried by preview/catalog rows (`_tag` /
+      // `mood`), and the Audius album-fallback. Collect all of them so a
+      // listener's favourite moods drive the "Made for you" reordering.
+      const g = t.genre || t._tag || t.mood || (t.album && t.source === "audius" ? t.album : "");
+      if (g) genres[g] = (genres[g] || 0) + 1;
     }
     const rank = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
     return {
@@ -926,20 +961,83 @@
     if (src === "youtube") return `<span class="badge yt">YouTube</span>`;
     if (src === "audius") return `<span class="badge au">Audius</span>`;
     if (src === "download") return `<span class="badge au">Saved</span>`;
+    if (src === "preview") return `<span class="badge rd">Sample</span>`;
+    if (src === "itunes" || src === "apple") return `<span class="badge au">iTunes</span>`;
+    if (src === "deezer") return `<span class="badge au">Deezer</span>`;
+    if (src === "radio") return `<span class="badge rd">Radio</span>`;
     return `<span class="badge rd">Radio</span>`;
   }
 
   const IDB_NAME = "aura";
   const IDB_STORE = "downloads";
+  const API_STORE = "api";
   function openIdb() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(IDB_NAME, 1);
+      const req = indexedDB.open(IDB_NAME, 2);
       req.onupgradeneeded = () => {
         if (!req.result.objectStoreNames.contains(IDB_STORE)) req.result.createObjectStore(IDB_STORE);
+        if (!req.result.objectStoreNames.contains(API_STORE)) req.result.createObjectStore(API_STORE);
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
+  }
+  // ── Client-side API response cache ────────────────────────────────────
+  // GET /api responses are stored in IndexedDB so a playlist/search/home/
+  // artist the user already opened loads INSTANTLY next time (no network
+  // wait). Only used when the browser/WKWebView has IndexedDB; never blocks
+  // the network fetch — a cache miss falls straight through to the API.
+  const API_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 h (anything longer risks stale)
+  // Bump this when the backend SHAPE of a cached GET changes (e.g. "Made for
+  // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
+  // a stale IndexedDB/payload from the previous deployment (which is exactly
+  // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
+  const API_CACHE_V = "v3-fy10";
+  // Never cache an "empty" catalog payload. If a provider is temporarily
+  // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
+  // tracks); caching that would freeze the shelf empty for the whole TTL.
+  // A miss just re-fetches — the safe direction.
+  function apiCacheIsUsable(data) {
+    if (!data || typeof data !== "object") return false;
+    let s = "";
+    try { s = JSON.stringify(data); } catch { return false; }
+    if (s.length < 40) return false; // trivial/empty object
+    if (Array.isArray(data.tracks) && data.tracks.length === 0) return false;
+    if (Array.isArray(data.songs) && data.songs.length === 0) return false;
+    if (Array.isArray(data.albums) && data.albums.length === 0) return false;
+    if (Array.isArray(data.youtube) && data.youtube.length === 0) return false;
+    if (Array.isArray(data.shelves)) {
+      if (data.shelves.length === 0) return false;
+      // A home payload whose every shelf is empty adds nothing.
+      const anyTracks = data.shelves.some((sh) => sh && Array.isArray(sh.tracks) && sh.tracks.length);
+      if (!anyTracks) return false;
+    }
+    return true;
+  }
+  async function apiCacheGet(key) {
+    try {
+      const db = await openIdb();
+      return await new Promise((resolve) => {
+        const req = db.transaction(API_STORE, "readonly").objectStore(API_STORE).get(key);
+        req.onsuccess = () => {
+          const rec = req.result;
+          if (!rec || typeof rec.at !== "number") return resolve(null);
+          resolve(Date.now() - rec.at < API_CACHE_TTL ? rec.value : null);
+        };
+        req.onerror = () => resolve(null);
+      });
+    } catch { return null; }
+  }
+  async function apiCachePut(key, value) {
+    try {
+      const db = await openIdb();
+      await new Promise((resolve) => {
+        const tx = db.transaction(API_STORE, "readwrite");
+        tx.objectStore(API_STORE).put({ at: Date.now(), value }, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    } catch { /* cache is best-effort */ }
   }
   async function idbPut(key, val) {
     const db = await openIdb();
@@ -978,41 +1076,330 @@
     });
   }
 
-  async function downloadTrack(t) {
-    if (!t || t.source !== "audius" || !t.trackId) {
-      toast("Only independent Audius tracks can be saved offline.");
-      return;
+  /* ── Real offline downloads (user-visible files on disk) ─────────────
+     Native shells ship a MuchiDownload plugin that writes a real, tagged
+     audio file to disk (Android MediaStore.Audio, iOS Documents). On the
+     web we use the File System Access API where available and fall back to
+     a blob + anchor download. Either way the file lands on disk with its
+     ID3/MP4 metadata embedded, and the app keeps a file handle / local URI
+     so it can be replayed offline. Downloads run through a queue with live
+     progress + cancel. */
+  function nativeDownloader() {
+    if (IS_NATIVE && window.Capacitor && window.Capacitor.Plugins) {
+      const p = window.Capacitor.getPlatform ? window.Capacitor.getPlatform() : "";
+      if (p === "android" || p === "ios") return window.Capacitor.Plugins.MuchiDownload || null;
     }
-    if (state.downloads.some((d) => d.id === t.id)) {
+    return null;
+  }
+  function sanitizeName(s) {
+    return String(s || "track").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "track";
+  }
+  function extFromMime(t) {
+    const src = String((t && t.streamMime) || "").toLowerCase();
+    const u = String((t && t.streamUrl) || "");
+    if (/mp3|mpeg|audio\/mp/.test(src) || /\.mp3($|\?)/.test(u)) return "mp3";
+    if (/flac/.test(src) || /\.flac($|\?)/.test(u)) return "flac";
+    if (/m4a|mp4|aac|audio\/mp4/.test(src) || /\.m4a($|\?)/.test(u)) return "m4a";
+    return "webm";
+  }
+  function slimTrack(t) {
+    const s = { id: t.id, title: t.title, artist: t.artist, source: t.source, duration: t.duration };
+    if (t.videoId) s.videoId = t.videoId;
+    if (t.trackId) s.trackId = t.trackId;
+    if (t.album) s.album = t.album;
+    if (t.genre) s.genre = t.genre;
+    if (t.artwork) s.artwork = t.artwork;
+    return s;
+  }
+  function downloadFilePath(t) {
+    // URL carrying enough info for the server to stream + name the file.
+    if (t && t.source === "audius" && t.trackId) {
+      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`;
+    }
+    if (t && t.videoId) {
+      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`;
+    }
+    return "";
+  }
+
+  function concatBytes(parts) {
+    let n = 0;
+    for (const p of parts) n += p.byteLength;
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const p of parts) { out.set(p instanceof Uint8Array ? p : new Uint8Array(p), o); o += p.byteLength; }
+    return out;
+  }
+  async function artworkDataURI(t) {
+    const art = t && t.artwork;
+    if (!art || typeof art !== "string") return "";
+    if (/^data:/i.test(art)) return art;
+    if (!/^https?:/i.test(art)) return "";
+    try {
+      const r = await fetch(art, { mode: "cors" });
+      if (!r.ok) return "";
+      const ct = (r.headers.get("content-type") || "image/jpeg").split(";")[0].trim();
+      const b64 = await blobToBase64(await r.arrayBuffer());
+      return `data:${ct};base64,${b64}`;
+    } catch { return ""; }
+  }
+  function blobToBase64(buf) {
+    let s = "";
+    const chunk = 0x8000;
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i += chunk) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(s);
+  }
+  function fmtBytes(b) {
+    const n = Number(b) || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+    return n + " B";
+  }
+  function dlProgressKey(id) { return `dlProgress:${id}`; }
+  function saveDlJob(job) {
+    state.dlQueue = state.dlQueue || [];
+    const i = state.dlQueue.findIndex((d) => d.id === job.id);
+    if (i >= 0) state.dlQueue[i] = job; else state.dlQueue.unshift(job);
+    save("aura.dlQueue", state.dlQueue);
+    const bar = $(`dlBar-${job.id}`);
+    if (bar) {
+      const pct = Math.min(100, Math.round((job.progress || 0) * 100));
+      bar.style.width = `${pct}%`;
+      const txt = $(`dlStat-${job.id}`);
+      if (txt) txt.textContent = job.status === "downloading" ? `${pct}%` : job.status === "saving" ? "Saving…" : job.status;
+    }
+    renderDlPanel();
+  }
+
+  async function saveDownloadToDisk(meta, t, job, onProgress) {
+    const ND = nativeDownloader();
+    if (ND) {
+      // Resolve cover art to a base64 data URI so the native plugin can embed
+      // the picture into the file (best-effort; title/artist/album always tag).
+      const artURI = await artworkDataURI(t);
+      const res = await ND.startDownload({
+        id: job.id,
+        url: meta.url,
+        filename: meta.filename,
+        title: t.title || "",
+        artist: t.artist || "",
+        album: t.album || "",
+        genre: t.genre || "",
+        artwork: (t.artwork && typeof t.artwork === "string") ? t.artwork : "",
+        artworkData: artURI || "",
+        mime: meta.mime,
+      });
+      // The native plugin resolves {id, uri} — keep only the URI string.
+      return (res && typeof res === "object" && res.uri) ? res.uri : String(res || "");
+    }
+    // Web / PWA — File System Access API, then blob+<a download> fallback.
+    const res = await fetch(meta.url, { credentials: "same-origin" });
+    if (!res.ok) throw new Error("download failed");
+    const total = Number(res.headers.get("content-length") || 0);
+    const cd = res.headers.get("content-disposition") || "";
+    const m = cd.match(/filename="?([^";]+)"?/i);
+    const fname = (m && m[1]) ? m[1] : meta.filename;
+    const ext = (fname.split(".").pop() || meta.ext).toLowerCase();
+    const ctype = (res.headers.get("content-type") || meta.mime || "audio/webm").split(";")[0].trim();
+    const w = window;
+    // Real, embedded audio tags (ID3v2 for mp3, MP4 ilst for m4a) so the
+    // downloaded file shows title/artist/album/cover in any music app. The
+    // native shells mirror the same frames (see public/meta.js).
+    const MM = w.MuchiMeta;
+    const collect = [];
+    const reader = res.body.getReader();
+    let buf = 0;
+    let cancelled = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (job.status === "cancelled") { cancelled = true; break; }
+      collect.push(value);
+      buf += value.byteLength;
+      onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
+    }
+    if (cancelled) throw new Error("cancelled");
+    let audioBytes = concatBytes(collect);
+    if (MM) {
+      // Best-effort artwork bytes (CORS-permitting); title/artist/album always embed.
+      let picture;
+      const art = t && t.artwork;
+      if (art && /^https?:/i.test(art)) {
+        try {
+          const ar = await fetch(art, { mode: "cors" });
+          if (ar.ok) picture = { mime: (ar.headers.get("content-type") || "image/jpeg").split(";")[0], data: new Uint8Array(await ar.arrayBuffer()) };
+        } catch {}
+      }
+      audioBytes = MM.embed(audioBytes, ext, {
+        title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
+      });
+    }
+    const blobType = ctype || "audio/webm";
+    if (w.showSaveFilePicker) {
+      const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
+      const writable = await handle.createWritable();
+      await writable.write(audioBytes);
+      await writable.close();
+      // Keep the file handle so the app can reopen the real file offline.
+      try { await idbPut(t.id, { handle, fname }); } catch {}
+      return `fsp:${fname}`;
+    }
+    // No File System Access API: build a blob then trigger a real browser
+    // file save via a temporary anchor.
+    const blob = new Blob([audioBytes], { type: blobType });
+    try { await idbPut(t.id, blob); } catch {}
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    return `blob:${fname}`;
+  }
+
+  async function downloadTrack(t) {
+    if (!t) return;
+    // Already fully saved?
+    const existing = state.downloads.find((d) => trackKey(d) === trackKey(t));
+    if (existing && existing.uri) {
       toast("Already saved on this device");
       return;
     }
-    toast("Saving track…");
+    // Job id follows the track id so the native downloader can map the saved
+    // file back to this track (removeDownload must be able to find + delete it).
+    const jid = t.id || `dl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    // Already in progress?
+    if ((state.dlQueue || []).some((d) => d.id === jid && (d.status === "downloading" || d.status === "saving"))) {
+      toast("Already downloading");
+      return;
+    }
+    const path = downloadFilePath(t);
+    if (!path) {
+      toast("This track can't be saved offline");
+      return;
+    }
+    const meta = {
+      url: path,
+      filename: `${sanitizeName(t.title)}.${extFromMime(t)}`,
+      mime: t.streamMime || (/mpeg|mp3/i.test(String(t.streamUrl)) ? "audio/mpeg" : "audio/mp4"),
+      ext: extFromMime(t),
+    };
+    const job = {
+      id: jid,
+      track: slimTrack(t),
+      filename: meta.filename,
+      progress: 0, bytes: 0, total: 0,
+      status: "downloading", cancel: false,
+    };
+    state.dlQueue = state.dlQueue || [];
+    state.dlQueue.unshift(job);
+    save("aura.dlQueue", state.dlQueue);
+    render(); // show the download manager (library/settings) or toast
+    toast("Downloading…");
     try {
-      const res = await fetch(`${API_BASE}/api/audius/file/${encodeURIComponent(t.trackId)}`);
-      if (!res.ok) throw new Error("download failed");
-      const blob = await res.blob();
-      await idbPut(t.id, blob);
-      const meta = { ...t, savedAt: Date.now() };
-      delete meta.streamUrl;
-      state.downloads = [meta, ...state.downloads.filter((d) => d.id !== t.id)];
+      const onProgress = (p) => { job.bytes = p.bytes || 0; job.total = p.total || 0; job.progress = p.progress || 0; saveDlJob(job); };
+      job.status = "downloading"; saveDlJob(job);
+      const uri = await saveDownloadToDisk(meta, t, job, onProgress);
+      if (job.status === "cancelled" || !uri) throw new Error("cancelled");
+      job.status = "done"; job.progress = 1; saveDlJob(job);
+      // Record metadata + the local uri so it can replay offline.
+      const dl = { ...slimTrack(t), uri, streamMime: meta.mime, savedAt: Date.now() };
+      delete dl.streamUrl;
+      state.downloads = [dl, ...state.downloads.filter((d) => d.id !== dl.id)];
       save("aura.downloads", state.downloads);
-      toast("Saved for offline", true, "success");
+      toast("Saved to your files", true, "success");
       if (IS_NATIVE && document.hidden) nativeNotifySaved(t.title);
-      renderChrome();
+      // Clear the finished job from the active queue shortly after.
+      setTimeout(() => {
+        state.dlQueue = (state.dlQueue || []).filter((d) => d.id !== job.id);
+        save("aura.dlQueue", state.dlQueue || []);
+        if (state.view === "settings" || state.view === "library" || state.view === "home") render();
+      }, 1500);
       if (state.view === "settings" || state.view === "library" || state.view === "now" || state.view === "home") render();
     } catch (e) {
-      console.error(e);
-      toast("Could not save this track", true, "error");
+      const isCancel = !!(e && (e.message === "cancelled" || e.name === "AbortError"));
+      job.status = isCancel ? "cancelled" : "error";
+      saveDlJob(job);
+      if (isCancel) toast("Download cancelled");
+      else { console.error(e); toast("Download failed", true, "error"); }
     }
   }
 
+  async function cancelDownload(id) {
+    state.dlQueue = (state.dlQueue || []).map((d) => d.id === id ? { ...d, status: "cancelled", cancel: true } : d);
+    save("aura.dlQueue", state.dlQueue);
+    const ND = nativeDownloader();
+    if (ND && ND.cancelDownload) { try { ND.cancelDownload({ id }).catch(() => {}); } catch {} }
+    toast("Cancelling…");
+  }
+
   async function removeDownload(id) {
+    // Native: delete the file on disk too.
+    const ND = nativeDownloader();
+    try { if (ND && ND.removeDownload) await ND.removeDownload({ id }); } catch {}
     await idbDel(id);
     state.downloads = state.downloads.filter((d) => d.id !== id);
     save("aura.downloads", state.downloads);
     toast("Removed offline file", true, "success");
     if (state.view === "settings" || state.view === "library") render();
+  }
+
+  function mountDlPanel() {
+    if ($("dlPanel")) return;
+    const el = document.createElement("div");
+    el.id = "dlPanel";
+    el.className = "dl-panel";
+    el.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-cancel-dl]");
+      if (b) { e.stopPropagation(); cancelDownload(b.dataset.cancelDl); }
+    });
+    $("app").appendChild(el);
+  }
+  function renderDlPanel() {
+    mountDlPanel();
+    const el = $("dlPanel");
+    if (!el) return;
+    const q = (state.dlQueue || []).filter((d) => d.status === "downloading" || d.status === "saving");
+    if (!q.length) { el.classList.remove("show"); el.innerHTML = ""; return; }
+    el.classList.add("show");
+    el.innerHTML = q.map((job) => {
+      const pct = Math.min(100, Math.round((job.progress || 0) * 100));
+      return `
+        <div class="dl-panel-row">
+          <span class="material-symbols-outlined">download</span>
+          <div class="dl-panel-main">
+            <div class="dl-panel-title">${escapeHTML(job.filename)}</div>
+            <div class="dl-progress"><div class="dl-progress-bar" style="width:${pct}%"></div></div>
+          </div>
+          <button type="button" class="icon-btn" data-cancel-dl="${escapeAttr(job.id)}" title="Cancel"><span class="material-symbols-outlined">close</span></button>
+        </div>`;
+    }).join("");
+  }
+
+  function renderDlManager() {
+    const q = state.dlQueue || [];
+    if (!q.length) return "";
+    const rows = q.map((job) => {
+      const pct = Math.min(100, Math.round((job.progress || 0) * 100));
+      const icon = job.status === "error" ? "error" : job.status === "cancelled" ? "close" : job.status === "done" ? "check_circle" : "download";
+      const cls = job.status === "error" ? "dl-err" : job.status === "cancelled" ? "dl-cancel" : "dl-live";
+      const label = job.status === "error" ? "Failed" : job.status === "cancelled" ? "Cancelled" : job.status === "done" ? "Saved" : job.status === "saving" ? "Saving…" : `${pct}%`;
+      return `
+        <div class="dl-job ${cls}" id="dlRow-${job.id}">
+          <span class="material-symbols-outlined">${icon}</span>
+          <div class="dl-job-main">
+            <div class="dl-job-title">${escapeHTML(job.filename)}</div>
+            <div class="dl-progress"><div class="dl-progress-bar" id="dlBar-${job.id}" style="width:${pct}%"></div></div>
+            <div class="dl-stat" id="dlStat-${job.id}">${label}${job.total ? " · " + escapeHTML(fmtBytes(job.bytes)) + " / " + escapeHTML(fmtBytes(job.total)) : ""}</div>
+          </div>
+          ${job.status === "downloading" || job.status === "saving" ? `<button class="icon-btn dl-cancel-btn" data-cancel-dl="${job.id}" title="Cancel"><span class="material-symbols-outlined">close</span></button>` : ""}
+        </div>`;
+    }).join("");
+    return `<div class="set-card dl-card"><h3>Downloads</h3>${rows}</div>`;
   }
 
   const fx = { ctx: null, src: null, nodes: [] };
@@ -1459,7 +1846,7 @@
   }
 
   function artUrl(t) {
-    return t && t.artwork ? t.artwork : "/cover-default.png";
+    return t && t.artwork ? t.artwork : "/cover-default.jpg";
   }
 
   function cardHTML(t) {
@@ -1470,7 +1857,7 @@
       <div class="card">
         <button type="button" class="card-hit" data-open-detail="${escapeAttr(t.id)}" title="Details">
           <div class="art">
-            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.png'"/>
+            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
             ${sourceBadge(t.source)}
             ${liked ? `<span class="liked-dot"><span class="material-symbols-outlined filled">favorite</span></span>` : ""}
           </div>
@@ -1481,14 +1868,14 @@
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
-      ${t.source === "audius" ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
+      ${(t.trackId || t.videoId) ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
       </div>`;
   }
 
   function rowHTML(t, i, extra = "") {
     return `
       <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.png'"/>
+        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
           <div class="t-sub">${escapeHTML(t.artist)}${t.source && t.source !== "apple" ? ` · ${escapeHTML(t.source)}` : ""}</div>
@@ -1502,7 +1889,7 @@
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
         <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.png'"/>
+          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
           <div>
             <div class="t-title">${escapeHTML(t.title)}</div>
             <div class="t-sub">${escapeHTML(t.artist)}</div>
@@ -1949,10 +2336,31 @@
     setTimeout(() => next(true), 450);
   }
 
+  // In-memory resolution cache: playQuery -> {videoId, artwork}. Keeping the
+  // resolved YouTube id here means re-tapping a Deezer/iTunes/catalog song
+  // starts instantly (no repeat of the slow YouTube search). This is a small
+  // bounded Map — it never grows unbounded and is per-app-run.
+  const ytResolveCache = new Map();
+  const YT_RESOLVE_CACHE_MAX = 500;
+  function ytResolveStore(q, videoId, artwork) {
+    if (ytResolveCache.size >= YT_RESOLVE_CACHE_MAX) {
+      const first = ytResolveCache.keys().next().value;
+      if (first !== undefined) ytResolveCache.delete(first);
+    }
+    ytResolveCache.set(q, { videoId, artwork: artwork || "" });
+  }
   async function resolveYouTubePlay(t) {
     if (!t || t.videoId) return t;
     const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
     if (!q) throw new Error("No playable version");
+    // Instant path: already resolved this exact query this session.
+    const cachedHit = ytResolveCache.get(q);
+    if (cachedHit && cachedHit.videoId) {
+      t.videoId = cachedHit.videoId;
+      t.source = "youtube";
+      if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
+      return t;
+    }
     let rows = [];
     try {
       const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 14000);
@@ -1968,7 +2376,8 @@
     if (!hit) throw new Error("No playable version");
     t.videoId = hit.videoId;
     t.source = "youtube";
-    if (!t.artwork || t.artwork === "/cover-default.png") t.artwork = hit.artwork;
+    if (!t.artwork || t.artwork === "/cover-default.jpg") t.artwork = hit.artwork;
+    ytResolveStore(q, t.videoId, t.artwork);
     return t;
   }
 
@@ -1977,15 +2386,39 @@
     if (!t) return;
     const gen = ++playGen;
     pushRecent(t);
+    // Listening shifts the taste profile — reorder "Made for you" so it adapts
+    // as the user keeps playing songs.
+    paintHomeSoon();
     renderChrome();
     loadLyrics(t);
     stopTimer();
     try {
-      if (t.source === "apple" || (t.source === "youtube" && !t.videoId)) {
+      // Metadata-only sources (apple/itunes/deezer from the iTunes or Deezer
+      // catalogs, and any youtube row still missing a resolved videoId) have
+      // no direct audio stream — resolve them to a real YouTube stream before
+      // playing. Without this, iTunes-catalog songs hit the audio player with
+      // no URL and silently skip ("can't play"). Audio-native sources
+      // (audius via trackId, radio via streamUrl) are left alone.
+      const needsResolve =
+        !t.videoId && !t.streamUrl && !t.url &&
+        t.source !== "audius" && t.source !== "radio";
+      if (needsResolve) {
         await resolveYouTubePlay(t);
       }
       if (gen !== playGen) return;
-      if (t.videoId) await playYouTube(t, reset);
+      if (t.videoId) {
+        // On native shells, play YouTube as a background audio stream when
+        // possible so the OS media notification + lock-screen controls work
+        // and music keeps playing with the screen off. Falls back to the
+        // in-app iframe/video player when no audio stream is resolvable (e.g.
+        // Piped outage), so playback never breaks. Disable via prefs.ytAudio.
+        const usedNative = await playYtWithAudio(t, reset);
+        if (usedNative) {
+          // resolved + handed to native player; nothing more to do here
+        } else {
+          await playYouTube(t, reset);
+        }
+      }
       else if (t.source === "youtube") throw new Error("No video");
       else await playAudio(t);
       if (gen !== playGen) return;
@@ -2002,6 +2435,39 @@
     if (state.view === "now" && gen === playGen) render();
   }
 
+  // Try to play a YouTube track through the native audio pipeline
+  // (foreground media service → background play + notification). Resolves the
+  // videoId to a direct audio URL, then hands it to the native player. Only
+  // runs on native shells and only when the user hasn't asked for the video
+  // panel. Returns true if the native player took over; false = keep iframe.
+  async function playYtWithAudio(t, reset) {
+    if (!t || !t.videoId) return false;
+    if (!IS_NATIVE || !nativePlayer()) return false;
+    if (state.prefs.ytAudio === false) return false;
+    // If the video panel is explicitly open (user wants the music video),
+    // don't silently switch to audio-only — honor their choice.
+    if (state.showVideo) return false;
+    let url = "";
+    let dur = t.duration || 0;
+    try {
+      // Short, bounded timeout so a Piped outage falls back to the iframe
+      // player fast instead of stalling playback. Production Piped is sub-sec;
+      // the server also caches the resolved stream for 15 min.
+      const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}`, 6000);
+      // Resolve only returns a real url; anything empty = no stream available.
+      if (data && data.url) {
+        url = data.url;
+        if (data.duration) dur = Number(data.duration);
+      }
+    } catch { url = ""; }
+    if (!url) return false; // fall back to the iframe player (safe)
+    t.streamUrl = url;
+    t.duration = dur;
+    // playAudio hands https URLs to the native player and sets playback state.
+    await playAudio(t);
+    return !!nativePlayer() && npActive;
+  }
+
   function stopOthers(keep) {
     if (keep !== "audio") {
       audio.pause();
@@ -2016,10 +2482,39 @@
   async function playAudio(t) {
     stopOthers("audio");
     let url = t.streamUrl;
-    try {
-      const blob = await idbGet(t.id);
-      if (blob) url = URL.createObjectURL(blob);
-    } catch {}
+    // Offline: replay the real file saved on disk. Native keeps a content URI /
+    // file path; the web keeps a File System Access handle cached in IndexedDB.
+    const saved = state.downloads.find((d) => d.id === t.id);
+    if (saved) {
+      if (saved.uri && nativePlayer()) {
+        url = saved.uri;
+        if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
+          setWantPlay(true); state.playing = true; showEl($("eqBars"), true);
+          updateMediaSession(); updateWakeLock(); startTimer(); return;
+        }
+        url = t.streamUrl;
+      } else if (saved.uri && /^fsp:/.test(saved.uri)) {
+        // web File System Access file saved as a handle — re-open it offline.
+        try {
+          const stored = await idbGet(t.id);
+          if (stored && stored.handle && typeof stored.handle.getFile === "function") {
+            const f = await stored.handle.getFile();
+            url = URL.createObjectURL(f);
+          }
+        } catch {}
+      } else {
+        // blob:<name> or plain IndexedDB blob — replay the stored Blob.
+        try {
+          const blob = await idbGet(t.id);
+          if (blob && typeof blob === "object" && !blob.handle) url = URL.createObjectURL(blob);
+        } catch {}
+      }
+    } else {
+      try {
+        const blob = await idbGet(t.id);
+        if (blob) url = URL.createObjectURL(blob);
+      } catch {}
+    }
     if (!url && t.source === "audius" && t.trackId) {
       const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`);
       url = data.url;
@@ -2031,11 +2526,11 @@
       if (url && /^https?:\/\//i.test(url) && !API_BASE) url = `/api/stream?url=${encodeURIComponent(url)}`;
     }
     if (!url) throw new Error("No stream");
-    // Optional native background playback: the native Android/iOS shells ship
-    // a MuchiAudio plugin (a foreground media service that keeps playing with
-    // the screen locked, with the OS media notification + lock-screen
-    // controls), so http(s) streams are handed to it. On the web there is no
-    // native plugin, so audio plays in the WebView <audio> element.
+    // Proxy URLs from the API (e.g. /api/stream?url=… from /api/yt/stream) are
+    // same-origin relative paths. The native player needs an absolute URL, so
+    // resolve them against API_BASE before handing over. On the web there is no
+    // native plugin, so audio plays in the WebView <audio> element instead.
+    if (url.startsWith("/")) url = API_BASE + url;
     if (nativePlayer() && /^https?:\/\//i.test(url)) {
       if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
         setWantPlay(true);
@@ -2305,6 +2800,12 @@
     if (open) {
       navPush();
       renderQueue();
+    } else {
+      // Rewriting the entry that navPush() added on open is mandatory:
+      // leaving a stale "queue: true" entry in the stack means a later
+      // back navigation (e.g. closing Lyrics) restores that entry and
+      // re-opens the Queue on its own.
+      navReplace();
     }
     syncPlayerVisibility();
   }
@@ -2917,6 +3418,12 @@
     const NP = P.MuchiAudio;
     if (NP) {
       try {
+        // Ask for POST_NOTIFICATIONS the first time the app launches on
+        // Android 13+, not just on the first native audio play. Before this,
+        // the permission dialog only appeared if/when a track was handed to
+        // the native player — so playing YouTube tracks never triggered it,
+        // and the media notification never showed.
+        nativeEnsureNotifyPermission();
         NP.addListener("muchiControls", (e) => nativeHandleControls(e || {}));
         NP.addListener("muchiProgress", (e) => {
           const v = e || {};
@@ -2924,6 +3431,28 @@
           npDur = (Number(v.durationMs) || 0) / 1000;
           npPlaying = !!v.playing;
           if (state.playing) updateProgress();
+        });
+      } catch {}
+    }
+    const DL = P.MuchiDownload;
+    if (DL && DL.addListener) {
+      try {
+        DL.addListener("progress", (e) => {
+          const job = (state.dlQueue || []).find((d) => d.id === (e && e.id));
+          if (job) {
+            job.bytes = Number(e.bytes) || 0;
+            job.total = Number(e.total) || 0;
+            job.progress = Number(e.progress) || 0;
+            saveDlJob(job);
+          }
+        });
+        DL.addListener("done", (e) => {
+          const job = (state.dlQueue || []).find((d) => d.id === (e && e.id));
+          if (job) { job.status = "done"; job.progress = 1; saveDlJob(job); }
+        });
+        DL.addListener("error", (e) => {
+          const job = (state.dlQueue || []).find((d) => d.id === (e && e.id));
+          if (job) { job.status = "error"; saveDlJob(job); }
         });
       } catch {}
     }
@@ -3267,17 +3796,27 @@
   function closeOverlays() {
     const side = $("sidebar");
     if (side) side.classList.remove("open");
+    const hadQueue = state.showQueue;
     state.showQueue = false;
     showEl($("queuePanel"), false);
     if ($("queuePanel")) $("queuePanel").classList.remove("open");
     showEl($("scrim"), false);
+    if (hadQueue) {
+      // Same stale-entry guard as setQueueOpen(false): clear the "queue: true"
+      // flag on the current history entry so a later popstate (closing
+      // Lyrics / a detail page) can't resurrect the Queue.
+      try {
+        const s = history.state;
+        if (s && s.muchi && s.queue) history.replaceState(Object.assign({}, s, { queue: false }), "");
+      } catch {}
+    }
     syncPlayerVisibility();
   }
 
   function renderChrome() {
     const t = current();
     const coverImg = $("coverArt");
-    const artSrc = t ? artUrl(t) : "/cover-default.png";
+    const artSrc = t ? artUrl(t) : "/cover-default.jpg";
     if (coverImg && coverImg.getAttribute("src") !== artSrc) {
       coverImg.setAttribute("src", artSrc);
       coverImg.classList.remove("art-swap");
@@ -3303,11 +3842,11 @@
     }
     const dl = $("dlBtn");
     if (dl) {
-      const can = !!(t && t.source === "audius");
+      const can = !!(t && (t.trackId || t.videoId));
       const saved = !!(t && isSaved(t));
       dl.classList.toggle("on", saved);
       dl.classList.toggle("dim", !can);
-      dl.title = !t ? "Save offline" : !can ? "Only Audius tracks can be saved" : saved ? "Saved offline" : "Save offline";
+      dl.title = !t ? "Save offline" : !can ? "This track can't be saved" : saved ? "Saved offline" : "Save offline";
       const ico = $("dlIcon");
       if (ico) ico.textContent = saved ? "download_done" : "download";
     }
@@ -3340,6 +3879,10 @@
       lyBtn.title = state.view === "now" ? "Close lyrics" : "Lyrics";
     }
     showEl($("eqBars"), state.playing);
+    // CSS reads this to pause the glass "shine" sweep when playback is idle
+    // (a continuously animating gradient layer is pure GPU cost when the
+    // player is paused).
+    document.body.dataset.playing = state.playing ? "1" : "";
     $("volume").value = state.volume;
     updateWakeLock();
     document.querySelectorAll("[data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
@@ -3362,7 +3905,7 @@
       return `
         <div class="q-row ${now ? "now" : ""}" draggable="true" data-q-i="${i}">
           <span class="q-handle" title="Drag to reorder">⋮⋮</span>
-          <img src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.png'"/>
+          <img src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.jpg'"/>
           <button type="button" class="q-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
             <div class="t-title">${escapeHTML(t.title)}</div>
             <div class="t-sub">${escapeHTML(t.artist)}</div>
@@ -3628,11 +4171,11 @@
   }
 
   function plCardHTML(p, group, i) {
-    const art = p.artwork || (p.tracks && p.tracks[0] && p.tracks[0].artwork) || "/cover-default.png";
+    const art = p.artwork || (p.tracks && p.tracks[0] && p.tracks[0].artwork) || "/cover-default.jpg";
     return `<div class="card-wrap">
       <button type="button" class="card card-hit" data-open-home-pl="${escapeAttr(group)}" data-pl-i="${i}">
         <div class="art">
-          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="this.src='/cover-default.png'"/>
+          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
           <span class="badge yt">Playlist</span>
         </div>
         <h3>${escapeHTML(p.title || "Playlist")}</h3>
@@ -3663,30 +4206,76 @@
     try { localStorage.setItem("aura.fyCards", JSON.stringify(c)); } catch {}
   }
 
+  // Score how well a "Made for you" card matches the listener's taste so the
+  // section reorders as they keep listening/liking. A card matches when any of
+  // its genre tags (e.g. "pop", "hiphop", "rnb", "chill", "workout",
+  // "throwback") shows up in the user's top-listen genres or in the words of
+  // the artists they play. Higher score = surfaces first in the row.
+  function fyTasteScore(p, taste) {
+    if (!p) return 0;
+    const g = (Array.isArray(p.genres) ? p.genres : []).map((x) => String(x).toLowerCase());
+    const mood = String(p.mood || "").toLowerCase().replace(/^mod:/, "");
+    const hay = `${String((p.title || p.query || "")).toLowerCase()} ${g.join(" ")} ${mood}`;
+    let score = 0;
+    // 1) Mood/genre match: if the listener's top-listen genres include this
+    //    card's mood tag, surface it.
+    for (const [name, n] of taste.genres || []) {
+      const w = String(name).toLowerCase();
+      if (w && (g.includes(w) || hay.includes(w))) score += (n || 1) * 5;
+    }
+    // 2) Artist match: count the songs in this card by artists the listener
+    //    actually plays. This is what makes "Made for you" visibly reorder as
+    //    the user keeps listening (preview cards carry their tracks; catalog
+    //    rows carry `_tag`/`mood`).
+    if (p.tracks && p.tracks.length) {
+      for (const t of p.tracks) {
+        if (!t) continue;
+        const a = String(t.artist || "").toLowerCase();
+        const first = a.split(" ")[0];
+        for (const [artist, n] of taste.artists || []) {
+          const w = String(artist).toLowerCase();
+          if (a === w || first === w.split(" ")[0]) { score += (n || 1) * 2; break; }
+        }
+      }
+    } else {
+      for (const [artist, n] of taste.artists || []) {
+        const first = String(artist).toLowerCase().split(" ")[0];
+        if (first.length > 2 && hay.includes(first)) score += (n || 1) * 3;
+      }
+    }
+    return score;
+  }
+
   function forYouPlaylistList() {
     const h = state.home || {};
     let pls = (h.forYouPlaylists || []).slice();
-    // Mix playlists only make sense once the user has some taste (likes/follows).
     const taste = tasteProfile();
-    if (!taste.artists.length && !taste.genres.length) pls = pls.filter((p) => p.kind !== "mix");
+    // Taste-adaptive: reorder the cards so the moods matching the listener's
+    // profile (their recent plays + likes) lead. Stable sort keeps the rest of
+    // the order (Pop → Hip-Hop → …) when no taste exists, so a brand-new
+    // listener still sees a sensible default row.
+    if (taste.artists.length || taste.genres.length) {
+      pls = pls
+        .map((p, i) => ({ p, i, s: fyTasteScore(p, taste) }))
+        .sort((a, b) => (b.s - a.s) || (a.i - b.i))
+        .map((x) => x.p);
+    }
     // If the API hasn't sent curated playlists yet (e.g. preview against an
-    // older server), build sensible defaults so the format still works.
+    // older server), build a sensible default so the format still works.
     if (!pls.length) {
       const cache = fyCardCache();
       const defs = [
-        { id: "fy-trending", title: "Trending", subtitle: "What the world is playing", artwork: "", playlistId: "", query: "trending music hits", kind: "yt" },
-        { id: "fy-releases", title: "Hit Releases", subtitle: "Fresh hits, just out", artwork: "", playlistId: "", query: "new hit releases official audio", kind: "yt" },
-        { id: "fy-top50", title: "Top 50 Global", subtitle: "The biggest songs right now", artwork: "", playlistId: "", query: "top 50 global hits official audio", kind: "yt" },
-        { id: "fy-dance", title: "Dance Hits", subtitle: "Club-ready anthems", artwork: "", playlistId: "", query: "dance hits official audio", kind: "yt" },
-        { id: "fy-chillv", title: "Chill Vibes", subtitle: "Easy listening, all day", artwork: "", playlistId: "", query: "chill vibes songs official audio", kind: "yt" },
-        { id: "fy-workout", title: "Workout Energy", subtitle: "Push through the burn", artwork: "", playlistId: "", query: "workout motivation songs official audio", kind: "yt" },
-        { id: "fy-indie", title: "Indie Radar", subtitle: "Fresh independent sounds", artwork: "", playlistId: "", query: "indie alternative hits official audio", kind: "yt" },
-        { id: "fy-throw", title: "Throwback", subtitle: "90s & 2000s classics", artwork: "", playlistId: "", query: "throwback 90s 2000s hits official audio", kind: "yt" },
+        { id: "fy-pop", title: "Pop Hits", subtitle: "Top English pop, right now", mood: "pop", genres: ["pop"], artwork: "", playlistId: "", query: "pop hits official audio", kind: "yt" },
+        { id: "fy-hiphop", title: "Hip-Hop", subtitle: "Fresh flows & new drops", mood: "hiphop", genres: ["hiphop"], artwork: "", playlistId: "", query: "hip hop rap hits official audio", kind: "yt" },
+        { id: "fy-rnb", title: "R&B", subtitle: "Smooth grooves", mood: "rnb", genres: ["rnb"], artwork: "", playlistId: "", query: "rnb soul hits official audio", kind: "yt" },
+        { id: "fy-rock", title: "Rock", subtitle: "Earworms", mood: "rock", genres: ["rock"], artwork: "", playlistId: "", query: "rock hits official audio", kind: "yt" },
+        { id: "fy-dance", title: "Dance Hits", subtitle: "Club-ready anthems", mood: "dance", genres: ["dance"], artwork: "", playlistId: "", query: "dance edm hits official audio", kind: "yt" },
+        { id: "fy-indie", title: "Indie", subtitle: "New discoveries", mood: "indie", genres: ["indie"], artwork: "", playlistId: "", query: "indie alternative hits official audio", kind: "yt" },
+        { id: "fy-trending", title: "Trending", subtitle: "What the world is playing", mood: "trending", genres: ["trending"], artwork: "", playlistId: "", query: "trending music hits", kind: "yt" },
+        { id: "fy-chillv", title: "Chill Vibes", subtitle: "Easy listening, all day", mood: "chill", genres: ["chill"], artwork: "", playlistId: "", query: "chill vibes songs official audio", kind: "yt" },
+        { id: "fy-workout", title: "Workout Energy", subtitle: "Push through the burn", mood: "workout", genres: ["workout"], artwork: "", playlistId: "", query: "workout motivation songs official audio", kind: "yt" },
+        { id: "fy-throw", title: "Throwback", subtitle: "90s & 2000s classics", mood: "throwback", genres: ["throwback"], artwork: "", playlistId: "", query: "throwback 90s 2000s hits official audio", kind: "yt" },
       ];
-      if (taste.artists.length || taste.genres.length) {
-        defs.push({ id: "fy-mix", title: "Your Mix", subtitle: "From artists you like", artwork: "", playlistId: "", query: "", kind: "mix" });
-        defs.push({ id: "fy-chill", title: "Chill Mix", subtitle: "Easy listening", artwork: "", playlistId: "", query: "", kind: "mix" });
-      }
       for (const d of defs) {
         const c = d.query && cache[d.query];
         if (c && c.id) d.playlistId = c.id;
@@ -3694,20 +4283,24 @@
       }
       pls = defs;
     }
+    (pls || []).slice(0, 10).forEach((p, i) => { p._fyTasteScore = fyTasteScore(p, taste); });
     fyCardsList = pls;
     return pls;
   }
 
   function forYouCardHTML(p, i) {
-    const art = p.artwork || (state.forYou && state.forYou[0] && state.forYou[0].artwork) || "/cover-default.png";
+    const art = p.artwork || (state.forYou && state.forYou[0] && state.forYou[0].artwork) || "/cover-default.jpg";
+    const n = Math.max(0, (p.tracks || []).length);
+    const count = n ? `${n} songs` : "Mix";
     return `<div class="card-wrap">
       <button type="button" class="card card-hit" data-open-fy="${i}">
         <div class="art">
-          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="this.src='/cover-default.png'"/>
+          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
           <span class="badge yt">Playlist</span>
         </div>
         <h3>${escapeHTML(p.title || "Playlist")}</h3>
         <p>${escapeHTML(p.subtitle || "Muchi mix")}</p>
+        <em class="fy-count">${count}</em>
       </button>
     </div>`;
   }
@@ -3726,6 +4319,10 @@
       artwork: p.artwork || (state.forYou && state.forYou[0] && state.forYou[0].artwork) || "",
       playlistId: p.playlistId || "",
       query: p.query || "",
+      // Ship the songs the card already carries (the seed sends 20 per card)
+      // so the playlist is fully populated the instant it opens; the server
+      // fetch then refreshes/verifies. Always a distinct, mood-matched set.
+      tracks: (p.tracks || []).slice(),
       forYouMix: p.kind === "mix",
       fyIndex: i,
     });
@@ -3841,7 +4438,7 @@
 
   function artistHitHTML(a, i) {
     return `<button type="button" class="lib-row artist" data-open-artist="${i}">
-      <img class="round" src="${escapeAttr(a.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+      <img class="round" src="${escapeAttr(a.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
       <div>
         <div class="t-title">${escapeHTML(a.name)}</div>
         <div class="t-sub">Artist</div>
@@ -3855,7 +4452,7 @@
     if (p.year) extra.push(`${p.year}`);
     if (p.trackCount) extra.push(`${p.trackCount} songs`);
     return `<button type="button" class="lib-row" data-ytpl="${escapeAttr(p.playlistId || "")}" data-pl-q="${escapeAttr(p.query || p.title || "")}">
-      <img src="${escapeAttr(p.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+      <img src="${escapeAttr(p.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
       <div>
         <div class="t-title">${escapeHTML(p.title)}</div>
         <div class="t-sub">${kind}${p.artist ? " · " + escapeHTML(p.artist) : ""}${extra.length ? " · " + escapeHTML(extra.join(" · ")) : ""}</div>
@@ -3884,7 +4481,7 @@
     return `
       <button class="chip-btn" id="artistBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
       <div class="artist-profile">
-        <img class="artist-photo" src="${escapeAttr(a.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+        <img class="artist-photo" src="${escapeAttr(a.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <p class="lib-kicker">Artist</p>
           <h1>${escapeHTML(a.name)}</h1>
@@ -3962,7 +4559,7 @@
     const topIdx = top ? artists.indexOf(top) : -1;
     const hero = (f === "all" && top) ? `
       <button type="button" class="artist-hero" data-open-artist="${topIdx}">
-        <img class="round" src="${escapeAttr(top.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+        <img class="round" src="${escapeAttr(top.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <p class="lib-kicker">Artist</p>
           <h2>${escapeHTML(top.name)}</h2>
@@ -4036,7 +4633,7 @@
         <div class="lib-detail">
           <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
           <div class="lib-hero custom-pl">
-            <img class="lib-cover" src="${escapeAttr(p.artwork || (tracks[0] && tracks[0].artwork) || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+            <img class="lib-cover" src="${escapeAttr(p.artwork || (tracks[0] && tracks[0].artwork) || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
             <div class="lib-hero-copy">
               <p class="lib-kicker">Playlist</p>
               <h1>${escapeHTML(p.title || "Playlist")}</h1>
@@ -4091,7 +4688,7 @@
         <div class="lib-detail">
           <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
           <div class="lib-hero custom-pl">
-            <img class="lib-cover" src="${escapeAttr(o.artwork || (tracks[0] && tracks[0].artwork) || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+            <img class="lib-cover" src="${escapeAttr(o.artwork || (tracks[0] && tracks[0].artwork) || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
             <div class="lib-hero-copy">
               <p class="lib-kicker">YouTube Playlist</p>
               <h1>${escapeHTML(o.title || "Playlist")}</h1>
@@ -4115,7 +4712,7 @@
             </button>
             <div class="lib-hero custom-pl">
               <button type="button" class="lib-cover-btn" id="pickPlCover" title="Change picture">
-                <img class="lib-cover" src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.png'"/>
+                <img class="lib-cover" src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.jpg'"/>
                 <span class="lib-cover-edit"><span class="material-symbols-outlined">photo_camera</span></span>
               </button>
               <div class="lib-hero-copy">
@@ -4140,7 +4737,7 @@
             <div class="list">${(String(plRecs.key).split(":")[0] === String(pl) ? plRecs.tracks : []).map((t) => `
               <div class="track-row lib-track rec-row">
                 <button type="button" class="lib-track-main" data-rec-play="${escapeAttr(t.id)}">
-                  <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.png'"/>
+                  <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
                   <div>
                     <div class="t-title">${escapeHTML(t.title)}</div>
                     <div class="t-sub">${escapeHTML(t.artist)}</div>
@@ -4171,7 +4768,7 @@
       </button>`;
     const playlistRows = state.playlists.map((p, i) => `
       <button type="button" class="lib-row" data-open-pl="${i}">
-        <img src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.png'"/>
+        <img src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <div class="t-title">${escapeHTML(p.name)}</div>
           <div class="t-sub">Playlist · ${trackStats(p.tracks)}</div>
@@ -4179,7 +4776,7 @@
       </button>`).join("");
     const artistRows = state.following.map((a) => `
       <button type="button" class="lib-row artist" data-artist="${escapeAttr(a.key)}">
-        <img class="round" src="${escapeAttr(a.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+        <img class="round" src="${escapeAttr(a.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <div class="t-title">${escapeHTML(a.name)}</div>
           <div class="t-sub">Artist</div>
@@ -4205,7 +4802,7 @@
           ? `<p class="yt-note">Couldn't load YouTube playlists.</p>`
           : state.ytPlaylists.map((p) => `
             <button type="button" class="lib-row" data-open-yt-pl="${escapeAttr(p.id)}">
-              <img src="${escapeAttr(p.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+              <img src="${escapeAttr(p.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
               <div>
                 <div class="t-title">${escapeHTML(p.title)}</div>
                 <div class="t-sub">Playlist · ${p.count} item${p.count === 1 ? "" : "s"}</div>
@@ -4239,7 +4836,7 @@
     } else if (f === "artists") {
       body = artistRows || `<p class="empty">Follow an artist from the player.</p>`;
     } else if (f === "downloaded") {
-      body = dlRows || `<p class="empty">Save an Audius track from the player to listen offline.</p>`;
+      body = dlRows || `<p class="empty">Save a track (YouTube or independent Audius) from the player to listen offline.</p>`;
     } else {
       body = likedRow + ytRows + playlistRows + artistRows;
       if (!state.playlists.length && !state.following.length) {
@@ -4767,12 +5364,13 @@
         <div class="set-card">
           <h3>Offline</h3>
           <div class="set-row">
-            <div><strong>Audius downloads</strong><p>Legal independent files only. YouTube cannot be saved.</p></div>
+            <div><strong>Downloads on disk</strong><p>Real audio files saved to your device with tagged metadata. YouTube m4a/webm &amp; independent Audius mp3.</p></div>
             <span>${dls.length}</span>
           </div>
+          ${renderDlManager()}
           <div class="list">${dls.map((t, i) => `
             <div class="track-row ${current() && current().id === t.id ? "active" : ""}">
-              <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.png'"/>
+              <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
               <button type="button" data-play="${escapeAttr(t.id)}" data-idx="${i}" style="all:unset;cursor:pointer;flex:1;min-width:0">
                 <div class="t-title">${escapeHTML(t.title)}</div>
                 <div class="t-sub">${escapeHTML(t.artist)}</div>
@@ -4800,7 +5398,7 @@
           </div>
           <div class="list">${state.following.map((f) => `
             <div class="track-row">
-              <img src="${escapeAttr(f.artwork || "/cover-default.png")}" alt="" onerror="this.src='/cover-default.png'"/>
+              <img src="${escapeAttr(f.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
               <div>
                 <div class="t-title">${escapeHTML(f.name)}</div>
                 <div class="t-sub">${escapeHTML(f.source)}${f.handle ? " · @" + escapeHTML(f.handle) : ""}</div>
@@ -4900,7 +5498,7 @@
       <div class="detail-page">
         <button class="chip-btn page-back" id="detailBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
         <div class="detail-hero">
-          <img class="detail-art" src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.png'"/>
+          <img class="detail-art" src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.jpg'"/>
           <div class="detail-copy">
             <p class="lib-kicker">${kind}</p>
             <h1>${escapeHTML(t.title)}</h1>
@@ -4936,7 +5534,7 @@
             <span class="material-symbols-outlined">keyboard_arrow_down</span>
           </button>
           <div class="ly-meta">
-            <img src="${escapeAttr(art)}" alt="" onerror="this.src='/cover-default.png'"/>
+            <img src="${escapeAttr(art)}" alt="" onerror="this.src='/cover-default.jpg'"/>
             <div>
               <strong>${escapeHTML(t.title)}</strong>
               <button type="button" class="artist-link-now" id="nowArtist">${escapeHTML(artistName(t) || t.artist)}</button>
@@ -5629,6 +6227,12 @@
       el.addEventListener("click", (e) => {
         e.stopPropagation();
         removeDownload(el.dataset.delDl);
+      });
+    });
+    viewEl.querySelectorAll("[data-cancel-dl]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        cancelDownload(el.dataset.cancelDl);
       });
     });
     viewEl.querySelectorAll("[data-clear]").forEach((el) => {
@@ -6539,7 +7143,7 @@
   }
 
   function plEditorHTML(d) {
-    const cover = d.cover || "/cover-default.png";
+    const cover = d.cover || "/cover-default.jpg";
     return `
       <p class="pl-ed-lead">Name it, then tap the cover or banner. Crop opens on top — you come right back here.</p>
       <div class="pl-ed">
@@ -6547,7 +7151,7 @@
           <button type="button" class="chip-btn pl-ed-ban-btn" id="plEdPickBanner">${d.banner ? "Change banner" : "Add banner"}</button>
         </div>
         <button type="button" class="pl-ed-cover-btn" id="plEdPickCover" title="Change picture">
-          <img id="plEdCover" src="${escapeAttr(cover)}" alt="" onerror="this.src='/cover-default.png'"/>
+          <img id="plEdCover" src="${escapeAttr(cover)}" alt="" onerror="this.src='/cover-default.jpg'"/>
           <span class="lib-cover-edit"><span class="material-symbols-outlined">photo_camera</span></span>
         </button>
       </div>
@@ -6658,7 +7262,7 @@
     if (!track) return;
     const rows = state.playlists.map((p, i) => `
       <button type="button" class="sheet-item" data-add="${i}">
-        <img src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.png'"/>
+        <img src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.jpg'"/>
         <span>${escapeHTML(p.name)}</span>
       </button>`).join("");
     showModal({
@@ -6751,7 +7355,16 @@
       };
     }
     $("searchInput").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && e.target.value.trim()) runSearch(e.target.value.trim());
+      if ((e.key === "Enter" || e.key === "search") && e.target.value.trim()) {
+        runSearch(e.target.value.trim());
+        // On phones, dismiss the on-screen keyboard once the search runs —
+        // results stay visible, and tapping the bar refocuses (and reopens
+        // the keyboard). Desktop keyboard behavior is untouched.
+        const onPhone =
+          (window.Capacitor && window.Capacitor.getPlatform && window.Capacitor.getPlatform() !== "web") ||
+          (window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+        if (onPhone) e.target.blur();
+      }
     });
     window.addEventListener("popstate", (e) => {
       if (e.state && e.state.muchi) {
@@ -7071,6 +7684,9 @@
         hue: i % 2 ? 340 + Math.random() * 18 : 300 + Math.random() * 40,
       });
     }
+    // The particle loop self-suspends when it has nothing to draw — wake it
+    // so the burst is actually rendered (also works when the loop idled off).
+    try { if (window.kickSparks) window.kickSparks(); } catch {}
   }
   (function startSparks() {
     const c = $("sparkLayer");
@@ -7104,10 +7720,22 @@
       });
     }
     let sparkOn = true;
-    function tick() {
+    // Phones: gate the particle loop to ~12fps (same pattern as the
+    // seek-wave loop) and scale per-frame deltas by dt, so drift speed and
+    // the ambient spawn cadence are visually identical at ~1/5 the canvas
+    // work. Desktop keeps the full 60fps loop.
+    const sparkSlow = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    let sparkLast = 0;
+    function tick(now) {
       if (document.hidden) {
         sparkOn = false;
         return;
+      }
+      let dt = 1;
+      if (sparkSlow) {
+        if (now - sparkLast < 80) { requestAnimationFrame(tick); return; }
+        sparkLast = now;
+        dt = 5;
       }
       const need = sparkBits.length || state.view === "home";
       if (!need) {
@@ -7116,15 +7744,15 @@
         return;
       }
       ctx.clearRect(0, 0, c.width, c.height);
-      if (state.view === "home" && sparkBits.length < 20 && Math.random() < 0.03) spawnAmbient();
+      if (state.view === "home" && sparkBits.length < 20 && Math.random() < 0.03 * dt) spawnAmbient();
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const p = dpr();
       for (let i = sparkBits.length - 1; i >= 0; i--) {
         const b = sparkBits[i];
-        b.x += b.vx;
-        b.y += b.vy;
-        b.life -= b.decay;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        b.life -= b.decay * dt;
         if (b.life <= 0) {
           sparkBits.splice(i, 1);
           continue;

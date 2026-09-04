@@ -15,6 +15,9 @@ export function handleHealth(env) {
     time: new Date().toISOString(),
     github,
     api: "",
+    // In-app updater (public/app.js checkUpdates) reads these.
+    android: { apkUrl: "https://github.com/Kaibshshdheueejw/Muchi/releases/latest/download/Muchi.apk" },
+    ios: { appStoreUrl: "" },
   });
 }
 

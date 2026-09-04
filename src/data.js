@@ -110,15 +110,21 @@ export const MOODS_BY_COUNTRY = {
 };
 
 // "Made for you" curated playlists (server.js FY_QUERIES).
+// EXACTLY 10, each a DIFFERENT mood, each tagged with `genres` (lowercase mood
+// tags) so the client can reorder / personalise them by the user's taste
+// profile. `query` is the English search that fills the playlist with the
+// latest hits for that mood.
 export const FY_QUERIES = [
-  { title: "Trending", subtitle: "What the world is playing", query: "trending music hits" },
-  { title: "Hit Releases", subtitle: "Fresh hits, just out", query: "new hit releases official audio" },
-  { title: "Top 50 Global", subtitle: "The biggest songs right now", query: "top 50 global hits official audio" },
-  { title: "Dance Hits", subtitle: "Club-ready anthems", query: "dance hits official audio" },
-  { title: "Chill Vibes", subtitle: "Easy listening, all day", query: "chill vibes songs official audio" },
-  { title: "Workout Energy", subtitle: "Push through the burn", query: "workout motivation songs official audio" },
-  { title: "Indie Radar", subtitle: "Fresh independent sounds", query: "indie alternative hits official audio" },
-  { title: "Throwback", subtitle: "90s & 2000s classics", query: "throwback 90s 2000s hits official audio" },
+  { mood: "pop",      genres: ["pop"],      title: "Pop Hits",       subtitle: "Top English pop, right now", query: "pop hits official audio" },
+  { mood: "hiphop",   genres: ["hiphop"],   title: "Hip-Hop",        subtitle: "Fresh flows & new drops",      query: "hip hop rap hits official audio" },
+  { mood: "rnb",      genres: ["rnb"],      title: "R&B",            subtitle: "Smooth grooves",               query: "rnb soul hits official audio" },
+  { mood: "rock",     genres: ["rock"],     title: "Rock",           subtitle: "Earworms",                     query: "rock hits official audio" },
+  { mood: "dance",    genres: ["dance"],    title: "Dance Hits",     subtitle: "Club-ready anthems",           query: "dance edm hits official audio" },
+  { mood: "indie",    genres: ["indie"],    title: "Indie",          subtitle: "New discoveries",              query: "indie alternative hits official audio" },
+  { mood: "trending", genres: ["trending"], title: "Trending",       subtitle: "What the world is playing",    query: "trending music hits" },
+  { mood: "chill",    genres: ["chill"],    title: "Chill Vibes",    subtitle: "Easy listening, all day",      query: "chill vibes songs official audio" },
+  { mood: "workout",  genres: ["workout"],  title: "Workout Energy", subtitle: "Push through the burn",        query: "workout motivation songs official audio" },
+  { mood: "throwback", genres: ["throwback"], title: "Throwback",    subtitle: "90s & 2000s classics",        query: "throwback 90s 2000s hits official audio" },
 ];
 
 export const RADIO_HOSTS = [
@@ -187,36 +193,26 @@ export function pickPlaylistHit(pls, query) {
 
 // fyRes = Promise.allSettled results aligned with FY_QUERIES; may be [].
 export function buildForYouPlaylists(fyRes) {
-  return [
-    ...FY_QUERIES.map((f, i) => {
-      const v = fyRes && fyRes[i] && fyRes[i].status === "fulfilled" ? fyRes[i].value : null;
-      return {
-        id: `fy-${i}`,
-        title: f.title,
-        subtitle: f.subtitle,
-        artwork: (v && v.artwork) || "",
-        playlistId: (v && v.playlistId) || "",
-        query: f.query,
-        kind: "yt",
-      };
-    }),
-    {
-      id: "fy-mix",
-      title: "Your Mix",
-      subtitle: "From artists you like",
-      artwork: "",
-      playlistId: "",
-      query: "",
-      kind: "mix",
-    },
-    {
-      id: "fy-chill",
-      title: "Chill Mix",
-      subtitle: "Easy listening",
-      artwork: "",
-      playlistId: "",
-      query: "",
-      kind: "mix",
-    },
-  ];
+  // EXACTLY 10 "Made for you" cards, each a different mood. No `kind:"mix"`
+  // cards here — the client no longer filters mixes out (when the user has no
+  // taste). Every card carries `mood` + `genres` so the client can reorder
+  // them by the listener's taste profile as they keep listening. It also
+  // carries up to 20 `tracks` so the card shows the real song count ("20
+  // songs") even before it's opened, and so a fresh list is fully populated.
+  return FY_QUERIES.map((f, i) => {
+    const v = fyRes && fyRes[i] && fyRes[i].status === "fulfilled" ? fyRes[i].value : null;
+    const tracks = (v && Array.isArray(v.tracks) ? v.tracks : []).slice(0, 20);
+    return {
+      id: `fy-${i}`,
+      title: f.title,
+      subtitle: f.subtitle,
+      artwork: (v && v.artwork) || "",
+      playlistId: (v && v.playlistId) || "",
+      query: f.query,
+      mood: f.mood,
+      genres: f.genres,
+      kind: "yt",
+      tracks,
+    };
+  });
 }

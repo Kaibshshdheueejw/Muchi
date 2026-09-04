@@ -257,8 +257,8 @@ export function walkCollect(node, out, seen, visiting = new Set(), opts = {}) {
 }
 
 export function lastThumb(thumbs) {
-  if (!thumbs || !thumbs.length) return "/cover-default.png";
-  return thumbs[thumbs.length - 1].url || thumbs[0].url || "/cover-default.png";
+  if (!thumbs || !thumbs.length) return "/cover-default.jpg";
+  return thumbs[thumbs.length - 1].url || thumbs[0].url || "/cover-default.jpg";
 }
 
 export function parseYtArtist(m) {
