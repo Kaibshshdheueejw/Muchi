@@ -1122,24 +1122,30 @@
   }
   function downloadFilePath(t) {
     const sid = String((t && t.streamUrl) || "");
+    const nm = encodeURIComponent(t.title || "track");
     const proxyFor = () => {
-      if (t && t.videoId) return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`;
-      if (t && t.source === "audius" && t.trackId) return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`;
+      if (t && t.videoId) return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}`;
+      if (t && t.source === "audius" && t.trackId) return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}`;
       return "";
     };
-    // Spotube comparison: native apps download via a local HTTP client to a
-    // real file + embedded tags — no CORS. The WEB app has no such client, and
-    // a cross-origin stream URL (Audius CDN / Piped / Googlevideo) is almost
-    // always CORS-blocked in a browser. So on the web we always go through the
-    // same-origin /api/download proxy (adds ACAO:* + real Content-Disposition
-    // filename), which is the browser-safe equivalent of Spotube's local save.
-    if (!IS_NATIVE && t && (t.videoId || (t.source === "audius" && t.trackId))) {
-      return proxyFor();
+    // Optimization: if the track already carries a known-good stream URL (e.g.
+    // the resolver /api/yt/stream returned one at play time, or an Audius/radio
+    // direct URL), reuse it so the download does NOT re-hit the volatile Piped
+    // resolver (/api/download?videoId=… goes through youtubeAudioStream, which
+    // 502s when Piped is down). Reusing a URL we already streamed makes real
+    // downloads land instead of erroring out.
+    //
+    //   • Native (no CORS): hand the absolute URL straight to the native
+    //     URLSession/MediaStore downloader.
+    //   • Web: a cross-origin stream URL can't be fetch()'d directly (CORS), so
+    //     proxy it through the same-origin /api/download?streamUrl=… (SSRF-guarded,
+    //     adds ACAO:* + Content-Disposition filename).
+    //   • Same-origin relative stream URL (offline/preview tone): keep as-is.
+    if (sid) {
+      if (isSameOriginStreamUrl(sid)) return sid;
+      if (IS_NATIVE) return sid;
+      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(sid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
-    // Same-origin direct stream (offline/preview tone) — safe on either platform.
-    if (sid && isSameOriginStreamUrl(sid)) return sid;
-    // Native (no CORS) or a direct stream that isn't guarded above: use as-is.
-    if (sid) return sid;
     return proxyFor();
   }
 

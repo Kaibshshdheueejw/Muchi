@@ -115,10 +115,18 @@ export async function handleAudiusStream(url) {
 export async function handleDownload(request, url) {
   const videoId = url.searchParams.get("videoId") || url.searchParams.get("v") || "";
   const trackId = url.searchParams.get("trackId") || "";
+  const streamUrl = url.searchParams.get("streamUrl") || "";
   const name = sanitizeForFilename(url.searchParams.get("name") || "");
   let src = "";
   let mime = "audio/mp4";
-  if (trackId) {
+  if (streamUrl) {
+    // The client may already know a working stream URL (e.g. it resolved one
+    // for playback via /api/yt/stream). Proxying it directly avoids re-hitting
+    // Piped, whose instance endpoints are volatile — so downloads land even
+    // when the Piped resolver is down. SSRF-guarded like every other fetch.
+    mime = url.searchParams.get("mime") || "audio/mp4";
+    src = streamUrl;
+  } else if (trackId) {
     try {
       src = await audiusStreamUrl(trackId);
       mime = "audio/mpeg";
