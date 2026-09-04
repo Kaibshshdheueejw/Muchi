@@ -83,18 +83,25 @@ const POOL_TAGS = [
 ];
 
 const AUDIO_URL = "/api/preview/audio";
+// The sandbox has NO egress to real music providers (YouTube/iTunes/etc are all
+// unreachable), so the preview plays a locally-generated WAV tone. To keep a
+// tapped song from feeling like a broken 6-second blip, the tone is generated
+// for the SAME length as the track's real duration, so the progress bar, seek
+// and scrubber behave like a real song. It's still a synth tone, not the real
+// recording (impossible without internet) — but it's playable end to end.
+const streamUrlFor = (duration) => `${AUDIO_URL}?dur=${Number(duration) || 30}`;
 const ARTWORK = "/cover-default.png";
 
 // Curated "Made for you" cards for the preview home. Same card shape the
 // client expects (see forYouCardHTML): title, subtitle, query, playlistId,
 // artwork. All use the local cover so they always load in the sandbox.
 const FY_DEFAULT_CARDS = [
-  { id: "fy:pop", title: "Pop Hits", subtitle: "Top English pop", query: "pop hits", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:hiphop", title: "Hip-Hop", subtitle: "Fresh flows", query: "hip hop hits", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:rnb", title: "R&B", subtitle: "Smooth grooves", query: "rnb songs", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:rock", title: "Rock", subtitle: "Earworms", query: "rock songs", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:dance", title: "Dance", subtitle: "Party starters", query: "dance hits", artwork: ARTWORK, playlistId: "", kind: "yt" },
-  { id: "fy:indie", title: "Indie", subtitle: "New discoveries", query: "indie songs", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:pop", title: "Pop Hits", subtitle: "Top English pop", query: "pop", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:hiphop", title: "Hip-Hop", subtitle: "Fresh flows", query: "hiphop", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:rnb", title: "R&B", subtitle: "Smooth grooves", query: "rnb", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:rock", title: "Rock", subtitle: "Earworms", query: "rock", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:dance", title: "Dance", subtitle: "Party starters", query: "dance", artwork: ARTWORK, playlistId: "", kind: "yt" },
+  { id: "fy:indie", title: "Indie", subtitle: "New discoveries", query: "indie", artwork: ARTWORK, playlistId: "", kind: "yt" },
 ];
 
 let seq = 0;
@@ -108,7 +115,7 @@ function mkTrack([title, artist, duration], tag) {
     album: "",
     duration,
     artwork: ARTWORK,
-    streamUrl: AUDIO_URL,
+    streamUrl: streamUrlFor(duration),
     playQuery: `${title} ${artist} official audio`,
     _tag: tag,
   };
@@ -155,7 +162,7 @@ function mkCatalogTrack(c) {
     // when it's tapped. In the real app (no seed) catalog songs have no
     // streamUrl/videoId, so they route through resolveYouTubePlay() to a real
     // YouTube stream — the exact path these represent.
-    streamUrl: AUDIO_URL,
+    streamUrl: streamUrlFor(c.duration),
     playQuery: `${c.title} ${c.artist} official audio`,
   };
 }
@@ -203,10 +210,35 @@ export function previewHome(gl) {
 }
 
 // ── /api/shelf ───────────────────────────────────────────────────────────
+// Resolve a shelf/playlist to its songs. When a known shelf id is given we use
+// that genre's pool. Otherwise (e.g. "Made for you" cards have no shelf id,
+// only a free-text query) we derive distinct songs FROM THE QUERY so every
+// playlist shows a different list instead of the same first 16 every time.
+function tracksByQuery(q) {
+  const needle = String(q || "").toLowerCase().trim();
+  const genre = matchTracks(needle);
+  if (genre.length) return genre;
+  // No genre tag matched (e.g. "trending music hits"): return a deterministic
+  // rotation of the pool seeded by the query, so distinct playlists get a
+  // distinct (but stable) set of songs rather than identical ones.
+  const all = allTracks();
+  let h = 0;
+  for (let i = 0; i < needle.length; i++) h = (h * 31 + needle.charCodeAt(i)) >>> 0;
+  const start = all.length ? h % all.length : 0;
+  const rot = [...all.slice(start), ...all.slice(0, start)];
+  return rot.slice(0, 16);
+}
+
 export function previewShelf(id, q, gl) {
-  const shelf = SHELVES.find((s) => s.id === id);
-  const tracks = shelf ? tracksForShelf(shelf.id) : allTracks().slice(0, 16);
-  return { id: id || "", title: (shelf && shelf.title) || "Songs", query: q || "", tracks };
+  if (id) {
+    const shelf = SHELVES.find((s) => s.id === id);
+    const tracks = shelf ? tracksForShelf(shelf.id) : allTracks().slice(0, 16);
+    return { id, title: (shelf && shelf.title) || "Songs", query: q || "", tracks };
+  }
+  // No id → a query-driven playlist ("Made for you" card). Honor the query so
+  // each card resolves to its own songs, not the same list.
+  const tracks = tracksByQuery(q);
+  return { id: "", title: q || "Songs", query: q || "", tracks };
 }
 
 // ── /api/search + /api/youtube/search ────────────────────────────────────
@@ -293,15 +325,22 @@ export function previewLyrics(title, artist) {
   };
 }
 
-// ── /api/preview/audio — a short, pleasant local tone (WAV) ─────────────
-// 16-bit PCM mono WAV. ~6 seconds of a soft arpeggio so tapping a song in
-// the preview actually plays audio through the <audio> player.
+// ── /api/preview/audio — a pleasant local tone (WAV) ────────────────────
+// 16-bit PCM mono WAV. The tone length is taken from the request (?dur=) so a
+// tapped song plays for its REAL duration (progress bar/seek behave like a real
+// track) instead of a jarring 6-second blip. It's still a synth arpeggio, not
+// the actual recording — the sandbox has no egress to stream real music.
 const WAV_SAMPLE_RATE = 16000;
-let wavCache = null;
-export function previewAudioWav() {
-  if (wavCache) return wavCache;
+const WAV_MAX_SEC = 360; // 6 minutes — beyond a normal song, bounds buffer size
+let wavCache = { key: null, buf: null };
+export function previewAudioWav(durArg) {
+  // Clamp requested duration so we never build an absurdly huge buffer.
+  const dur = Math.min(Math.max(Number(durArg) || 30, 5), WAV_MAX_SEC);
+  const key = String(dur);
+  // Cache ONE buffer (the most recent) so rapid retries of the same track are
+  // cheap without holding a buffer per track (memory is scarce in the worker).
+  if (wavCache.key === key && wavCache.buf) return wavCache.buf;
   const sr = WAV_SAMPLE_RATE;
-  const dur = 6.0;
   const n = Math.floor(sr * dur);
   const data = new Int16Array(n);
   // A soft C-major arpeggio with a gentle decay, so it's audible but not harsh.
@@ -331,6 +370,6 @@ export function previewAudioWav() {
   header.write("data", 36);
   header.writeUInt32LE(n * 2, 40);
   const buf = Buffer.concat([header, Buffer.from(data.buffer)]);
-  wavCache = buf;
+  wavCache = { key, buf };
   return buf;
 }

@@ -79,8 +79,18 @@ async function handleApi(request, env, url) {
   // still flow through their normal handlers untouched.
   if (env && env.MUCHI_PREVIEW_SEED) {
     const gl = url.searchParams.get("gl") || "";
+    // Dev seed data must never be cached by the browser/service worker — a
+    // stale `/api/lyrics` (old {synced,plain} shape) would keep showing
+    // "Lyrics aren't available" even after the fix. Always send no-store.
+    const seedJson = (status, obj) => {
+      const r = json(status, obj);
+      r.headers.set("Cache-Control", "no-store");
+      return r;
+    };
     if (p === "/api/preview/audio") {
-      const wav = previewAudioWav();
+      // ?dur=<seconds> tells the seed how long to make the tone so a tapped
+      // song plays for its real duration (the sandbox can't stream real music).
+      const wav = previewAudioWav(url.searchParams.get("dur"));
       return new Response(new Uint8Array(wav), {
         status: 200,
         headers: {
@@ -90,24 +100,24 @@ async function handleApi(request, env, url) {
         },
       });
     }
-    if (p === "/api/home") return json(200, previewHome(gl));
+    if (p === "/api/home") return seedJson(200, previewHome(gl));
     if (p === "/api/shelf") {
-      return json(200, previewShelf(
+      return seedJson(200, previewShelf(
         url.searchParams.get("id") || "",
         url.searchParams.get("q") || "",
         gl,
       ));
     }
-    if (p === "/api/search") return json(200, previewSearch(url.searchParams.get("q") || ""));
-    if (p === "/api/youtube/search") return json(200, previewYtSearch(url.searchParams.get("q") || url.searchParams.get("query") || ""));
+    if (p === "/api/search") return seedJson(200, previewSearch(url.searchParams.get("q") || ""));
+    if (p === "/api/youtube/search") return seedJson(200, previewYtSearch(url.searchParams.get("q") || url.searchParams.get("query") || ""));
     if (p === "/api/artist") {
-      return json(200, previewArtist(url.searchParams.get("name") || url.searchParams.get("q") || ""));
+      return seedJson(200, previewArtist(url.searchParams.get("name") || url.searchParams.get("q") || ""));
     }
-    if (p === "/api/related") return json(200, previewRelated(url.searchParams.get("title") || ""));
-    if (p === "/api/discover" || p === "/api/for-you") return json(200, previewDiscover(gl));
-    if (p === "/api/radio") return json(200, previewRadio(url.searchParams.get("q") || ""));
+    if (p === "/api/related") return seedJson(200, previewRelated(url.searchParams.get("title") || ""));
+    if (p === "/api/discover" || p === "/api/for-you") return seedJson(200, previewDiscover(gl));
+    if (p === "/api/radio") return seedJson(200, previewRadio(url.searchParams.get("q") || ""));
     if (p === "/api/lyrics") {
-      return json(200, previewLyrics(url.searchParams.get("title") || "", url.searchParams.get("artist") || ""));
+      return seedJson(200, previewLyrics(url.searchParams.get("title") || "", url.searchParams.get("artist") || ""));
     }
   }
 
