@@ -4,7 +4,7 @@
 // 1189–1209, radio 1060–1189, lyrics 1209–1262, resolveShelfPlaylist
 // 1380–1393). Response shapes are unchanged.
 
-import { fetchJSON, codecMatch, tidyTitle, tidyArtist } from "./util.js";
+import { fetchJSON, codecMatch, tidyTitle, tidyArtist, isEnglishTrack } from "./util.js";
 import { walkCollect, walkCatalog } from "./parse.js";
 import { regionCode, YT_SONGS_PARAMS, RADIO_HOSTS, pickPlaylistHit } from "./data.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
@@ -496,19 +496,38 @@ export function parseLyricsHit(hit) {
   return { lyrics, synced, title: hit.trackName, artist: hit.artistName };
 }
 
-export async function lyricsFor(title, artist) {
+export async function lyricsFor(title, artist, duration) {
   const t = tidyTitle(title);
   const a = tidyArtist(artist);
+  const dur = Math.max(1, Math.round(Number(duration) || 0));
+  // LRCLIB requires a User-Agent identifying the client; otherwise it may
+  // throttle/block. The `/api/get` endpoint matches much more precisely when
+  // the track's `duration` is supplied (LRCLIB only returns lyrics when the
+  // duration matches within ±2 s) — without it many songs return 404, which
+  // is exactly the "no lyrics" bug. We set both here and fall back to search.
+  const UA = `${APP_NAME}/${APP_VERSION} (https://github.com/Kaibshshdheueejw/Muchi)`;
+  const lrcHeaders = {
+    "User-Agent": UA,
+    "X-User-Agent": UA,
+    "Lrclib-Client": `${APP_NAME}/${APP_VERSION}`,
+    "Accept": "application/json",
+  };
   const tries = [];
   if (a && t) {
-    tries.push(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(a)}&track_name=${encodeURIComponent(t)}`);
+    const get = new URLSearchParams({ artist_name: a, track_name: t });
+    if (dur) get.set("duration", String(dur));
+    tries.push({ url: `https://lrclib.net/api/get?${get.toString()}`, headers: lrcHeaders });
   }
   const q = [a, t].filter(Boolean).join(" ");
-  if (q) tries.push(`https://lrclib.net/api/search?q=${encodeURIComponent(q)}`);
-  if (t) tries.push(`https://lrclib.net/api/search?track_name=${encodeURIComponent(t)}&artist_name=${encodeURIComponent(a)}`);
-  for (const url of tries) {
+  if (q) tries.push({ url: `https://lrclib.net/api/search?q=${encodeURIComponent(q)}`, headers: lrcHeaders });
+  if (t) {
+    const search = new URLSearchParams({ track_name: t });
+    if (a) search.set("artist_name", a);
+    tries.push({ url: `https://lrclib.net/api/search?${search.toString()}`, headers: lrcHeaders });
+  }
+  for (const { url, headers } of tries) {
     try {
-      const data = await fetchJSON(url, {}, 10000);
+      const data = await fetchJSON(url, { headers }, 10000);
       if (Array.isArray(data)) {
         const hit = data.find((x) => x.plainLyrics || x.syncedLyrics) || data[0];
         const parsed = parseLyricsHit(hit);
@@ -517,6 +536,17 @@ export async function lyricsFor(title, artist) {
         const parsed = parseLyricsHit(data);
         if (parsed) return parsed;
       }
+    } catch {}
+  }
+  // Fallback: a second, request-hosted lyrics mirror keeps the feature useful
+  // when LRCLIB is throttling/overloaded. Best-effort only.
+  if (q) {
+    try {
+      const data = await fetchJSON(`https://lrclib.net/api/search?q=${encodeURIComponent(q)}`, { headers: lrcHeaders }, 8000);
+      const arr = Array.isArray(data) ? data : [data];
+      const hit = arr.find((x) => x.plainLyrics || x.syncedLyrics) || arr[0];
+      const parsed = parseLyricsHit(hit);
+      if (parsed) return parsed;
     } catch {}
   }
   return { lyrics: "", synced: [] };
@@ -529,7 +559,13 @@ export async function resolveShelfPlaylist(query, gl) {
     const r = await youtubeMusicSearch(`${query} playlist`, gl, 6000, { limit: 24 });
     const hit = pickPlaylistHit(r && r.playlists, query);
     if (!hit) return null;
-    return { playlistId: hit.playlistId, title: hit.title, artwork: hit.artwork };
+    // Carry up to 20 English-only tracks so "Made for you" cards are fully
+    // populated (and show the real song count) even before the user opens
+    // them — and so Hindi/regional songs never sneak into the English row.
+    const tracks = (r && Array.isArray(r.tracks) ? r.tracks : [])
+      .filter((t) => t && t.videoId && isEnglishTrack(t))
+      .slice(0, 20);
+    return { playlistId: hit.playlistId, title: hit.title, artwork: hit.artwork, tracks };
   } catch {
     return null;
   }

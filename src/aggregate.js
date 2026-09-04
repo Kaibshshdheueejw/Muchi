@@ -635,7 +635,8 @@ export async function handleRelated(url) {
 export async function handleLyrics(url) {
   const title = url.searchParams.get("title") || "";
   const artist = url.searchParams.get("artist") || "";
-  const data = await lyricsFor(title, artist);
+  const dur = Number(url.searchParams.get("duration")) || 0;
+  const data = await lyricsFor(title, artist, dur);
   return json(200, data);
 }
 
