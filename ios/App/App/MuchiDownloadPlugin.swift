@@ -205,7 +205,10 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
         if let artData = artData {
             let artItem = AVMutableMetadataItem()
             artItem.identifier = .commonIdentifierArtwork
-            artItem.value = artData
+            // AVMetadataItem.value expects an NSCopying & NSObjectProtocol value;
+            // Swift's Data (a struct) is not one, so bridge to NSData explicitly
+            // (other value types are not supported for cover art).
+            artItem.value = artData as NSData
             artItem.dataType = "public.jpeg"
             artItem.extendedLanguageTag = "und"
             items.append(artItem)
