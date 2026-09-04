@@ -175,12 +175,25 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func applyMp4Metadata(to src: URL, title: String, artist: String, album: String, genre: String, artwork: Data?, artworkURL: String) {
+        // AVAssetExportSession.metadata is read-only, so write tags with a
+        // passthrough AVAssetReader -> AVAssetWriter (AVAssetWriter.metadata
+        // is writable). If the passthrough fails for an unusual source the
+        // original (untagged) file is kept, so the download always works.
         let asset = AVURLAsset(url: src)
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
+        guard let track = asset.tracks(withMediaType: .audio).first,
+              let reader = try? AVAssetReader(asset: asset) else { return }
+        let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        guard reader.canAdd(readerOutput) else { return }
+        reader.add(readerOutput)
+
         let tmp = src.deletingPathExtension().appendingPathExtension("tagged.m4a")
-        export.outputURL = tmp
-        export.outputFileType = .m4a
-        var items: [AVMutableMetadataItem] = []
+        guard let writer = try? AVAssetWriter(outputURL: tmp, fileType: .m4a) else { return }
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
+        writerInput.expectsMediaDataInRealTime = false
+        guard writer.canAdd(writerInput) else { return }
+        writer.add(writerInput)
+
+        var items: [AVMetadataItem] = []
         if !title.isEmpty { items.append(metaItem(.title, title)) }
         if !artist.isEmpty { items.append(metaItem(.artist, artist)) }
         if !album.isEmpty { items.append(metaItem(.albumName, album)) }
@@ -195,11 +208,29 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
             artItem.extendedLanguageTag = "und"
             items.append(artItem)
         }
-        export.metadata = items
+        writer.metadata = items
+
+        guard writer.startWriting() else { return }
+        writer.startSession(atSourceTime: .zero)
+
         let sem = DispatchSemaphore(value: 0)
-        export.exportAsynchronously { sem.signal() }
+        writerInput.requestMediaDataWhenReady(on: DispatchQueue.global(qos: .utility)) {
+            while writerInput.isReadyForMoreMediaData {
+                guard let sample = readerOutput.copyNextSampleBuffer() else {
+                    writerInput.markAsFinished()
+                    writer.finishWriting { sem.signal() }
+                    return
+                }
+                if !writerInput.append(sample) {
+                    writerInput.markAsFinished()
+                    writer.cancelWriting()
+                    sem.signal()
+                    return
+                }
+            }
+        }
         sem.wait()
-        guard export.status == .completed else { return }
+        guard writer.status == .completed else { return }
         do {
             try? FileManager.default.removeItem(at: src)
             try FileManager.default.moveItem(at: tmp, to: src)

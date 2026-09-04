@@ -1111,19 +1111,36 @@
     if (t.artwork) s.artwork = t.artwork;
     return s;
   }
+  function isSameOriginStreamUrl(sid) {
+    if (!sid) return false;
+    if (sid.startsWith("/")) return true; // relative → same origin
+    try {
+      return new URL(sid, window.location.origin).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
   function downloadFilePath(t) {
-    // Prefer a direct stream URL the track already carries (Audius, and the
-    // offline/preview tone). This keeps downloads working even when the worker
-    // can't resolve a fresh YouTube stream, and avoids double-proxying a URL.
-    if (t && t.streamUrl) return t.streamUrl;
-    // Otherwise ask the server to resolve + proxy the audio and name the file.
-    if (t && t.source === "audius" && t.trackId) {
-      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`;
+    const sid = String((t && t.streamUrl) || "");
+    const proxyFor = () => {
+      if (t && t.videoId) return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`;
+      if (t && t.source === "audius" && t.trackId) return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`;
+      return "";
+    };
+    // Spotube comparison: native apps download via a local HTTP client to a
+    // real file + embedded tags — no CORS. The WEB app has no such client, and
+    // a cross-origin stream URL (Audius CDN / Piped / Googlevideo) is almost
+    // always CORS-blocked in a browser. So on the web we always go through the
+    // same-origin /api/download proxy (adds ACAO:* + real Content-Disposition
+    // filename), which is the browser-safe equivalent of Spotube's local save.
+    if (!IS_NATIVE && t && (t.videoId || (t.source === "audius" && t.trackId))) {
+      return proxyFor();
     }
-    if (t && t.videoId) {
-      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`;
-    }
-    return "";
+    // Same-origin direct stream (offline/preview tone) — safe on either platform.
+    if (sid && isSameOriginStreamUrl(sid)) return sid;
+    // Native (no CORS) or a direct stream that isn't guarded above: use as-is.
+    if (sid) return sid;
+    return proxyFor();
   }
 
   function concatBytes(parts) {
