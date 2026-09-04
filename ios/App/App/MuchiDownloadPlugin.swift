@@ -197,7 +197,9 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
         if !title.isEmpty { items.append(metaItem(.commonIdentifierTitle, title)) }
         if !artist.isEmpty { items.append(metaItem(.commonIdentifierArtist, artist)) }
         if !album.isEmpty { items.append(metaItem(.commonIdentifierAlbumName, album)) }
-        if !genre.isEmpty { items.append(metaItem(.commonIdentifierGenre, genre)) }
+        // Genre: AVFoundation has NO .commonIdentifierGenre. For QuickTime/m4a
+        // the correct member is .quickTimeMetadataGenre.
+        if !genre.isEmpty { items.append(metaItem(.quickTimeMetadataGenre, genre)) }
         // Cover art: prefer the base64 data passed from JS, else fetch the URL.
         let artData = artwork ?? fetchArtwork(artworkURL)
         if let artData = artData {
