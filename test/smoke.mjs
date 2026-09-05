@@ -379,7 +379,7 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
   const realFetch = globalThis.fetch;
   try {
     const { youtubeAudioStream } = await import("../src/providers.js");
-    const itTubeOk = new Response(JSON.stringify({
+    const itTubeOk = () => new Response(JSON.stringify({
       playabilityStatus: { status: "OK" },
       streamingData: { adaptiveFormats: [
         { itag: 251, mimeType: "audio/webm; codecs=\"opus\"", bitrate: 160000, url: "https://g/opus-251" },
@@ -387,7 +387,7 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
       ] },
       videoDetails: { durationSeconds: "200" },
     }), { status: 200, headers: { "content-type": "application/json" } });
-    const pipedOk = new Response(JSON.stringify({
+    const pipedOk = () => new Response(JSON.stringify({
       duration: 200,
       audioStreams: [{ url: "https://p/1", mimeType: "audio/webm", format: "opus", quality: "opus", bitrate: 160 }],
     }), { status: 200, headers: { "content-type": "application/json" } });
@@ -395,10 +395,10 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
 
     // (a) InnerTube healthy → Piped must NOT be touched at all.
     let seen = [];
-    globalThis.fetch = async (u) => { seen.push(String(u)); return String(u).includes("youtubei/v1/player") ? itTubeOk.clone() : serverErr(); };
+    globalThis.fetch = async (u) => { seen.push(String(u)); return String(u).includes("youtubei/v1/player") ? itTubeOk() : serverErr(); };
     let r = await youtubeAudioStream("vid123");
     ok("chain: innertube-first m4a picked", r.url === "https://g/m4a-140" && r.format === "m4a" && r.duration === 200);
-    ok("chain: zero Piped load when innertube works", seen.length === 1 && seen[0].includes("youtubei/v1/player"));
+    ok("chain: zero Piped load when innertube works (race)", seen.length >= 1 && seen.every((s) => s.includes("youtubei/v1/player")));
 
     // (b) InnerTube says LOGIN_REQUIRED (HTTP 200, unplayable) → Piped rescues.
     seen = [];
@@ -407,7 +407,7 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
       if (String(u).includes("youtubei/v1/player")) {
         return new Response(JSON.stringify({ playabilityStatus: { status: "LOGIN_REQUIRED" } }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      return String(u).includes("/streams/vid123") ? pipedOk.clone() : serverErr();
+      return String(u).includes("/streams/vid123") ? pipedOk() : serverErr();
     };
     r = await youtubeAudioStream("vid123");
     ok("chain: piped fallback when innertube unplayable", r.url === "https://p/1" && seen.some((s) => s.includes("pipedapi")));
@@ -430,6 +430,17 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
     };
     threw = "";
     try { await youtubeAudioStream("vid123"); } catch (e) { threw = String(e.message || e); }
+    // (e2) diagnostics: the throw must carry WHY each InnerTube profile gated.
+    globalThis.fetch = async (u) => {
+      if (String(u).includes("youtubei/v1/player")) {
+        return new Response(JSON.stringify({ playabilityStatus: { status: "LOGIN_REQUIRED" } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (String(u).includes("/streams/")) return new Response(JSON.stringify({ audioStreams: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      return serverErr();
+    };
+    try { await youtubeAudioStream("vid123"); } catch (e) { threw = String(e.message || e); }
+    ok("chain: error names gated profiles + reason", threw.includes("no audio stream") && threw.includes("LOGIN_REQUIRED") && threw.includes("ANDROID-19.09") && threw.includes("IOS-19.09"));
+
     ok("chain: empty-answer throw, not silent null", threw.includes("no audio stream"));
 
     // (e) empty videoId → null immediately, no fetches (bad-request guard).

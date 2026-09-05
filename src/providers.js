@@ -297,20 +297,91 @@ function streamQualityScore(s) {
   return 0;
 }
 
-// ── Tier 1: innerTube player endpoint (ANDROID client) ─────────────────────
+// ── Tier 1: innerTube player endpoint (multi-client race) ───────────────
 // WHY THIS TIER EXISTS (v1.5.4 audit, D+E): the public Piped instances became
 // unreliable — production /api/yt/stream returned an empty url for every video
 // on 2026-09-05 (live-verified), which killed native background playback
 // (the Media3/AVPlayer sink never engaged) and made YouTube downloads fail.
-// The public innerTube `player` endpoint answered with the ANDROID client
-// returns audio-only adaptive formats with DIRECT (no cipher-decipher needed)
-// playable URLs — single request, no third-party dependency. It uses the same
+// The public innerTube `player` endpoint answers with audio-only adaptive
+// formats with DIRECT (no cipher-decipher needed) playable URLs — one request
+// per client profile, no third-party dependency, profiles raced in parallel. It uses the same
 // keyless innerTube pattern as the WEB_REMIX/WEB search calls in this file.
 // If Google ever gates this endpoint too, this tier simply returns null and
 // the existing Piped fan-out (Tier 2) + the client's iframe fallback keep
 // working exactly as before — nothing regresses.
-const INERTUBE_PLAYER_TIMEOUT = 4000;
-const INERTUBE_ANDROID_UA = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip";
+const INNERTUBE_PLAYER_TIMEOUT = 4000;
+const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+// Multiple client profiles, raced in parallel. A single client version/IP can
+// be gated (LOGIN_REQUIRED / cipher-only) by Google while others still return
+// direct URLs — the first profile to hand back a usable stream wins, so the
+// median latency stays one request. If Google ever gates them ALL, each gate
+// reason is included in the final error so production logs/curls tell us WHY
+// (this is what /api/yt/stream's error field used to hide).
+const INNERTUBE_PROFILES = [
+  {
+    tag: "ANDROID-19.09",
+    ua: "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+    client: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" },
+  },
+  {
+    tag: "ANDROID-20.10",
+    ua: "com.google.android.youtube/20.10.44 (Linux; U; Android 14) gzip",
+    client: { clientName: "ANDROID", clientVersion: "20.10.44", androidSdkVersion: 34, hl: "en", gl: "US" },
+  },
+  {
+    tag: "IOS-19.09",
+    ua: "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X) gzip",
+    client: { clientName: "IOS", clientVersion: "19.09.3", deviceModel: "iPhone16,2", hl: "en", gl: "US" },
+  },
+];
+
+// One profile probe: direct audio stream or a REJECT carrying "TAG=reason"
+// (playability status, or NO_AUDIO_FORMATS when playable-but-empty).
+async function innertubeProbe(spec, videoId) {
+  const data = await fetchJSON(INNERTUBE_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: "https://www.youtube.com",
+      Referer: "https://www.youtube.com/",
+      "User-Agent": spec.ua,
+    },
+    body: JSON.stringify({ context: { client: spec.client }, videoId }),
+  }, INNERTUBE_PLAYER_TIMEOUT);
+  const picked = pickInnertubeStream(data);
+  if (picked) return { ...picked, source: `innertube:${spec.tag}` };
+  const status = String((data && data.playabilityStatus && data.playabilityStatus.status) || "NO_AUDIO_FORMATS");
+  throw new Error(`${spec.tag}=${status}`);
+}
+
+export async function youtubeAudioStream(videoId) {
+  const id = String(videoId || "").trim();
+  if (!id) return null;
+  // Tier 1 — innerTube, all client profiles RACED (direct URLs, no third-party hop).
+  const gates = [];
+  const probes = INNERTUBE_PROFILES.map((spec) => new Promise((resolve, reject) => {
+    innertubeProbe(spec, id).then(resolve, (e) => { gates.push(String(e.message || e)); reject(e); });
+  }));
+  try {
+    return await Promise.any(probes);
+  } catch {
+    // every profile gated/failed → Tier 2
+  }
+  // Tier 2 — Piped instances (unchanged fallback; usually dead lately, but
+  // free to keep).
+  const attempts = PIPED_STREAM_INSTANCES.map((base) =>
+    fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, PIPED_API_TIMEOUT)
+  );
+  try {
+    const data = await Promise.any(attempts);
+    const picked = pickPipedStream(data);
+    if (picked) return picked;
+  } catch {
+    // Promise.any rejects only if ALL instances failed.
+    throw new Error("all piped stream instances failed");
+  }
+  throw new Error(`no audio stream (innertube: ${gates.length ? [...new Set(gates)].join(", ") : "not attempted"})`);
+}
 
 /**
  * Pure extractor: innerTube player response → the best direct audio URL.
@@ -340,60 +411,6 @@ export function pickInnertubeStream(data) {
     bitrate: String(best.bitrate || ""),
     duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || 0,
   };
-}
-
-async function innertubePlayer(videoId) {
-  return fetchJSON(
-    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: "https://www.youtube.com",
-        Referer: "https://www.youtube.com/",
-        "User-Agent": INERTUBE_ANDROID_UA,
-      },
-      body: JSON.stringify({
-        context: {
-          client: {
-            clientName: "ANDROID",
-            clientVersion: "19.09.37",
-            androidSdkVersion: 30,
-            hl: "en",
-            gl: "US",
-          },
-        },
-        videoId,
-      }),
-    },
-    INERTUBE_PLAYER_TIMEOUT
-  );
-}
-
-export async function youtubeAudioStream(videoId) {
-  const id = String(videoId || "").trim();
-  if (!id) return null;
-  // Tier 1 — innerTube ANDROID player (direct URLs, no third-party hop).
-  try {
-    const picked = pickInnertubeStream(await innertubePlayer(id));
-    if (picked) return picked;
-  } catch {
-    // fall through to Tier 2
-  }
-  // Tier 2 — Piped instances (unchanged fallback; usually dead lately, but
-  // free to keep).
-  const attempts = PIPED_STREAM_INSTANCES.map((base) =>
-    fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, PIPED_API_TIMEOUT)
-  );
-  try {
-    const data = await Promise.any(attempts);
-    const picked = pickPipedStream(data);
-    if (picked) return picked;
-  } catch (e) {
-    // Promise.any rejects only if ALL instances failed.
-    throw new Error("all piped stream instances failed");
-  }
-  throw new Error("no audio stream");
 }
 
 export function mapAudiusTrack(t) {
