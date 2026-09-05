@@ -450,7 +450,7 @@ public class MuchiAudioService extends Service {
         // v1.5.4: real transport buttons (prev / play-pause / next) on the
         // notification itself + compact view, a delete intent so a swipe that
         // somehow goes through stops playback instead of orphaning the
-        // service, and CATEGORY_MEDIA so OEM/Android auto-group it with media.
+        // service, and CATEGORY_TRANSPORT (the media category that exists in AndroidX) so OEM/Android auto-group it with media.
         // The framework ic_media_* drawables are used deliberately: zero new
         // assets, monochrome-correct on every OEM skin, and what every
         // MediaStyle notification template expects at API 24+.
@@ -467,7 +467,7 @@ public class MuchiAudioService extends Service {
                 // we don't depend on a specific androidx.core version).
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setCategory(NotificationCompat.CATEGORY_MEDIA)
+                .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
                 .addAction(android.R.drawable.ic_media_previous, "Previous", serviceAction(ACTION_PREV, 11))
                 .addAction(playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
                         playing ? "Pause" : "Play", serviceAction(ACTION_TOGGLE, 12))
