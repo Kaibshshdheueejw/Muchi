@@ -15,8 +15,8 @@ import {
   radioSearch, radioBrowser, lyricsFor, resolveShelfPlaylist,
 } from "./providers.js";
 import {
-  regionCode, utcDay, LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES,
-  moodsForCountry, playlistsOf, uniqPlaylists, buildForYouPlaylists,
+  regionCode, utcDay, LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES, VIRAL_QUERIES,
+  moodsForCountry, playlistsOf, uniqPlaylists, buildForYouPlaylists, buildViralPlaylists,
 } from "./data.js";
 import { deezerCatalog } from "./deezer.js";
 import { strictSongs } from "./parse.js";
@@ -78,7 +78,7 @@ export async function handleHome(env, url) {
   const gl = regionCode(url.searchParams.get("gl"));
   const localQ = LOCAL_CHARTS[gl] || "top hits official audio";
   const refresh = url.searchParams.get("refresh") === "1";
-  let globalPart = { shelves: [], globalPlaylists: [], audius: [], underground: [], radio: [], forYouPlaylists: [] };
+  let globalPart = { shelves: [], globalPlaylists: [], audius: [], underground: [], radio: [], forYouPlaylists: [], viralPlaylists: [] };
   let localPart = { youtubeLocal: [], countryPlaylists: [] };
   try {
     globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:v5:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
@@ -86,6 +86,7 @@ export async function handleHome(env, url) {
     console.error("home english", e);
     globalPart.shelves = ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: s.query, tracks: [] }));
     globalPart.forYouPlaylists = buildForYouPlaylists([]);
+    globalPart.viralPlaylists = buildViralPlaylists([]);
   }
   try {
     localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v5:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
@@ -107,6 +108,7 @@ export async function handleHome(env, url) {
     countryPlaylists: localPart.countryPlaylists || [],
     globalPlaylists: globalPart.globalPlaylists || [],
     forYouPlaylists: globalPart.forYouPlaylists || [],
+    viralPlaylists: globalPart.viralPlaylists || [],
     audius: globalPart.audius,
     underground: globalPart.underground,
     radio: globalPart.radio,
@@ -145,12 +147,18 @@ async function buildGlobal(gl, localQ) {
   const radio = take(extra[jobs.length + 3]).slice(0, 12);
   const fyRes = await Promise.allSettled(FY_QUERIES.map((f) => resolveShelfPlaylist(f.query, "US")));
   const forYouPlaylists = buildForYouPlaylists(fyRes);
+  // Viral / "trending worldwide" shelf — resolved the same way as "Made for
+  // you" so it auto-refreshes with the per-day home build (KV-cached above),
+  // and each card ships its own 20 tracks for an instant, fully-populated row.
+  const viralRes = await Promise.allSettled(VIRAL_QUERIES.map((f) => resolveShelfPlaylist(f.query, "US")));
+  const viralPlaylists = buildViralPlaylists(viralRes);
   const total =
     shelves.reduce((n, s) => n + (s.tracks || []).length, 0) +
     globalPlaylists.length + audius.length + underground.length + radio.length +
-    forYouPlaylists.filter((p) => p.playlistId).length;
+    forYouPlaylists.filter((p) => p.playlistId).length +
+    viralPlaylists.filter((p) => p.playlistId).length;
   if (!total) throw new Error("home empty — not caching");
-  return { shelves, globalPlaylists, audius, underground, radio, forYouPlaylists };
+  return { shelves, globalPlaylists, audius, underground, radio, forYouPlaylists, viralPlaylists };
 }
 
 async function buildLocal(gl, localQ) {

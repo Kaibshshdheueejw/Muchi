@@ -20,12 +20,18 @@ import {
 } from "../src/parse.js";
 import {
   regionCode, moodsForCountry, uniqPlaylists, pickPlaylistHit,
-  buildForYouPlaylists, utcDay, LOCAL_CHARTS, MOODS_BY_COUNTRY,
+  buildForYouPlaylists, buildViralPlaylists, VIRAL_QUERIES,
+  utcDay, LOCAL_CHARTS, MOODS_BY_COUNTRY,
 } from "../src/data.js";
 import { codecMatch, tidyTitle, tidyArtist } from "../src/util.js";
 import { parseLyricsHit } from "../src/providers.js";
 import { APP_VERSION } from "../src/config.js";
 import { createHmac as nodeHmac } from "node:crypto";
+import {
+  parseVersion, versionAtLeast, versionEqual, checkVersionSync, isSync,
+  readBuildGradleVersion, readPbxprojVersion, readConfigVersion, readAppJsVersion,
+} from "../scripts/version-utils.mjs";
+import { normalizeGain, volumeFor, qualityToYtRange, qualityLabel } from "../scripts/audio-utils.mjs";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 
@@ -152,8 +158,8 @@ ok("regionCode IN default", regionCode() === "IN");
 ok("regionCode lower→upper", regionCode("us") === "US");
 ok("regionCode invalid → IN", regionCode("12") === "IN");
 ok("regionCode XX passthrough", regionCode("XX") === "XX");
-ok("LOCAL_CHARTS 27 countries", Object.keys(LOCAL_CHARTS).length === 27);
-ok("MOODS_BY_COUNTRY 23 countries", Object.keys(MOODS_BY_COUNTRY).length === 23);
+ok("LOCAL_CHARTS 29 countries", Object.keys(LOCAL_CHARTS).length === 29);
+ok("MOODS_BY_COUNTRY 25 countries", Object.keys(MOODS_BY_COUNTRY).length === 25);
 ok("moods IN = 12 (10 core + 5 local unique)", moodsForCountry("IN").length === 12);
 // US local = [us-pop, rnb, country, latin-us]; slice(0,2) → rnb duplicates
 // core rnb and is deduped → 11 (same as server.js moodsForCountry)
@@ -163,6 +169,18 @@ ok("moods IN first = pop", moodsForCountry("IN")[0].id === "pop");
 ok("moods unique ids", new Set(moodsForCountry("IN").map((m) => m.id)).size === 12);
 ok("uniqPlaylists dedupes", uniqPlaylists([{ playlistId: "a", title: "A" }, { playlistId: "a", title: "A" }, { playlistId: "b", title: "B" }]).length === 2);
 ok("pickPlaylistHit best match", pickPlaylistHit([{ playlistId: "p1", title: "Dance Hits" }, { playlistId: "p2", title: "Chill Vibes" }], "dance hits")?.playlistId === "p1");
+ok("VIRAL_QUERIES exactly 10 distinct tastes", (() => {
+  const tastes = new Set(VIRAL_QUERIES.map((q) => q.taste));
+  return VIRAL_QUERIES.length === 10 && tastes.size === 10 && VIRAL_QUERIES.every((q) => q.query && q.title);
+})());
+ok("buildViralPlaylists 10 entries", buildViralPlaylists([]).length === 10);
+ok("buildViralPlaylists tracks up to 20 (resolved)", (() => {
+  const res = VIRAL_QUERIES.map((_, i) => ({
+    status: "fulfilled",
+    value: { playlistId: "PL" + i, artwork: "a", tracks: Array.from({ length: 30 }, (_, j) => ({ id: "yt:" + i + "-" + j, title: "T" + j, artist: "A", artwork: "x" })) },
+  }));
+  return buildViralPlaylists(res).every((p) => p.tracks.length <= 20);
+})());
 ok("buildForYouPlaylists 10 entries", buildForYouPlaylists([]).length === 10);
 ok("buildForYouPlaylists all 10 distinct-mood yt cards (no mix)", (() => {
   const pls = buildForYouPlaylists([]);
@@ -174,6 +192,51 @@ ok("buildForYouPlaylists tracks up to 20 (resolved)", (() => {
   return pls.length === 10 && pls.every((p) => p.playlistId.startsWith("PL") && Array.isArray(p.tracks) && p.tracks.length === 20);
 })());
 ok("utcDay format", /^\d{4}-\d{2}-\d{2}$/.test(utcDay()));
+
+// ── Release/update-safety guard (scripts/version-utils.mjs) ────────────────
+ok("parseVersion tolerates v / partial", (() => {
+  const a = parseVersion("v1.2.3"), b = parseVersion("1.2"), c = parseVersion("3");
+  return a.major === 1 && a.minor === 2 && a.patch === 3 && b.patch === 0 && c.major === 3;
+})());
+ok("versionAtLeast ordering", versionAtLeast("1.5.2", "1.5.1") && versionAtLeast("2.0.0", "1.9.9") && !versionAtLeast("1.5.0", "1.5.1"));
+ok("versionEqual ignores case/pre", versionEqual("1.5.1", "v1.5.1-alpha") && !versionEqual("1.5.1", "1.5.2"));
+ok("buildGradle parse versionCode+versionName", (() => {
+  const r = readBuildGradleVersion("versionCode 6\nversionName \"1.5.1\"");
+  return r.versionCode === 6 && r.versionName === "1.5.1";
+})());
+ok("pbxproj parse marketing+build", (() => {
+  const r = readPbxprojVersion("MARKETING_VERSION = 1.5.1;\nCURRENT_PROJECT_VERSION = 4;");
+  return r.marketingVersion === "1.5.1" && r.currentProjectVersion === 4;
+})());
+ok("checkVersionSync detects drift", (() => {
+  const good = checkVersionSync({ pkgVersion: "1.5.1", pkgLockVersion: "1.5.1", configVersion: "1.5.1", gradleVersionName: "1.5.1", iosMarketing: "1.5.1", publicAppVersion: "1.5.1", canonical: "1.5.1" });
+  const bad = checkVersionSync({ pkgVersion: "1.5.1", pkgLockVersion: "1.5.1", configVersion: "1.5.2", gradleVersionName: "1.5.1", iosMarketing: "1.5.1", publicAppVersion: "1.5.1", canonical: "1.5.1" });
+  const badApp = checkVersionSync({ pkgVersion: "1.5.2", pkgLockVersion: "1.5.2", configVersion: "1.5.2", gradleVersionName: "1.5.2", iosMarketing: "1.5.2", publicAppVersion: "1.5.1", canonical: "1.5.2" });
+  const badLock = checkVersionSync({ pkgVersion: "1.5.2", pkgLockVersion: "1.5.1", configVersion: "1.5.2", gradleVersionName: "1.5.2", iosMarketing: "1.5.2", publicAppVersion: "1.5.2", canonical: "1.5.2" });
+  return good.errors.length === 0 && bad.errors.length === 1 && badApp.errors.length === 1 && badLock.errors.length === 1;
+})());
+ok("isSync false on any drift", !isSync({ pkgVersion: "1.5.1", pkgLockVersion: "1.5.1", configVersion: "1.5.1", gradleVersionName: "1.5.2", iosMarketing: "1.5.1", publicAppVersion: "1.5.1" }));
+ok("isSync true when all agree", isSync({ pkgVersion: "1.5.1", pkgLockVersion: "1.5.1", configVersion: "1.5.1", gradleVersionName: "1.5.1", iosMarketing: "1.5.1", publicAppVersion: "1.5.1" }));
+ok("REAL version strings all agree across pkg/pkg-lock/src-config/public-app", (() => {
+  const pkg = JSON.parse(readFileSync("package.json", "utf8") || "{}");
+  const lock = JSON.parse(readFileSync("package-lock.json", "utf8") || "{}");
+  const app = readAppJsVersion(readFileSync("public/app.js", "utf8"));
+  const cfg = readConfigVersion(readFileSync("src/config.js", "utf8"));
+  return app && lock.version && versionEqual(lock.version, pkg.version) && versionEqual(app, pkg.version) && versionEqual(cfg, pkg.version);
+})());
+
+// ── Audio helpers (scripts/audio-utils.mjs) — "Even volume" + quality ──────
+ok("normalizeGain off = 1, on = 0.86", normalizeGain(false) === 1 && normalizeGain(true) === 0.86);
+ok("volumeFor clamps + trims when normalize", (() => {
+  // 100% normalized = 1 * 0.86 = 0.86; 200% clamps to volume cap 0.86? -> clamp to 1*something
+  return volumeFor(100, true) === 0.86 && volumeFor(50, true) === 0.43 && volumeFor(100, false) === 1;
+})());
+ok("volumeFor clamps out-of-range", volumeFor(300, false) === 1 && volumeFor(-5, false) === 0 && volumeFor(100, true) <= 0.86);
+ok("qualityToYtRange", (() => {
+  const r = qualityToYtRange("highest");
+  return r[0] === "hd1080" && r[1] === "highres";
+})());
+ok("qualityLabel", qualityLabel("low") === "Low" && qualityLabel("nope") === "High");
 
 // ── 5. Helpers (server.js:1209–1262, 1060–1069) ─────────────────────────────
 ok("tidyTitle strips brackets", tidyTitle("Song (Official Audio)") === "Song");
@@ -288,7 +351,8 @@ if (BASE) {
   ok("home 200 full shape", home.status === 200 && home.body && home.body.country === "IN" && home.body.day);
   ok("home shelves empty w/ ids", Array.isArray(home.body.shelves) && home.body.shelves.length === 7 && home.body.shelves[0].id === "today");
   ok("home forYou 10 fallback", home.body.forYouPlaylists.length === 10);
-  ok("home has all keys", ["youtubeCharts", "youtubeLocal", "youtubeIndia", "countryPlaylists", "globalPlaylists", "audius", "underground", "radio", "moods"].every((k) => k in home.body));
+  ok("home viral 10 fallback", Array.isArray(home.body.viralPlaylists) && home.body.viralPlaylists.length === 10);
+  ok("home has all keys", ["youtubeCharts", "youtubeLocal", "youtubeIndia", "countryPlaylists", "globalPlaylists", "audius", "underground", "radio", "moods", "viralPlaylists"].every((k) => k in home.body));
   const homeRefresh = await get("/api/home?refresh=1");
   ok("home refresh=1 still 200", homeRefresh.status === 200);
 

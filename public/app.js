@@ -113,7 +113,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.1";
+  const APP_VERSION = "1.5.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -124,6 +124,7 @@
     ["PH", "Philippines"], ["TH", "Thailand"], ["VN", "Vietnam"], ["EG", "Egypt"],
     ["IT", "Italy"], ["ES", "Spain"], ["TR", "Turkey"], ["NZ", "New Zealand"],
     ["NL", "Netherlands"], ["SE", "Sweden"],
+    ["CN", "China"], ["HK", "Hong Kong"],
   ];
 
   function countryName(code) {
@@ -342,6 +343,21 @@
     document.documentElement.dataset.player = ["pill", "island", "wave", "bar"].includes(ps) ? ps : "pill";
     const icons = ["small", "default", "medium", "large"].includes(state.prefs.iconSize) ? state.prefs.iconSize : "default";
     document.documentElement.dataset.icons = icons;
+    // "Interface size" drives the WHOLE app, not just icon glyphs: pick a
+    // uniform scale (0.92× / 1× / 1.12× / 1.24×) applied via CSS `zoom`, which
+    // scales text, spacing, touch targets and icons together. This is the
+    // standard, layout-safe way to scale an entire PWA/native WebView (works on
+    // Chrome, Safari/WKWebView and Android WebView). We still set data-icons so
+    // the icon/dock CSS vars stay in sync; zoom is the multiplier.
+    const scaleMap = { small: 0.92, default: 1, medium: 1.12, large: 1.24 };
+    const uiScale = scaleMap[icons] || 1;
+    if (Math.abs(Number(uiScale) - 1) > 0.001) {
+      document.documentElement.style.setProperty("--ui-zoom", String(uiScale));
+      document.documentElement.style.zoom = String(uiScale);
+    } else {
+      document.documentElement.style.setProperty("--ui-zoom", "1");
+      document.documentElement.style.zoom = "";
+    }
     const bar = $("playerBar");
     if (bar) bar.dataset.player = document.documentElement.dataset.player;
     syncPlayerVisibility();
@@ -625,10 +641,9 @@
     renderChrome();
     if (!was) {
       burstHearts(btn);
-      toast("Added to Liked Songs");
-    } else {
-      toast("Removed from Liked Songs");
     }
+    // No toast on like/unlike — the heart fills/empties and the button pop are
+    // enough feedback. A toast on every tap is noisy and interrupts playback.
     if (state.view === "library" || state.view === "home") render();
     // Liking shifts the taste profile — reorder "Made for you" cards too.
     paintHomeSoon();
@@ -1091,6 +1106,24 @@
     }
     return null;
   }
+  // Item 7 — ask for storage permission when saving a song. Android 10+ writes
+  // through scoped MediaStore (no permission needed); Android 9 and below needs
+  // the legacy WRITE_EXTERNAL_STORAGE. The plugin declares the permission; this
+  // one-time request surfaces the OS dialog at the first save, mirroring the
+  // notification-permission pattern. Never blocks the save.
+  let dlPermAsked = false;
+  function nativeEnsureStoragePermission() {
+    const ND = nativeDownloader();
+    if (dlPermAsked || !ND || typeof ND.checkPermissions !== "function") return;
+    dlPermAsked = true;
+    ND.checkPermissions()
+      .then((st) => {
+        if (st && st.storage === "prompt" && typeof ND.requestPermissions === "function") {
+          ND.requestPermissions().catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }
   function sanitizeName(s) {
     return String(s || "track").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "track";
   }
@@ -1111,6 +1144,28 @@
     if (t.artwork) s.artwork = t.artwork;
     return s;
   }
+  async function ensureStreamForDownload(t) {
+    if (!t) return t;
+    const out = { ...t };
+    // Already resolved (played / audius / radio carries a streamUrl): keep it.
+    if (out.streamUrl) return out;
+    // YouTube: resolve via the same /api/yt/stream endpoint playback uses.
+    // The server caches the resolved URL for 15 min and fans out across Piped
+    // instances, so the download reuses a URL that playback just proved works
+    // instead of doing its own (un-cached) Piped resolution at download time.
+    if (out.videoId) {
+      try {
+        const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 7000);
+        if (d && d.url) {
+          out.streamUrl = d.url;
+          if (d.mimeType) out.streamMime = d.mimeType;
+          if (d.duration) out.duration = Number(d.duration) || out.duration;
+        }
+      } catch { /* fall through — downloadFilePath will try the proxy path */ }
+    }
+    return out;
+  }
+
   function isSameOriginStreamUrl(sid) {
     if (!sid) return false;
     if (sid.startsWith("/")) return true; // relative → same origin
@@ -1304,16 +1359,24 @@
       toast("Already downloading");
       return;
     }
-    const path = downloadFilePath(t);
+    // Item 7 — ask for storage permission once, at the moment of saving.
+    if (IS_NATIVE) nativeEnsureStoragePermission();
+    // Resolve a usable stream first, so downloads don't depend on the volatile
+    // Piped resolver at the moment of the request. If the track already carries
+    // a streamUrl (e.g. it was just played), reuse it. Otherwise ask the same
+    // /api/yt/stream endpoint playback uses (the server caches the resolved URL
+    // for 15 min), so a download on a never-played YouTube track still lands.
+    const resolved = await ensureStreamForDownload(t);
+    const path = downloadFilePath(resolved);
     if (!path) {
       toast("This track can't be saved offline");
       return;
     }
     const meta = {
       url: path,
-      filename: `${sanitizeName(t.title)}.${extFromMime(t)}`,
-      mime: t.streamMime || (/mpeg|mp3/i.test(String(t.streamUrl)) ? "audio/mpeg" : "audio/mp4"),
-      ext: extFromMime(t),
+      filename: `${sanitizeName(t.title)}.${extFromMime(resolved)}`,
+      mime: resolved.streamMime || (/mpeg|mp3/i.test(String(resolved.streamUrl)) ? "audio/mpeg" : "audio/mp4"),
+      ext: extFromMime(resolved),
     };
     const job = {
       id: jid,
@@ -1325,8 +1388,7 @@
     state.dlQueue = state.dlQueue || [];
     state.dlQueue.unshift(job);
     save("aura.dlQueue", state.dlQueue);
-    render(); // show the download manager (library/settings) or toast
-    toast("Downloading…");
+    render(); // show the download manager (library/settings) with live progress
     try {
       const onProgress = (p) => { job.bytes = p.bytes || 0; job.total = p.total || 0; job.progress = p.progress || 0; saveDlJob(job); };
       job.status = "downloading"; saveDlJob(job);
@@ -1451,6 +1513,15 @@
     }
     return curve;
   }
+  // Pure audio math (mirrors scripts/audio-utils.mjs). Kept inline so the app
+  // never needs to import; the canonical copy is unit-tested in smoke.mjs and
+  // must stay in sync with these three lines.
+  function normalizeGain(on) { return on ? 0.86 : 1; }
+  function volumeFor(volumePct, normalize) {
+    const v = Math.max(0, Math.min(100, Number(volumePct) || 0)) / 100;
+    return Math.min(1, v * normalizeGain(normalize));
+  }
+
   function spatialMode() {
     const m = state.prefs.spatial || "off";
     if (m === "wide" || m === "motion") return "spatial";
@@ -1747,8 +1818,9 @@
     const rate = Number(state.prefs.speed || 1);
     try { audio.playbackRate = rate; } catch {}
     let vol = state.volume / 100;
-    if (state.prefs.normalize) vol *= 0.92;
-    audio.volume = Math.min(1, vol);
+    // Even volume — single, consistent loudness trim (was 0.92/0.88/0.92).
+    audio.volume = volumeFor(state.volume, state.prefs.normalize);
+    vol = audio.volume;
     if (state.yt && state.yt.setPlaybackRate) {
       try { state.yt.setPlaybackRate(rate); } catch {}
     }
@@ -1764,8 +1836,7 @@
   }
 
   function baseVolume() {
-    const vol = state.volume / 100;
-    return state.prefs.normalize ? Math.min(1, vol * 0.88) : vol;
+    return volumeFor(state.volume, state.prefs.normalize);
   }
 
   function fadeInTrack() {
@@ -3075,7 +3146,7 @@
     state.volume = v;
     save("aura.vol", v);
     const vol = v / 100;
-    audio.volume = Math.min(1, state.prefs.normalize ? vol * 0.92 : vol);
+    audio.volume = volumeFor(v, state.prefs.normalize);
     if (state.yt && state.yt.setVolume) {
       try { state.yt.setVolume(Math.min(100, Math.round(v))); } catch {}
       try { if (state.yt.unMute) state.yt.unMute(); } catch {}
@@ -4176,6 +4247,7 @@
       </div>
       ${recents.length ? section("Jump back in", recents) : ""}
       ${forYouSection()}
+      ${viralSection()}
       ${playlistSection(`Trending in ${region}`, h.countryPlaylists || [], "country")}
       ${section(`Top songs in ${region}`, local, "local")}
       ${playlistSection("Global trending playlists", h.globalPlaylists || [], "global")}
@@ -4336,6 +4408,68 @@
   function forYouSection() {
     const pls = forYouPlaylistList();
     return `<div class="section"><div class="section-head"><h2>Made for you</h2><span>${pls.length}</span></div><div class="row">${pls.map(forYouCardHTML).join("")}</div></div>`;
+  }
+
+  // ---- "Viral & Trending worldwide" home shelf ---------------------------
+  // 10 playlist cards, each a different viral taste (TikTok, Reels, Facebook,
+  // Shorts, sped-up, sudden breakouts, global buzz, soundtracks, dance
+  // challenges, breakouts). Rendered straight from the home payload's
+  // `viralPlaylists`; the server resolves each query against the live catalog
+  // and KV-caches the build per utc-day, so the row auto-refreshes with new
+  // trends like every other shelf. If the server hasn't sent them yet (older
+  // backend), fall back to the same "Made for you" defaults so the section
+  // never renders empty.
+  function viralPlaylistList() {
+    const h = state.home || {};
+    let pls = (h.viralPlaylists || []).slice(0, 10);
+    // Backend hasn't sent the viral row yet (older server / still building):
+    // fall back to the curated "Made for you" cards so the section is fully
+    // populated rather than empty. Prefer trend/global/pop-facing titles, and
+    // top up to a full row from the rest of the curated list.
+    if (!pls.length) {
+      const fy = forYouPlaylistList().slice();
+      pls = fy.filter((p) => /trend|viral|pop|chill|dance/i.test(String(p.title || ""))).slice(0, 10);
+      if (pls.length < 5) pls = fy.slice(0, 10);
+    }
+    return pls;
+  }
+
+  function viralCardHTML(p, i) {
+    const art = p.artwork || (p.tracks && p.tracks[0] && p.tracks[0].artwork) || "/cover-default.jpg";
+    const n = Math.max(0, (p.tracks || []).length);
+    const count = n ? `${n} songs` : "Trending";
+    const emoji = ({ tiktok: "🎵", instagram: "📸", facebook: "👍", shorts: "⚡", spedup: "🚀", sudden: "💥", global: "🌍", soundtrack: "🎬", dance: "🕺", breaks: "🔥" })[p.taste] || "🔥";
+    return `<div class="card-wrap">
+      <button type="button" class="card card-hit" data-open-viral="${i}">
+        <div class="art">
+          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+          <span class="badge yt">Viral</span>
+        </div>
+        <h3>${escapeHTML(p.title || "Viral Hit")} ${emoji}</h3>
+        <p>${escapeHTML(p.subtitle || "Trending worldwide")}</p>
+        <em class="fy-count">${count}</em>
+      </button>
+    </div>`;
+  }
+
+  function viralSection() {
+    const pls = viralPlaylistList();
+    if (!pls.length) return "";
+    return `<div class="section"><div class="section-head"><h2>Viral &amp; trending this week</h2><span>${pls.length}</span></div><div class="row">${pls.map(viralCardHTML).join("")}</div></div>`;
+  }
+
+  function openViralPlaylist(i) {
+    const p = viralPlaylistList()[i];
+    if (!p) return;
+    openCatalogPlaylist({
+      title: p.title || "Viral Hit",
+      artist: p.subtitle || "Trending worldwide",
+      artwork: p.artwork || (p.tracks && p.tracks[0] && p.tracks[0].artwork) || "",
+      playlistId: p.playlistId || "",
+      query: p.query || "",
+      tracks: (p.tracks || []).slice(),
+      forYouMix: p.kind === "mix",
+    });
   }
 
   function openForYouPlaylist(i) {
@@ -4916,6 +5050,135 @@
     const gh = githubRepo();
     return gh ? `${gh.url}/releases/latest/download/Muchi.apk` : "";
   }
+  /* ── What's new (in-app popup) ───────────────────────────────────────
+     Item 8: the Settings "What's new" button used to open a browser tab.
+     It now shows a lightweight in-app modal listing what changed in the
+     current release, so the user never leaves the app for a changelog. */
+  const WHATS_NEW = [
+    {
+      ver: "1.5.2",
+      title: "Muchi 1.5.2",
+      notes: [
+        "Save offline straight from Now Playing — a Download button now sits next to Queue and Lyrics.",
+        "China and Hong Kong are now in the Catalog country list.",
+        "Settings got quieter — many actions no longer pop a toast.",
+        "Updates download inside the app itself, no browser redirect.",
+        "Storage permission is asked when you save a song.",
+        "This What's New popup in Settings instead of a browser tab.",
+      ],
+    },
+    {
+      ver: "1.5.0",
+      title: "Muchi 1.5.0",
+      notes: [
+        "Real tagged downloads on disk — album art and title/artist embedded.",
+        "Sound stage and spatial bass boost.",
+        "Browser-side artist catalogues from iTunes and Deezer.",
+      ],
+    },
+  ];
+  function whatsNewBody() {
+    return WHATS_NEW.map((r) => `
+      <div class="wn-release">
+        <div class="wn-ver">${escapeHTML(r.title || r.ver)}</div>
+        <ul class="wn-list">${(r.notes || []).map((n) => `<li>${escapeHTML(n)}</li>`).join("")}</ul>
+      </div>`).join("");
+  }
+  function openWhatsNew() {
+    const modal = $("modal");
+    const card = $("modalCard");
+    clearTimeout(hideModal._t);
+    modal.classList.add("sheet");
+    card.innerHTML = `<div class="sheet-handle" aria-hidden="true"></div><h2>What's new</h2>
+      <div class="wn-scroll">${whatsNewBody()}</div>
+      <p class="wn-foot">Installed version <strong>${escapeHTML(APP_VERSION)}</strong>.</p>
+      <div class="modal-actions"><button class="btn ghost" id="mCancel">Close</button></div>`;
+    showEl(modal, true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => modal.classList.add("in"));
+    });
+    $("mCancel").onclick = () => hideModal();
+    modal.onclick = (e) => { if (e.target === modal) hideModal(); };
+  }
+  /* ── In-app update download ─────────────────────────────────────────
+     Item 6: the Android update tile used to link out to a browser. The app
+     now downloads the APK itself (native plugin writes it to Downloads; on
+     the web we fetch + save it) and never redirects. If the app is already
+     on the latest version it offers no download at all. */
+  async function downloadUpdateInApp() {
+    const u = state.update || {};
+    if (!u.available) {
+      toast("You're already on the latest version");
+      openUpdateModal();
+      return;
+    }
+    const url = u.apkUrl;
+    const ver = u.latest || "";
+    if (!url) {
+      toast("The Android download link isn't ready yet", true, "error");
+      return;
+    }
+    toast(`Downloading Muchi ${ver}…`);
+    const ND = nativeDownloader();
+    if (ND && typeof ND.downloadUpdate === "function") {
+      try {
+        const res = await ND.downloadUpdate({ url, version: ver });
+        const uri = (res && typeof res === "object" && res.uri) ? res.uri : String(res || "");
+        if (!uri) throw new Error("no file");
+        state.update.downloaded = true;
+        toast(`Muchi ${ver} saved — open it to install`, true, "success");
+        openUpdateModal();
+        return;
+      } catch (e) {
+        toast("Update download failed", true, "error");
+        return;
+      }
+    }
+    // Web / PWA — fetch the APK and save it to disk (no browser redirect).
+    try {
+      const res = await fetch(url, { credentials: "same-origin" });
+      if (!res.ok) throw new Error("download failed");
+      const total = Number(res.headers.get("content-length") || 0);
+      const reader = res.body.getReader();
+      const parts = [];
+      let buf = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        buf += value.byteLength;
+        if (parts.length % 8 === 0) toast(`Downloading Muchi ${ver}… ${fmtBytes(buf)}`);
+      }
+      const bytes = concatBytes(parts);
+      const fname = `Muchi-${ver}.apk`;
+      const blob = new Blob([bytes], { type: "application/vnd.android.package-archive" });
+      const w = window;
+      if (w.showSaveFilePicker) {
+        const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Android app", accept: { "application/vnd.android.package-archive": [".apk"] } }] });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      }
+      state.update.downloaded = true;
+      toast(`Muchi ${ver} downloaded — open the file to install`, true, "success");
+      openUpdateModal();
+    } catch (e) {
+      // A cross-origin release URL (e.g. GitHub) won't pass the browser's
+      // CORS check, so an in-app fetch lands here on the web. The native
+      // shell never hits this path (it downloads the file directly). Tell the
+      // user where the file actually is so the app can still self-serve it.
+      toast("Couldn't fetch the update in-app — opening it in a browser instead", true, "error");
+      try { window.open(url, "_blank", "noopener"); } catch {}
+    }
+  }
   function updateLine() {
     const u = state.update;
     if (!u) return "Checking for updates…";
@@ -4983,12 +5246,14 @@
           <span class="material-symbols-outlined">android</span>
           <div><strong>Android update</strong><p>Installs over this app — your likes, playlists and settings stay.</p></div>
         </div>
-        ${u.apkUrl
-          ? `<a class="filled-btn upd-dl" href="${escapeAttr(u.apkUrl)}" target="_blank" rel="noopener"><span class="material-symbols-outlined filled">download</span> Download Muchi ${escapeHTML(u.latest || "")}</a>`
-          : `<p class="upd-pending">${u.available
-              ? "The Android release is being prepared — the download link appears here the moment it is published."
-              : "You're on the latest published Android version."}</p>`}
-        <p class="upd-note">If your phone asks for permission, allow “Install unknown apps” for this app (Android 8+ security rule).</p>`;
+        ${u.available
+          ? (u.downloaded
+            ? `<div class="upd-done"><span class="material-symbols-outlined filled">check_circle</span> Muchi ${escapeHTML(u.latest || "")} downloaded — open the file to install it.</div>`
+            : u.apkUrl
+              ? `<button type="button" class="filled-btn upd-dl" id="updDlBtn"><span class="material-symbols-outlined filled">download</span> Download Muchi ${escapeHTML(u.latest || "")}</button>`
+              : `<p class="upd-pending">The Android release is being prepared — the download link appears here the moment it is published.</p>`)
+          : `<p class="upd-pending">You're on the latest published Android version — nothing to download.</p>`}
+        <p class="upd-note">Installing: open the downloaded file and allow “Install unknown apps” for this app (Android 8+ security rule). Your likes, playlists and settings stay.</p>`;
     } else {
       sub.innerHTML = `
         <div class="upd-sub-head">
@@ -5001,6 +5266,10 @@
     }
     sub.hidden = false;
     if (tiles) tiles.classList.add("dim");
+    // In-app APK download (item 6): the button calls the app's own downloader
+    // instead of opening a browser tab.
+    const dlBtn = document.getElementById("updDlBtn");
+    if (dlBtn) dlBtn.addEventListener("click", downloadUpdateInApp);
   }
   function openUpdateModal() {
     const modal = $("modal");
@@ -5134,8 +5403,8 @@
       </div>
       <div class="settings">
         <div class="set-card">
-          <h3>Icons</h3>
-          <p class="set-lead">Size of buttons and dock icons on this phone.</p>
+          <h3>Interface size</h3>
+          <p class="set-lead">Scales the whole app — text, spacing, buttons and icons.</p>
           <div class="chip-row icon-size-row">
             ${[["small", "Small"], ["default", "Default"], ["medium", "Medium"], ["large", "Large"]].map(([id, label]) =>
               `<button type="button" class="chip ${(state.prefs.iconSize || "default") === id ? "active" : ""}" data-set-icons="${id}">${label}</button>`
@@ -5257,7 +5526,7 @@
             </select>
           </label>
           <div class="set-row">
-            <div><strong>Even volume</strong><p>Tame sudden loud tracks.</p></div>
+            <div><strong>Even volume</strong><p>Consistent headroom so loud tracks don't clip.</p></div>
             <button class="switch ${p.normalize ? "on" : ""}" data-pref="normalize" type="button"><i></i></button>
           </div>
           <label class="set-row">
@@ -5392,7 +5661,7 @@
         <div class="set-card">
           <h3>Offline</h3>
           <div class="set-row">
-            <div><strong>Downloads on disk</strong><p>Real audio files saved to your device with tagged metadata. YouTube m4a/webm &amp; independent Audius mp3.</p></div>
+            <div><strong>Downloads on disk</strong><p>Your saved songs live here and play offline — even without a connection.</p></div>
             <span>${dls.length}</span>
           </div>
           ${renderDlManager()}
@@ -5554,6 +5823,8 @@
         <div class="empty"><h3>Nothing playing</h3><p>Play a song, then tap lyrics.</p></div>`;
     }
     const art = artUrl(t);
+    const canDl = !!(t && (t.trackId || t.videoId));
+    const saved = !!(t && isSaved(t));
     return `
       <div class="ly-screen">
         <div class="ly-bg" style="background-image:url('${escapeAttr(art)}')"></div>
@@ -5568,6 +5839,17 @@
               <button type="button" class="artist-link-now" id="nowArtist">${escapeHTML(artistName(t) || t.artist)}</button>
             </div>
           </div>
+        </div>
+        <div class="now-actions">
+          <button type="button" class="icon-btn ly-icon ${canDl || saved ? "" : "dim"}" id="dlNow" title="${saved ? "Saved offline" : canDl ? "Save offline" : "This track can't be saved"}" aria-label="Download">
+            <span class="material-symbols-outlined" id="dlNowIcon">${saved ? "download_done" : "download"}</span>
+          </button>
+          <button type="button" class="icon-btn ly-icon" id="queueNow" title="Queue" aria-label="Queue">
+            <span class="material-symbols-outlined">queue_music</span>
+          </button>
+          <button type="button" class="icon-btn ly-icon" id="lyNow" title="Lyrics" aria-label="Lyrics">
+            <span class="material-symbols-outlined">lyrics</span>
+          </button>
         </div>
         <div class="ly-scroll" id="lyScroll">${lyricsBodyHTML()}</div>
       </div>`;
@@ -5820,6 +6102,9 @@
     viewEl.querySelectorAll("[data-open-fy]").forEach((el) => {
       el.addEventListener("click", () => openForYouPlaylist(Number(el.dataset.openFy)));
     });
+    viewEl.querySelectorAll("[data-open-viral]").forEach((el) => {
+      el.addEventListener("click", () => openViralPlaylist(Number(el.dataset.openViral)));
+    });
     const playCatalog = viewEl.querySelector("#playCatalog");
     if (playCatalog) {
       playCatalog.addEventListener("click", () => {
@@ -5988,7 +6273,22 @@
       setTimeout(() => document.addEventListener("click", closeProf), 0);
     }
     const dlNow = viewEl.querySelector("#dlNow");
-    if (dlNow) dlNow.addEventListener("click", () => downloadTrack(current()));
+    if (dlNow) dlNow.addEventListener("click", () => {
+      const t = current();
+      if (!t) { toast("Play a song first"); return; }
+      downloadTrack(t);
+    });
+    const queueNow = viewEl.querySelector("#queueNow");
+    if (queueNow) queueNow.addEventListener("click", () => {
+      if (state.showQueue) requestBack();
+      else setQueueOpen(true);
+    });
+    const lyNow = viewEl.querySelector("#lyNow");
+    if (lyNow) lyNow.addEventListener("click", () => {
+      if (!current()) { toast("Play a song first"); return; }
+      if (state.view === "now") requestBack();
+      else setView("now");
+    });
     const nowBack = viewEl.querySelector("#nowBack");
     if (nowBack) nowBack.addEventListener("click", requestBack);
     const lyScroll = viewEl.querySelector("#lyScroll");
@@ -6118,7 +6418,6 @@
         state.prefs.country = setCountry.value;
         state.prefs.countryChosen = true;
         savePrefs();
-        toast(`Home will load ${countryName(state.prefs.country)} charts`);
         state.home = null;
         if (state.view === "settings") render();
         loadHome(true);
@@ -6130,7 +6429,6 @@
         state.prefs.speed = Number(setSpeed.value);
         savePrefs();
         applyPlaybackPrefs();
-        toast(`Speed ${state.prefs.speed}×`);
       });
     }
     const setSpatial = viewEl.querySelector("#setSpatial");
@@ -6147,7 +6445,7 @@
           dynamic: "Dynamic on — punchier Audius and radio",
         };
         const t = current();
-        toast(t && t.source === "youtube" ? `${labels[state.prefs.spatial] || "Updated"}. YouTube stays in Google’s player.` : (labels[state.prefs.spatial] || "Updated"));
+        // No toast — the sound stage applies live and the dropdown/control shows the value.
       });
     }
     viewEl.querySelectorAll("[data-set-quality]").forEach((el) => {
@@ -6155,8 +6453,6 @@
         state.prefs.quality = el.dataset.setQuality;
         savePrefs();
         applyYtQuality();
-        const names = { auto: "Auto · network", low: "Low · data saver", standard: "Standard", high: "High", highest: "Highest" };
-        toast(`Stream quality · ${names[state.prefs.quality] || state.prefs.quality}`);
         render();
       });
     });
@@ -6165,7 +6461,6 @@
       setCodec.addEventListener("change", () => {
         state.prefs.codec = setCodec.value;
         savePrefs();
-        toast(state.prefs.codec === "auto" ? "Any radio codec" : `Prefer ${state.prefs.codec.toUpperCase()} on radio`);
       });
     }
     const setGithub = viewEl.querySelector("#setGithub");
@@ -6173,14 +6468,13 @@
       setGithub.addEventListener("change", () => {
         state.prefs.github = String(setGithub.value || "").trim().replace(/\/$/, "");
         savePrefs();
-        toast(state.prefs.github ? "GitHub repo saved" : "GitHub unlinked");
         render();
       });
     }
     const ghRelease = viewEl.querySelector("#ghRelease");
     if (ghRelease) ghRelease.addEventListener("click", () => {
-      const u = String(state.prefs.github || "").replace(/\/$/, "");
-      if (u) window.open(`${u}/releases`, "_blank", "noopener");
+      // Item 8: show the What's New popup in-app — no browser redirect.
+      openWhatsNew();
     });
     const ghBug = viewEl.querySelector("#ghBug");
     if (ghBug) ghBug.addEventListener("click", () => {
@@ -6219,7 +6513,7 @@
         themedId = "";
         themeFromTrack(current());
         const pack = THEMES.find((x) => x.id === id);
-        toast(id === "system" ? "Following this device" : id === "custom" ? `${customTheme().name || "Custom"} theme` : `${pack ? pack.name : id} theme`);
+        // No toast — the theme preview + active chip highlight is the feedback.
         if (state.view === "settings") render();
       });
     });
@@ -6235,7 +6529,7 @@
         applyTheme();
         themedId = "";
         themeFromTrack(current());
-        toast(mode === "light" ? "Light appearance" : mode === "dark" ? "Dark appearance" : "Following this device");
+        // No toast — the theme applies instantly app-wide; that IS the feedback.
         if (state.view === "settings") render();
       });
     });
@@ -6244,7 +6538,6 @@
       setFade.addEventListener("change", () => {
         state.prefs.crossfade = Number(setFade.value);
         savePrefs();
-        toast(state.prefs.crossfade ? `Crossfade ${state.prefs.crossfade}s` : "Crossfade off");
       });
     }
     const setSleepEl = viewEl.querySelector("#setSleep");
@@ -7440,7 +7733,8 @@
     $("shuffleBtn").onclick = () => { state.shuffle = !state.shuffle; renderChrome(); };
     $("repeatBtn").onclick = () => {
       state.repeat = state.repeat === "off" ? "all" : state.repeat === "all" ? "one" : "off";
-      toast(state.repeat === "off" ? "Repeat off" : state.repeat === "all" ? "Repeat queue" : "Repeat one");
+      // No toast — the repeat icon changes (repeat vs repeat_one) and the
+      // button highlights, which is clear feedback without a popup.
       renderChrome();
     };
     $("likeBtn").onclick = () => {

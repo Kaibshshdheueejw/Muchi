@@ -41,9 +41,26 @@ jobs:
             echo "MUCHI_KEYSTORE_PASSWORD=$MUCHI_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "signed=yes" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact signed with DEBUG key (not for Play)."
             echo "signed=no" >> "$GITHUB_OUTPUT"
           fi
+      # Update-safety gate: never publish an APK that can't install in place.
+      # A debug-signed "update" (keystore secret missing) or a non-incrementing
+      # versionCode forces a wipe that ERASES the user's library on update.
+      - name: Update-safety guard (version sync + versionCode + signing)
+        env:
+          MUCHI_KEYSTORE_FILE: ${{ env.MUCHI_KEYSTORE_FILE }}
+          MUCHI_KEYSTORE_B64: ${{ secrets.MUCHI_KEYSTORE_B64 }}
+        run: |
+          if [ "${{ steps.keystore.outputs.signed }}" != "yes" ]; then
+            echo "::error::Release keystore secret (MUCHI_KEYSTORE_B64) is NOT set. This release would be signed with the DEBUG key and could NOT update any installed release-signed app without a full uninstall (erasing the user's history, liked songs & playlists). Refusing to publish."
+            exit 1
+          fi
+          node scripts/check-release.mjs --assert-release
+      - name: Clean Gradle cache and refresh dependencies
+        working-directory: android
+        run: |
+          ./gradlew clean --refresh-dependencies
+          rm -rf .gradle build app/build
       - name: Clean Gradle cache and refresh dependencies
         working-directory: android
         run: |

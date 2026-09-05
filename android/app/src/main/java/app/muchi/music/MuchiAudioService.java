@@ -163,8 +163,17 @@ public class MuchiAudioService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // Swiped away from recents → stop the music.
-        stopPlaybackInternal();
+        // The app was swiped away from Recents. Keep the foreground media
+        // service alive so background playback continues (the whole point of a
+        // music app); the notification remains so the user can reopen or stop
+        // it. Do NOT stop playback here — that's what made "music stops when I
+        // close the app". If the user explicitly stops (notification action or
+        // the in-app stop), ACTION_STOP clears the service; if the system
+        // needs the process, it re-creates it (START_STICKY) and re-attaches
+        // the notification.
+        startInForeground();
+        ticker.removeCallbacks(tick);
+        ticker.post(tick);
     }
 
     @Override

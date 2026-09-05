@@ -29,6 +29,8 @@ export const LOCAL_CHARTS = {
   IT: "italy hits official",
   ES: "spain hits official",
   TR: "turkce pop hits official",
+  CN: "chinese hits official",
+  HK: "hong kong cantopop hits official",
 };
 
 export const YT_SONGS_PARAMS = "EgWKAQIIAWoKEAkQBRAKEAMQBA==";
@@ -107,6 +109,11 @@ export const MOODS_BY_COUNTRY = {
   EG: [{ id: "egypt", title: "Egypt Hits", query: "egypt hits official", color: "#f59e0b", tags: "arabic egypt" }],
   IT: [{ id: "italian", title: "Italia", query: "italy hits official", color: "#22c55e", tags: "italian pop" }],
   ES: [{ id: "spain", title: "España", query: "spain hits official", color: "#f97316", tags: "spanish latin" }],
+  CN: [
+    { id: "mandopop", title: "Mando Pop", query: "chinese mandopop hits official", color: "#f43f5e", tags: "chinese mandopop" },
+    { id: "cpop", title: "C-Pop", query: "chinese pop hits official", color: "#fb7185", tags: "cpop china" },
+  ],
+  HK: [{ id: "cantopop", title: "Cantopop", query: "hong kong cantopop hits official", color: "#f59e0b", tags: "cantopop hong kong" }],
 };
 
 // "Made for you" curated playlists (server.js FY_QUERIES).
@@ -189,6 +196,46 @@ export function pickPlaylistHit(pls, query) {
     }
   }
   return best || (pls && pls[0]) || null;
+}
+
+// ── "Viral / Trending worldwide" home shelf ────────────────────────────────
+// EXACTLY 10, each a DIFFERENT viral taste (TikTok, Instagram, Facebook,
+// Shorts, sudden-breakout songs, global charts), each tagged with a `taste`
+// so the client can label/theme the card. `query` is the English search that
+// fills the playlist with the newest viral hits for that taste. The shelf
+// auto-refreshes with the rest of the home page: the server resolves these
+// against the real catalog and KV-caches the home build per utc-day, so the
+// cards pick up new trends every day without a code change.
+export const VIRAL_QUERIES = [
+  { taste: "tiktok",        title: "TikTok Hits",       subtitle: "Songs blowing up on TikTok right now",      query: "tiktok viral songs" },
+  { taste: "instagram",     title: "Instagram Reels",   subtitle: "Reels you've heard on your feed",          query: "instagram reel trending songs" },
+  { taste: "facebook",      title: "Facebook Trending", subtitle: "Viral audio flooding Facebook & Stories",  query: "facebook viral trending songs" },
+  { taste: "shorts",        title: "Shorts & Snacks",   subtitle: "YouTube Shorts earworms on repeat",        query: "youtube shorts viral songs" },
+  { taste: "spedup",        title: "Sped Up & Exploded", subtitle: "The sped-up versions everyone mouths",    query: "sped up viral songs" },
+  { taste: "sudden",        title: "Suddenly Viral",    subtitle: "Songs that came out of nowhere",           query: "suddenly viral songs this week" },
+  { taste: "global",        title: "Global Buzz",       subtitle: "The same chorus everywhere at once",       query: "global trending viral songs" },
+  { taste: "soundtrack",    title: "Sound on",          subtitle: "Scenes you can't scroll past",             query: "trending soundtrack songs" },
+  { taste: "dance",         title: "Viral Dance",       subtitle: "Challenge-ready beats",                    query: "viral dance challenge songs" },
+  { taste: "breaks",        title: "Breakout Now",      subtitle: "Fresh breakouts crossing over to charts",  query: "new breakout viral hits" },
+];
+
+// viralRes = Promise.allSettled results aligned with VIRAL_QUERIES; may be [].
+export function buildViralPlaylists(viralRes) {
+  return VIRAL_QUERIES.map((f, i) => {
+    const v = viralRes && viralRes[i] && viralRes[i].status === "fulfilled" ? viralRes[i].value : null;
+    const tracks = (v && Array.isArray(v.tracks) ? v.tracks : []).slice(0, 20);
+    return {
+      id: `viral-${i}`,
+      title: f.title,
+      subtitle: f.subtitle,
+      artwork: (v && v.artwork) || "",
+      playlistId: (v && v.playlistId) || "",
+      query: f.query,
+      taste: f.taste,
+      kind: "yt",
+      tracks,
+    };
+  });
 }
 
 // fyRes = Promise.allSettled results aligned with FY_QUERIES; may be [].

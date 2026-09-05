@@ -1,5 +1,6 @@
 package app.muchi.music;
 
+import android.Manifest;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
@@ -13,6 +14,9 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -50,7 +54,15 @@ import java.util.concurrent.Future;
  *   done      {id, uri}
  *   error     {id, message}
  */
-@com.getcapacitor.annotation.CapacitorPlugin(name = "MuchiDownload")
+@CapacitorPlugin(
+        name = "MuchiDownload",
+        // Storage permission (item 7). Android 10+ (API 29+) writes through
+        // scoped MediaStore and needs NO runtime permission; Android 9 and
+        // below writing to shared storage needs the legacy WRITE_EXTERNAL_STORAGE.
+        // Declaring it here lets the web layer request it at save time via
+        // MuchiDownload.checkPermissions()/requestPermissions().
+        permissions = @Permission(strings = { Manifest.permission.WRITE_EXTERNAL_STORAGE }, alias = "storage")
+)
 public class MuchiDownloadPlugin extends Plugin {
 
     private final ExecutorService io = Executors.newFixedThreadPool(3);
@@ -71,6 +83,15 @@ public class MuchiDownloadPlugin extends Plugin {
 
         if (url.isEmpty()) {
             call.reject("MuchiDownload: missing url");
+            return;
+        }
+
+        // Item 7 — ask for storage permission before writing to shared storage
+        // on Android 9 and below. Android 10+ uses scoped MediaStore (no
+        // permission). If not granted yet, request it and resume; the user
+        // sees the OS dialog at the moment of the first save.
+        if (Build.VERSION.SDK_INT < 29 && !"granted".equals(getPermissionState("storage"))) {
+            requestPermissionForAliases(new String[] { "storage" }, call, "storagePermissionCallback");
             return;
         }
 
@@ -97,6 +118,109 @@ public class MuchiDownloadPlugin extends Plugin {
             }
         });
         active.put(id, f);
+    }
+
+    /* Item 7 — resume a download after the storage-permission dialog resolves. */
+    @PermissionCallback
+    private void storagePermissionCallback(PluginCall call) {
+        if (!"granted".equals(getPermissionState("storage"))) {
+            call.reject("storage permission denied");
+            return;
+        }
+        startDownload(call);
+    }
+
+    /* Item 6 — download the app's own update APK in-app (no browser redirect).
+       Writes to the public Downloads (Android 10+) or the app Downloads folder
+       (Android 9 and below) and returns {uri} so the web layer can toast and
+       hint the user to open it. Also requests storage permission on < API 29. */
+    @PluginMethod
+    public void downloadUpdate(PluginCall call) {
+        final String url = call.getString("url", "");
+        final String version = call.getString("version", "");
+        if (url.isEmpty()) {
+            call.reject("MuchiDownload: missing update url");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < 29 && !"granted".equals(getPermissionState("storage"))) {
+            requestPermissionForAliases(new String[] { "storage" }, call, "storagePermissionCallback");
+            return;
+        }
+        final String id = "update_" + System.currentTimeMillis();
+        calls.put(id, call);
+        io.submit(() -> {
+            try {
+                Uri uri = downloadApk(id, url, version);
+                uris.put(id, uri.toString());
+                JSObject done = new JSObject();
+                done.put("id", id);
+                done.put("uri", uri.toString());
+                notifyListeners("done", done);
+                call.resolve(done);
+            } catch (Exception e) {
+                JSObject err = new JSObject();
+                err.put("id", id);
+                err.put("message", e.getMessage() == null ? "update download failed" : e.getMessage());
+                notifyListeners("error", err);
+                call.reject(err.toString(), e);
+            } finally {
+                active.remove(id);
+                calls.remove(id);
+            }
+        });
+    }
+
+    private Uri downloadApk(String id, String url, String version) throws IOException {
+        HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+        con.setConnectTimeout(20000);
+        con.setReadTimeout(30000);
+        con.setInstanceFollowRedirects(true);
+        con.setRequestProperty("User-Agent", "Muchi/" + (version == null ? "1.5.2" : version));
+        try {
+            int code = con.getResponseCode();
+            if (code >= 400) throw new IOException("update download failed (" + code + ")");
+            String name = "Muchi-" + (version == null ? "app" : version) + ".apk";
+            String mime = con.getContentType();
+            if (mime == null || mime.isEmpty()) mime = "application/vnd.android.package-archive";
+            ContentResolver resolver = getContext().getContentResolver();
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                values.put(MediaStore.Downloads.MIME_TYPE, mime);
+                values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Muchi");
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                Uri item = resolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+                if (item == null) throw new IOException("could not create download");
+                try (OutputStream out = resolver.openOutputStream(item)) {
+                    copy(con, out);
+                }
+                values.clear();
+                values.put(MediaStore.Downloads.IS_PENDING, 0);
+                resolver.update(item, values, null, null);
+                return item;
+            }
+            // Android 9 and below — app Downloads folder (no public-write permission
+            // needed beyond the requested WRITE_EXTERNAL_STORAGE).
+            File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Muchi");
+            if (!dir.exists() && !dir.mkdirs()) throw new IOException("could not create download folder");
+            File outFile = new File(dir, name);
+            try (OutputStream out = new FileOutputStream(outFile)) {
+                copy(con, out);
+            }
+            return Uri.fromFile(outFile);
+        } finally {
+            con.disconnect();
+        }
+    }
+
+    private void copy(HttpURLConnection con, OutputStream out) throws IOException {
+        try (InputStream in = con.getInputStream()) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        }
     }
 
     @PluginMethod
@@ -149,7 +273,7 @@ public class MuchiDownloadPlugin extends Plugin {
         con.setConnectTimeout(20000);
         con.setReadTimeout(30000);
         con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "Muchi/1.5.1");
+        con.setRequestProperty("User-Agent", "Muchi/1.5.2");
         con.setRequestProperty("Accept", "audio/*,*/*");
         // We need the whole file, not a video-dash stream.
         con.setRequestProperty("Range", "bytes=0-");

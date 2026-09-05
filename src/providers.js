@@ -263,20 +263,38 @@ const PIPED_API_TIMEOUT = 5000;
 export function pickPipedStream(data) {
   const streams = (data && data.audioStreams) || [];
   if (!streams.length) return null;
-  // Prefer m4a/mp4 (best native ExoPlayer/AVPlayer compatibility), then
-  // opus/webm. Lower quality numbers are the "best" on Piped.
-  const byType = (re) => streams.find((s) => s && s.url && re.test(String(s.mimeType || "") + " " + String(s.format || "")));
+  // Spotube-style "best quality": pick the HIGHEST-BITRATE audio stream, not
+  // just the first one. Piped lists several audioStreams per video; the first
+  // is often a low-bitrate placeholder. We prefer AAC/m4a (best native decoder
+  // compatibility on ExoPlayer/AVPlayer), then opus/webm, and within each
+  // container choose the stream with the largest listed bitrate/quality — so
+  // both playback and downloads come through at the highest available quality.
+  const byType = (re) => streams
+    .filter((s) => s && s.url && re.test(String(s.mimeType || "") + " " + String(s.format || "")))
+    .sort((a, b) => streamQualityScore(b) - streamQualityScore(a));
   const m4a = byType(/mp4|m4a|mpeg|aac/i);
   const opus = byType(/opus|webm|ogg|vorbis/i);
-  const best = m4a || opus || streams.find((s) => s && s.url);
+  const best = m4a[0] || opus[0] || streams.find((s) => s && s.url);
   if (!best || !best.url) return null;
   return {
     url: best.url,
-    format: best.format || (m4a ? "m4a" : "opus"),
+    format: best.format || (m4a.length ? "m4a" : "opus"),
     mimeType: best.mimeType || "",
     quality: best.quality || "",
+    // Expose the numeric bitrate so callers can surface/track it.
+    bitrate: best.bitrate || "",
     duration: (data && data.duration) || 0,
   };
+}
+
+function streamQualityScore(s) {
+  // Piped audioStreams may carry `bitrate` (bps or kbps) and/or `quality`
+  // (itag-ish number). Higher = better. Prefer explicit bitrate, then quality.
+  const b = Number(s.bitrate);
+  if (isFinite(b) && b > 0) return b > 1000 ? b : b * 1000; // normalize kbps→bps
+  const q = Number(s.quality);
+  if (isFinite(q) && q > 0) return q * 1000;
+  return 0;
 }
 
 export async function youtubeAudioStream(videoId) {

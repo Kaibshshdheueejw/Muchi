@@ -2724,7 +2724,36 @@ html[data-theme="light"] .ly-screen {
   overflow: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 28vh 22px 42vh;
+  padding: 14vh 22px 22vh;
+}
+/* Now-playing quick actions: download / queue / lyrics */
+.now-actions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 10px;
+  justify-content: center;
+}
+.now-actions .ly-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--md-sys-color-on-surface, #fff);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.now-actions .ly-icon .material-symbols-outlined { font-size: 22px; }
+.now-actions .ly-icon.dim { opacity: 0.4; }
+.now-actions .ly-icon.on { color: var(--accent, #3d5afe); }
+html[data-ui="glass"] .now-actions .ly-icon {
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.22);
 }
 .ly-line {
   display: block;
@@ -3286,43 +3315,103 @@ html[data-ui="glass"] body[data-playing="1"] .player::before {
   0%, 100% { transform: translateX(-12%) rotate(8deg); opacity: 0.35; }
   50% { transform: translateX(14%) rotate(8deg); opacity: 0.7; }
 }
-html[data-player="pill"] .player { border-radius: 28px; }
-html[data-player="island"] .player {
-  border-radius: 40px;
-  padding: 6px 14px;
-  min-height: 64px;
+/* ── Player "Type" looks (Settings → Player → Type) ─────────────────────────
+   Each variant restyles the SAME bottom player bar into a visually distinct
+   shape/feel. Styles are scoped on html[data-player] (set by applyUi() from
+   state.prefs.playerStyle, persisted in aura.prefs) so they survive reloads
+   and re-render. Keep them GPU-cheap: border-radius/background/filter only,
+   no layout thrash, plus the seek-line stroke tweak. */
+
+/* Glass pill — the default: floating capsule, soft rounded, glass sheen. */
+html[data-player="pill"] .player {
+  border-radius: 30px;
+  padding: 8px 14px;
 }
+
+/* Island — compact, centered "Dynamic Island" capsule: narrower than the
+   screen, fully rounded, tinted border so it reads as a floating pill. */
+html[data-player="island"] .player {
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  max-width: min(620px, calc(100% - 24px));
+  border-radius: 999px;
+  padding: 6px 12px;
+  min-height: 62px;
+  gap: 2px 8px;
+  border-width: 1.5px;
+}
+html[data-player="island"] .now { gap: 8px; }
 html[data-player="island"] .cover-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+}
+html[data-player="island"] .fab {
   width: 40px;
   height: 40px;
   border-radius: 50%;
 }
-html[data-player="island"] .fab {
-  width: 38px;
-  height: 38px;
-}
+html[data-player="island"] .meta { max-width: 22ch; }
+html[data-player="island"] .extras { gap: 0; }
+html[data-player="island"] .extras .icon-btn { width: 30px; }
+
+/* Wave — the seek line is the hero: taller, thicker, glowing, and always
+   animated while playing; the bar shell recedes behind it. */
 html[data-player="wave"] .player {
-  border-radius: 26px;
-  padding-bottom: 10px;
+  border-radius: 24px;
+  padding: 6px 12px 4px;
 }
-html[data-player="wave"] .seek-wave path { stroke-width: 2.6; }
+html[data-player="wave"] .seek-box { height: 22px; }
+html[data-player="wave"] .seek-wave { height: 22px; }
+html[data-player="wave"] .seek-wave path {
+  stroke-width: 3.4;
+  filter: drop-shadow(0 0 8px var(--song-glow, rgba(125,211,187,0.7)));
+}
+html[data-player="wave"][data-ui="glass"] body[data-playing="1"] .player::before {
+  animation-duration: 4.5s;
+}
+
+/* Solid bar — a flat, opaque Material bar: no glass blur, no shine, square
+   corners, full-width, controls sit on a hard surface. */
 html[data-player="bar"] .player {
-  border-radius: 12px;
+  left: 0;
+  right: 0;
+  border-radius: 0;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  background: color-mix(in srgb, var(--song-container) 94%, #000);
+  background: color-mix(in srgb, var(--song-container) 96%, #000);
+  box-shadow: 0 -1px 0 var(--md-sys-color-outline-variant), 0 -8px 24px rgba(0,0,0,0.28);
+  border: 0;
 }
-/* This rule appears after the light-mode .player override (top of file) at
-   equal specificity, so the dark mix would win for the bar style — re-assert
-   the light mix with higher specificity. */
+/* Re-assert the light mix at higher specificity (matches the top-of-file
+   light override). */
 html[data-theme="light"][data-player="bar"] .player {
-  background: color-mix(in srgb, var(--song-container) 94%, #fff);
+  background: color-mix(in srgb, var(--song-container) 96%, #fff);
 }
 html[data-player="bar"] .player::before { display: none; }
-.ui-pick-preview.player-pill { background: linear-gradient(90deg, rgba(255,255,255,0.25), #3d5afe); border-radius: 20px; }
-.ui-pick-preview.player-island { background: #111; border-radius: 40px; }
-.ui-pick-preview.player-wave { background: linear-gradient(90deg, #64f0ff, #ff8ad8); }
-.ui-pick-preview.player-bar { background: #1b2421; border-radius: 8px; }
+html[data-player="bar"] .player-wash { display: none; }
+html[data-player="bar"] .cover-btn { border-radius: 10px; }
+
+/* Settings picker previews — distinct silhouettes per type. */
+.ui-pick-preview.player-pill {
+  background: linear-gradient(90deg, rgba(255,255,255,0.25), #3d5afe);
+  border-radius: 22px;
+}
+.ui-pick-preview.player-island {
+  background: #111;
+  border-radius: 999px;
+  max-width: 70%;
+  margin: 0 auto;
+}
+.ui-pick-preview.player-wave {
+  background: linear-gradient(90deg, #64f0ff, #ff8ad8);
+  border-radius: 18px;
+}
+.ui-pick-preview.player-bar {
+  background: #1b2421;
+  border-radius: 4px;
+}
 
 /* v60 phone UX */
 :root { --icon: 22px; }
@@ -4730,6 +4819,56 @@ html[data-native="1"] .filled-btn {
   border: 1px dashed color-mix(in srgb, var(--md-sys-color-tertiary) 35%, transparent);
 }
 .upd-note { margin: 8px 0 0; font-size: 12px; color: var(--md-sys-color-on-surface-variant); }
+.upd-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  justify-content: center;
+  margin: 6px 0;
+  padding: 12px;
+  font-size: 13px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--md-sys-color-primary) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-primary) 35%, transparent);
+  color: var(--md-sys-color-on-surface);
+}
+.upd-done .material-symbols-outlined { color: var(--md-sys-color-primary); }
+
+/* ===== What's new (in-app popup) ===== */
+.wn-scroll {
+  max-height: 52vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 4px 0 6px;
+}
+.wn-release {
+  padding: 12px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--md-sys-color-outline) 18%, transparent);
+}
+.wn-release:last-child { border-bottom: 0; }
+.wn-ver {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--md-sys-color-primary);
+}
+.wn-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+.wn-list li {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.wn-foot {
+  margin: 8px 2px 0;
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+}
 
 /* ===== Library: YouTube connect nudge ===== */
 .yt-connect {
@@ -4854,3 +4993,79 @@ html[data-native="1"] .filled-btn {
 }
 .dl-stat { font-size: 0.72rem; color: var(--md-sys-color-on-surface-variant); margin-top: 4px; }
 .dl-cancel-btn { opacity: 0.8; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   v66 — more motion, GPU-cheap (item 4)
+   Only transform + opacity are animated (both are composited on the GPU,
+   no paint/layout reflow), everything is one-shot or capped-fps on
+   phones, and every rule is disabled under prefers-reduced-motion.
+   No new filters/blurs in these rules — those are what heat a phone.
+   ═══════════════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: no-preference) {
+  /* Cards, moods and rows roll in once when they mount. transform+opacity
+     only, one-shot (fill-mode: backwards). On phones the home list remounts
+     on navigation — cheap, and it gives the page life without a looping GPU
+     effect. */
+  .card-wrap { animation: cardRoll 460ms var(--md-motion) both; }
+  .mood { animation: moodIn 380ms var(--md-motion) both; }
+  .track-row { animation: rowIn 300ms var(--md-motion) both; }
+
+  /* Gentle "breathing" glow on the artist-now link while a song plays —
+     a soft scale/opacity loop on ONE element, throttled to every 2.8s. */
+  body[data-playing="1"] .now-actions .ly-icon.on {
+    animation: actionPulse 2.8s ease-in-out infinite;
+  }
+
+  /* Quick press feedback on the now-actions icons (transform only). */
+  .now-actions .ly-icon:active { animation: iconTap 200ms var(--md-motion); }
+
+  /* Playing artwork: a subtle, periodic sheen sweep on the miniature in the
+     docked player — transform only, gated to the playing state. */
+  body[data-playing="1"] .cover-btn.live {
+    animation: coverBreathe 3.4s ease-in-out infinite;
+  }
+
+  /* The active seek-wave line already animates via rAF; add a soft color
+     shimmer on the filled portion is filter-based, so instead we pulse the
+     wave's stroke opacity (cheap). */
+  .seek-wave path { transition: stroke-width 320ms var(--md-motion); }
+}
+
+@keyframes cardRoll {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes moodIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes rowIn {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes actionPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+@keyframes iconTap {
+  0% { transform: scale(1); }
+  40% { transform: scale(0.82); }
+  100% { transform: scale(1); }
+}
+@keyframes coverBreathe {
+  0%, 100% { box-shadow: 0 8px 20px var(--song-glow); }
+  50% { box-shadow: 0 16px 36px var(--song-glow); }
+}
+
+/* Phones: cap looping animation cost — the pulse and breathe loops are the
+   only persistent ones, so slow them and drop the per-row roll-in to a
+   cheaper slide (fewer animated layers in one frame). */
+@media (max-width: 980px), (pointer: coarse) {
+  body[data-playing="1"] .now-actions .ly-icon.on,
+  body[data-playing="1"] .cover-btn.live {
+    animation-duration: 4.5s;
+  }
+  .card-wrap, .mood, .track-row {
+    animation-play-state: running;
+  }
+}
