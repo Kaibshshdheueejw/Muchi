@@ -11,7 +11,7 @@
 // /api/img: buffered like server.js (10 s abort, 8 MB cap → 413, public
 // cache 86400) with an early Content-Length guard added.
 
-import { json, corsHeaders } from "./util.js";
+import { json, corsHeaders, cached } from "./util.js";
 import { assertPublicUrl } from "./ssrf.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
 import { audiusStreamUrl, youtubeAudioStream } from "./providers.js";
@@ -26,7 +26,7 @@ function sanitizeForFilename(name) {
 function extFor(mime) {
   const m = String(mime || "").toLowerCase();
   if (m.includes("webm") || m.includes("ogg") || m.includes("opus")) return "webm";
-  if (m.includes("mpeg") || m.includes("mp3") || m.includes("audio/mp")) return "mp3";
+  if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
   if (m.includes("flac")) return "flac";
   return "m4a";
 }
@@ -134,18 +134,33 @@ export async function handleDownload(request, url) {
       return json(502, { error: String((e && e.message) || e) });
     }
   } else if (videoId) {
-    // Resolve the audio URL with a retry — Piped instances are volatile, and a
-    // single transient failure shouldn't fail the whole download. The fan-out
-    // + retry makes real downloads land instead of erroring out.
-    for (let attempt = 0; attempt < 2 && !src; attempt++) {
-      try {
-        const s = await youtubeAudioStream(videoId);
-        if (s && s.url) {
-          src = s.url;
-          if (s.mimeType) mime = s.mimeType;
+    // Resolve the audio URL via the SAME `ytstream:<id>` cache that
+    // /api/yt/stream uses. If playback already resolved this video (e.g. the
+    // user just played it), the download reuses that exact proven URL instead
+    // of re-hitting the volatile Piped resolver — which is what made downloads
+    // 502 when Piped was down even though the song was playing fine. The cache
+    // also in-flight-dedupes so a play + a download of the same track never
+    // resolve it twice. Falls back to a direct resolve with one retry on a
+    // cache miss (Piped instances are volatile).
+    try {
+      const s = await cached(`ytstream:${videoId}`, 15 * 60 * 1000, () => youtubeAudioStream(videoId));
+      if (s && s.url) {
+        src = s.url;
+        if (s.mimeType) mime = s.mimeType;
+      }
+    } catch (e) {
+      // Cache miss / all instances down — one bounded retry, then an honest 502
+      // with a clear message (the client keeps the live download-manager state).
+      for (let attempt = 0; attempt < 2 && !src; attempt++) {
+        try {
+          const s = await youtubeAudioStream(videoId);
+          if (s && s.url) {
+            src = s.url;
+            if (s.mimeType) mime = s.mimeType;
+          }
+        } catch {
+          /* fall through to retry */
         }
-      } catch {
-        /* fall through to retry */
       }
     }
     if (!src) return json(502, { error: "No stream available for this track" });

@@ -1,6 +1,6 @@
 {
   "name": "muchi",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "private": true,
   "description": "MUCHI — YouTube Music + Spotify-style player on Cloudflare Workers (D1 + KV). Official YouTube playback, Audius independent artists, live radio. Web (PWA) + Android + iOS (Capacitor).",
   "type": "module",

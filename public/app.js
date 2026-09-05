@@ -113,7 +113,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.2";
+  const APP_VERSION = "1.5.3";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -133,6 +133,39 @@
   }
 
   function savePrefs() { save("aura.prefs", state.prefs); }
+
+  // ── Persistent last-song player (Settings → Playback → Resume) ────────────
+  // Saves the live queue + index + position on close/hide so the docked player
+  // shows the last song (ready to resume) after the app is reopened.
+  const PLAYER_SESSION_KEY = "aura.player.session";
+  function slimPlayerQueue(q) {
+    return (q || []).filter(Boolean).map((t) => ({
+      id: t.id, title: t.title, artist: t.artist, artwork: t.artwork, duration: t.duration,
+      source: t.source, videoId: t.videoId, trackId: t.trackId, stationId: t.stationId,
+      playQuery: t.playQuery, album: t.album,
+    }));
+  }
+  function savePlayerSession() {
+    try {
+      if (!state.queue.length || !current()) return;
+      let pos = 0;
+      try { pos = Math.max(0, Number(position()) || 0); } catch {}
+      save(PLAYER_SESSION_KEY, {
+        at: Date.now(),
+        queue: slimPlayerQueue(state.queue),
+        index: state.index,
+        pos,
+        playing: !!state.playing,
+      });
+    } catch {}
+  }
+  function restorePlayerSession() {
+    if (!state.prefs.resume) return null;
+    const s = load(PLAYER_SESSION_KEY, null);
+    if (!s || !Array.isArray(s.queue) || !s.queue.length) return null;
+    if (!Number.isInteger(s.index) || s.index < 0 || s.index >= s.queue.length) return null;
+    return s;
+  }
   if (state.prefs.soundV !== 2) {
     if (!state.prefs.spatial || state.prefs.spatial === "off") state.prefs.spatial = "phone";
     state.prefs.soundV = 2;
@@ -582,7 +615,7 @@
     // (which exists precisely to bypass caches).
     const cacheable =
       method === "GET" &&
-      !/\/api\/(auth|health|version|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
+      !/\/api\/(auth|health|version|geo|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
       !/[?&]refresh=1\b/.test(path);
     const cacheKey = cacheable ? `${API_CACHE_V}:${path}` : "";
     if (cacheable) {
@@ -710,6 +743,8 @@
           ${inPl ? sheetItem("rempl", "playlist_remove", "Remove from this playlist") : ""}
           ${track.source !== "radio" ? sheetItem("follow", isFollowing(track) ? "person_remove" : "person_add", isFollowing(track) ? "Unfollow artist" : "Follow artist") : ""}
           ${canDl ? sheetItem("dl", "download", isSaved(track) ? "Saved offline" : "Save offline") : ""}
+          ${ytConnected() && track.videoId ? sheetItem("ytlike", "thumb_up", "Add to YouTube Liked") : ""}
+          ${ytConnected() && track.videoId ? sheetItem("ytpl", "playlist_add", "Add to YouTube playlist") : ""}
           ${IS_NATIVE ? sheetItem("share", "share", "Share") : ""}
           ${sheetItem("now", "lyrics", "Song details & lyrics")}
         </div>`,
@@ -728,6 +763,8 @@
         else if (act === "follow") toggleFollow(track);
         else if (act === "dl") downloadTrack(track);
         else if (act === "share") shareTrack(track);
+        else if (act === "ytlike") ytToggleLike(track);
+        else if (act === "ytpl") ytAddToPlaylist(track);
         else if (act === "now") {
           const list = inLiked ? state.liked
             : inPl ? state.playlists[state.activePlaylist].tracks
@@ -1124,16 +1161,53 @@
       })
       .catch(() => {});
   }
+  /* Item 9 — POST_NOTIFICATIONS (Android 13+). The media/background-play
+     foreground service runs WITHOUT a runtime permission and playback keeps
+     going, but on Android 13+ the media notification + lock-screen controls
+     only appear in the drawer if the user grants POST_NOTIFICATIONS. Spotify /
+     YT Music ask once, at the first play. The app never asked at play time (it
+     only asked when following an artist), so users saw "no permission prompt"
+     and no working notification. Ask once, on Android, at first play / first
+     save. Safe: if the user denies, playback still works — it just falls back
+     to the FGS Task Manager as the OS documents. */
+  let notifyPermAsked = false;
+  function nativeEnsureNotificationPermission() {
+    if (notifyPermAsked || !IS_NATIVE) return;
+    let plat = "";
+    try { plat = window.Capacitor && window.Capacitor.getPlatform ? window.Capacitor.getPlatform() : ""; } catch { plat = ""; }
+    if (plat !== "android") return;
+    if (typeof Notification === "undefined" || Notification.permission !== "default") return;
+    notifyPermAsked = true;
+    try { Notification.requestPermission().catch(() => {}); } catch {}
+  }
   function sanitizeName(s) {
     return String(s || "track").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "track";
   }
   function extFromMime(t) {
     const src = String((t && t.streamMime) || "").toLowerCase();
     const u = String((t && t.streamUrl) || "");
-    if (/mp3|mpeg|audio\/mp/.test(src) || /\.mp3($|\?)/.test(u)) return "mp3";
+    if (/mp3|mpeg/.test(src) || /\.mp3($|\?)/.test(u)) return "mp3";
     if (/flac/.test(src) || /\.flac($|\?)/.test(u)) return "flac";
     if (/m4a|mp4|aac|audio\/mp4/.test(src) || /\.m4a($|\?)/.test(u)) return "m4a";
+    // Use the resolved container's own hint when available (e.g. a Piped
+    // m4a stream resolves with a bare "audio/mp4"), otherwise fall back to
+    // opus/webm which is what an unresolved/unknown YouTube stream really is.
+    if (/opus|webm|ogg|vorbis/.test(src)) return "webm";
+    if (/mp4|m4a/.test(src)) return "m4a";
     return "webm";
+  }
+  // Map an HTTP Content-Type to the RIGHT extension, so the saved filename and
+  // the File System Access API accept-list agree with the actual bytes (the
+  // native plugin does the same via extensionFor(realMime)). Without this the
+  // client guessed ".webm" from an unresolved stream while the server returned
+  // audio/mp4 — the mismatch made showSaveFilePicker throw and downloads show
+  // an ugly ".webm" name. Mirrors server extFor().
+  function extFromContentType(ctype) {
+    const m = String(ctype || "").toLowerCase();
+    if (/webm|ogg|opus|vorbis/.test(m)) return "webm";
+    if (/mpeg|mp3/.test(m)) return "mp3";
+    if (/flac/.test(m)) return "flac";
+    return "m4a";
   }
   function slimTrack(t) {
     const s = { id: t.id, title: t.title, artist: t.artist, source: t.source, duration: t.duration };
@@ -1190,15 +1264,22 @@
     // 502s when Piped is down). Reusing a URL we already streamed makes real
     // downloads land instead of erroring out.
     //
-    //   • Native (no CORS): hand the absolute URL straight to the native
-    //     URLSession/MediaStore downloader.
+    //   • Native (no CORS): hand the ABSOLUTE URL straight to the native
+    //     URLSession/MediaStore downloader. Native plugins do `new URL(url)`,
+    //     so a relative "/api/…" path throws MalformedURLException and the
+    //     download never starts — absolutize here.
     //   • Web: a cross-origin stream URL can't be fetch()'d directly (CORS), so
     //     proxy it through the same-origin /api/download?streamUrl=… (SSRF-guarded,
     //     adds ACAO:* + Content-Disposition filename).
     //   • Same-origin relative stream URL (offline/preview tone): keep as-is.
     if (sid) {
+      if (IS_NATIVE) {
+        // Hand the plugin an absolute URL so `new URL(url)` always parses.
+        if (sid.startsWith("/")) sid = API_BASE + sid;
+        else if (!/^https?:\/\//i.test(sid) && API_BASE) sid = API_BASE.replace(/\/$/, "") + "/" + sid;
+        return sid;
+      }
       if (isSameOriginStreamUrl(sid)) return sid;
-      if (IS_NATIVE) return sid;
       return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(sid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
     return proxyFor();
@@ -1283,9 +1364,18 @@
     const total = Number(res.headers.get("content-length") || 0);
     const cd = res.headers.get("content-disposition") || "";
     const m = cd.match(/filename="?([^";]+)"?/i);
-    const fname = (m && m[1]) ? m[1] : meta.filename;
-    const ext = (fname.split(".").pop() || meta.ext).toLowerCase();
+    let fname = (m && m[1]) ? m[1] : meta.filename;
     const ctype = (res.headers.get("content-type") || meta.mime || "audio/webm").split(";")[0].trim();
+    // The pre-generated filename/extension can disagree with the actual bytes
+    // (e.g. an unresolved stream guessed ".webm" while the server served
+    // audio/mp4). Derive the extension from the REAL content type and reconcile
+    // the name to it, so the saved file AND the File System Access API accept
+    // list (which requires mime↔ext consistency) never mismatch again — that
+    // mismatch is exactly what made showSaveFilePicker throw NotSupportedError.
+    const ext = extFromContentType(ctype) || (fname.split(".").pop() || meta.ext).toLowerCase();
+    fname = /\.([a-z0-9]{1,5})$/i.test(fname)
+      ? fname.replace(/\.[a-z0-9]{1,5}$/i, "." + ext)
+      : `${fname}.${ext}`;
     const w = window;
     // Real, embedded audio tags (ID3v2 for mp3, MP4 ilst for m4a) so the
     // downloaded file shows title/artist/album/cover in any music app. The
@@ -1320,7 +1410,11 @@
       });
     }
     const blobType = ctype || "audio/webm";
-    if (w.showSaveFilePicker) {
+    // The File System Access API requires a real audio/video MIME for its
+    // accept list; a bare "application/octet-stream" (or missing Content-Type)
+    // makes showSaveFilePicker reject the type. In that case fall through to
+    // the blob+anchor download, which accepts any name regardless of MIME.
+    if (w.showSaveFilePicker && /^(audio|video)\//i.test(blobType)) {
       const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
       const writable = await handle.createWritable();
       await writable.write(audioBytes);
@@ -1361,6 +1455,9 @@
     }
     // Item 7 — ask for storage permission once, at the moment of saving.
     if (IS_NATIVE) nativeEnsureStoragePermission();
+    // Item 9 — ask for the media notification permission (Android 13+) once,
+    // at the moment of saving, the same way we ask for storage.
+    if (IS_NATIVE) nativeEnsureNotificationPermission();
     // Resolve a usable stream first, so downloads don't depend on the volatile
     // Piped resolver at the moment of the request. If the track already carries
     // a streamUrl (e.g. it was just played), reuse it. Otherwise ask the same
@@ -1943,6 +2040,68 @@
     setSleep(nextKind);
   }
 
+  // Player options sheet (opened from the tune button in the mini player).
+  // Gives quick access to the sleep-timer presets, the player-look picker and
+  // (when a YouTube account is connected) add-to-YT actions — all in one tidy
+  // bottom sheet that reuses the existing modal/sheet styling so it is properly
+  // laid out and never overflows the player bar.
+  function openPlayerOptions() {
+    const t = current();
+    const sleep = ["off", "5", "10", "15", "30", "45", "60", "90", "track"];
+    const curSleep = state.sleep.mode === "track" ? "track" : state.sleep.mode === "mins" ? String(Math.round((state.sleep.until - Date.now()) / 60000)) || "off" : "off";
+    const curPlayer = ["pill", "island", "wave", "bar"].includes(state.prefs.playerStyle) ? state.prefs.playerStyle : "pill";
+    const playerLooks = [["pill", "Glass pill"], ["island", "Island"], ["wave", "Wave"], ["bar", "Solid bar"]];
+    const ytChip = ytConnected() && t && t.videoId
+      ? `<div class="po-row"><div><strong>YouTube</strong><p>Add the current song to your account.</p></div>
+          <div class="po-yt-actions">
+            <button type="button" class="chip-btn" id="poYtLike">Like</button>
+            <button type="button" class="chip-btn" id="poYtPl">Add to playlist</button>
+          </div></div>`
+      : "";
+    showModal({
+      title: "Player options",
+      body: `
+        <div class="set-card">
+          <h3>Sleep timer</h3>
+          <div class="po-chips">
+            ${sleep.map((n) => {
+              const label = n === "off" ? "Off" : n === "track" ? "End of track" : `${n} min`;
+              const on = curSleep === n;
+              return `<button type="button" class="chip ${on ? "active" : ""}" data-po-sleep="${n}">${label}</button>`;
+            }).join("")}
+          </div>
+        </div>
+        <div class="set-card">
+          <h3>Player look</h3>
+          <div class="po-chips">
+            ${playerLooks.map(([id, label]) => {
+              const on = curPlayer === id;
+              return `<button type="button" class="chip ${on ? "active" : ""}" data-po-player="${id}">${label}</button>`;
+            }).join("")}
+          </div>
+        </div>
+        ${ytChip}`,
+      ok: "Close",
+      onOk: () => {},
+    });
+    $("modalCard").querySelectorAll("[data-po-sleep]").forEach((b) => {
+      b.addEventListener("click", () => { setSleep(b.dataset.poSleep); hideModal(); });
+    });
+    $("modalCard").querySelectorAll("[data-po-player]").forEach((b) => {
+      b.addEventListener("click", () => {
+        state.prefs.playerStyle = b.dataset.poPlayer;
+        savePrefs();
+        applyUi();
+        drawSeekWave();
+        hideModal();
+      });
+    });
+    const poYtLike = $("poYtLike");
+    if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
+    const poYtPl = $("poYtPl");
+    if (poYtPl) poYtPl.addEventListener("click", () => { hideModal(); ytAddToPlaylist(t); });
+  }
+
   function artUrl(t) {
     return t && t.artwork ? t.artwork : "/cover-default.jpg";
   }
@@ -2482,6 +2641,15 @@
   async function playCurrent(reset) {
     const t = current();
     if (!t) return;
+    // Only reuse the restored seek when the user resumes the SAME track that
+    // was playing when the app closed; starting anything else clears it so we
+    // never jump a new song to a stale position.
+    if (_resumeTrackId && t && String(t.id || "") !== _resumeTrackId) {
+      _pendingSeek = 0;
+      ytSeekReset = 0;
+      _pendingSeekApplied = true;
+      _resumeTrackId = null;
+    }
     const gen = ++playGen;
     pushRecent(t);
     // Listening shifts the taste profile — reorder "Made for you" so it adapts
@@ -2524,6 +2692,9 @@
       state.playing = true;
       setWantPlay(true);
       showEl($("eqBars"), true);
+      // Item 9 — Android 13+: at the FIRST play, ask for POST_NOTIFICATIONS so
+      // the background-play media notification + lock-screen controls show up.
+      if (IS_NATIVE) nativeEnsureNotificationPermission();
       updateMediaSession();
       updateWakeLock();
     } catch (err) {
@@ -2577,6 +2748,20 @@
     }
   }
 
+  function applyNativePendingSeek() {
+    if (_pendingSeek <= 0) return;
+    try {
+      const NP = nativePlayer();
+      if (npActive && NP && typeof NP.seekTo === "function") {
+        NP.seekTo({ position: Math.round(_pendingSeek * 1000) }).catch(() => {});
+        const pos = _pendingSeek;
+        _pendingSeek = 0;
+        _pendingSeekApplied = true;
+        if (typeof npPos === "number") npPos = pos;
+      }
+    } catch {}
+  }
+
   async function playAudio(t) {
     stopOthers("audio");
     let url = t.streamUrl;
@@ -2588,6 +2773,7 @@
         url = saved.uri;
         if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
           setWantPlay(true); state.playing = true; showEl($("eqBars"), true);
+          applyNativePendingSeek();
           updateMediaSession(); updateWakeLock(); startTimer(); return;
         }
         url = t.streamUrl;
@@ -2634,6 +2820,7 @@
         setWantPlay(true);
         state.playing = true;
         showEl($("eqBars"), true);
+        applyNativePendingSeek();
         updateMediaSession();
         updateWakeLock();
         startTimer();
@@ -2649,6 +2836,20 @@
     audio.src = url;
     applyPlaybackPrefs();
     await audio.play();
+    // Resume the restored track's saved position once metadata is loaded.
+    if (_pendingSeek > 0 && !_pendingSeekApplied) {
+      _pendingSeekApplied = true;
+      const seek = _pendingSeek;
+      const once = () => {
+        try {
+          const ok = Number(audio.duration);
+          if (ok && ok > 0.5) audio.currentTime = Math.min(seek, ok - 0.25);
+        } catch (err) { console.error(err); }
+        audio.removeEventListener("loadedmetadata", once);
+      };
+      if (audio.readyState >= 1) once();
+      else audio.addEventListener("loadedmetadata", once);
+    }
     fadeInTrack();
     startTimer();
   }
@@ -2672,7 +2873,11 @@
     return {
       onReady: (e) => {
         try {
-          if (ytWanted) e.target.loadVideoById(ytWanted);
+          if (ytWanted) {
+            const startSec = ytSeekReset > 0 ? ytSeekReset : 0;
+            e.target.loadVideoById(ytWanted, startSec);
+            if (startSec > 0) ytSeekReset = 0;
+          }
           e.target.playVideo();
           e.target.setVolume(state.volume);
         } catch {}
@@ -2706,7 +2911,11 @@
             try { state.yt.playVideo(); } catch {}
             return;
           }
-          if (!wantPlay) {
+          // Any other pause is a real stop — reflect it on the play/pause icon
+          // immediately, even if wantPlay is still true (the old `if (!wantPlay)`
+          // gate left a stale "pause" icon when the video stopped for another
+          // reason). togglePlay() idempotently re-renders, so no flicker.
+          if (state.playing) {
             state.playing = false;
             updateMediaSession();
             renderChrome();
@@ -2850,7 +3059,9 @@
     const player = state.yt;
     if (!player) return;
     try {
-      if (typeof player.loadVideoById === "function") player.loadVideoById(id);
+      const startSec = ytSeekReset > 0 ? ytSeekReset : 0;
+      if (typeof player.loadVideoById === "function") player.loadVideoById(id, startSec);
+      if (startSec > 0) ytSeekReset = 0;
     } catch {}
     try { player.playVideo(); } catch {}
     try { player.setVolume(state.volume); } catch {}
@@ -3156,6 +3367,12 @@
   }
 
   let wantPlay = false;
+  // Cross-reload resume: pending seek (seconds) for the last song, plus a YT
+  // start offset applied the first time the restored video loads.
+  let _pendingSeek = 0;
+  let _pendingSeekApplied = false;
+  let ytSeekReset = 0;
+  let _resumeTrackId = null;
   function setWantPlay(on) {
     wantPlay = !!on;
     try {
@@ -3654,6 +3871,67 @@
       if (String((err && err.message) || "").indexOf("youtube") >= 0) state.ytReconnect = true;
     }
     if (state.view === "library") render();
+  }
+  function ytConnected() {
+    return !!(state.auth && state.auth.signedIn && state.auth.youtube && state.auth.youtube.connected);
+  }
+  // Add the track to the connected user's YouTube Liked Videos. Only for
+  // tracks that carry a real YouTube videoId (Audius/radio can't be liked on
+  // YouTube). Re-authorization note: connectYouTube now grants a write scope.
+  async function ytToggleLike(track) {
+    if (!ytConnected()) { toast("Connect your YouTube account in Settings", true, "error"); return; }
+    const videoId = String((track && track.videoId) || "").trim();
+    if (!videoId) { toast("This song isn't a YouTube track", true, "error"); return; }
+    try {
+      await api("/api/youtube/like", 12000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ videoId }) });
+      // Invalidate the cached liked list so the Library reflects the change.
+      state.ytLiked = null;
+      toast("Added to your YouTube Liked Videos", true, "success");
+      if (state.view === "library") loadYtLiked(true);
+    } catch (e) {
+      if (String((e && e.message) || "").indexOf("youtube") >= 0) { state.ytReconnect = true; toast("YouTube access expired — reconnect in Settings", true, "error"); }
+      else toast("Couldn't add to YouTube Liked", true, "error");
+    }
+  }
+  // Pick one of the user's YouTube playlists and add the track to it.
+  async function ytAddToPlaylist(track) {
+    if (!ytConnected()) { toast("Connect your YouTube account in Settings", true, "error"); return; }
+    const videoId = String((track && track.videoId) || "").trim();
+    if (!videoId) { toast("This song isn't a YouTube track", true, "error"); return; }
+    if (!state.ytPlaylists || (state.ytPlaylists && state.ytPlaylists.error)) await loadYtPlaylists(true);
+    const pls = Array.isArray(state.ytPlaylists) ? state.ytPlaylists.filter((p) => p && p.id) : [];
+    if (!pls.length) { toast("No YouTube playlists found", true, "error"); return; }
+    showModal({
+      title: "Add to YouTube playlist",
+      body: `<p>${escapeHTML(track.title)}</p>
+        <div class="sheet-list">
+          ${pls.map((p) => `<button type="button" class="sheet-item" data-ytadd="${escapeAttr(p.id)}">
+            <img src="${escapeAttr(p.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
+            <span>${escapeHTML(p.title)}</span>
+          </button>`).join("")}
+        </div>`,
+      ok: "Close",
+      onOk: () => {},
+    });
+    $("modalCard").querySelectorAll("[data-ytadd]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const pid = b.dataset.ytadd;
+        b.disabled = true;
+        const ico = b.querySelector(".material-symbols-outlined");
+        try {
+          await api("/api/youtube/playlist/add", 12000, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ videoId, playlistId: pid }) });
+          if (ico) ico.textContent = "check";
+          b.classList.add("ok");
+          toast("Added to YouTube playlist", true, "success");
+          const id = String(pid);
+          if (state.ytOpen && state.ytOpen.id === id) state.ytOpen.tracks = null;
+          setTimeout(() => hideModal(), 520);
+        } catch (e) {
+          if (String((e && e.message) || "").indexOf("youtube") >= 0) { state.ytReconnect = true; toast("YouTube access expired — reconnect in Settings", true, "error"); }
+          else { toast("Couldn't add to playlist", true, "error"); b.disabled = false; if (ico) ico.textContent = "add"; }
+        }
+      });
+    });
   }
   async function openYtPlaylist(id, title) {
     state.ytOpen = { id, title, tracks: null, loading: true };
@@ -5056,8 +5334,8 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
-      ver: "1.5.2",
-      title: "Muchi 1.5.2",
+      ver: "1.5.3",
+      title: "Muchi 1.5.3",
       notes: [
         "Save offline straight from Now Playing — a Download button now sits next to Queue and Lyrics.",
         "China and Hong Kong are now in the Catalog country list.",
@@ -5823,8 +6101,6 @@
         <div class="empty"><h3>Nothing playing</h3><p>Play a song, then tap lyrics.</p></div>`;
     }
     const art = artUrl(t);
-    const canDl = !!(t && (t.trackId || t.videoId));
-    const saved = !!(t && isSaved(t));
     return `
       <div class="ly-screen">
         <div class="ly-bg" style="background-image:url('${escapeAttr(art)}')"></div>
@@ -5839,17 +6115,6 @@
               <button type="button" class="artist-link-now" id="nowArtist">${escapeHTML(artistName(t) || t.artist)}</button>
             </div>
           </div>
-        </div>
-        <div class="now-actions">
-          <button type="button" class="icon-btn ly-icon ${canDl || saved ? "" : "dim"}" id="dlNow" title="${saved ? "Saved offline" : canDl ? "Save offline" : "This track can't be saved"}" aria-label="Download">
-            <span class="material-symbols-outlined" id="dlNowIcon">${saved ? "download_done" : "download"}</span>
-          </button>
-          <button type="button" class="icon-btn ly-icon" id="queueNow" title="Queue" aria-label="Queue">
-            <span class="material-symbols-outlined">queue_music</span>
-          </button>
-          <button type="button" class="icon-btn ly-icon" id="lyNow" title="Lyrics" aria-label="Lyrics">
-            <span class="material-symbols-outlined">lyrics</span>
-          </button>
         </div>
         <div class="ly-scroll" id="lyScroll">${lyricsBodyHTML()}</div>
       </div>`;
@@ -6272,23 +6537,6 @@
       };
       setTimeout(() => document.addEventListener("click", closeProf), 0);
     }
-    const dlNow = viewEl.querySelector("#dlNow");
-    if (dlNow) dlNow.addEventListener("click", () => {
-      const t = current();
-      if (!t) { toast("Play a song first"); return; }
-      downloadTrack(t);
-    });
-    const queueNow = viewEl.querySelector("#queueNow");
-    if (queueNow) queueNow.addEventListener("click", () => {
-      if (state.showQueue) requestBack();
-      else setQueueOpen(true);
-    });
-    const lyNow = viewEl.querySelector("#lyNow");
-    if (lyNow) lyNow.addEventListener("click", () => {
-      if (!current()) { toast("Play a song first"); return; }
-      if (state.view === "now") requestBack();
-      else setView("now");
-    });
     const nowBack = viewEl.querySelector("#nowBack");
     if (nowBack) nowBack.addEventListener("click", requestBack);
     const lyScroll = viewEl.querySelector("#lyScroll");
@@ -7233,6 +7481,35 @@
     return true;
   }
 
+  // IP-based country is how the big music/video apps pick your catalog, and it
+  // is far more reliable than a timezone/language guess (e.g. a traveller on an
+  // Indian account in the US). This fires /api/geo once at boot and, if the
+  // server reports a valid country and the user hasn't picked one manually,
+  // re-points the catalog at that country and refreshes Home. Never overrides a
+  // manual choice (countryChosen === true).
+  async function autoDetectCountry() {
+    if (state.prefs.countryChosen === true) return;
+    let geo = null;
+    try { geo = await api("/api/geo", 6000); } catch { geo = null; }
+    if (!geo || !/^[A-Z]{2}$/.test(geo.country || "")) return;
+    const code = geo.country;
+    if (state.prefs.country === code) {
+      if (state.prefs.countryChosen !== "auto") {
+        state.prefs.countryChosen = "auto";
+        savePrefs();
+      }
+      return;
+    }
+    const prev = state.prefs.country || "";
+    state.prefs.country = code;
+    state.prefs.countryChosen = "auto";
+    savePrefs();
+    homeFetchedAt = 0;
+    if (state.view === "home") loadHome(true);
+    else paintHomeSoon();
+    if (prev && prev !== code) toast(`Catalog set to ${countryName(code)}`, true);
+  }
+
   function utcDayClient() {
     return new Date().toISOString().slice(0, 10);
   }
@@ -7798,6 +8075,10 @@
       if (state.view === "now") requestBack();
       else setView("now");
     };
+    if ($("optionsBtn")) $("optionsBtn").onclick = () => {
+      if (!current()) { toast("Play a song first"); return; }
+      openPlayerOptions();
+    };
     $("openNow").onclick = () => {
       if (!current()) { toast("Play a song first"); return; }
       if (state.view === "now") return;
@@ -7898,6 +8179,15 @@
     $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") hideModal(); });
     audio.addEventListener("ended", () => {
       if (state._xfading) { state._xfading = false; return; }
+      // Track finished: mark stopped BEFORE advancing so the play/pause glyph
+      // is never a stale "pause" (which previously happened when next(false)
+      // ran without re-rendering, e.g. when autoplay was off or the queue ran
+      // out).
+      if (state.playing) {
+        state.playing = false;
+        updateMediaSession();
+        renderChrome();
+      }
       next(false);
     });
     audio.addEventListener("play", () => { state.playing = true; updateMediaSession(); renderChrome(); });
@@ -7908,7 +8198,10 @@
         audio.play().catch(() => {});
         return;
       }
-      if (!wantPlay) {
+      // Any other pause is a real stop — update the icon even when wantPlay is
+      // still true (the old `if (!wantPlay)` gate left a stale "pause" glyph
+      // when the element stopped for another reason).
+      if (state.playing) {
         state.playing = false;
         updateMediaSession();
         renderChrome();
@@ -8158,7 +8451,33 @@
   document.addEventListener("freeze", () => {
     if (wantPlay) updateMediaSession();
   });
-  if (state.prefs.resume && state.recents.length) {
+  // Persist the last listening session when the app is closed / backgrounded
+  // (native shells fire `pause`/`stop`; web fires pagehide + visibilitychange).
+  window.addEventListener("pagehide", () => savePlayerSession());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") savePlayerSession();
+  });
+  // Resume the last listening session: put the last song (and its queue) back
+  // in the docked player so reopening the app "shows the player of the last
+  // song" ready to resume. We restore the track + position but do NOT
+  // autoplay on launch — tapping play resumes from the saved position.
+  const _sess = restorePlayerSession();
+  if (_sess) {
+    state.queue = slimPlayerQueue(_sess.queue);
+    state.index = _sess.index;
+    state.playerReady = true;
+    const _rt = current();
+    const _pos = Math.max(0, Number(_sess.pos) || 0);
+    if (_pos > 0.5) {
+      _pendingSeek = _pos;
+      _pendingSeekApplied = false;
+      _resumeTrackId = _rt && _rt.id ? String(_rt.id) : "";
+      if (_rt && (_rt.videoId || _rt.source === "youtube")) ytSeekReset = _pos;
+    }
+    // The player bar is populated by renderChrome(), which render() calls on
+    // the next paint; no need (and it's slightly unsafe) to touch the DOM
+    // before wire() has run.
+  } else if (state.prefs.resume && state.recents.length) {
     state.queue = state.recents.slice(0, 24);
     state.index = 0;
   }
@@ -8182,6 +8501,7 @@
     setInterval(() => { if (wantPlay) keepBackgroundPlay(); }, 2000);
   }
   detectCountry();
+  autoDetectCountry();
   setVolume(state.volume);
   wire();
   initAuth();

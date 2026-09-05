@@ -125,6 +125,32 @@ async function ytApi(session, env, pathAndQuery) {
   return await r.json();
 }
 
+// POST variant for the write endpoints (videos/rate, playlistItems.insert).
+// Some of these return 204 No Content with an empty body — treat that as an
+// empty object so callers still see success.
+async function ytApiPost(session, env, pathAndQuery, body) {
+  const base = "https://www.googleapis.com/youtube/v3/";
+  const headers = {
+    Authorization: "Bearer " + session.yt.access,
+    "Content-Type": "application/json",
+  };
+  const doFetch = async () => {
+    return fetch(base + pathAndQuery, { method: "POST", headers, body: body ? JSON.stringify(body) : undefined });
+  };
+  let r = await doFetch();
+  if (r.status === 401 && (await googleRefresh(session, env))) r = await doFetch();
+  if (!r.ok) {
+    try {
+      const t = await r.text().catch(() => "");
+      console.error(`YouTube API POST ${pathAndQuery.split("?")[0]} ${r.status}: ${String(t).slice(0, 180)}`);
+    } catch {}
+    return null;
+  }
+  const text = await r.text().catch(() => "");
+  if (!text) return {};
+  try { return JSON.parse(text); } catch { return {}; }
+}
+
 function revokeGoogle(token) {
   if (!token) return;
   fetch("https://oauth2.googleapis.com/revoke?token=" + encodeURIComponent(token), { method: "POST" }).catch(() => {});
@@ -194,8 +220,12 @@ export async function handleAuthUrl(request, env, url, path) {
     platform,
     exp: Date.now() + 10 * 60 * 1000,
   });
+  // A write-capable scope so a connected-user can LIKE a song and add it to one
+  // of their YouTube playlists from the app. NOTE: users who connected before
+  // this change granted only youtube.readonly — they must tap "Connect" again
+  // to re-authorize with the wider scope (the API surfaces that cleanly).
   const scope = step === "youtube"
-    ? "openid email profile https://www.googleapis.com/auth/youtube.readonly"
+    ? "openid email profile https://www.googleapis.com/auth/youtube.force-ssl"
     : "openid email profile";
   const extra = step === "youtube" ? { access_type: "offline", prompt: "consent" } : { prompt: "select_account" };
   return json(200, { url: makeOAuthUrl(scope, state, extra, env) });
@@ -305,6 +335,31 @@ export async function handleYoutubeData(request, env, url, path) {
   const sid = s.sid;
   const cache = ytCacheFor(sid);
   try {
+    // ── WRITE actions (connected user) ────────────────────────────────
+    // Add the current song to the user's YouTube Liked Videos.
+    if (path === "/api/youtube/like" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const videoId = String(body.videoId || url.searchParams.get("videoId") || "").trim();
+      if (!videoId) return json(400, { error: "Missing videoId" });
+      const q = new URLSearchParams({ id: videoId, rating: "like" });
+      const j = await ytApiPost(s, env, "videos/rate?" + q.toString());
+      if (!j) return json(401, { error: "youtube" });
+      cache.liked = null; // refetch the liked list next time
+      return json(200, { ok: true });
+    }
+    // Add the current song to one of the user's YouTube playlists.
+    if (path === "/api/youtube/playlist/add" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const videoId = String(body.videoId || "").trim();
+      const playlistId = String(body.playlistId || url.searchParams.get("playlistId") || "").trim();
+      if (!videoId || !playlistId) return json(400, { error: "Missing videoId or playlistId" });
+      const j = await ytApiPost(s, env, "playlistItems?part=snippet", {
+        snippet: { playlistId, resourceId: { kind: "youtube#video", videoId } },
+      });
+      if (!j) return json(401, { error: "youtube" });
+      cache.detail.delete(playlistId); // invalidate the cached track list
+      return json(200, { ok: true });
+    }
     if (path === "/api/youtube/liked") {
       if (!ytFresh(cache.liked)) {
         const pages = [];
