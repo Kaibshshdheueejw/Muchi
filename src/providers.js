@@ -390,6 +390,12 @@ export async function youtubeAudioStream(videoId) {
  * Prefers AAC/m4a (best device + tagging compatibility) over Opus/webm,
  * highest bitrate first within a container.
  */
+// Google's ANDROID/IOS player responses sometimes omit videoDetails.durationSeconds;
+// the signed format URL always carries the canonical `dur` param — use it as fallback.
+function urlDuration(u) {
+  try { return Number(new URL(String(u)).searchParams.get("dur")) || 0; } catch { return 0; }
+}
+
 export function pickInnertubeStream(data) {
   const st = data && data.streamingData;
   if (!st) return null;
@@ -409,7 +415,7 @@ export function pickInnertubeStream(data) {
     mimeType: String(best.mimeType || (m4a.length ? "audio/mp4" : "audio/webm")),
     quality: String(best.itag || ""),
     bitrate: String(best.bitrate || ""),
-    duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || 0,
+    duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || urlDuration(best.url),
   };
 }
 

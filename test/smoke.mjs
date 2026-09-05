@@ -283,6 +283,12 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
     fmt(137, "video/mp4; codecs=\"avc1.640028\"", 4000000, "https://e1.video-only"),
   ])) === null);
   ok("innertube: empty garbage → null", pickInnertubeStream({}) === null && pickInnertubeStream(null) === null && pickInnertubeStream({ streamingData: {} }) === null);
+    ok("innertube: duration falls back to URL dur param", (() => {
+      const d = { playabilityStatus: { status: "OK" }, streamingData: { adaptiveFormats: [
+        { itag: 140, mimeType: "audio/mp4", bitrate: 128000, url: "https://g/f?dur=213.089&sig=x" } ] } };
+      const p = pickInnertubeStream(d);
+      return p && p.duration === 213.089;
+    })());
   ok("innertube: highest bitrate wins in container", pickInnertubeStream(player([
     fmt(140, "audio/mp4; codecs=\"mp4a.40.2\"", 128000, "https://lo.m4a"),
     fmt(141, "audio/mp4; codecs=\"mp4a.40.2\"", 256000, "https://hi.m4a"),
