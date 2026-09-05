@@ -67,6 +67,10 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     private PluginCall pendingPlay;
     private long pendingPlayAt = 0L;
     private Runnable bindTimeout;
+    // Set when a pendingPlay was rejected by the bind timeout: the web layer
+    // has already fallen back to the <audio> sink. If the service connection
+    // then arrives late, stop native playback so we don't double-play.
+    private volatile boolean playTimedOut = false;
 
     private final ServiceConnection conn = new ServiceConnection() {
         @Override
@@ -85,6 +89,12 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
                 pendingPlay = null;
                 main.removeCallbacks(bindTimeout);
                 pc.resolve();
+            } else if (playTimedOut) {
+                playTimedOut = false;
+                // Late bind after play() already rejected: the WebView is the
+                // active sink now — make sure the service doesn't also play.
+                // (The "stop" echo this emits is ignored by the web layer.)
+                try { service.stopAll(); } catch (Exception ignored) {}
             }
         }
 
@@ -161,13 +171,31 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_ARTIST, call.getString("artist", ""));
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
         i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, call.getLong("duration", 0L));
+
+        if (service != null) {
+            // Bound (the normal case while the app is up): hand the track to
+            // the LIVE service through the binder. This deliberately avoids a
+            // startForegroundService round-trip — on Android 12+ a fresh FGS
+            // start is restricted while the app is backgrounded (e.g. auto-next
+            // from the notification with the screen off), but the already
+            // foreground service can always take new work.
+            try {
+                service.playIntent(i);
+                call.resolve();
+                return;
+            } catch (Exception ignored) {
+                service = null; // binder dead — fall through to the cold path
+            }
+        }
         startService(i);
 
-        // Resolve once the service actually connects (so the web layer can
-        // fall back to <audio> if the native service never comes up). A
-        // timeout keeps the promise from hanging on a dead service.
+        // Resolve once the service actually connects; REJECT on timeout so the
+        // web layer falls back to the WebView <audio> element instead of
+        // silently "playing" nothing (v1.5.4: resolve-on-timeout was why a
+        // broken service looked like "track is dead" to users).
         pendingPlay = call;
         pendingPlayAt = System.currentTimeMillis();
+        playTimedOut = false;
         ensureService(null);
         if (bindTimeout != null) main.removeCallbacks(bindTimeout);
         bindTimeout = new Runnable() {
@@ -177,7 +205,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
                 if (pendingPlay != null) {
                     PluginCall pc = pendingPlay;
                     pendingPlay = null;
-                    try { pc.resolve(); } catch (Exception ignored) {}
+                    playTimedOut = true;
+                    try { pc.reject("muchi audio service did not connect"); } catch (Exception ignored) {}
                 }
             }
         };

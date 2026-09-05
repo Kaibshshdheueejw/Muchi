@@ -126,11 +126,16 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         p.replaceCurrentItem(with: item)
         p.play()
 
+        // NOTE: the web layer sends `duration` ALREADY IN MILLISECONDS
+        // (app.js: Math.round(durationSec * 1000)) and updateNowPlaying()
+        // divides by 1000 for MPMediaItemPropertyPlaybackDuration — the old
+        // `* 1000.0` here multiplied twice, inflating lock-screen remaining
+        // time ~1000× (e.g. "3 days left" on a 3-minute song).
         updateNowPlaying(
             title: call.getString("title") ?? "Muchi",
             artist: call.getString("artist") ?? "",
             artwork: call.getString("artwork") ?? "",
-            durationMs: (call.getDouble("duration") ?? 0) * 1000.0
+            durationMs: call.getDouble("duration") ?? 0
         )
         startTicker()
         call.resolve()

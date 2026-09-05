@@ -297,9 +297,91 @@ function streamQualityScore(s) {
   return 0;
 }
 
+// ── Tier 1: innerTube player endpoint (ANDROID client) ─────────────────────
+// WHY THIS TIER EXISTS (v1.5.4 audit, D+E): the public Piped instances became
+// unreliable — production /api/yt/stream returned an empty url for every video
+// on 2026-09-05 (live-verified), which killed native background playback
+// (the Media3/AVPlayer sink never engaged) and made YouTube downloads fail.
+// The public innerTube `player` endpoint answered with the ANDROID client
+// returns audio-only adaptive formats with DIRECT (no cipher-decipher needed)
+// playable URLs — single request, no third-party dependency. It uses the same
+// keyless innerTube pattern as the WEB_REMIX/WEB search calls in this file.
+// If Google ever gates this endpoint too, this tier simply returns null and
+// the existing Piped fan-out (Tier 2) + the client's iframe fallback keep
+// working exactly as before — nothing regresses.
+const INERTUBE_PLAYER_TIMEOUT = 4000;
+const INERTUBE_ANDROID_UA = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip";
+
+/**
+ * Pure extractor: innerTube player response → the best direct audio URL.
+ * Mirrors pickPipedStream's contract exactly:
+ *   { url, format, mimeType, quality, bitrate, duration } | null
+ * Prefers AAC/m4a (best device + tagging compatibility) over Opus/webm,
+ * highest bitrate first within a container.
+ */
+export function pickInnertubeStream(data) {
+  const st = data && data.streamingData;
+  if (!st) return null;
+  const status = String((data.playabilityStatus && data.playabilityStatus.status) || "OK");
+  if (status !== "OK") return null;
+  const formats = [...(st.adaptiveFormats || []), ...(st.formats || [])];
+  const isAudio = (f) => f && f.url && /audio/i.test(String(f.mimeType || ""));
+  const score = (f) => Number(f.bitrate) || 0;
+  const audio = formats.filter(isAudio);
+  const m4a = audio.filter((f) => /mp4/i.test(String(f.mimeType))).sort((a, b) => score(b) - score(a));
+  const opus = audio.filter((f) => /opus|webm/i.test(String(f.mimeType))).sort((a, b) => score(b) - score(a));
+  const best = m4a[0] || opus[0];
+  if (!best || !best.url) return null;
+  return {
+    url: String(best.url),
+    format: m4a.length ? "m4a" : "opus",
+    mimeType: String(best.mimeType || (m4a.length ? "audio/mp4" : "audio/webm")),
+    quality: String(best.itag || ""),
+    bitrate: String(best.bitrate || ""),
+    duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || 0,
+  };
+}
+
+async function innertubePlayer(videoId) {
+  return fetchJSON(
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://www.youtube.com",
+        Referer: "https://www.youtube.com/",
+        "User-Agent": INERTUBE_ANDROID_UA,
+      },
+      body: JSON.stringify({
+        context: {
+          client: {
+            clientName: "ANDROID",
+            clientVersion: "19.09.37",
+            androidSdkVersion: 30,
+            hl: "en",
+            gl: "US",
+          },
+        },
+        videoId,
+      }),
+    },
+    INERTUBE_PLAYER_TIMEOUT
+  );
+}
+
 export async function youtubeAudioStream(videoId) {
   const id = String(videoId || "").trim();
   if (!id) return null;
+  // Tier 1 — innerTube ANDROID player (direct URLs, no third-party hop).
+  try {
+    const picked = pickInnertubeStream(await innertubePlayer(id));
+    if (picked) return picked;
+  } catch {
+    // fall through to Tier 2
+  }
+  // Tier 2 — Piped instances (unchanged fallback; usually dead lately, but
+  // free to keep).
   const attempts = PIPED_STREAM_INSTANCES.map((base) =>
     fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, PIPED_API_TIMEOUT)
   );

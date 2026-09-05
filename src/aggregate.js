@@ -314,7 +314,8 @@ export async function handleYtStream(url) {
   const id = url.searchParams.get("v") || url.searchParams.get("id") || "";
   if (!id) return json(400, { error: "Missing videoId" });
   // Cache the resolved stream URL briefly so re-taps are instant and we
-  // don't hammer the Piped instances. 15 min TTL + in-flight dedupe.
+  // don't hammer the resolver (innerTube Tier 1 / Piped Tier 2).
+  // 15 min TTL + in-flight dedupe.
   try {
     const stream = await cached(`ytstream:${id}`, 15 * 60 * 1000, () => youtubeAudioStream(id));
     // Route the (IP/token-restricted) Googlevideo URL through the /api/stream

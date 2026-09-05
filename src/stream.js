@@ -66,13 +66,23 @@ async function pipeUrl(request, src, accept) {
   if (!r.ok || !r.body) return json(r.status || 502, { error: "stream failed" });
 
   const ct = r.headers.get("content-type") || "application/octet-stream";
+  // v1.5.4: pass the range-relevant upstream headers through. ExoPlayer and
+  // AVPlayer issue Range requests against this URL for seeking/gapless;
+  // answering 200 with no Accept-Ranges/Content-Length forced naive
+  // full-buffer playback. Workers' fetch does not re-encode the body, so the
+  // upstream values are exact for the bytes we forward — echo them verbatim.
+  const outHeaders = {
+    "Content-Type": ct.split(";")[0],
+    "Cache-Control": "no-store",
+    ...corsHeaders(),
+  };
+  for (const h of ["content-length", "content-range", "accept-ranges"]) {
+    const v = r.headers.get(h);
+    if (v) outHeaders[h] = v;
+  }
   return new Response(r.body, {
     status: r.status === 206 ? 206 : 200, // 206 when the upstream honored a Range
-    headers: {
-      "Content-Type": ct.split(";")[0],
-      "Cache-Control": "no-store",
-      ...corsHeaders(),
-    },
+    headers: outHeaders,
   });
 }
 
@@ -169,6 +179,10 @@ export async function handleDownload(request, url) {
   }
   const ext = extFor(mime);
   const orig = await pipeUrl(request, src, PROXY_ACCEPT);
+  // Never attach a filename to an error answer: a browser/WebView "Save as…"
+  // with Content-Disposition on a 502 JSON body would save a corrupt "song".
+  // Pass the error through verbatim (the native plugins check status too).
+  if (orig.status >= 400) return orig;
   const disposition = `attachment; filename="${name}.${ext}"`;
   const h = new Headers(orig.headers);
   h.set("Content-Disposition", disposition);

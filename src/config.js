@@ -3,7 +3,7 @@
 // never sent to the client. Mirrors server.js env contract (lines 19–33).
 
 export const APP_NAME = "Muchi";
-export const APP_VERSION = "1.5.3"; // keep in sync with package.json (root)
+export const APP_VERSION = "1.5.4"; // keep in sync with package.json (root)
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (server.js line 35)
 
 export function authConfig(env) {

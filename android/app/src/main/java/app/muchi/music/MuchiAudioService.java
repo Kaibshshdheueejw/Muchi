@@ -58,6 +58,11 @@ public class MuchiAudioService extends Service {
 
     public static final String ACTION_PLAY = "app.muchi.music.action.PLAY";
     public static final String ACTION_STOP = "app.muchi.music.action.STOP";
+    /** Notification transport buttons (v1.5.4): these arrive as getService
+     *  PendingIntents from the media notification itself. */
+    public static final String ACTION_TOGGLE = "app.muchi.music.action.TOGGLE";
+    public static final String ACTION_NEXT = "app.muchi.music.action.NEXT";
+    public static final String ACTION_PREV = "app.muchi.music.action.PREV";
 
     public static final String EXTRA_URL = "url";
     public static final String EXTRA_TITLE = "title";
@@ -71,12 +76,23 @@ public class MuchiAudioService extends Service {
         void onProgress(long positionMs, long durationMs, boolean playing);
     }
 
+    /**
+     * Plugin → service control surface. IMPORTANT: Capacitor dispatches plugin
+     * calls on its own "CapacitorPlugins" HandlerThread, but ExoPlayer +
+     * MediaSessionCompat are main-thread-affine (cross-thread calls throw
+     * IllegalStateException). Every call therefore hops to the service's
+     * main-looper handler — which also FIFO-orders controls against each
+     * other and against onStartCommand work, exactly like the old
+     * startService path did. (onServiceConnected runs on main, so the
+     * posted setListener lands before any posted control.)
+     */
     public class LocalBinder extends Binder {
-        public void setListener(PluginListener l) { MuchiAudioService.this.listener = l; }
-        public void pausePlayback() { if (player != null) player.pause(); }
-        public void resumePlayback() { if (player != null) player.play(); }
-        public void seekToPlayback(long positionMs) { if (player != null) player.seekTo(positionMs); }
-        public void stopAll() { stopPlaybackInternal(); }
+        public void setListener(PluginListener l) { ticker.post(() -> listener = l); }
+        public void playIntent(Intent i) { ticker.post(() -> handlePlayIntent(i)); }
+        public void pausePlayback() { ticker.post(() -> { if (player != null) player.pause(); }); }
+        public void resumePlayback() { ticker.post(() -> { if (player != null) player.play(); }); }
+        public void seekToPlayback(long positionMs) { ticker.post(() -> { if (player != null) player.seekTo(positionMs); }); }
+        public void stopAll() { ticker.post(MuchiAudioService.this::stopPlaybackInternal); }
     }
 
     private final LocalBinder binder = new LocalBinder();
@@ -117,27 +133,22 @@ public class MuchiAudioService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+        String action = intent == null ? "" : (intent.getAction() == null ? "" : intent.getAction());
+        if (ACTION_STOP.equals(action)) {
             stopPlaybackInternal();
             return START_NOT_STICKY;
         }
-        if (intent != null && ACTION_PLAY.equals(intent.getAction())) {
-            String url = intent.getStringExtra(EXTRA_URL);
-            if (url != null && !url.isEmpty()) {
-                // Promote to a foreground service IMMEDIATELY (before any
-                // network/prepare work) so Android reliably keeps it alive in
-                // the background and shows the media notification. Without
-                // this, on some devices the OS can kill the service (music
-                // stops when you leave the app) or the notification never
-                // appears.
-                startInForeground();
-                loadTrack(
-                        url,
-                        intent.getStringExtra(EXTRA_TITLE),
-                        intent.getStringExtra(EXTRA_ARTIST),
-                        intent.getStringExtra(EXTRA_ARTWORK),
-                        intent.getLongExtra(EXTRA_DURATION_MS, 0L));
+        if (ACTION_PLAY.equals(action)) {
+            handlePlayIntent(intent);
+        } else if (ACTION_TOGGLE.equals(action)) {
+            if (player != null) {
+                if (player.isPlaying()) player.pause(); else player.play();
             }
+        } else if (ACTION_NEXT.equals(action)) {
+            // The queue lives in the web layer; echo, don't decide.
+            emitControls("next", 0L);
+        } else if (ACTION_PREV.equals(action)) {
+            emitControls("previous", 0L);
         } else if (intent == null && player != null) {
             // START_STICKY restart: the OS recreated us. Re-attach the
             // foreground notification so background playback survives a
@@ -146,8 +157,34 @@ public class MuchiAudioService extends Service {
             startInForeground();
             ticker.removeCallbacks(tick);
             ticker.post(tick);
+        } else if (intent == null) {
+            // Nothing playing to resume after a system restart — stop cleanly
+            // instead of lingering as a bare background service (O+ would
+            // eventually kill it mid-nothing; START_NOT_STICKY ends the churn).
+            stopSelf();
+            return START_NOT_STICKY;
         }
         return START_STICKY;
+    }
+
+    /** Shared by onStartCommand and the plugin binder (bound = cheap, no
+     *  startForegroundService re-entry needed when the app is already up). */
+    private void handlePlayIntent(Intent intent) {
+        String url = intent.getStringExtra(EXTRA_URL);
+        if (url == null || url.isEmpty()) return;
+        // Promote to a foreground service IMMEDIATELY (before any
+        // network/prepare work) so Android reliably keeps it alive in
+        // the background and shows the media notification. Without
+        // this, on some devices the OS can kill the service (music
+        // stops when you leave the app) or the notification never
+        // appears.
+        startInForeground();
+        loadTrack(
+                url,
+                intent.getStringExtra(EXTRA_TITLE),
+                intent.getStringExtra(EXTRA_ARTIST),
+                intent.getStringExtra(EXTRA_ARTWORK),
+                intent.getLongExtra(EXTRA_DURATION_MS, 0L));
     }
 
     @Override
@@ -226,6 +263,14 @@ public class MuchiAudioService extends Service {
                 @Override
                 public void onPlayerError(@NonNull PlaybackException error) {
                     emitControls("error", 0L);
+                }
+
+                @Override
+                public void onIsPlayingChanged(boolean isPlaying) {
+                    // Refresh the notification's play/pause action so the
+                    // button matches reality when playback state changes from
+                    // ANY source (notification tap, headset, lock screen, JS).
+                    ticker.post(() -> showNotification());
                 }
             });
         }
@@ -317,9 +362,21 @@ public class MuchiAudioService extends Service {
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
+            // IMPORTANCE_LOW: an ongoing media notification must not beep/bob
+            // on every track change (DEFAULT made it a heads-up interruption
+            // per song). It still shows in the shade + lock screen.
+            NotificationChannel existing = notificationManager.getNotificationChannel(CHANNEL_ID);
+            if (existing != null && existing.getImportance() != NotificationManager.IMPORTANCE_LOW) {
+                // Importance is immutable after creation (1.5.3 shipped this
+                // channel as DEFAULT) — delete + recreate once so upgraders
+                // get the silent behavior too.
+                notificationManager.deleteNotificationChannel(CHANNEL_ID);
+            }
             NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_DEFAULT);
+                    CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_LOW);
             channel.setDescription("MUCHI background playback controls");
+            channel.setShowBadge(false);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
             notificationManager.createNotificationChannel(channel);
         }
     }
@@ -372,26 +429,54 @@ public class MuchiAudioService extends Service {
         }
     }
 
+    /** PendingIntent → service action (notification transport buttons). */
+    private PendingIntent serviceAction(String action, int requestCode) {
+        Intent i = new Intent(this, MuchiAudioService.class);
+        i.setAction(action);
+        int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0;
+        return PendingIntent.getService(this, requestCode, i, flags);
+    }
+
     private void showNotification() {
-        if (notificationManager == null) return;
+        // Guard against a post-stop race: onIsPlayingChanged fires during
+        // player.release() and re-notifying the cancelled id would leave an
+        // orphaned "player" notification behind after ACTION_STOP.
+        if (notificationManager == null || session == null || player == null) return;
         Intent contentIntent = new Intent(this, MainActivity.class);
         contentIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, contentIntent,
-                Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0);
+        int piFlags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0;
+        PendingIntent pi = PendingIntent.getActivity(this, 0, contentIntent, piFlags);
 
-        Notification.Builder builder = new Notification.Builder(this);
-        if (Build.VERSION.SDK_INT >= 26) builder.setChannelId(CHANNEL_ID);
-        builder.setSmallIcon(R.drawable.ic_stat_muchi);
-
-        builder.setContentTitle(trackTitle);
-        builder.setContentText(trackArtist.isEmpty() ? "Muchi" : trackArtist);
-        if (artworkBitmap != null) builder.setLargeIcon(artworkBitmap);
-        builder.setContentIntent(pi);
-        builder.setOngoing(true);
-        builder.setVisibility(Notification.VISIBILITY_PUBLIC);
+        // v1.5.4: real transport buttons (prev / play-pause / next) on the
+        // notification itself + compact view, a delete intent so a swipe that
+        // somehow goes through stops playback instead of orphaning the
+        // service, and CATEGORY_MEDIA so OEM/Android auto-group it with media.
+        // The framework ic_media_* drawables are used deliberately: zero new
+        // assets, monochrome-correct on every OEM skin, and what every
+        // MediaStyle notification template expects at API 24+.
+        boolean playing = player != null && player.isPlaying();
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_muchi)
+                .setContentTitle(trackTitle)
+                .setContentText(trackArtist.isEmpty() ? "Muchi" : trackArtist)
+                .setLargeIcon(artworkBitmap)
+                .setContentIntent(pi)
+                .setOngoing(true)
+                // Silent by construction: the channel is IMPORTANCE_LOW (kept
+                // here as .setPriority(LOW) rather than androidx setSilent so
+                // we don't depend on a specific androidx.core version).
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setCategory(NotificationCompat.CATEGORY_MEDIA)
+                .addAction(android.R.drawable.ic_media_previous, "Previous", serviceAction(ACTION_PREV, 11))
+                .addAction(playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
+                        playing ? "Pause" : "Play", serviceAction(ACTION_TOGGLE, 12))
+                .addAction(android.R.drawable.ic_media_next, "Next", serviceAction(ACTION_NEXT, 13))
+                .setDeleteIntent(serviceAction(ACTION_STOP, 14));
         if (session != null) {
-            builder.setStyle(new android.app.Notification.MediaStyle()
-                    .setMediaSession((android.media.session.MediaSession.Token) session.getSessionToken().getToken()));
+            builder.setStyle(new androidx.media.app.NotificationCompat.MediaStyle()
+                    .setMediaSession(session.getSessionToken())
+                    .setShowActionsInCompactView(0, 1, 2));
         }
         Notification notification = builder.build();
         notificationManager.notify(NOTIFICATION_ID, notification);
@@ -399,7 +484,7 @@ public class MuchiAudioService extends Service {
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIFICATION_ID, notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-        } else if (Build.VERSION.SDK_INT >= 26) {
+        } else {
             startForeground(NOTIFICATION_ID, notification);
         }
     }

@@ -71,7 +71,7 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
         let artworkData = self.decodeArtwork(call.getString("artworkData") ?? "")
         let artworkURL = call.getString("artwork") ?? ""
 
-        let dest = documentsDir().appendingPathComponent(filename)
+        let dest0 = documentsDir().appendingPathComponent(filename)
         let session = URLSession(configuration: .default)
         let task = session.downloadTask(with: u) { tempURL, response, error in
             self.tasks[id] = nil
@@ -79,12 +79,31 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
             // Download + metadata tagging happen off the main thread so the
             // UI never blocks (AVAssetExportSession + file I/O are heavy).
             DispatchQueue.global(qos: .utility).async {
-                var finalURI = dest.absoluteString
+                var finalURI = dest0.absoluteString
                 var doneError: String?
+                // (v1.5.4) URLSession's downloadTask does NOT surface HTTP
+                // errors as `error` — a 404/502 body (e.g. the "No stream
+                // available" JSON from /api/download when resolution fails)
+                // was previously moved into place and saved as a "song".
+                // Reject non-2xx before touching the file system, mirroring
+                // the Android plugin's `code >= 400` guard.
+                let http = response as? HTTPURLResponse
                 if let error = error {
                     doneError = error.localizedDescription
+                } else if let status = http?.statusCode, !(200..<300).contains(status) {
+                    doneError = "server responded \(status)"
                 } else if let tempURL = tempURL {
                     do {
+                        // Trust the response's Content-Type over the
+                        // JS-guessed extension (mirrors Android's
+                        // extensionFor(realMime)): the m4a streams the resolver
+                        // prefers were landing as .webm because JS guessed.
+                        var dest = dest0
+                        if let mime = http?.value(forHTTPHeaderField: "Content-Type"),
+                           let realExt = Self.extensionFor(mime),
+                           dest.pathExtension.lowercased() != realExt {
+                            dest = dest.deletingPathExtension().appendingPathExtension(realExt)
+                        }
                         let ext = dest.pathExtension.lowercased()
                         try? FileManager.default.removeItem(at: dest)
                         try FileManager.default.moveItem(at: tempURL, to: dest)
@@ -151,6 +170,18 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     // ── Metadata embedding ──────────────────────────────────────────────────
+    /// Maps an audio MIME type to the file extension that matches the bytes —
+    /// 1:1 with the Android plugin's extensionFor() (webm/opus is only the
+    /// fallback when the container is genuinely unknown).
+    private static func extensionFor(_ mime: String) -> String? {
+        let m = mime.lowercased()
+        if m.contains("mpeg") || m.contains("mp3") { return "mp3" }
+        if m.contains("flac") { return "flac" }
+        if m.contains("mp4") || m.contains("m4a") || m.contains("aac") { return "m4a" }
+        if m.contains("webm") || m.contains("ogg") || m.contains("opus") { return "webm" }
+        return nil
+    }
+
     private func embedMetadata(at url: URL, ext: String, title: String, artist: String,
                                album: String, genre: String, artwork: Data?, artworkURL: String) {
         if ext == "mp3" || ext == "mp2" {

@@ -121,7 +121,7 @@ async function handleApi(request, env, url) {
     }
   }
 
-  if (p === "/api/health" || p === "/api/version") return handleHealth(env);
+  if (p === "/api/health" || p === "/api/version") return await handleHealth(env);
   if (p === "/api/auth/status") return handleAuthStatus(request, env);
   if (p === "/api/auth/google/url" || p === "/api/auth/youtube/url") return handleAuthUrl(request, env, url, p);
   if (p === "/api/auth/google/callback") return handleGoogleCallback(request, env, url);

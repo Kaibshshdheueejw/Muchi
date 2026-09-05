@@ -1,14 +1,19 @@
 package app.muchi.music;
 
 import android.Manifest;
+import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.webkit.MimeTypeMap;
+
+import androidx.core.content.FileProvider;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -132,8 +137,9 @@ public class MuchiDownloadPlugin extends Plugin {
 
     /* Item 6 — download the app's own update APK in-app (no browser redirect).
        Writes to the public Downloads (Android 10+) or the app Downloads folder
-       (Android 9 and below) and returns {uri} so the web layer can toast and
-       hint the user to open it. Also requests storage permission on < API 29. */
+       (Android 9 and below) and returns {uri}; the web layer then fires
+       installUpdate() so the system Install sheet comes up directly (v1.5.4).
+       Also requests storage permission on < API 29. */
     @PluginMethod
     public void downloadUpdate(PluginCall call) {
         final String url = call.getString("url", "");
@@ -175,7 +181,7 @@ public class MuchiDownloadPlugin extends Plugin {
         con.setConnectTimeout(20000);
         con.setReadTimeout(30000);
         con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "Muchi/" + (version == null ? "1.5.2" : version));
+        con.setRequestProperty("User-Agent", "Muchi/" + (version == null || version.isEmpty() ? "1.5.4" : version));
         try {
             int code = con.getResponseCode();
             if (code >= 400) throw new IOException("update download failed (" + code + ")");
@@ -264,6 +270,55 @@ public class MuchiDownloadPlugin extends Plugin {
         call.resolve(o);
     }
 
+    /**
+     * v1.5.4 — hand a freshly-downloaded update APK to the system package
+     * installer so the user lands on the real "Install" sheet instead of
+     * hunting for the file in a Downloads app.
+     *  - file:// paths (Android 9 fallback) are re-wrapped through the
+     *    app's FileProvider — passing a raw file:// URI to another app
+     *    throws FileUriExposedException on API 24+.
+     *  - When the user has not granted "install unknown apps" for MUCHI the
+     *    VIEW intent resolves to nothing; we then open the exact settings
+     *    page to grant it and reject with a clear message so the UI can say
+     *    "allow, then tap Install again".
+     */
+    @PluginMethod
+    public void installUpdate(PluginCall call) {
+        String uriStr = call.getString("uri", "");
+        if (uriStr.isEmpty()) {
+            call.reject("MuchiDownload: missing uri");
+            return;
+        }
+        try {
+            Uri apkUri = Uri.parse(uriStr);
+            if ("file".equals(apkUri.getScheme())) {
+                File f = new File(apkUri.getPath());
+                if (!f.exists()) throw new IOException("the downloaded file is gone");
+                apkUri = FileProvider.getUriForFile(getContext(),
+                        getContext().getPackageName() + ".fileprovider", f);
+            }
+            Intent view = new Intent(Intent.ACTION_VIEW);
+            view.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(view);
+            call.resolve();
+        } catch (ActivityNotFoundException notAllowed) {
+            // Almost always: INSTALL_PACKAGES not yet allowed for this app.
+            try {
+                Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getContext().getPackageName()));
+                settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(settings);
+                call.reject("Allow “Install unknown apps” for Muchi in the settings screen, then tap Install again.");
+            } catch (Exception ignored) {
+                call.reject("Could not open the installer — enable “install unknown apps” for Muchi in system settings.");
+            }
+        } catch (Exception e) {
+            call.reject("install failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+        }
+    }
+
     /* ── internals ─────────────────────────────────────────────────── */
 
     private Uri downloadFile(String id, String url, String filename,
@@ -273,7 +328,7 @@ public class MuchiDownloadPlugin extends Plugin {
         con.setConnectTimeout(20000);
         con.setReadTimeout(30000);
         con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "Muchi/1.5.2");
+        con.setRequestProperty("User-Agent", "Muchi/1.5.4");
         con.setRequestProperty("Accept", "audio/*,*/*");
         // We need the whole file, not a video-dash stream.
         con.setRequestProperty("Range", "bytes=0-");

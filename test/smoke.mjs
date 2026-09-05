@@ -24,7 +24,7 @@ import {
   utcDay, LOCAL_CHARTS, MOODS_BY_COUNTRY,
 } from "../src/data.js";
 import { codecMatch, tidyTitle, tidyArtist } from "../src/util.js";
-import { parseLyricsHit } from "../src/providers.js";
+import { parseLyricsHit, pickInnertubeStream } from "../src/providers.js";
 import { APP_VERSION } from "../src/config.js";
 import { createHmac as nodeHmac } from "node:crypto";
 import {
@@ -251,6 +251,196 @@ ok("codecMatch opus", codecMatch("opus", "opus") === true);
 ok("parseLyricsHit synced", parseLyricsHit({ syncedLyrics: "[00:12.50]Hello\n[00:20]World", plainLyrics: "Hello\nWorld", trackName: "T", artistName: "A" })?.synced.length === 2);
 ok("parseLyricsHit plain only", parseLyricsHit({ plainLyrics: "Words" })?.lyrics === "Words");
 ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
+
+// ── 5a2. innerTube player picker (Tier-1 resolver, providers.js) ───────────
+// Fixtures mirror real ANDROID-client player responses (itag 140 m4a/128k,
+// 251 opus/160k). Contract = same shape pickPipedStream returns, because
+// aggregate.js/stream.js consumers key off `.url` and `.mimeType`.
+{
+  const fmt = (itag, mime, bitrate, url) => ({ itag, mimeType: mime, bitrate, url });
+  const player = (adaptive, extra = {}) => ({
+    playabilityStatus: { status: "OK" },
+    streamingData: { adaptiveFormats: adaptive },
+    videoDetails: { durationSeconds: 182 },
+    ...extra,
+  });
+  const okResp = player([
+    fmt(251, "audio/webm; codecs=\"opus\"", 160000, "https://e1.opus"),
+    fmt(140, "audio/mp4; codecs=\"mp4a.40.2\"", 128000, "https://e1.m4a"),
+  ]);
+  const p1 = pickInnertubeStream(okResp);
+  ok("innertube: prefers m4a over opus", p1?.url === "https://e1.m4a" && p1.format === "m4a");
+  ok("innertube: contract shape", p1 && typeof p1.mimeType === "string" && p1.quality === "140" && p1.bitrate === "128000" && p1.duration === 182);
+  ok("innertube: m4a mime preserved", /^audio\/mp4/.test(p1.mimeType));
+  const opusOnly = pickInnertubeStream(player([fmt(251, "audio/webm; codecs=\"opus\"", 160000, "https://e1.opus")]));
+  ok("innertube: opus fallback", opusOnly?.url === "https://e1.opus" && opusOnly.format === "opus");
+  ok("innertube: LOGIN_REQUIRED → null", pickInnertubeStream({ ...okResp, playabilityStatus: { status: "LOGIN_REQUIRED" } }) === null);
+  ok("innertube: missing playability treated OK", pickInnertubeStream({ streamingData: okResp.streamingData, videoDetails: okResp.videoDetails })?.url === "https://e1.m4a");
+  ok("innertube: cipher-only (no url) → null", pickInnertubeStream(player([
+    { itag: 140, mimeType: "audio/mp4; codecs=\"mp4a.40.2\"", bitrate: 128000, signatureCipher: "s=abc" },
+  ])) === null);
+  ok("innertube: video-only formats ignored", pickInnertubeStream(player([
+    fmt(137, "video/mp4; codecs=\"avc1.640028\"", 4000000, "https://e1.video-only"),
+  ])) === null);
+  ok("innertube: empty garbage → null", pickInnertubeStream({}) === null && pickInnertubeStream(null) === null && pickInnertubeStream({ streamingData: {} }) === null);
+  ok("innertube: highest bitrate wins in container", pickInnertubeStream(player([
+    fmt(140, "audio/mp4; codecs=\"mp4a.40.2\"", 128000, "https://lo.m4a"),
+    fmt(141, "audio/mp4; codecs=\"mp4a.40.2\"", 256000, "https://hi.m4a"),
+  ]))?.url === "https://hi.m4a");
+}
+
+// ── 5a3. Proxy contract (stream.js): Range pass-through + honest errors ──────
+// v1.5.4: ExoPlayer/AVPlayer only seek efficiently when /api/stream echoes
+// the upstream range headers; and /api/download must never attach
+// Content-Disposition to an error (that saved 404/502 JSON bodies as
+// corrupt "song" files — one root cause of the "0-byte .webm" reports).
+// Runs the REAL module against a mocked network (Node ships fetch/Request/
+// Response since v18; the sandbox has no internet).
+{
+  const realFetch = globalThis.fetch;
+  let seen = [];
+  globalThis.fetch = async (u, init = {}) => {
+    const us = String(u);
+    if (us.includes("cloudflare-dns.com")) {
+      return new Response(JSON.stringify({ Status: 0, Answer: [{ type: 1, data: "93.184.216.34" }] }), { headers: { "content-type": "application/json" } });
+    }
+    seen.push({ url: us, range: (init.headers || {}).Range || "" });
+    if (us.includes("want404")) {
+      return new Response(JSON.stringify({ error: "nope" }), { status: 404, headers: { "content-type": "application/json" } });
+    }
+    const ranged = Boolean((init.headers || {}).Range);
+    const headers = { "content-type": "audio/mp4; codecs=mp4a.40.2", "content-length": "5", "accept-ranges": "bytes" };
+    if (ranged) headers["content-range"] = "bytes 0-4/5";
+    return new Response("HELLO", { status: ranged ? 206 : 200, headers });
+  };
+  try {
+    const { handleStream, handleDownload } = await import("../src/stream.js");
+    // 1) Range forwarding + header echo on /api/stream
+    seen = [];
+    let req = new Request("http://w/api/stream?url=" + encodeURIComponent("https://ok.example/a.m4a"), { headers: { Range: "bytes=0-4" } });
+    let res = await handleStream(req, new URL(req.url));
+    ok("proxy: forwards Range upstream", seen.some((s) => s.range === "bytes=0-4"));
+    ok("proxy: 206 preserved", res.status === 206);
+    ok("proxy: content-range echoed", res.headers.get("content-range") === "bytes 0-4/5");
+    ok("proxy: content-length echoed", res.headers.get("content-length") === "5");
+    ok("proxy: accept-ranges echoed", res.headers.get("accept-ranges") === "bytes");
+    ok("proxy: body intact", (await res.text()) === "HELLO");
+    // 2) plain GET keeps 200 + length, no bogus 206
+    req = new Request("http://w/api/stream?url=" + encodeURIComponent("https://ok.example/a.m4a"));
+    res = await handleStream(req, new URL(req.url));
+    ok("proxy: 200 stays 200", res.status === 200 && res.headers.get("content-length") === "5" && !res.headers.get("content-range"));
+    // 3) /api/download success path: attachment + real extension
+    req = new Request("http://w/api/download?name=Song&streamUrl=" + encodeURIComponent("https://ok.example/a.m4a") + "&mime=audio%2Fmp4");
+    res = await handleDownload(req, new URL(req.url));
+    const cd = res.headers.get("content-disposition") || "";
+    ok("download: 200 attachment", res.status === 200 && cd.includes('attachment') && cd.includes('Song.m4a'));
+    ok("download: length passes through", res.headers.get("content-length") === "5");
+    // 4) /api/download error path: NO attachment on error (the corrupt-file bug)
+    req = new Request("http://w/api/download?name=Song&streamUrl=" + encodeURIComponent("https://want404.example/a.m4a") + "&mime=audio%2Fmp4");
+    res = await handleDownload(req, new URL(req.url));
+    ok("download: error keeps real status", res.status === 404);
+    ok("download: NO content-disposition on error", !res.headers.get("content-disposition"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// ── 5a4. /api/version release authority (direct.js) ─────────────────────────
+// The "downloads the same version again" bug: the endpoint advertised the
+// Worker's own version with a floating releases/latest asset, so a Worker
+// redeploy ahead of the GitHub release offered 1.5.4 while GitHub's latest
+// still served 1.5.3. Pinned rule: a newer version is only advertised when
+// the release itself carries the matching Muchi.apk asset.
+{
+  const { pickReleaseVersion } = await import("../src/direct.js");
+  const pinned = "https://github.com/x/Muchi/releases/download/v1.5.4/Muchi.apk";
+  const float_ = "https://github.com/x/Muchi/releases/latest/download/Muchi.apk";
+  const p1 = pickReleaseVersion("1.5.3", { tag: "1.5.4", apkUrl: pinned }, "x/Muchi");
+  ok("version-api: newer release with asset wins", p1.version === "1.5.4" && p1.apkUrl === pinned);
+  const p2 = pickReleaseVersion("1.5.4", { tag: "1.5.4", apkUrl: pinned }, "x/Muchi");
+  ok("version-api: equal version never re-offers", p2.version === "1.5.4" && p2.apkUrl === float_);
+  const p3 = pickReleaseVersion("1.5.4", { tag: "1.5.3", apkUrl: pinned }, "x/Muchi");
+  ok("version-api: older release ignored", p3.version === "1.5.4" && p3.apkUrl === float_);
+  const p4 = pickReleaseVersion("1.5.4", null, "x/Muchi");
+  ok("version-api: offline GitHub → static fallback", p4.version === "1.5.4" && p4.apkUrl === float_);
+  const p5 = pickReleaseVersion("1.5.9", { tag: "1.10.0", apkUrl: pinned }, "x/Muchi");
+  ok("version-api: numeric compare (1.10 > 1.5.9)", p5.version === "1.10.0");
+  const p6 = pickReleaseVersion("1.5.4", { tag: "1.6.0", apkUrl: "" }, "x/Muchi");
+  ok("version-api: release without asset never advertised", p6.version === "1.5.4" && p6.apkUrl === float_);
+}
+
+// ── 5a5. Resolver CHAIN (real youtubeAudioStream, both tiers) ───────────────
+// Not just the picker: runs the actual exported function against stubbed
+// networks and asserts tier ORDER + fallthrough + the never-regress contract.
+// The client depends on: InnerTube first (fast, reliable), Piped only when
+// InnerTube fails, and a THROW only when everything failed (so aggregate.js
+// can answer 200 {url:""} and keep the iframe fallback alive).
+{
+  const realFetch = globalThis.fetch;
+  try {
+    const { youtubeAudioStream } = await import("../src/providers.js");
+    const itTubeOk = new Response(JSON.stringify({
+      playabilityStatus: { status: "OK" },
+      streamingData: { adaptiveFormats: [
+        { itag: 251, mimeType: "audio/webm; codecs=\"opus\"", bitrate: 160000, url: "https://g/opus-251" },
+        { itag: 140, mimeType: "audio/mp4; codecs=\"mp4a.40.2\"", bitrate: 128000, url: "https://g/m4a-140" },
+      ] },
+      videoDetails: { durationSeconds: "200" },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+    const pipedOk = new Response(JSON.stringify({
+      duration: 200,
+      audioStreams: [{ url: "https://p/1", mimeType: "audio/webm", format: "opus", quality: "opus", bitrate: 160 }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+    const serverErr = () => new Response("boom", { status: 500 });
+
+    // (a) InnerTube healthy → Piped must NOT be touched at all.
+    let seen = [];
+    globalThis.fetch = async (u) => { seen.push(String(u)); return String(u).includes("youtubei/v1/player") ? itTubeOk.clone() : serverErr(); };
+    let r = await youtubeAudioStream("vid123");
+    ok("chain: innertube-first m4a picked", r.url === "https://g/m4a-140" && r.format === "m4a" && r.duration === 200);
+    ok("chain: zero Piped load when innertube works", seen.length === 1 && seen[0].includes("youtubei/v1/player"));
+
+    // (b) InnerTube says LOGIN_REQUIRED (HTTP 200, unplayable) → Piped rescues.
+    seen = [];
+    globalThis.fetch = async (u) => {
+      seen.push(String(u));
+      if (String(u).includes("youtubei/v1/player")) {
+        return new Response(JSON.stringify({ playabilityStatus: { status: "LOGIN_REQUIRED" } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return String(u).includes("/streams/vid123") ? pipedOk.clone() : serverErr();
+    };
+    r = await youtubeAudioStream("vid123");
+    ok("chain: piped fallback when innertube unplayable", r.url === "https://p/1" && seen.some((s) => s.includes("pipedapi")));
+
+    // (c) InnerTube HTTP 500 + all six Piped instances dead → THROW (aggregate
+    //     converts this to the 200 {url:""} iframe contract; it must NOT be a
+    //     silent null that would break the caller's try/catch).
+    globalThis.fetch = async () => serverErr();
+    let threw = "";
+    try { await youtubeAudioStream("vid123"); } catch (e) { threw = String(e.message || e); }
+    ok("chain: all-tiers-down throws", threw.includes("piped"));
+
+    // (d) Piped answers but has no audioStreams → still throws "no audio".
+    globalThis.fetch = async (u) => {
+      if (String(u).includes("youtubei/v1/player")) return serverErr();
+      if (String(u).includes("/streams/")) {
+        return new Response(JSON.stringify({ audioStreams: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return serverErr();
+    };
+    threw = "";
+    try { await youtubeAudioStream("vid123"); } catch (e) { threw = String(e.message || e); }
+    ok("chain: empty-answer throw, not silent null", threw.includes("no audio stream"));
+
+    // (e) empty videoId → null immediately, no fetches (bad-request guard).
+    let touched = 0;
+    globalThis.fetch = async () => { touched++; return serverErr(); };
+    r = await youtubeAudioStream("   ");
+    ok("chain: blank id short-circuits", r === null && touched === 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
 
 // ── 5b. Real download metadata tags (public/meta.js) ────────────────────────
 // Verifies the browser audio tagger writes real ID3v2 (mp3) + MP4 ilst (m4a)

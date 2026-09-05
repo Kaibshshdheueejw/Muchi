@@ -72,4 +72,11 @@
          and does NOT need this permission, so it is capped at API 28 to avoid
          a pointless legacy prompt on modern devices. -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+
+    <!-- v1.5.4 in-app updater: after MUCHI downloads its own update APK it
+         hands the file to the system package installer ("Install unknown apps"
+         for THIS app). This is a normal-protection permission the user still
+         confirms in system settings; it is NOT granted silently and is only
+         used to install MUCHI's own signed update, never anything else. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 </manifest>

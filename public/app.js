@@ -113,7 +113,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.3";
+  const APP_VERSION = "1.5.4";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1170,16 +1170,12 @@
      and no working notification. Ask once, on Android, at first play / first
      save. Safe: if the user denies, playback still works — it just falls back
      to the FGS Task Manager as the OS documents. */
-  let notifyPermAsked = false;
-  function nativeEnsureNotificationPermission() {
-    if (notifyPermAsked || !IS_NATIVE) return;
-    let plat = "";
-    try { plat = window.Capacitor && window.Capacitor.getPlatform ? window.Capacitor.getPlatform() : ""; } catch { plat = ""; }
-    if (plat !== "android") return;
-    if (typeof Notification === "undefined" || Notification.permission !== "default") return;
-    notifyPermAsked = true;
-    try { Notification.requestPermission().catch(() => {}); } catch {}
-  }
+  // (v1.5.4) nativeEnsureNotificationPermission removed: the WebView
+  // Notification.requestPermission() prompt does NOT grant the native
+  // POST_NOTIFICATIONS permission on Android (different API surface) — it
+  // only produced a second, useless dialog on top of the real one asked by
+  // MuchiAudioPlugin (nativeEnsureNotifyPermission → plugin check/request,
+  // at first play). The native plugin path is the single source.
   function sanitizeName(s) {
     return String(s || "track").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "track";
   }
@@ -1224,9 +1220,10 @@
     // Already resolved (played / audius / radio carries a streamUrl): keep it.
     if (out.streamUrl) return out;
     // YouTube: resolve via the same /api/yt/stream endpoint playback uses.
-    // The server caches the resolved URL for 15 min and fans out across Piped
-    // instances, so the download reuses a URL that playback just proved works
-    // instead of doing its own (un-cached) Piped resolution at download time.
+    // The server caches the resolved URL for 15 min and tries the InnerTube
+    // Tier-1 resolver first (Piped fan-out as fallback), so the download
+    // reuses a URL that playback just proved works instead of doing its own
+    // (un-cached) resolution at download time.
     if (out.videoId) {
       try {
         const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 7000);
@@ -1455,9 +1452,9 @@
     }
     // Item 7 — ask for storage permission once, at the moment of saving.
     if (IS_NATIVE) nativeEnsureStoragePermission();
-    // Item 9 — ask for the media notification permission (Android 13+) once,
-    // at the moment of saving, the same way we ask for storage.
-    if (IS_NATIVE) nativeEnsureNotificationPermission();
+    // (v1.5.4) The notification-permission ask that used to sit here is gone:
+    // POST_NOTIFICATIONS is handled by the native plugin path (asked at first
+    // play) and downloads don't post notifications by themselves.
     // Resolve a usable stream first, so downloads don't depend on the volatile
     // Piped resolver at the moment of the request. If the track already carries
     // a streamUrl (e.g. it was just played), reuse it. Otherwise ask the same
@@ -2041,16 +2038,50 @@
   }
 
   // Player options sheet (opened from the tune button in the mini player).
-  // Gives quick access to the sleep-timer presets, the player-look picker and
-  // (when a YouTube account is connected) add-to-YT actions — all in one tidy
-  // bottom sheet that reuses the existing modal/sheet styling so it is properly
-  // laid out and never overflows the player bar.
-  function openPlayerOptions() {
-    const t = current();
+  // v1.5.4: one action per row — the sleep timer (tap to pick a preset in a
+  // dedicated sheet) and downloading the current song for offline, plus the
+  // add-to-YT actions when an account is connected. The player-look picker
+  // moved out of here (it lives in Settings → Appearance where the rest of
+  // the theming is, and this sheet was scrolling under it).
+  function sleepStatusLabel() {
+    const s = state.sleep || { mode: "off", until: 0 };
+    if (s.mode === "track") return "End of this track";
+    if (s.mode === "mins") {
+      const left = Math.max(1, Math.round((s.until - Date.now()) / 60000));
+      return `Stops in about ${left} min`;
+    }
+    return "Off";
+  }
+  function openSleepTimerSheet() {
     const sleep = ["off", "5", "10", "15", "30", "45", "60", "90", "track"];
     const curSleep = state.sleep.mode === "track" ? "track" : state.sleep.mode === "mins" ? String(Math.round((state.sleep.until - Date.now()) / 60000)) || "off" : "off";
-    const curPlayer = ["pill", "island", "wave", "bar"].includes(state.prefs.playerStyle) ? state.prefs.playerStyle : "pill";
-    const playerLooks = [["pill", "Glass pill"], ["island", "Island"], ["wave", "Wave"], ["bar", "Solid bar"]];
+    showModal({
+      title: "Sleep timer",
+      body: `
+        <div class="set-card">
+          <p style="margin:0 0 10px">Pause playback automatically — currently: <strong>${escapeHTML(sleepStatusLabel())}</strong>.</p>
+          <div class="po-chips">
+            ${sleep.map((n) => {
+              const label = n === "off" ? "Off" : n === "track" ? "End of track" : `${n} min`;
+              const on = curSleep === n;
+              return `<button type="button" class="chip ${on ? "active" : ""}" data-po-sleep="${n}">${label}</button>`;
+            }).join("")}
+          </div>
+        </div>`,
+      ok: "Close",
+      onOk: () => {},
+    });
+    $("modalCard").querySelectorAll("[data-po-sleep]").forEach((b) => {
+      b.addEventListener("click", () => { setSleep(b.dataset.poSleep); hideModal(); });
+    });
+  }
+  function openPlayerOptions() {
+    const t = current();
+    const saved = !!(t && isSaved(t));
+    // Same gate as the library cards: a real download needs an Audius
+    // trackId or a YouTube videoId — Apple *preview* streamUrls are 30 s
+    // clips and must never be offered as "downloads".
+    const canDl = !!t && t.source !== "radio" && !!(t.videoId || t.trackId || saved);
     const ytChip = ytConnected() && t && t.videoId
       ? `<div class="po-row"><div><strong>YouTube</strong><p>Add the current song to your account.</p></div>
           <div class="po-yt-actions">
@@ -2062,40 +2093,28 @@
       title: "Player options",
       body: `
         <div class="set-card">
-          <h3>Sleep timer</h3>
-          <div class="po-chips">
-            ${sleep.map((n) => {
-              const label = n === "off" ? "Off" : n === "track" ? "End of track" : `${n} min`;
-              const on = curSleep === n;
-              return `<button type="button" class="chip ${on ? "active" : ""}" data-po-sleep="${n}">${label}</button>`;
-            }).join("")}
+          <div class="po-row">
+            <div><strong>Sleep timer</strong><p>${escapeHTML(sleepStatusLabel())}</p></div>
+            <button type="button" class="chip-btn" id="poSleep">Choose…</button>
           </div>
-        </div>
-        <div class="set-card">
-          <h3>Player look</h3>
-          <div class="po-chips">
-            ${playerLooks.map(([id, label]) => {
-              const on = curPlayer === id;
-              return `<button type="button" class="chip ${on ? "active" : ""}" data-po-player="${id}">${label}</button>`;
-            }).join("")}
+          <div class="po-row">
+            <div><strong>${saved ? "Saved offline" : "Download song"}</strong><p>${
+              saved ? "Already on this device — it plays without internet."
+              : canDl ? "Keep this track on the device (real audio file with cover art)."
+              : t && t.source === "radio" ? "Live radio can't be saved."
+              : "Nothing to save for this item."}</p></div>
+            ${canDl
+              ? `<button type="button" class="chip-btn" id="poDl">${saved ? "✓ Saved" : "Download"}</button>`
+              : ""}
           </div>
         </div>
         ${ytChip}`,
       ok: "Close",
       onOk: () => {},
     });
-    $("modalCard").querySelectorAll("[data-po-sleep]").forEach((b) => {
-      b.addEventListener("click", () => { setSleep(b.dataset.poSleep); hideModal(); });
-    });
-    $("modalCard").querySelectorAll("[data-po-player]").forEach((b) => {
-      b.addEventListener("click", () => {
-        state.prefs.playerStyle = b.dataset.poPlayer;
-        savePrefs();
-        applyUi();
-        drawSeekWave();
-        hideModal();
-      });
-    });
+    $("poSleep").addEventListener("click", () => { hideModal(); openSleepTimerSheet(); });
+    const poDl = $("poDl");
+    if (poDl) poDl.addEventListener("click", () => { hideModal(); downloadTrack(t); });
     const poYtLike = $("poYtLike");
     if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
     const poYtPl = $("poYtPl");
@@ -2692,9 +2711,10 @@
       state.playing = true;
       setWantPlay(true);
       showEl($("eqBars"), true);
-      // Item 9 — Android 13+: at the FIRST play, ask for POST_NOTIFICATIONS so
-      // the background-play media notification + lock-screen controls show up.
-      if (IS_NATIVE) nativeEnsureNotificationPermission();
+      // (v1.5.4) The web Notification.requestPermission() ask that used to sit
+      // here was a no-op for the native notification (wrong permission surface)
+      // — the real POST_NOTIFICATIONS prompt fires in nativePlayTrack via the
+      // plugin, at the first track handed to the service.
       updateMediaSession();
       updateWakeLock();
     } catch (err) {
@@ -2805,9 +2825,21 @@
     }
     if (t.source === "radio") {
       if (t.stationId) fetch(`${API_BASE}/api/radio/click/${encodeURIComponent(t.stationId)}`).catch(() => {});
-      // Same-origin deploys proxy radio streams through /api/stream. When talking
-      // to a remote API base, the browser can play the resolved stream directly.
-      if (url && /^https?:\/\//i.test(url) && !API_BASE) url = `/api/stream?url=${encodeURIComponent(url)}`;
+      // (v1.5.4) Cleartext radio handling. The overwhelming majority of
+      // radio-browser stations serve plain http:// — which iOS ATS, Android
+      // (API 28+ default) and any https web page REFUSE to play, silently
+      // ("station starts, no sound"). Wherever direct playback can't happen,
+      // route the stream through the Worker's https /api/stream proxy (it is
+      // built for exactly this: long-lived body, no re-resolution). https
+      // stations still play directly — zero added proxy load for them.
+      const cleartext = !!url && /^http:\/\//i.test(url);
+      if (cleartext && (IS_NATIVE || /^https:/i.test(location.protocol))) {
+        url = `${API_BASE}/api/stream?url=${encodeURIComponent(url)}`;
+      } else if (url && /^https?:\/\//i.test(url) && !API_BASE) {
+        // Same-origin web deploys keep proxying all radio (existing behavior:
+        // avoids hotlinking from the site's own origin).
+        url = `/api/stream?url=${encodeURIComponent(url)}`;
+      }
     }
     if (!url) throw new Error("No stream");
     // Proxy URLs from the API (e.g. /api/stream?url=… from /api/yt/stream) are
@@ -3301,7 +3333,6 @@
     }
     if (!cheapPhone()) drawSeekWave();
     highlightLyric(p);
-    nativeTickControls();
   }
   let msPosTick = 0;
 
@@ -3489,8 +3520,6 @@
      styles the status bar, handles the hardware back button and adds
      native sharing + offline-download notifications.
      No Google Sign-In here: auth can be layered on later. */
-  let mcCreated = false;
-  let mcLastElapsed = -1;
   function nativePlugins() {
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     return window.Capacitor.Plugins;
@@ -3543,10 +3572,6 @@
     const NP = nativePlayer();
     if (!NP) return false;
     nativeEnsureNotifyPermission();
-    // The Media3 notification replaces the legacy MusicControls one.
-    const P = nativePlugins();
-    const MC = P && P.MusicControls;
-    if (MC) { try { MC.destroy().catch(() => {}); } catch {} }
     npActive = true;
     npPlaying = true;
     npPos = 0;
@@ -3591,51 +3616,13 @@
     NP.seekTo({ position: Math.round(npPos * 1000) }).catch(() => {});
     return true;
   }
-  function nativeSyncMediaControls() {
-    // When the real native player (Media3) is active it owns the OS media
-    // notification/lock-screen surface — don't double-create MusicControls.
-    if (npActive) return;
-    const P = nativePlugins();
-    const MC = P && P.MusicControls;
-    if (!MC) return;
-    const t = current();
-    const playing = !!(wantPlay || state.playing);
-    const name = t ? String(t.title || "Muchi") : "Muchi";
-    const artist = t ? String(artistName(t) || t.artist || "") : "";
-    const album = t && t.album ? String(t.album) : "Muchi";
-    const cover = t ? artUrl(t) : "";
-    const dur = Math.round(duration() || 0);
-    const pos = Math.round(position() || 0);
-    if (!mcCreated) {
-      MC.create({
-        track: name,
-        artist,
-        album,
-        cover,
-        isPlaying: playing,
-        hasPrev: true,
-        hasNext: true,
-        hasClose: false,
-        hasScrubbing: true,
-        duration: dur,
-        elapsed: pos,
-        ticker: playing ? `Now playing "${name}"` : "Muchi",
-      }).then(() => { mcCreated = true; }).catch(() => {});
-    } else {
-      try { MC.updateIsPlaying({ isPlaying: playing }); } catch {}
-      try { MC.updateElapsed({ elapsed: pos, isPlaying: playing }); } catch {}
-    }
-  }
-  function nativeTickControls() {
-    const P = nativePlugins();
-    const MC = P && P.MusicControls;
-    if (!MC || !mcCreated || !current()) return;
-    const pos = Math.round(position() || 0);
-    if (Math.abs(pos - mcLastElapsed) >= 1) {
-      mcLastElapsed = pos;
-      try { MC.updateElapsed({ elapsed: pos, isPlaying: !!(wantPlay || state.playing) }); } catch {}
-    }
-  }
+  // (v1.5.4) The legacy MusicControls fallback paths (nativeSyncMediaControls
+  // / nativeTickControls) are gone: that plugin's own killer service
+  // (stopWithTask) and its second MediaSession were what made playback die on
+  // swipe and fight the Media3 session for the notification slot. The native
+  // MuchiAudioService now owns the OS media surface unconditionally — including
+  // the notification's transport buttons — and P0 made its stream resolver
+  // reliable enough to be the real sink for every track.
   function nativeHandleControls(action) {
     if (!action) return;
     const msg = action.message || action;
@@ -3720,25 +3707,21 @@
         });
       } catch {}
     }
-    const MC = P.MusicControls;
-    if (MC) {
-      try {
-        if (window.Capacitor.getPlatform() === "ios") {
-          MC.addListener("controlsNotification", (info) => nativeHandleControls(info));
-        } else {
-          document.addEventListener("controlsNotification", (e) => nativeHandleControls({ message: e.message, position: e.position }));
-        }
-      } catch {}
-    }
+    // (v1.5.4) MusicControls listener removed — the plugin is no longer
+    // used (its killer service + duplicate MediaSession fought the native
+    // MuchiAudioService; see nativeSyncMediaControls comment above). iOS
+    // Control Center / lock-screen commands are handled natively by
+    // MuchiAudioPlugin.swift's MPRemoteCommandCenter, Android's by the
+    // media session inside MuchiAudioService — both echo through
+    // muchiControls below, so the web layer stays the single queue owner.
     const NP = P.MuchiAudio;
     if (NP) {
       try {
-        // Ask for POST_NOTIFICATIONS the first time the app launches on
-        // Android 13+, not just on the first native audio play. Before this,
-        // the permission dialog only appeared if/when a track was handed to
-        // the native player — so playing YouTube tracks never triggered it,
-        // and the media notification never showed.
-        nativeEnsureNotifyPermission();
+        // POST_NOTIFICATIONS is asked via nativeEnsureNotifyPermission() at
+        // the FIRST native play (in nativePlayTrack) — the moment the
+        // notification actually needs it, per Play policy. The old
+        // app-launch ask was removed together with the web
+        // Notification.requestPermission duplicate that fired alongside it.
         NP.addListener("muchiControls", (e) => nativeHandleControls(e || {}));
         NP.addListener("muchiProgress", (e) => {
           const v = e || {};
@@ -4264,7 +4247,6 @@
     updateWakeLock();
     document.querySelectorAll("[data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
     syncPlayerVisibility();
-    nativeSyncMediaControls();
   }
 
   function renderQueue() {
@@ -5334,6 +5316,19 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.5.4",
+      title: "Muchi 1.5.4",
+      notes: [
+        "YouTube play + save fixed at the source — the app now resolves streams directly (no flaky third-party proxy), which also brings back reliable background playback.",
+        "Background music survives leaving the app; auto-next works from the notification even with the screen off.",
+        "The media notification now has real Previous / Play-Pause / Next buttons and no longer beeps on every song change.",
+        "Downloads are always the real file type — m4a where available — and a failed download can no longer save a corrupt file.",
+        "Player options: Sleep timer and Download song live in the player's ⋮ sheet (look settings moved to Settings → Appearance where they belong).",
+        "Updates: the app opens the Install screen itself after downloading, with an Install button if you dismissed it — no browser, no re-downloading the version you already have.",
+        "iOS: lock-screen remaining time fixed; radio stations (plain http) now actually play. Android: radio http streams play through the secure proxy too.",
+      ],
+    },
+    {
       ver: "1.5.3",
       title: "Muchi 1.5.3",
       notes: [
@@ -5404,7 +5399,21 @@
         const uri = (res && typeof res === "object" && res.uri) ? res.uri : String(res || "");
         if (!uri) throw new Error("no file");
         state.update.downloaded = true;
-        toast(`Muchi ${ver} saved — open it to install`, true, "success");
+        state.update.apkUri = uri;
+        // v1.5.4 — don't just leave the APK in Downloads: go straight to the
+        // system Install sheet. If "install unknown apps" isn't allowed yet,
+        // the native side opens that exact settings screen and the message
+        // tells the user to tap Install again after granting.
+        if (typeof ND.installUpdate === "function") {
+          try {
+            await ND.installUpdate({ uri });
+            toast(`Muchi ${ver} ready — tap Install in the system sheet`, true, "success");
+          } catch (e) {
+            toast(String((e && e.message) || "Could not open the installer"), true, "error");
+          }
+        } else {
+          toast(`Muchi ${ver} saved — open it from the notification to install`, true, "success");
+        }
         openUpdateModal();
         return;
       } catch (e) {
@@ -5412,10 +5421,14 @@
         return;
       }
     }
-    // Web / PWA — fetch the APK and save it to disk (no browser redirect).
-    try {
-      const res = await fetch(url, { credentials: "same-origin" });
-      if (!res.ok) throw new Error("download failed");
+    // Web / PWA — download the APK inside the app, no browser redirect. A
+    // direct cross-origin fetch of the GitHub asset can never work in a
+    // browser (GitHub's release host sends no CORS header — that is what
+    // used to dump users in a browser tab). The Worker's /api/stream proxy is
+    // same-origin with the app and streams the SAME bytes, so try it first
+    // (Content-Length even passes through now, so real progress), then a
+    // direct fetch for self-hosted mirrors, then — only then — the browser.
+    const saveApk = async (res) => {
       const total = Number(res.headers.get("content-length") || 0);
       const reader = res.body.getReader();
       const parts = [];
@@ -5425,7 +5438,7 @@
         if (done) break;
         parts.push(value);
         buf += value.byteLength;
-        if (parts.length % 8 === 0) toast(`Downloading Muchi ${ver}… ${fmtBytes(buf)}`);
+        if (parts.length % 8 === 0) toast(`Downloading Muchi ${ver}… ${fmtBytes(buf)}${total ? ` / ${fmtBytes(total)}` : ""}`);
       }
       const bytes = concatBytes(parts);
       const fname = `Muchi-${ver}.apk`;
@@ -5445,14 +5458,26 @@
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(a.href), 4000);
       }
+    };
+    let saved = false;
+    const attempts = [];
+    if (API_BASE) attempts.push(`${API_BASE}/api/stream?url=${encodeURIComponent(url)}`);
+    else attempts.push(`/api/stream?url=${encodeURIComponent(url)}`);
+    attempts.push(url); // same-origin / self-hosted release mirrors work directly
+    for (const attempt of attempts) {
+      try {
+        const res = await fetch(attempt, { credentials: "same-origin" });
+        if (!res.ok) throw new Error("download failed");
+        await saveApk(res);
+        saved = true;
+        break;
+      } catch {}
+    }
+    if (saved) {
       state.update.downloaded = true;
       toast(`Muchi ${ver} downloaded — open the file to install`, true, "success");
       openUpdateModal();
-    } catch (e) {
-      // A cross-origin release URL (e.g. GitHub) won't pass the browser's
-      // CORS check, so an in-app fetch lands here on the web. The native
-      // shell never hits this path (it downloads the file directly). Tell the
-      // user where the file actually is so the app can still self-serve it.
+    } else {
       toast("Couldn't fetch the update in-app — opening it in a browser instead", true, "error");
       try { window.open(url, "_blank", "noopener"); } catch {}
     }
@@ -5526,12 +5551,14 @@
         </div>
         ${u.available
           ? (u.downloaded
-            ? `<div class="upd-done"><span class="material-symbols-outlined filled">check_circle</span> Muchi ${escapeHTML(u.latest || "")} downloaded — open the file to install it.</div>`
+            ? (u.apkUri
+              ? `<button type="button" class="filled-btn upd-dl" id="updInstallBtn"><span class="material-symbols-outlined filled">system_update</span> Install Muchi ${escapeHTML(u.latest || "")}</button><p class="upd-note">The update is already downloaded inside the app.</p>`
+              : `<div class="upd-done"><span class="material-symbols-outlined filled">check_circle</span> Muchi ${escapeHTML(u.latest || "")} downloaded — open it from the Downloads notification to install.</div>`)
             : u.apkUrl
               ? `<button type="button" class="filled-btn upd-dl" id="updDlBtn"><span class="material-symbols-outlined filled">download</span> Download Muchi ${escapeHTML(u.latest || "")}</button>`
               : `<p class="upd-pending">The Android release is being prepared — the download link appears here the moment it is published.</p>`)
           : `<p class="upd-pending">You're on the latest published Android version — nothing to download.</p>`}
-        <p class="upd-note">Installing: open the downloaded file and allow “Install unknown apps” for this app (Android 8+ security rule). Your likes, playlists and settings stay.</p>`;
+        <p class="upd-note">After the download the Install screen opens by itself. First time only: Android asks you to allow “Install unknown apps” for Muchi (system security rule) — allow it and tap Install again. Your likes, playlists and settings stay.</p>`;
     } else {
       sub.innerHTML = `
         <div class="upd-sub-head">
@@ -5548,6 +5575,26 @@
     // instead of opening a browser tab.
     const dlBtn = document.getElementById("updDlBtn");
     if (dlBtn) dlBtn.addEventListener("click", downloadUpdateInApp);
+    // v1.5.4: once downloaded, the same tile shows a one-tap Install button.
+    const inBtn = document.getElementById("updInstallBtn");
+    if (inBtn) inBtn.addEventListener("click", installDownloadedUpdate);
+  }
+  /* v1.5.4 — reopen the installer for an already-downloaded update without
+     re-downloading anything (the old flow's dead end). On web there is no
+     installer to launch — point at the saved file instead. */
+  async function installDownloadedUpdate() {
+    const u = state.update || {};
+    const ND = nativeDownloader();
+    if (u.apkUri && ND && typeof ND.installUpdate === "function") {
+      try {
+        await ND.installUpdate({ uri: u.apkUri });
+        return;
+      } catch (e) {
+        toast(String((e && e.message) || "Could not open the installer"), true, "error");
+        return;
+      }
+    }
+    toast("Open the downloaded file from the Downloads notification to install");
   }
   function openUpdateModal() {
     const modal = $("modal");
@@ -5565,6 +5612,10 @@
     const i = card.querySelector("#updIos");
     if (a) a.onclick = () => showUpdatePlatform("android");
     if (i) i.onclick = () => showUpdatePlatform("ios");
+    // v1.5.4: after a successful download, re-open straight onto the platform
+    // sheet so the Install button is immediately visible (1.5.3 re-opened the
+    // tile picker, making the "downloaded" state unreachable).
+    if ((state.update || {}).downloaded) showUpdatePlatform("android");
   }
   async function reloadApp() {
     toast("Reloading…");
@@ -8496,10 +8547,11 @@
     } else if (cmd === "next") next(true);
     else if (cmd === "prev") prev();
   };
+  // (v1.5.4) The legacy pre-Capacitor "MuchiApp" UA watchdog interval is
+  // gone: the Capacitor shell's UA never matches /MuchiApp/i, so it never
+  // fired (and its keepBackgroundPlay() body no-ops without the old
+  // MuchiAndroid JS interface). Nothing was maintaining it; nothing lost.
   try { if (window.MuchiAndroid && MuchiAndroid.ready) MuchiAndroid.ready(); } catch {}
-  if (/MuchiApp/i.test(navigator.userAgent)) {
-    setInterval(() => { if (wantPlay) keepBackgroundPlay(); }, 2000);
-  }
   detectCountry();
   autoDetectCountry();
   setVolume(state.volume);
