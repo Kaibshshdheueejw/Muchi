@@ -1,21 +1,17 @@
 {
   "name": "muchi",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "private": true,
   "description": "MUCHI — YouTube Music + Spotify-style player on Cloudflare Workers (D1 + KV). Official YouTube playback, Audius independent artists, live radio. Web (PWA) + Android + iOS (Capacitor).",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "dev:remote": "wrangler dev --remote",
-    "deploy": "wrangler deploy",
-    "deploy:staging": "wrangler deploy --env staging",
-    "setup": "node scripts/setup.mjs",
-    "setup:migrate": "node scripts/setup.mjs --migrate",
-    "d1:local:migrate": "wrangler d1 execute DB --local --file migrations/0001_initial.sql",
-    "d1:migrate": "wrangler d1 migrations apply DB --remote",
-    "d1:migrate:staging": "wrangler d1 migrations apply DB --remote --env staging",
+    "dev": "node server.js",
+    "build": "node -e \"console.log('Build complete')\"",
+    "start": "node server.js",
+    "lint": "node --check server.js",
     "test": "node test/smoke.mjs",
-    "test:live": "WRANGLER_DEV_URL=http://127.0.0.1:8787 node test/smoke.mjs",
+    "test:live": "WRANGLER_DEV_URL=http://127.0.0.1:3000 node test/smoke.mjs",
+    "setup": "node scripts/setup.mjs",
     "check:release": "node scripts/check-release.mjs",
     "mobile:sync": "cap sync",
     "mobile:sync:android": "cap sync android",
@@ -29,7 +25,8 @@
     "@capacitor/share": "^8.0.0",
     "@capacitor/splash-screen": "^8.0.0",
     "@capacitor/status-bar": "^8.0.0",
-    "capacitor-music-controls-plugin": "^8.0.0"
+    "capacitor-music-controls-plugin": "^8.0.0",
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@capacitor/android": "^8.0.0",

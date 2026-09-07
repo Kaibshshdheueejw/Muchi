@@ -21,7 +21,16 @@ import {
 import { deezerCatalog } from "./deezer.js";
 import { strictSongs } from "./parse.js";
 
-const take = (r) => (r.status === "fulfilled" ? r.value : []);
+const take = (r) => {
+  if (!r) return [];
+  const val = (typeof r === "object" && "status" in r)
+    ? (r.status === "fulfilled" ? r.value : [])
+    : r;
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  if (Array.isArray(val.tracks)) return val.tracks;
+  return [];
+};
 // Resolve with `fallback` after ms so one slow upstream (usually Piped)
 // can't stall the whole artist build. The losing promise is abandoned.
 const raceTimeout = (p, ms, fallback = null) =>
@@ -38,12 +47,28 @@ const DAILY_MIX_TITLES = [
   "Global Pop", "Global Hip-Hop", "Global Dance", "Global R&B",
 ];
 const COUNTRY_DM_TITLES = [
+  "Trending Now", "Top Hits", "Viral Chart", "Mega Mix",
   "Daily Mix 1", "Daily Mix 2", "Daily Mix 3", "Daily Mix 4",
   "Daily Mix 5", "Daily Mix 6", "Daily Mix 7", "Daily Mix 8",
+  "Daily Mix 9", "Daily Mix 10", "Daily Mix 11", "Daily Mix 12",
+  "Country Top 20", "Weekend Heat", "New Music Mix", "Party Hits",
 ];
 
 function dailyMixCard(title, pool, idx) {
-  const tracks = (pool || []).filter(Boolean).slice(0, 40);
+  const filtered = (pool || []).filter(Boolean);
+  const start = (idx * 5) % Math.max(1, filtered.length);
+  const tracks = [];
+  const seen = new Set();
+  for (let i = 0; i < filtered.length && tracks.length < 20; i++) {
+    const t = filtered[(start + i) % filtered.length];
+    if (t && t.id && !seen.has(t.id)) {
+      seen.add(t.id);
+      tracks.push(t);
+    }
+  }
+  while (tracks.length < 20 && filtered.length > 0) {
+    tracks.push(filtered[tracks.length % filtered.length]);
+  }
   return {
     id: `dmix:${idx}:${title}`,
     kind: "playlist",
@@ -53,17 +78,36 @@ function dailyMixCard(title, pool, idx) {
     source: "youtube",
     playlistId: "",
     query: title,
-    tracks,
+    tracks: tracks.slice(0, 20),
   };
 }
 
 // Ensure a playlist shelf has at least `count` cards, topping up with Daily
 // mixes drawn from the tracks we already have. Never drops real playlists.
 function ensureMinPlaylists(list, pool, titles, count = 8) {
-  const out = (list || []).slice();
+  const tracks = (pool || []).filter(Boolean);
+  const out = (list || []).slice(0, count).map((p) => {
+    let plTracks = (p.tracks || []).slice(0, 20);
+    const seen = new Set(plTracks.map((t) => t.id));
+    for (const t of tracks) {
+      if (plTracks.length >= 20) break;
+      if (t && t.id && !seen.has(t.id)) {
+        seen.add(t.id);
+        plTracks.push(t);
+      }
+    }
+    let padIdx = 0;
+    while (plTracks.length < 20 && tracks.length > 0) {
+      plTracks.push(tracks[padIdx % tracks.length]);
+      padIdx++;
+    }
+    return {
+      ...p,
+      tracks: plTracks.slice(0, 20),
+    };
+  });
   const seen = new Set(out.map((p) => String((p && p.title) || "").toLowerCase()));
   let i = 0;
-  const tracks = (pool || []).filter(Boolean);
   while (out.length < count && tracks.length && i < titles.length) {
     const title = titles[i++];
     const key = String(title).toLowerCase();
@@ -81,7 +125,7 @@ export async function handleHome(env, url) {
   let globalPart = { shelves: [], globalPlaylists: [], audius: [], underground: [], radio: [], forYouPlaylists: [], viralPlaylists: [] };
   let localPart = { youtubeLocal: [], countryPlaylists: [] };
   try {
-    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:v5:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
+    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:v7:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
   } catch (e) {
     console.error("home english", e);
     globalPart.shelves = ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: s.query, tracks: [] }));
@@ -89,11 +133,42 @@ export async function handleHome(env, url) {
     globalPart.viralPlaylists = buildViralPlaylists([]);
   }
   try {
-    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v5:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
+    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v7:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
   } catch (e) {
     console.error("home local", e);
   }
   const charts = (globalPart.shelves[0] && globalPart.shelves[0].tracks) || [];
+
+  // Guaranteed fallback: localTracks must NEVER be empty and must reach 25 tracks
+  let localTracks = (localPart.youtubeLocal || []).filter(Boolean);
+  if (localTracks.length < 25) {
+    const backupPool = [
+      ...charts,
+      ...((globalPart.shelves[1] && globalPart.shelves[1].tracks) || []),
+      ...((globalPart.shelves[2] && globalPart.shelves[2].tracks) || []),
+    ];
+    const seen = new Set(localTracks.map((t) => t.id));
+    for (const t of backupPool) {
+      if (t && t.id && !seen.has(t.id)) {
+        seen.add(t.id);
+        localTracks.push(t);
+        if (localTracks.length >= 25) break;
+      }
+    }
+  }
+
+  // Guaranteed fallback: countryPlaylists must NEVER be empty and must reach 12 playlists (20 songs each)
+  let countryPlaylists = (localPart.countryPlaylists || []).filter(Boolean);
+  const poolForPl = localTracks.length ? localTracks : (charts.length ? charts : []);
+  if (countryPlaylists.length < 12 && poolForPl.length > 0) {
+    countryPlaylists = ensureMinPlaylists(
+      countryPlaylists,
+      poolForPl,
+      COUNTRY_DM_TITLES,
+      12,
+    );
+  }
+
   return json(200, {
     country: gl,
     day: utcDay(),
@@ -103,9 +178,9 @@ export async function handleHome(env, url) {
       ? globalPart.shelves
       : ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: s.query, tracks: [] })),
     youtubeCharts: charts,
-    youtubeLocal: localPart.youtubeLocal,
-    youtubeIndia: localPart.youtubeLocal,
-    countryPlaylists: localPart.countryPlaylists || [],
+    youtubeLocal: localTracks.slice(0, 25),
+    youtubeIndia: localTracks.slice(0, 25),
+    countryPlaylists: countryPlaylists.slice(0, 12),
     globalPlaylists: globalPart.globalPlaylists || [],
     forYouPlaylists: globalPart.forYouPlaylists || [],
     viralPlaylists: globalPart.viralPlaylists || [],
@@ -163,32 +238,65 @@ async function buildGlobal(gl, localQ) {
 
 async function buildLocal(gl, localQ) {
   const [ytLocal, ytPl] = await Promise.allSettled([
-    searchYouTube(localQ, gl, true),
-    youtubeMusicSearch(`${localQ} playlist`, gl, 6000, { limit: 40 }),
+    searchYouTube(localQ, gl, false),
+    youtubeMusicSearch(`${localQ} playlist`, gl, 7000, { limit: 50 }),
   ]);
-  const countryPool = [...take(ytLocal), ...take(ytPl)];
+  const ytTracks = take(ytLocal);
+  const plTracks = take(ytPl);
+  const countryPool = [...ytTracks, ...plTracks];
+
+  // Top songs in country: total of 25 songs
+  const localTracks = [];
+  const seenLocal = new Set();
+  for (const t of countryPool) {
+    if (!t || !t.id || seenLocal.has(t.id)) continue;
+    seenLocal.add(t.id);
+    localTracks.push(t);
+    if (localTracks.length >= 25) break;
+  }
+  if (localTracks.length < 25) {
+    try {
+      const extra = await searchYouTube(`top 50 ${localQ} official music`, gl, false);
+      for (const t of extra) {
+        if (!t || !t.id || seenLocal.has(t.id)) continue;
+        seenLocal.add(t.id);
+        localTracks.push(t);
+        if (localTracks.length >= 25) break;
+      }
+    } catch {}
+  }
+  let padIdx = 0;
+  while (localTracks.length < 25 && countryPool.length > 0) {
+    localTracks.push(countryPool[padIdx % countryPool.length]);
+    padIdx++;
+  }
+
+  const rawPlaylists = uniqPlaylists([
+    ...playlistsOf(ytLocal.status === "fulfilled" ? ytLocal.value : []),
+    ...playlistsOf(ytPl.status === "fulfilled" ? ytPl.value : []),
+  ]);
+
+  const countryPlaylists = ensureMinPlaylists(
+    rawPlaylists,
+    countryPool.length ? countryPool : localTracks,
+    COUNTRY_DM_TITLES,
+    12,
+  );
+
   return {
-    youtubeLocal: take(ytLocal).slice(0, 18),
-    countryPlaylists: ensureMinPlaylists(
-      uniqPlaylists([
-        ...playlistsOf(ytLocal.status === "fulfilled" ? ytLocal.value : []),
-        ...playlistsOf(ytPl.status === "fulfilled" ? ytPl.value : []),
-      ]).slice(0, 12),
-      countryPool,
-      COUNTRY_DM_TITLES,
-      8,
-    ),
+    youtubeLocal: localTracks.slice(0, 25),
+    countryPlaylists: countryPlaylists.slice(0, 12),
   };
 }
 
 export async function handleShelf(env, url) {
   const id = url.searchParams.get("id") || "";
   const shelf = ENGLISH_SHELVES.find((s) => s.id === id);
-  const q = url.searchParams.get("q") || (shelf && shelf.query) || "";
+  const gl = regionCode(url.searchParams.get("gl") || "US");
+  const q = url.searchParams.get("q") || (shelf && shelf.query) || (id === "local" ? (LOCAL_CHARTS[gl] || "top hits official audio") : "");
   const full = url.searchParams.get("full") === "1";
   if (!q.trim()) return json(400, { error: "Missing query" });
-  const gl = url.searchParams.get("gl") || "US";
-  const cap = full ? 100 : 18;
+  const cap = full ? 100 : (id === "local" ? 25 : 18);
   const refresh = url.searchParams.get("refresh") === "1";
   try {
     const key = `shelf:${full ? "full" : "row"}:${id}:${q}:${gl}:${utcDay()}`;

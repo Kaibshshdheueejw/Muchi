@@ -1738,19 +1738,31 @@ img { max-width: 100%; display: block; }
 
 .moods {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
+@media (min-width: 580px) {
+  .moods {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+}
 .mood {
-  height: 88px;
+  height: 94px;
   border-radius: var(--md-shape-lg);
-  padding: 16px;
+  padding: 14px;
   text-align: left;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   position: relative;
   overflow: hidden;
   color: #fff;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+@media (max-width: 400px) {
+  .moods { gap: 10px; }
+  .mood { height: 88px; padding: 12px; font-size: 14px; }
 }
 .mood::after {
   content: "";
@@ -4092,8 +4104,8 @@ html[data-ui="glass"] .set-row select {
 
 /* v64 moods + compact every settings row */
 .mood {
-  height: 88px !important;
-  padding: 16px !important;
+  min-height: 84px;
+  padding: 14px !important;
   justify-content: flex-start !important;
   align-items: flex-start !important;
   white-space: normal !important;
@@ -4901,6 +4913,44 @@ html[data-native="1"] .filled-btn {
   color: var(--md-sys-color-on-surface);
 }
 .upd-done .material-symbols-outlined { color: var(--md-sys-color-primary); }
+.upd-prog-box {
+  margin: 10px 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--md-sys-color-surface-container) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 40%, transparent);
+}
+.upd-prog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.upd-prog-track {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent);
+  overflow: hidden;
+}
+.upd-prog-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--md-sys-color-primary);
+  transition: width 150ms ease-out;
+}
+.upd-dl-sec {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  justify-content: center;
+  margin-top: 6px;
+  padding: 10px;
+}
 
 /* ===== What's new (in-app popup) ===== */
 .wn-scroll {

@@ -1,0 +1,6 @@
+{
+  "name": "Muchi",
+  "description": "Material You music player with YouTube playback, Audius artists, and live radio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -113,7 +113,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.4";
+  const APP_VERSION = "1.5.5";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1044,7 +1044,7 @@
   // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
   // a stale IndexedDB/payload from the previous deployment (which is exactly
   // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
-  const API_CACHE_V = "v3-fy10";
+  const API_CACHE_V = "v7-top25-country12";
   // Never cache an "empty" catalog payload. If a provider is temporarily
   // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
   // tracks); caching that would freeze the shelf empty for the whole TTL.
@@ -1058,6 +1058,8 @@
     if (Array.isArray(data.songs) && data.songs.length === 0) return false;
     if (Array.isArray(data.albums) && data.albums.length === 0) return false;
     if (Array.isArray(data.youtube) && data.youtube.length === 0) return false;
+    if (Array.isArray(data.countryPlaylists) && data.countryPlaylists.length < 6) return false;
+    if (Array.isArray(data.youtubeLocal) && data.youtubeLocal.length < 5) return false;
     if (Array.isArray(data.shelves)) {
       if (data.shelves.length === 0) return false;
       // A home payload whose every shelf is empty adds nothing.
@@ -1151,15 +1153,38 @@
   let dlPermAsked = false;
   function nativeEnsureStoragePermission() {
     const ND = nativeDownloader();
-    if (dlPermAsked || !ND || typeof ND.checkPermissions !== "function") return;
+    if (!ND || dlPermAsked) return;
     dlPermAsked = true;
-    ND.checkPermissions()
-      .then((st) => {
-        if (st && st.storage === "prompt" && typeof ND.requestPermissions === "function") {
-          ND.requestPermissions().catch(() => {});
-        }
-      })
-      .catch(() => {});
+    if (typeof ND.checkPermissions === "function") {
+      ND.checkPermissions()
+        .then((st) => {
+          if (!st || st.storage !== "granted") {
+            if (typeof ND.requestPermissions === "function") {
+              ND.requestPermissions({ permissions: ["storage"] }).catch(() => {
+                ND.requestPermissions().catch(() => {});
+              });
+            }
+          }
+        })
+        .catch(() => {
+          if (typeof ND.requestPermissions === "function") {
+            ND.requestPermissions().catch(() => {});
+          }
+        });
+    } else if (typeof ND.requestPermissions === "function") {
+      ND.requestPermissions().catch(() => {});
+    }
+  }
+
+  function webEnsurePermissions() {
+    try {
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+      if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().catch(() => {});
+      }
+    } catch {}
   }
   /* Item 9 — POST_NOTIFICATIONS (Android 13+). The media/background-play
      foreground service runs WITHOUT a runtime permission and playback keeps
@@ -2783,6 +2808,11 @@
   }
 
   async function playAudio(t) {
+    webEnsurePermissions();
+    if (IS_NATIVE) {
+      nativeEnsureNotifyPermission();
+      nativeEnsureStoragePermission();
+    }
     stopOthers("audio");
     let url = t.streamUrl;
     // Offline: replay the real file saved on disk. Native keeps a content URI /
@@ -3539,20 +3569,28 @@
   let npDur = 0;          // last known duration (s)
   let npPermAsked = false; // one-time native notification permission ask
   function nativeEnsureNotifyPermission() {
-    // Android 13+ POST_NOTIFICATIONS for the background media notification
-    // (lock-screen controls still work without it; only the notification
-    // banner waits for the grant). Canonical Capacitor flow: the plugin
-    // declares the permission natively, JS asks once. Never blocks playback.
     const NP = nativePlayer();
-    if (npPermAsked || !NP || typeof NP.checkPermissions !== "function") return;
+    if (!NP || npPermAsked) return;
     npPermAsked = true;
-    NP.checkPermissions()
-      .then((st) => {
-        if (st && st.muchi_audio === "prompt" && typeof NP.requestPermissions === "function") {
-          NP.requestPermissions().catch(() => {});
-        }
-      })
-      .catch(() => {});
+    if (typeof NP.checkPermissions === "function") {
+      NP.checkPermissions()
+        .then((st) => {
+          if (!st || st.muchi_audio !== "granted") {
+            if (typeof NP.requestPermissions === "function") {
+              NP.requestPermissions({ permissions: ["muchi_audio"] }).catch(() => {
+                NP.requestPermissions().catch(() => {});
+              });
+            }
+          }
+        })
+        .catch(() => {
+          if (typeof NP.requestPermissions === "function") {
+            NP.requestPermissions().catch(() => {});
+          }
+        });
+    } else if (typeof NP.requestPermissions === "function") {
+      NP.requestPermissions().catch(() => {});
+    }
   }
   function nativePlayer() {
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
@@ -4527,7 +4565,8 @@
     const heading = shelfKey
       ? `<button type="button" class="section-title" data-open-shelf="${escapeAttr(String(shelfKey))}">${title}</button>`
       : `<h2>${title}</h2>`;
-    return `<div class="section"><div class="section-head">${heading}${open}</div><div class="row">${rows.length ? rows.map(cardHTML).join("") : `<p class="empty">Open to load songs</p>`}</div></div>`;
+    const skelCards = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel" style="height:175px;border-radius:var(--md-shape-lg);background:var(--md-surface-variant);opacity:0.35;"></div></div>`).join("");
+    return `<div class="section"><div class="section-head">${heading}${open}</div><div class="row">${rows.length ? rows.map(cardHTML).join("") : skelCards}</div></div>`;
   }
 
   function plCardHTML(p, group, i) {
@@ -4545,8 +4584,12 @@
   }
 
   function playlistSection(title, playlists, group) {
-    if (!playlists || !playlists.length) return "";
-    return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${playlists.length}</span></div><div class="row">${playlists.map((p, i) => plCardHTML(p, group, i)).join("")}</div></div>`;
+    const rows = playlists || [];
+    if (!rows.length) {
+      const skelPls = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel" style="height:190px;border-radius:var(--md-shape-lg);background:var(--md-surface-variant);opacity:0.35;"></div></div>`).join("");
+      return `<div class="section"><div class="section-head"><h2>${title}</h2><span>12</span></div><div class="row">${skelPls}</div></div>`;
+    }
+    return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${rows.length}</span></div><div class="row">${rows.map((p, i) => plCardHTML(p, group, i)).join("")}</div></div>`;
   }
 
   // "Made for you" — a shelf of custom playlist cards. Each card opens a
@@ -5316,6 +5359,16 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.5.5",
+      title: "Muchi 1.5.5",
+      notes: [
+        "In-app updater: Android updates now download seamlessly inside the app with live progress, redirect following, and automatic installer launching.",
+        "iOS & Web updates: instant in-place cache refreshing and in-app iOS package download without external browser redirects.",
+        "Settings About update sheet now keeps you inside the app throughout the entire update flow.",
+        "Capacitor Android build & release pipeline synchronization.",
+      ],
+    },
+    {
       ver: "1.5.4",
       title: "Muchi 1.5.4",
       notes: [
@@ -5373,37 +5426,51 @@
     $("mCancel").onclick = () => hideModal();
     modal.onclick = (e) => { if (e.target === modal) hideModal(); };
   }
-  /* ── In-app update download ─────────────────────────────────────────
-     Item 6: the Android update tile used to link out to a browser. The app
-     now downloads the APK itself (native plugin writes it to Downloads; on
-     the web we fetch + save it) and never redirects. If the app is already
-     on the latest version it offers no download at all. */
-  async function downloadUpdateInApp() {
+  /* In-app updater: Android APK & iOS bundle download in-app without browser
+     redirects. Real progress reporting with percentage and progress bar. */
+  function setUpdateProgress(pct, text) {
+    if (!state.update) state.update = {};
+    state.update.progress = { pct, text };
+    const fill = document.getElementById("updProgFill");
+    const txt = document.getElementById("updProgText");
+    const box = document.getElementById("updProgBox");
+    if (box) box.hidden = false;
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    if (txt) txt.textContent = text;
+  }
+
+  async function downloadUpdateInApp(target = "android") {
     const u = state.update || {};
-    if (!u.available) {
-      toast("You're already on the latest version");
-      openUpdateModal();
-      return;
-    }
-    const url = u.apkUrl;
-    const ver = u.latest || "";
-    if (!url) {
-      toast("The Android download link isn't ready yet", true, "error");
-      return;
-    }
-    toast(`Downloading Muchi ${ver}…`);
-    const ND = nativeDownloader();
+    const ver = u.latest || APP_VERSION;
+    const isIos = target === "ios";
+    const fallbackRepo = "Kaibshshdheueejw/Muchi";
+    const url = isIos
+      ? `https://github.com/${fallbackRepo}/releases/latest/download/Muchi-ios.xcarchive.zip`
+      : (u.apkUrl || `https://github.com/${fallbackRepo}/releases/latest/download/Muchi.apk`);
+
+    state.update.downloading = true;
+    showUpdatePlatform(target);
+    setUpdateProgress(2, `Connecting to update server for Muchi ${ver}…`);
+
+    const ND = !isIos ? nativeDownloader() : null;
     if (ND && typeof ND.downloadUpdate === "function") {
+      let listener = null;
       try {
+        if (typeof ND.addListener === "function") {
+          listener = await ND.addListener("progress", (p) => {
+            const bytes = Number((p && p.bytes) || 0);
+            const total = Number((p && p.total) || 0);
+            const pct = total > 0 ? Math.round((bytes / total) * 100) : 10;
+            setUpdateProgress(pct, `Downloading Muchi ${ver}… ${pct > 0 ? `${pct}% ` : ""}(${fmtBytes(bytes)}${total > 0 ? ` / ${fmtBytes(total)}` : ""})`);
+          });
+        }
         const res = await ND.downloadUpdate({ url, version: ver });
         const uri = (res && typeof res === "object" && res.uri) ? res.uri : String(res || "");
-        if (!uri) throw new Error("no file");
+        if (!uri) throw new Error("no file returned");
         state.update.downloaded = true;
         state.update.apkUri = uri;
-        // v1.5.4 — don't just leave the APK in Downloads: go straight to the
-        // system Install sheet. If "install unknown apps" isn't allowed yet,
-        // the native side opens that exact settings screen and the message
-        // tells the user to tap Install again after granting.
+        state.update.downloading = false;
+        setUpdateProgress(100, `Muchi ${ver} downloaded successfully!`);
         if (typeof ND.installUpdate === "function") {
           try {
             await ND.installUpdate({ uri });
@@ -5412,23 +5479,50 @@
             toast(String((e && e.message) || "Could not open the installer"), true, "error");
           }
         } else {
-          toast(`Muchi ${ver} saved — open it from the notification to install`, true, "success");
+          toast(`Muchi ${ver} saved — ready to install`, true, "success");
         }
-        openUpdateModal();
+        showUpdatePlatform("android");
         return;
       } catch (e) {
-        toast("Update download failed", true, "error");
+        state.update.downloading = false;
+        toast("Update download failed — please check connection", true, "error");
+        showUpdatePlatform("android");
         return;
+      } finally {
+        if (listener && typeof listener.remove === "function") {
+          try { listener.remove(); } catch {}
+        }
       }
     }
-    // Web / PWA — download the APK inside the app, no browser redirect. A
-    // direct cross-origin fetch of the GitHub asset can never work in a
-    // browser (GitHub's release host sends no CORS header — that is what
-    // used to dump users in a browser tab). The Worker's /api/stream proxy is
-    // same-origin with the app and streams the SAME bytes, so try it first
-    // (Content-Length even passes through now, so real progress), then a
-    // direct fetch for self-hosted mirrors, then — only then — the browser.
-    const saveApk = async (res) => {
+
+    // Web / PWA / Fallback: download inside the app using streaming Fetch + Blob
+    const saveBlobFile = async (blob, fname) => {
+      const w = window;
+      if (w.showSaveFilePicker) {
+        try {
+          const handle = await w.showSaveFilePicker({ suggestedName: fname });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          return true;
+        } catch (e) {
+          if (e.name === "AbortError") return false;
+        }
+      }
+      const a = document.createElement("a");
+      a.style.display = "none";
+      a.href = URL.createObjectURL(blob);
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        try { document.body.removeChild(a); } catch {}
+        URL.revokeObjectURL(a.href);
+      }, 5000);
+      return true;
+    };
+
+    const saveStreamInApp = async (res, fname) => {
       const total = Number(res.headers.get("content-length") || 0);
       const reader = res.body.getReader();
       const parts = [];
@@ -5438,48 +5532,42 @@
         if (done) break;
         parts.push(value);
         buf += value.byteLength;
-        if (parts.length % 8 === 0) toast(`Downloading Muchi ${ver}… ${fmtBytes(buf)}${total ? ` / ${fmtBytes(total)}` : ""}`);
+        const pct = total > 0 ? Math.round((buf / total) * 100) : 0;
+        setUpdateProgress(pct, `Downloading ${fname}… ${pct > 0 ? `${pct}% ` : ""}(${fmtBytes(buf)}${total ? ` / ${fmtBytes(total)}` : ""})`);
       }
       const bytes = concatBytes(parts);
-      const fname = `Muchi-${ver}.apk`;
-      const blob = new Blob([bytes], { type: "application/vnd.android.package-archive" });
-      const w = window;
-      if (w.showSaveFilePicker) {
-        const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Android app", accept: { "application/vnd.android.package-archive": [".apk"] } }] });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-      } else {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-      }
+      const mime = fname.endsWith(".apk") ? "application/vnd.android.package-archive" : "application/zip";
+      const blob = new Blob([bytes], { type: mime });
+      await saveBlobFile(blob, fname);
+      setUpdateProgress(100, `${fname} downloaded — check your downloads!`);
+      return true;
     };
+
     let saved = false;
+    const fname = isIos ? `Muchi-${ver}-ios.zip` : `Muchi-${ver}.apk`;
     const attempts = [];
     if (API_BASE) attempts.push(`${API_BASE}/api/stream?url=${encodeURIComponent(url)}`);
     else attempts.push(`/api/stream?url=${encodeURIComponent(url)}`);
-    attempts.push(url); // same-origin / self-hosted release mirrors work directly
+    attempts.push(url);
+
     for (const attempt of attempts) {
       try {
-        const res = await fetch(attempt, { credentials: "same-origin" });
-        if (!res.ok) throw new Error("download failed");
-        await saveApk(res);
+        const res = await fetch(attempt);
+        if (!res.ok) throw new Error("download failed (" + res.status + ")");
+        await saveStreamInApp(res, fname);
         saved = true;
         break;
-      } catch {}
+      } catch (err) {}
     }
+
+    state.update.downloading = false;
     if (saved) {
       state.update.downloaded = true;
-      toast(`Muchi ${ver} downloaded — open the file to install`, true, "success");
-      openUpdateModal();
+      toast(`Muchi ${ver} downloaded inside app`, true, "success");
+      showUpdatePlatform(target);
     } else {
-      toast("Couldn't fetch the update in-app — opening it in a browser instead", true, "error");
-      try { window.open(url, "_blank", "noopener"); } catch {}
+      toast("Could not download update file — please check network connection", true, "error");
+      showUpdatePlatform(target);
     }
   }
   function updateLine() {
@@ -5519,21 +5607,21 @@
   }
   function updateModalBody() {
     const u = state.update || {};
-    const status = u.error ? "offline" : u.available ? "update available" : (u.latest ? "up to date" : "checking");
+    const status = u.error ? "offline" : u.available ? "update available" : (u.latest ? "up to date" : "ready");
     return `
       <p class="upd-ver">Current <strong>${escapeHTML(u.current || APP_VERSION)}</strong>${u.latest ? ` · Latest <strong>${escapeHTML(u.latest)}</strong>` : ""} · <em>${status}</em></p>
       <div class="upd-tiles">
         <button type="button" class="upd-tile" id="updAndroid" style="animation-delay:.05s">
           <span class="upd-tile-icon"><span class="material-symbols-outlined">android</span></span>
           <span class="upd-tile-name">Android</span>
-          <span class="upd-tile-sub">Download &amp; install the APK</span>
+          <span class="upd-tile-sub">Download &amp; install update in app</span>
         </button>
         <button type="button" class="upd-tile" id="updIos" style="animation-delay:.16s">
           <span class="upd-tile-icon ios">
             <svg class="apple-logo" viewBox="0 0 384 512" role="img" aria-label="Apple" xmlns="http://www.w3.org/2000/svg"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
           </span>
           <span class="upd-tile-name">iOS</span>
-          <span class="upd-tile-sub">App Store / TestFlight</span>
+          <span class="upd-tile-sub">Update in app</span>
         </button>
       </div>
       <div class="upd-sub" id="updSub" hidden></div>`;
@@ -5543,41 +5631,76 @@
     const tiles = document.querySelector("#modal .upd-tiles");
     if (!sub) return;
     const u = state.update || {};
+    const ver = u.latest || APP_VERSION;
+    const isDownloading = !!u.downloading;
+    const prog = u.progress || { pct: 0, text: "" };
+
     if (which === "android") {
       sub.innerHTML = `
         <div class="upd-sub-head">
           <span class="material-symbols-outlined">android</span>
-          <div><strong>Android update</strong><p>Installs over this app — your likes, playlists and settings stay.</p></div>
+          <div>
+            <strong>Android update (Muchi ${escapeHTML(ver)})</strong>
+            <p>Installs directly over this app — your likes, playlists and settings stay.</p>
+          </div>
         </div>
-        ${u.available
-          ? (u.downloaded
-            ? (u.apkUri
-              ? `<button type="button" class="filled-btn upd-dl" id="updInstallBtn"><span class="material-symbols-outlined filled">system_update</span> Install Muchi ${escapeHTML(u.latest || "")}</button><p class="upd-note">The update is already downloaded inside the app.</p>`
-              : `<div class="upd-done"><span class="material-symbols-outlined filled">check_circle</span> Muchi ${escapeHTML(u.latest || "")} downloaded — open it from the Downloads notification to install.</div>`)
-            : u.apkUrl
-              ? `<button type="button" class="filled-btn upd-dl" id="updDlBtn"><span class="material-symbols-outlined filled">download</span> Download Muchi ${escapeHTML(u.latest || "")}</button>`
-              : `<p class="upd-pending">The Android release is being prepared — the download link appears here the moment it is published.</p>`)
-          : `<p class="upd-pending">You're on the latest published Android version — nothing to download.</p>`}
-        <p class="upd-note">After the download the Install screen opens by itself. First time only: Android asks you to allow “Install unknown apps” for Muchi (system security rule) — allow it and tap Install again. Your likes, playlists and settings stay.</p>`;
+        <div id="updProgBox" class="upd-prog-box" ${isDownloading ? "" : "hidden"}>
+          <div class="upd-prog-header">
+            <span id="updProgText">${escapeHTML(prog.text || "Downloading update…")}</span>
+          </div>
+          <div class="upd-prog-track"><div id="updProgFill" class="upd-prog-fill" style="width:${prog.pct || 0}%"></div></div>
+        </div>
+        ${u.downloaded
+          ? `
+            <button type="button" class="filled-btn upd-dl" id="updInstallBtn">
+              <span class="material-symbols-outlined filled">system_update</span> Install Muchi ${escapeHTML(ver)}
+            </button>
+            <button type="button" class="btn ghost upd-dl-sec" id="updDlBtn">
+              <span class="material-symbols-outlined">refresh</span> Re-download APK in app
+            </button>
+            <p class="upd-note">The update is downloaded inside Muchi. Tap Install to begin installing.</p>`
+          : `
+            <button type="button" class="filled-btn upd-dl" id="updDlBtn" ${isDownloading ? "disabled" : ""}>
+              <span class="material-symbols-outlined filled">download</span> ${isDownloading ? "Downloading in app…" : `Download Muchi ${escapeHTML(ver)} in app`}
+            </button>
+            <p class="upd-note">Downloads the APK directly inside Muchi. Once finished, the Install screen opens automatically without leaving the app.</p>`}`;
     } else {
       sub.innerHTML = `
         <div class="upd-sub-head">
-          <span class="material-symbols-outlined">smartphone_iphone</span>
-          <div><strong>iOS update</strong><p>iPhone apps update through Apple's App Store or TestFlight.</p></div>
+          <span class="upd-tile-icon ios" style="width:36px;height:36px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;">
+            <svg class="apple-logo" viewBox="0 0 384 512" style="width:18px;height:18px;fill:currentColor" role="img" aria-label="Apple"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+          </span>
+          <div>
+            <strong>iOS update (Muchi ${escapeHTML(ver)})</strong>
+            <p>Update seamlessly in-place or download the release package in the app.</p>
+          </div>
         </div>
-        ${u.appStoreUrl
-          ? `<a class="filled-btn upd-dl" href="${escapeAttr(u.appStoreUrl)}" target="_blank" rel="noopener"><span class="material-symbols-outlined filled">open_in_new</span> Open in the App Store</a>`
-          : `<p class="upd-pending">MUCHI isn't on the App Store yet. Once it's published, this button opens the App Store automatically — iPhones can't side-load apps, and we won't pretend otherwise.</p>`}`;
+        <div id="updProgBox" class="upd-prog-box" ${isDownloading ? "" : "hidden"}>
+          <div class="upd-prog-header">
+            <span id="updProgText">${escapeHTML(prog.text || "Downloading iOS package…")}</span>
+          </div>
+          <div class="upd-prog-track"><div id="updProgFill" class="upd-prog-fill" style="width:${prog.pct || 0}%"></div></div>
+        </div>
+        <button type="button" class="filled-btn upd-dl" id="updIosRefreshBtn">
+          <span class="material-symbols-outlined filled">sync</span> Update &amp; Refresh app in-place
+        </button>
+        <button type="button" class="btn ghost upd-dl-sec" id="updIosZipBtn" ${isDownloading ? "disabled" : ""}>
+          <span class="material-symbols-outlined">download</span> Download iOS Package (.zip) in app
+        </button>
+        ${u.appStoreUrl ? `<a class="btn ghost upd-dl-sec" href="${escapeAttr(u.appStoreUrl)}" target="_blank" rel="noopener"><span class="material-symbols-outlined">open_in_new</span> Open in App Store</a>` : ""}
+        <p class="upd-note">For Web &amp; PWA: tap "Update &amp; Refresh" to apply the latest build in place. For developers &amp; sideloaders: download the iOS archive directly.</p>`;
     }
     sub.hidden = false;
     if (tiles) tiles.classList.add("dim");
-    // In-app APK download (item 6): the button calls the app's own downloader
-    // instead of opening a browser tab.
+
     const dlBtn = document.getElementById("updDlBtn");
-    if (dlBtn) dlBtn.addEventListener("click", downloadUpdateInApp);
-    // v1.5.4: once downloaded, the same tile shows a one-tap Install button.
+    if (dlBtn) dlBtn.addEventListener("click", () => downloadUpdateInApp("android"));
     const inBtn = document.getElementById("updInstallBtn");
     if (inBtn) inBtn.addEventListener("click", installDownloadedUpdate);
+    const rBtn = document.getElementById("updIosRefreshBtn");
+    if (rBtn) rBtn.addEventListener("click", reloadApp);
+    const zipBtn = document.getElementById("updIosZipBtn");
+    if (zipBtn) zipBtn.addEventListener("click", () => downloadUpdateInApp("ios"));
   }
   /* v1.5.4 — reopen the installer for an already-downloaded update without
      re-downloading anything (the old flow's dead end). On web there is no
@@ -7281,7 +7404,8 @@
     if (key === "local") {
       title = `Top songs in ${countryName(h.country || state.prefs.country)}`;
       tracks = h.youtubeLocal && h.youtubeLocal.length ? h.youtubeLocal : (h.youtubeIndia || []);
-      query = h.localQuery || "";
+      query = h.localQuery || "top hits official audio";
+      shelfId = "local";
     } else if (key === "audius") {
       title = "Independent artists";
       tracks = h.audius || [];
@@ -7412,9 +7536,10 @@
     }
     if (!forYouMix && (shelfId || (fallbackQ && !playlistId))) {
       const q = fallbackQ || "";
+      const countryGl = encodeURIComponent((state.home && state.home.country) || state.prefs.country || "US");
       const fetchShelf = async (full, timeoutMs) => {
         const data = await api(
-          `/api/shelf?id=${encodeURIComponent(shelfId)}&q=${encodeURIComponent(q)}&full=${full ? "1" : "0"}&gl=US`,
+          `/api/shelf?id=${encodeURIComponent(shelfId)}&q=${encodeURIComponent(q)}&full=${full ? "1" : "0"}&gl=${countryGl}`,
           timeoutMs
         );
         if (data && data.title && !meta.title) shelfTitle = data.title;
@@ -7567,6 +7692,7 @@
 
   function seedHome() {
     return {
+      country: state.prefs.country || "US",
       moods: [],
       day: utcDayClient(),
       shelves: FALLBACK_SHELVES.map((s) => ({ ...s, tracks: [] })),
@@ -7699,11 +7825,34 @@
     const localEmpty = !(cur.youtubeLocal && cur.youtubeLocal.length) && !(cur.youtubeIndia && cur.youtubeIndia.length);
     if (localEmpty) {
       try {
-        const data = await api(`/api/youtube/search?q=${encodeURIComponent("english pop hits official audio")}&gl=US`, 16000);
-        if (!cur.shelves.some((s) => s.id === "today" && s.tracks && s.tracks.length)) {
-          cur.youtubeCharts = data.tracks || [];
+        const countryGl = encodeURIComponent((cur && cur.country) || state.prefs.country || "US");
+        const q = (cur && cur.localQuery) || "top hits official audio";
+        const data = await api(`/api/shelf?id=local&q=${encodeURIComponent(q)}&gl=${countryGl}`, 16000);
+        const tracks = (data && data.tracks) || [];
+        if (tracks.length) {
+          const target = state.home || cur;
+          target.youtubeLocal = tracks;
+          target.youtubeIndia = tracks;
+          if (!target.countryPlaylists || !target.countryPlaylists.length) {
+            target.countryPlaylists = [
+              "Trending Now", "Top Hits", "Viral Chart", "Mega Mix",
+              "Daily Mix 1", "Daily Mix 2", "Daily Mix 3", "Daily Mix 4",
+              "Daily Mix 5", "Daily Mix 6", "Daily Mix 7", "Daily Mix 8",
+              "Daily Mix 9", "Daily Mix 10", "Daily Mix 11", "Daily Mix 12",
+            ].slice(0, 12).map((title, idx) => ({
+              id: `cpl:${idx}:${title}`,
+              kind: "playlist",
+              title,
+              artist: "Daily mix",
+              artwork: (tracks[idx % tracks.length] && tracks[idx % tracks.length].artwork) || "",
+              source: "youtube",
+              playlistId: "",
+              query: title,
+              tracks: tracks.slice(0, 20),
+            }));
+          }
+          paintHomeSoon();
         }
-        paintHomeSoon();
       } catch {}
     }
   }

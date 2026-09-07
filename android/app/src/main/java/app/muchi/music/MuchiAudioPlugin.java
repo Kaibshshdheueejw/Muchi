@@ -54,7 +54,13 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     /** Permission alias — JS asks via MuchiAudio.checkPermissions()/requestPermissions(). */
     public static final String MUCHI_AUDIO_NOTIFICATION = "muchi_audio";
 
-    private static final long BIND_TIMEOUT_MS = 4000;
+    private static final long BIND_TIMEOUT_MS = 8000;
+
+    @Override
+    public void load() {
+        super.load();
+        ensureService(null);
+    }
 
     private MuchiAudioService.LocalBinder service;
     private boolean bound = false;
