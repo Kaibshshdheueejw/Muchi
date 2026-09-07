@@ -1,0 +1,30 @@
+{
+	"appId": "app.muchi.music",
+	"appName": "Muchi",
+	"webDir": "public",
+	"backgroundColor": "#101413",
+	"android": {
+		"allowMixedContent": false
+	},
+	"ios": {
+		"contentInset": "always",
+		"backgroundColor": "#101413"
+	},
+	"plugins": {
+		"SplashScreen": {
+			"launchShowDuration": 900,
+			"launchAutoHide": true,
+			"backgroundColor": "#101413",
+			"androidSplashResourceName": "splash",
+			"androidScaleType": "CENTER_CROP",
+			"showSpinner": false,
+			"splashFullScreen": true,
+			"splashImmersive": true
+		},
+		"StatusBar": {
+			"overlaysWebView": false,
+			"style": "LIGHT",
+			"backgroundColor": "#101413"
+		}
+	}
+}

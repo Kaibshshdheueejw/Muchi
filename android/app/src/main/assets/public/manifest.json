@@ -1,0 +1,21 @@
+{
+  "id": "/",
+  "name": "Muchi",
+  "short_name": "Muchi",
+  "description": "Muchi — YouTube Music + independent Audius + live radio in a Material You player.",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "fullscreen", "minimal-ui"],
+  "orientation": "portrait-primary",
+  "background_color": "#101413",
+  "theme_color": "#101413",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["music", "entertainment"],
+  "icons": [
+    { "src": "/logo.png?v=53", "sizes": "1024x1024", "type": "image/png", "purpose": "any" },
+    { "src": "/logo.png?v=53", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/logo.png?v=53", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
