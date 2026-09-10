@@ -17,6 +17,7 @@ yarn-error.log*
 !.env.example
 
 # ── Android / Gradle build output ──
+.android-sdk/
 android/.gradle/
 android/build/
 android/app/build/
@@ -31,6 +32,12 @@ local.properties
 *.ap_
 *.dex
 *.class
+
+# ── Temporary debug / logs ──
+run_logs.zip
+commits.json
+jobs.json
+runs.json
 
 # ── iOS build output ──
 ios/App/DerivedData/

@@ -2280,12 +2280,7 @@ img { max-width: 100%; display: block; }
 .fab:active { transform: scale(0.95); }
 .fab.live { animation: fabLive 1.7s ease-in-out infinite; }
 .fab.bump { animation: fabBump 380ms var(--md-motion); }
-.fab.buffering { animation: fabBuffering 1.2s ease-in-out infinite alternate; opacity: 0.85; }
 .fab .material-symbols-outlined { font-size: 24px; }
-@keyframes fabBuffering {
-  0% { transform: scale(0.96); opacity: 0.72; }
-  100% { transform: scale(1.04); opacity: 1; }
-}
 @keyframes fabLive {
   0%, 100% { box-shadow: 0 8px 18px var(--song-glow); transform: scale(1); }
   50% { box-shadow: 0 12px 28px var(--song-glow); transform: scale(1.06); }

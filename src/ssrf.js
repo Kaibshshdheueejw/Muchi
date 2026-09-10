@@ -53,7 +53,14 @@ export async function assertPublicUrl(src) {
   const u = new URL(src);
   const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (!host) throw new Error("bad host");
-  const [a4, a6] = await Promise.all([dnsLookup(host, "A"), dnsLookup(host, "AAAA")]);
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host) || host.includes(":")) {
+    if (isPrivateIp(host)) throw new Error("private address blocked");
+    return true;
+  }
+  const [a4, a6] = await Promise.all([
+    dnsLookup(host, "A").catch(() => []),
+    dnsLookup(host, "AAAA").catch(() => []),
+  ]);
   const addrs = [...a4, ...a6];
   if (!addrs.length) throw new Error("dns failed");
   for (const addr of addrs) {

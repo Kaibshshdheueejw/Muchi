@@ -436,7 +436,7 @@ export function mapAudiusTrack(t) {
     mood: t.mood || "",
     plays: t.play_count || 0,
     permalink: t.permalink || "",
-    streamUrl: (t.stream && t.stream.url) || "",
+    streamUrl: "",
   };
 }
 
@@ -461,6 +461,7 @@ export async function itunesSearch(query) {
         album: t.collectionName || "",
         duration: Math.round((t.trackTimeMillis || 0) / 1000),
         artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+        previewUrl: t.previewUrl || "",
         playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
       });
     }
@@ -534,11 +535,40 @@ export async function radioBrowser(path, extraHeaders = {}) {
 export async function audiusStreamUrl(trackId) {
   const id = encodeURIComponent(String(trackId || "").replace(/[^\w-]/g, ""));
   if (!id) throw new Error("bad track");
+
+  // Fast path: resolve 302 redirect directly from healthy Audius discovery/stream endpoints.
+  // Audius stream endpoint redirects (302) to an active, load-balanced validator node in ~150ms.
+  const endpoints = [
+    `https://api.audius.co/v1/tracks/${id}/stream?app_name=${APP_NAME}`,
+    `https://audius-discovery-1.cultur3stake.com/v1/tracks/${id}/stream?app_name=${APP_NAME}`,
+    `https://discoveryprovider.audius.co/v1/tracks/${id}/stream?app_name=${APP_NAME}`,
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3500);
+      const res = await fetch(ep, {
+        redirect: "manual",
+        headers: { "User-Agent": `${APP_NAME}/${APP_VERSION}` },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        if (loc) return loc;
+      }
+      if (res.status === 200) return ep;
+    } catch {}
+  }
+
+  // Fallback: check track metadata
   try {
-    const data = await fetchJSON(`https://api.audius.co/v1/tracks/${id}?app_name=${APP_NAME}`);
+    const data = await fetchJSON(`https://api.audius.co/v1/tracks/${id}?app_name=${APP_NAME}`, {}, 3000);
     const t = (data && data.data) || {};
     if (t.stream && t.stream.url) return t.stream.url;
   } catch {}
+
   return `https://api.audius.co/v1/tracks/${id}/stream?app_name=${APP_NAME}`;
 }
 

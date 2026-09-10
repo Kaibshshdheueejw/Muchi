@@ -1251,7 +1251,7 @@
     // (un-cached) resolution at download time.
     if (out.videoId) {
       try {
-        const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 7000);
+        const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 20000);
         if (d && d.url) {
           out.streamUrl = d.url;
           if (d.mimeType) out.streamMime = d.mimeType;
@@ -1264,6 +1264,13 @@
 
   function isSameOriginStreamUrl(sid) {
     if (!sid) return false;
+    if (API_BASE) {
+      try {
+        return new URL(API_BASE, window.location.origin).origin === window.location.origin;
+      } catch {
+        return false;
+      }
+    }
     if (sid.startsWith("/")) return true; // relative → same origin
     try {
       return new URL(sid, window.location.origin).origin === window.location.origin;
@@ -1295,14 +1302,17 @@
     //     adds ACAO:* + Content-Disposition filename).
     //   • Same-origin relative stream URL (offline/preview tone): keep as-is.
     if (sid) {
+      let resolvedSid = sid;
+      if (resolvedSid.startsWith("/")) {
+        resolvedSid = API_BASE ? `${API_BASE}${resolvedSid}` : resolvedSid;
+      }
       if (IS_NATIVE) {
         // Hand the plugin an absolute URL so `new URL(url)` always parses.
-        if (sid.startsWith("/")) sid = API_BASE + sid;
-        else if (!/^https?:\/\//i.test(sid) && API_BASE) sid = API_BASE.replace(/\/$/, "") + "/" + sid;
-        return sid;
+        if (!/^https?:\/\//i.test(resolvedSid) && API_BASE) resolvedSid = API_BASE.replace(/\/$/, "") + "/" + resolvedSid;
+        return resolvedSid;
       }
-      if (isSameOriginStreamUrl(sid)) return sid;
-      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(sid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+      if (isSameOriginStreamUrl(sid)) return resolvedSid;
+      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
     return proxyFor();
   }
@@ -1381,8 +1391,20 @@
       return (res && typeof res === "object" && res.uri) ? res.uri : String(res || "");
     }
     // Web / PWA — File System Access API, then blob+<a download> fallback.
-    const res = await fetch(meta.url, { credentials: "same-origin" });
-    if (!res.ok) throw new Error("download failed");
+    let res = await fetch(meta.url, { credentials: "same-origin" }).catch(() => null);
+    if (!res || !res.ok) {
+      // Fallback: If direct streamUrl failed (e.g. expired or 403), retry through /api/download?videoId=...
+      const fallbackUrl = (t && t.videoId)
+        ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`
+        : ((t && t.source === "audius" && t.trackId)
+          ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`
+          : "");
+      if (fallbackUrl && meta.url !== fallbackUrl) {
+        const retryRes = await fetch(fallbackUrl, { credentials: "same-origin" }).catch(() => null);
+        if (retryRes && retryRes.ok) res = retryRes;
+      }
+    }
+    if (!res || !res.ok) throw new Error(`download failed with status ${res ? res.status : "network"}`);
     const total = Number(res.headers.get("content-length") || 0);
     const cd = res.headers.get("content-disposition") || "";
     const m = cd.match(/filename="?([^";]+)"?/i);
@@ -1404,51 +1426,67 @@
     // native shells mirror the same frames (see public/meta.js).
     const MM = w.MuchiMeta;
     const collect = [];
-    const reader = res.body.getReader();
-    let buf = 0;
-    let cancelled = false;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (job.status === "cancelled") { cancelled = true; break; }
-      collect.push(value);
-      buf += value.byteLength;
-      onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
+    if (res.body && typeof res.body.getReader === "function") {
+      const reader = res.body.getReader();
+      let buf = 0;
+      let cancelled = false;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (job.status === "cancelled") { cancelled = true; break; }
+        collect.push(value);
+        buf += value.byteLength;
+        onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
+      }
+      if (cancelled) throw new Error("cancelled");
+    } else {
+      const ab = await res.arrayBuffer();
+      collect.push(new Uint8Array(ab));
+      onProgress({ bytes: ab.byteLength, total: total || ab.byteLength, progress: 1 });
     }
-    if (cancelled) throw new Error("cancelled");
     let audioBytes = concatBytes(collect);
     if (MM) {
-      // Best-effort artwork bytes (CORS-permitting); title/artist/album always embed.
-      let picture;
-      const art = t && t.artwork;
-      if (art && /^https?:/i.test(art)) {
-        try {
-          const ar = await fetch(art, { mode: "cors" });
-          if (ar.ok) picture = { mime: (ar.headers.get("content-type") || "image/jpeg").split(";")[0], data: new Uint8Array(await ar.arrayBuffer()) };
-        } catch {}
+      try {
+        // Best-effort artwork bytes (CORS-permitting); title/artist/album always embed.
+        let picture;
+        const art = t && t.artwork;
+        if (art && /^https?:/i.test(art)) {
+          try {
+            const ar = await fetch(art, { mode: "cors" });
+            if (ar.ok) picture = { mime: (ar.headers.get("content-type") || "image/jpeg").split(";")[0], data: new Uint8Array(await ar.arrayBuffer()) };
+          } catch {}
+        }
+        audioBytes = MM.embed(audioBytes, ext, {
+          title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
+        });
+      } catch (metaErr) {
+        console.warn("MuchiMeta embed failed, keeping raw audio bytes:", metaErr);
       }
-      audioBytes = MM.embed(audioBytes, ext, {
-        title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
-      });
     }
     const blobType = ctype || "audio/webm";
-    // The File System Access API requires a real audio/video MIME for its
-    // accept list; a bare "application/octet-stream" (or missing Content-Type)
-    // makes showSaveFilePicker reject the type. In that case fall through to
-    // the blob+anchor download, which accepts any name regardless of MIME.
-    if (w.showSaveFilePicker && /^(audio|video)\//i.test(blobType)) {
-      const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
-      const writable = await handle.createWritable();
-      await writable.write(audioBytes);
-      await writable.close();
-      // Keep the file handle so the app can reopen the real file offline.
-      try { await idbPut(t.id, { handle, fname }); } catch {}
-      return `fsp:${fname}`;
-    }
-    // No File System Access API: build a blob then trigger a real browser
-    // file save via a temporary anchor.
+    // Always persist into IndexedDB first so offline playback works immediately.
     const blob = new Blob([audioBytes], { type: blobType });
     try { await idbPut(t.id, blob); } catch {}
+
+    // File System Access API (showSaveFilePicker) requires active user gesture,
+    // which expires during streaming download. We try it safely in try/catch,
+    // and seamlessly fall back to standard anchor download so web downloads never fail.
+    if (w.showSaveFilePicker && /^(audio|video)\//i.test(blobType)) {
+      try {
+        const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
+        const writable = await handle.createWritable();
+        await writable.write(audioBytes);
+        await writable.close();
+        try { await idbPut(t.id, { handle, fname }); } catch {}
+        return `fsp:${fname}`;
+      } catch (pickerErr) {
+        if (pickerErr && pickerErr.name === "AbortError") {
+          throw new Error("cancelled");
+        }
+        console.warn("File System Access picker bypassed or gesture expired, falling back to browser download:", pickerErr);
+      }
+    }
+    // Standard browser download fallback via temporary anchor
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = fname;

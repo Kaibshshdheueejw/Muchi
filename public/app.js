@@ -1242,6 +1242,20 @@
   async function ensureStreamForDownload(t) {
     if (!t) return t;
     const out = { ...t };
+    // Audius: resolve active stream url if missing or unverified
+    if (out.source === "audius" && out.trackId) {
+      out.streamMime = "audio/mpeg";
+      if (!out.streamUrl || out.streamUrl.includes("open-audio-validator") || out.streamUrl.includes("audius.co/v1/tracks")) {
+        out.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(out.trackId)}`;
+      }
+      return out;
+    }
+    // Apple / iTunes: resolve via YouTube search or fallback to previewUrl
+    if ((out.source === "apple" || out.source === "itunes") && !out.videoId) {
+      try {
+        await resolveYouTubePlay(out);
+      } catch {}
+    }
     // Already resolved (played / audius / radio carries a streamUrl): keep it.
     if (out.streamUrl) return out;
     // YouTube: resolve via the same /api/yt/stream endpoint playback uses.
@@ -1251,7 +1265,7 @@
     // (un-cached) resolution at download time.
     if (out.videoId) {
       try {
-        const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 7000);
+        const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 20000);
         if (d && d.url) {
           out.streamUrl = d.url;
           if (d.mimeType) out.streamMime = d.mimeType;
@@ -1264,6 +1278,13 @@
 
   function isSameOriginStreamUrl(sid) {
     if (!sid) return false;
+    if (API_BASE) {
+      try {
+        return new URL(API_BASE, window.location.origin).origin === window.location.origin;
+      } catch {
+        return false;
+      }
+    }
     if (sid.startsWith("/")) return true; // relative → same origin
     try {
       return new URL(sid, window.location.origin).origin === window.location.origin;
@@ -1274,37 +1295,27 @@
   function downloadFilePath(t) {
     const sid = String((t && t.streamUrl) || "");
     const nm = encodeURIComponent(t.title || "track");
-    const proxyFor = () => {
-      if (t && t.videoId) return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}`;
-      if (t && t.source === "audius" && t.trackId) return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}`;
-      return "";
-    };
-    // Optimization: if the track already carries a known-good stream URL (e.g.
-    // the resolver /api/yt/stream returned one at play time, or an Audius/radio
-    // direct URL), reuse it so the download does NOT re-hit the volatile Piped
-    // resolver (/api/download?videoId=… goes through youtubeAudioStream, which
-    // 502s when Piped is down). Reusing a URL we already streamed makes real
-    // downloads land instead of erroring out.
-    //
-    //   • Native (no CORS): hand the ABSOLUTE URL straight to the native
-    //     URLSession/MediaStore downloader. Native plugins do `new URL(url)`,
-    //     so a relative "/api/…" path throws MalformedURLException and the
-    //     download never starts — absolutize here.
-    //   • Web: a cross-origin stream URL can't be fetch()'d directly (CORS), so
-    //     proxy it through the same-origin /api/download?streamUrl=… (SSRF-guarded,
-    //     adds ACAO:* + Content-Disposition filename).
-    //   • Same-origin relative stream URL (offline/preview tone): keep as-is.
-    if (sid) {
-      if (IS_NATIVE) {
-        // Hand the plugin an absolute URL so `new URL(url)` always parses.
-        if (sid.startsWith("/")) sid = API_BASE + sid;
-        else if (!/^https?:\/\//i.test(sid) && API_BASE) sid = API_BASE.replace(/\/$/, "") + "/" + sid;
-        return sid;
-      }
-      if (isSameOriginStreamUrl(sid)) return sid;
-      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(sid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+    if (t && t.videoId) {
+      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
-    return proxyFor();
+    if (t && t.source === "audius" && t.trackId) {
+      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=audio%2Fmpeg`;
+    }
+    if (t && (t.source === "apple" || t.source === "itunes")) {
+      return `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${nm}${t.previewUrl ? `&streamUrl=${encodeURIComponent(t.previewUrl)}` : ""}`;
+    }
+    if (sid) {
+      let resolvedSid = sid;
+      if (resolvedSid.startsWith("/")) {
+        resolvedSid = API_BASE ? `${API_BASE}${resolvedSid}` : resolvedSid;
+      }
+      if (IS_NATIVE) {
+        if (!/^https?:\/\//i.test(resolvedSid) && API_BASE) resolvedSid = API_BASE.replace(/\/$/, "") + "/" + resolvedSid;
+        return resolvedSid;
+      }
+      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+    }
+    return "";
   }
 
   function concatBytes(parts) {
@@ -1381,8 +1392,22 @@
       return (res && typeof res === "object" && res.uri) ? res.uri : String(res || "");
     }
     // Web / PWA — File System Access API, then blob+<a download> fallback.
-    const res = await fetch(meta.url, { credentials: "same-origin" });
-    if (!res.ok) throw new Error("download failed");
+    let res = await fetch(meta.url, { credentials: "same-origin" }).catch(() => null);
+    if (!res || !res.ok) {
+      // Fallback: If direct streamUrl failed (e.g. expired or 403), retry through /api/download?videoId=...
+      const fallbackUrl = (t && t.videoId)
+        ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`
+        : ((t && t.source === "audius" && t.trackId)
+          ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`
+          : ((t && (t.source === "apple" || t.source === "itunes"))
+            ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}`
+            : ""));
+      if (fallbackUrl && meta.url !== fallbackUrl) {
+        const retryRes = await fetch(fallbackUrl, { credentials: "same-origin" }).catch(() => null);
+        if (retryRes && retryRes.ok) res = retryRes;
+      }
+    }
+    if (!res || !res.ok) throw new Error(`download failed with status ${res ? res.status : "network"}`);
     const total = Number(res.headers.get("content-length") || 0);
     const cd = res.headers.get("content-disposition") || "";
     const m = cd.match(/filename="?([^";]+)"?/i);
@@ -1404,51 +1429,67 @@
     // native shells mirror the same frames (see public/meta.js).
     const MM = w.MuchiMeta;
     const collect = [];
-    const reader = res.body.getReader();
-    let buf = 0;
-    let cancelled = false;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (job.status === "cancelled") { cancelled = true; break; }
-      collect.push(value);
-      buf += value.byteLength;
-      onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
+    if (res.body && typeof res.body.getReader === "function") {
+      const reader = res.body.getReader();
+      let buf = 0;
+      let cancelled = false;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (job.status === "cancelled") { cancelled = true; break; }
+        collect.push(value);
+        buf += value.byteLength;
+        onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
+      }
+      if (cancelled) throw new Error("cancelled");
+    } else {
+      const ab = await res.arrayBuffer();
+      collect.push(new Uint8Array(ab));
+      onProgress({ bytes: ab.byteLength, total: total || ab.byteLength, progress: 1 });
     }
-    if (cancelled) throw new Error("cancelled");
     let audioBytes = concatBytes(collect);
     if (MM) {
-      // Best-effort artwork bytes (CORS-permitting); title/artist/album always embed.
-      let picture;
-      const art = t && t.artwork;
-      if (art && /^https?:/i.test(art)) {
-        try {
-          const ar = await fetch(art, { mode: "cors" });
-          if (ar.ok) picture = { mime: (ar.headers.get("content-type") || "image/jpeg").split(";")[0], data: new Uint8Array(await ar.arrayBuffer()) };
-        } catch {}
+      try {
+        // Best-effort artwork bytes (CORS-permitting); title/artist/album always embed.
+        let picture;
+        const art = t && t.artwork;
+        if (art && /^https?:/i.test(art)) {
+          try {
+            const ar = await fetch(art, { mode: "cors" });
+            if (ar.ok) picture = { mime: (ar.headers.get("content-type") || "image/jpeg").split(";")[0], data: new Uint8Array(await ar.arrayBuffer()) };
+          } catch {}
+        }
+        audioBytes = MM.embed(audioBytes, ext, {
+          title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
+        });
+      } catch (metaErr) {
+        console.warn("MuchiMeta embed failed, keeping raw audio bytes:", metaErr);
       }
-      audioBytes = MM.embed(audioBytes, ext, {
-        title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
-      });
     }
     const blobType = ctype || "audio/webm";
-    // The File System Access API requires a real audio/video MIME for its
-    // accept list; a bare "application/octet-stream" (or missing Content-Type)
-    // makes showSaveFilePicker reject the type. In that case fall through to
-    // the blob+anchor download, which accepts any name regardless of MIME.
-    if (w.showSaveFilePicker && /^(audio|video)\//i.test(blobType)) {
-      const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
-      const writable = await handle.createWritable();
-      await writable.write(audioBytes);
-      await writable.close();
-      // Keep the file handle so the app can reopen the real file offline.
-      try { await idbPut(t.id, { handle, fname }); } catch {}
-      return `fsp:${fname}`;
-    }
-    // No File System Access API: build a blob then trigger a real browser
-    // file save via a temporary anchor.
+    // Always persist into IndexedDB first so offline playback works immediately.
     const blob = new Blob([audioBytes], { type: blobType });
     try { await idbPut(t.id, blob); } catch {}
+
+    // File System Access API (showSaveFilePicker) requires active user gesture,
+    // which expires during streaming download. We try it safely in try/catch,
+    // and seamlessly fall back to standard anchor download so web downloads never fail.
+    if (w.showSaveFilePicker && /^(audio|video)\//i.test(blobType)) {
+      try {
+        const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
+        const writable = await handle.createWritable();
+        await writable.write(audioBytes);
+        await writable.close();
+        try { await idbPut(t.id, { handle, fname }); } catch {}
+        return `fsp:${fname}`;
+      } catch (pickerErr) {
+        if (pickerErr && pickerErr.name === "AbortError") {
+          throw new Error("cancelled");
+        }
+        console.warn("File System Access picker bypassed or gesture expired, falling back to browser download:", pickerErr);
+      }
+    }
+    // Standard browser download fallback via temporary anchor
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = fname;
@@ -1676,8 +1717,11 @@
     const mode = spatialMode();
     try {
       if (mode === "off" && !fx.src) return;
-      if (!fx.ctx) fx.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      if (fx.ctx.state === "suspended") fx.ctx.resume();
+      if (!fx.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
+      }
+      if (fx.ctx && fx.ctx.state === "suspended") fx.ctx.resume();
       if (!fx.src) fx.src = fx.ctx.createMediaElementSource(audio);
       fx.src.disconnect();
       clearFx();
@@ -1872,11 +1916,93 @@
     audio.playsInline = true;
     audio.setAttribute("playsinline", "");
     audio.setAttribute("webkit-playsinline", "");
+    audio.preload = "auto";
   } catch {}
+
+  // ── Adaptive Audio Buffering Strategy ─────────────────────────────────
+  // Balances immediate start latency with smooth playback on high-bitrate
+  // streams (AAC 256k, MP3 320k) under fluctuating network conditions.
+  const adaptiveBuffer = {
+    buffering: false,
+    stallCount: 0,
+    minBufferAhead: 2.0,    // Initial safety margin (seconds) for fast start
+    targetBufferAhead: 2.0, // Dynamically expanded up to 5.5s upon buffer starvation
+    lastStall: 0,
+    startTime: 0,
+  };
+
+  function getBufferedAhead() {
+    try {
+      const pos = audio.currentTime || 0;
+      const b = audio.buffered;
+      if (!b || !b.length) return 0;
+      for (let i = 0; i < b.length; i++) {
+        if (b.start(i) <= pos + 0.35 && pos <= b.end(i)) {
+          return Math.max(0, b.end(i) - pos);
+        }
+      }
+    } catch {}
+    return 0;
+  }
+
+  function renderBufferState(isBuffering) {
+    state.buffering = isBuffering;
+    const playBtn = $("playBtn");
+    if (playBtn) {
+      if (isBuffering && state.playing) playBtn.classList.add("buffering");
+      else playBtn.classList.remove("buffering");
+    }
+    const bar = $("playerBar");
+    if (bar) {
+      if (isBuffering && state.playing) bar.classList.add("is-buffering");
+      else bar.classList.remove("is-buffering");
+    }
+  }
+
+  function onPlaybackWaiting() {
+    if (!state.playing || audio.paused || audio.ended) return;
+    const now = performance.now();
+    adaptiveBuffer.buffering = true;
+    renderBufferState(true);
+
+    // If another stall occurs within 45s, adaptively scale the buffer threshold
+    if (now - adaptiveBuffer.lastStall < 45000) {
+      adaptiveBuffer.stallCount += 1;
+      adaptiveBuffer.targetBufferAhead = Math.min(6.0, 2.0 + adaptiveBuffer.stallCount * 1.0);
+    } else {
+      adaptiveBuffer.stallCount = 1;
+      adaptiveBuffer.targetBufferAhead = 2.5;
+    }
+    adaptiveBuffer.lastStall = now;
+  }
+
+  function checkBufferResume() {
+    if (!adaptiveBuffer.buffering) return;
+    const ahead = getBufferedAhead();
+    const dur = audio.duration;
+    const isNearEnd = dur && isFinite(dur) && (ahead + audio.currentTime >= dur - 0.5);
+
+    if (ahead >= adaptiveBuffer.targetBufferAhead || isNearEnd) {
+      adaptiveBuffer.buffering = false;
+      renderBufferState(false);
+      if (state.playing && audio.paused && !audio.ended) {
+        audio.play().catch(() => {});
+      }
+    }
+  }
+
+  function onPlaybackPlaying() {
+    adaptiveBuffer.buffering = false;
+    renderBufferState(false);
+  }
+
   function unlockSound() {
     try {
-      if (!fx.ctx) fx.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      if (fx.ctx.state === "suspended") fx.ctx.resume();
+      if (!fx.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
+      }
+      if (fx.ctx && fx.ctx.state === "suspended") fx.ctx.resume();
     } catch {}
   }
   window.addEventListener("pointerdown", unlockSound, true);
@@ -2169,7 +2295,7 @@
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
-      ${(t.trackId || t.videoId) ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
+      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
       </div>`;
   }
 
@@ -2179,7 +2305,7 @@
         <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
-          <div class="t-sub">${escapeHTML(t.artist)}${t.source && t.source !== "apple" ? ` · ${escapeHTML(t.source)}` : ""}</div>
+          <div class="t-sub">${escapeHTML(t.artist)}${t.source ? ` · ${t.source === "apple" ? "iTunes" : escapeHTML(t.source)}` : ""}</div>
         </div>
         <span class="t-dur">${t.source === "radio" ? "LIVE" : fmt(t.duration)}</span>
         ${extra}
@@ -2553,32 +2679,84 @@
     return (data && data.tracks) || [];
   }
 
-  async function fillRelatedQueue(seed) {
-    const gen = ++relatedGen;
-    if (!seed || seed.source === "radio") return;
+  let isRefillingQueue = false;
+  async function ensureQueueRefill(seed) {
+    if (isRefillingQueue) return false;
+    const targetSeed = seed || current() || (state.queue && state.queue[state.queue.length - 1]) || (state.recent && state.recent[0]);
+    if (!targetSeed || targetSeed.source === "radio") return false;
+    isRefillingQueue = true;
     try {
-      const rows = await fetchRelated(seed);
-      if (gen !== relatedGen) return;
-      if (!state.queue.some((t) => t && t.id === seed.id)) return;
+      const rows = await fetchRelated(targetSeed);
       const have = new Set();
-      state.queue.forEach((t) => {
+      (state.queue || []).forEach((t) => {
         if (!t) return;
         if (t.id) have.add(t.id);
         if (t.videoId) have.add(t.videoId);
+        if (t.trackId) have.add(String(t.trackId));
       });
-      const extra = [];
-      for (const t of rows) {
-        if (!t || !looksLikeSong(t)) continue;
-        if (have.has(t.id) || (t.videoId && have.has(t.videoId))) continue;
-        have.add(t.id);
+      (state.recent || []).slice(0, 20).forEach((t) => {
+        if (!t) return;
+        if (t.id) have.add(t.id);
         if (t.videoId) have.add(t.videoId);
+        if (t.trackId) have.add(String(t.trackId));
+      });
+
+      let candidates = Array.isArray(rows) ? [...rows] : [];
+
+      // If target seed is Audius, also add trending/popular Audius tracks to candidate pool
+      if (targetSeed.source === "audius") {
+        try {
+          const gData = await api(`/api/home?${glq()}`, 4000);
+          const audList = (gData && gData.audius) || [];
+          for (const a of audList) {
+            if (a && (a.id || a.trackId)) candidates.push(a);
+          }
+        } catch {}
+      }
+
+      // If candidates are sparse, query search for more songs by the same artist or title genre
+      if (candidates.length < 8) {
+        try {
+          const a = artistName(targetSeed) || targetSeed.artist;
+          if (a) {
+            const sData = await api(`/api/search?q=${encodeURIComponent(a)}&${glq()}`, 4000);
+            if (sData && Array.isArray(sData.youtube)) {
+              candidates = candidates.concat(sData.youtube);
+            }
+          }
+        } catch {}
+      }
+
+      const extra = [];
+      for (const t of candidates) {
+        if (!t || !looksLikeSong(t)) continue;
+        const tid = t.id;
+        const vid = t.videoId;
+        const trk = t.trackId ? String(t.trackId) : "";
+        if (tid && have.has(tid)) continue;
+        if (vid && have.has(vid)) continue;
+        if (trk && have.has(trk)) continue;
+        if (tid) have.add(tid);
+        if (vid) have.add(vid);
+        if (trk) have.add(trk);
         extra.push(t);
         if (extra.length >= 20) break;
       }
-      if (!extra.length) return;
+
+      if (!extra.length) return false;
       state.queue = state.queue.concat(extra);
       renderQueue();
-    } catch {}
+      renderChrome();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isRefillingQueue = false;
+    }
+  }
+
+  async function fillRelatedQueue(seed) {
+    return ensureQueueRefill(seed);
   }
 
   async function loadPlaylistRecs(plIndex) {
@@ -2653,7 +2831,13 @@
   async function resolveYouTubePlay(t) {
     if (!t || t.videoId) return t;
     const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
-    if (!q) throw new Error("No playable version");
+    if (!q) {
+      if (t.previewUrl) {
+        t.streamUrl = t.previewUrl;
+        return t;
+      }
+      throw new Error("No playable version");
+    }
     // Instant path: already resolved this exact query this session.
     const cachedHit = ytResolveCache.get(q);
     if (cachedHit && cachedHit.videoId) {
@@ -2664,17 +2848,23 @@
     }
     let rows = [];
     try {
-      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 14000);
+      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 6000);
       rows = data.tracks || data.youtube || [];
     } catch {}
     if (!Array.isArray(rows) || !rows.length) {
       try {
-        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`, 14000);
+        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`, 6000);
         rows = data.youtube || [];
       } catch {}
     }
     const hit = (Array.isArray(rows) ? rows : []).find((x) => x && x.videoId);
-    if (!hit) throw new Error("No playable version");
+    if (!hit) {
+      if (t.previewUrl) {
+        t.streamUrl = t.previewUrl;
+        return t;
+      }
+      throw new Error("No playable version");
+    }
     t.videoId = hit.videoId;
     t.source = "youtube";
     if (!t.artwork || t.artwork === "/cover-default.jpg") t.artwork = hit.artwork;
@@ -2743,6 +2933,9 @@
       updateMediaSession();
       updateWakeLock();
     } catch (err) {
+      if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) {
+        return;
+      }
       console.error(err);
       if (gen === playGen) skipFailed("Could not play this track");
     }
@@ -2784,8 +2977,9 @@
 
   function stopOthers(keep) {
     if (keep !== "audio") {
-      audio.pause();
-      audio.removeAttribute("src");
+      try {
+        audio.pause();
+      } catch {}
       nativeStopPlayback();
     }
     if (keep !== "yt" && state.yt && state.yt.pauseVideo) {
@@ -2849,9 +3043,20 @@
         if (blob) url = URL.createObjectURL(blob);
       } catch {}
     }
-    if (!url && t.source === "audius" && t.trackId) {
-      const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`);
-      url = data.url;
+    if (t.source === "audius" && t.trackId) {
+      if (IS_NATIVE && !url) {
+        try {
+          const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`, 5000);
+          if (data && data.url) {
+            url = data.url;
+            t.streamUrl = url;
+          }
+        } catch {}
+      }
+      if (!url || !IS_NATIVE) {
+        url = `${API_BASE}/api/audius/file/${encodeURIComponent(t.trackId)}`;
+        t.streamUrl = url;
+      }
     }
     if (t.source === "radio") {
       if (t.stationId) fetch(`${API_BASE}/api/radio/click/${encodeURIComponent(t.stationId)}`).catch(() => {});
@@ -2889,15 +3094,44 @@
         return;
       }
     }
-    playAudioWeb(url);
+    await playAudioWeb(url);
   }
 
+  let audioPlaySeq = 0;
   async function playAudioWeb(url) {
     const t = current();
-    if (!t) return;
-    audio.src = url;
+    if (!t || !url) return;
+    const seq = ++audioPlaySeq;
+    adaptiveBuffer.buffering = false;
+    adaptiveBuffer.startTime = performance.now();
+    renderBufferState(false);
+    if (audio.src !== url) {
+      audio.src = url;
+    }
     applyPlaybackPrefs();
-    await audio.play();
+    try {
+      if (fx.ctx && fx.ctx.state === "suspended") {
+        fx.ctx.resume().catch(() => {});
+      }
+    } catch {}
+    try {
+      const p = audio.play();
+      if (p !== undefined) {
+        await p;
+      }
+    } catch (err) {
+      if (seq !== audioPlaySeq) return;
+      if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) {
+        return;
+      }
+      if (err && err.name === "NotAllowedError") {
+        state.playing = false;
+        renderChrome();
+        return;
+      }
+      throw err;
+    }
+    if (seq !== audioPlaySeq) return;
     // Resume the restored track's saved position once metadata is loaded.
     if (_pendingSeek > 0 && !_pendingSeekApplied) {
       _pendingSeekApplied = true;
@@ -3227,12 +3461,23 @@
         state.playing = true;
       }
     } else if (audio.paused) {
+      if (!audio.src || audio.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+        setWantPlay(true);
+        playCurrent(false);
+        return;
+      }
       setWantPlay(true);
-      audio.play();
+      const p = audio.play();
+      if (p && typeof p.catch === "function") {
+        p.catch((err) => {
+          if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) return;
+          playCurrent(false);
+        });
+      }
       state.playing = true;
     } else {
       setWantPlay(false);
-      audio.pause();
+      try { audio.pause(); } catch {}
       state.playing = false;
     }
     if (state.playing && !state.timer) startTimer();
@@ -3241,13 +3486,13 @@
     if (state.playing) burstHearts($("playBtn"));
   }
 
-  function next(force) {
+  async function next(force) {
     if (!state.queue.length) return;
     if (!force && state.sleep.mode === "track") {
       pauseForSleep();
       return;
     }
-    if (!force && !state.prefs.autoplay) {
+    if (!force && state.prefs.autoplay === false) {
       state.playing = false;
       renderChrome();
       return;
@@ -3260,6 +3505,12 @@
     } else if (state.repeat === "all") {
       state.index = 0;
     } else {
+      const refilled = await ensureQueueRefill();
+      if (refilled && state.index + 1 < state.queue.length) {
+        state.index += 1;
+        playCurrent(true);
+        return;
+      }
       state.playing = false;
       renderChrome();
       return;
@@ -3344,6 +3595,37 @@
     updateMediaPosition();
     msPosTick = (msPosTick || 0) + 1;
     if (msPosTick % 5 === 0) updateMediaSession();
+
+    // Adaptive buffering health check
+    checkBufferResume();
+
+    // Proactive queue refill: replenish queue with related tracks when approaching end of queue
+    if (state.playing && state.prefs.autoplay !== false && (state.queue.length - 1 - state.index <= 1)) {
+      ensureQueueRefill();
+    }
+    // Audio playback optimization: pre-resolve next track stream and pre-warm for gapless playback
+    if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
+      const nextT = state.queue[state.index + 1];
+      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
+        nextT._resolving = true;
+        api(`/api/yt/stream?v=${encodeURIComponent(nextT.videoId)}`, 8000).then((res) => {
+          if (res && res.url) {
+            nextT.streamUrl = res.url;
+            if (!nextT._prefetched) {
+              nextT._prefetched = true;
+              fetch(res.url, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+            }
+          }
+        }).catch(() => {}).finally(() => { nextT._resolving = false; });
+      } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
+        nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
+        if (!nextT._prefetched) {
+          nextT._prefetched = true;
+          fetch(nextT.streamUrl, { headers: { Range: "bytes=0-65535" } }).catch(() => {});
+        }
+      }
+    }
+
     if (document.hidden && cheapPhone()) return;
     $("curTime").textContent = fmt(p);
     $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
@@ -4895,8 +5177,8 @@
   }
 
   function searchChips() {
-    const labels = { all: "All", songs: "Songs", artists: "Artists", playlists: "Playlists", albums: "Albums", radio: "Radio", history: "History" };
-    return ["all", "songs", "artists", "playlists", "albums", "radio", "history"].map((f) =>
+    const labels = { all: "All", songs: "Songs", itunes: "iTunes", audius: "Audius", artists: "Artists", playlists: "Playlists", albums: "Albums", radio: "Radio", history: "History" };
+    return ["all", "songs", "itunes", "audius", "artists", "playlists", "albums", "radio", "history"].map((f) =>
       `<button class="chip ${state.filter === f ? "active" : ""}" data-filter="${f}">${labels[f]}</button>`
     ).join("");
   }
@@ -5032,6 +5314,25 @@
         </div>
         <span class="material-symbols-outlined">chevron_right</span>
       </button>` : "";
+    if (f === "itunes") {
+      const itunesSongs = s.apple || [];
+      return `
+        <div class="section">
+          <div class="section-head"><h2>iTunes Songs</h2><span>${itunesSongs.length}</span></div>
+          <div class="list">${itunesSongs.length ? itunesSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No iTunes songs found for this search.</p>`}</div>
+        </div>
+        ${albums.length ? `<div class="section"><div class="section-head"><h2>iTunes Albums</h2><span>${albums.length}</span></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+      `;
+    }
+    if (f === "audius") {
+      const audiusSongs = s.audius || [];
+      return `
+        <div class="section">
+          <div class="section-head"><h2>Audius Songs</h2><span>${audiusSongs.length}</span></div>
+          <div class="list">${audiusSongs.length ? audiusSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Audius songs found for this search.</p>`}</div>
+        </div>
+      `;
+    }
     if (f === "songs") {
       return `<div class="section"><div class="section-head"><h2>Songs</h2></div><div class="list">${songs.map((t, i) => rowHTML(t, i)).join("")}</div></div>`;
     }
@@ -5053,6 +5354,16 @@
         <div class="section-head"><h2>Songs</h2><span>${songs.length}</span></div>
         <div class="list">${songs.map((t, i) => rowHTML(t, i)).join("")}</div>
       </div>
+      ${(s.apple && s.apple.length) ? `
+      <div class="section">
+        <div class="section-head"><h2>iTunes Songs</h2><span>${s.apple.length}</span></div>
+        <div class="list">${s.apple.slice(0, 15).map((t, i) => rowHTML(t, i)).join("")}</div>
+      </div>` : ""}
+      ${(s.audius && s.audius.length) ? `
+      <div class="section">
+        <div class="section-head"><h2>Audius Songs</h2><span>${s.audius.length}</span></div>
+        <div class="list">${s.audius.slice(0, 15).map((t, i) => rowHTML(t, i)).join("")}</div>
+      </div>` : ""}
       ${artists.length ? `<div class="section"><div class="section-head"><h2>Artists</h2></div><div class="lib-list">${artists.slice(0, 20).map(artistHitHTML).join("")}</div></div>` : ""}
       ${albums.length ? `<div class="section"><div class="section-head"><h2>Albums</h2></div><div class="lib-list">${albums.slice(0, 20).map(playlistHitHTML).join("")}</div></div>` : ""}
       ${playlists.length ? `<div class="section"><div class="section-head"><h2>Playlists</h2></div><div class="lib-list">${playlists.slice(0, 20).map(playlistHitHTML).join("")}</div></div>` : ""}
@@ -8391,6 +8702,12 @@
       next(false);
     });
     audio.addEventListener("play", () => { state.playing = true; updateMediaSession(); renderChrome(); });
+    audio.addEventListener("playing", onPlaybackPlaying);
+    audio.addEventListener("waiting", onPlaybackWaiting);
+    audio.addEventListener("stalled", onPlaybackWaiting);
+    audio.addEventListener("progress", checkBufferResume);
+    audio.addEventListener("canplay", checkBufferResume);
+    audio.addEventListener("canplaythrough", checkBufferResume);
     audio.addEventListener("pause", () => {
       if (current() && current().source === "youtube") return;
       if (audio.ended) return;
@@ -8407,7 +8724,15 @@
         renderChrome();
       }
     });
-    audio.addEventListener("error", () => { if (current() && current().source !== "youtube") skipFailed("Stream failed"); });
+    audio.addEventListener("error", () => {
+      const src = audio.getAttribute("src") || audio.src;
+      if (!src || src === window.location.href) return;
+      if (audio.error && audio.error.code === 1) return; // MEDIA_ERR_ABORTED
+      const cur = current();
+      if (!cur) return;
+      if (cur.source === "youtube" || cur.videoId || npActive) return;
+      skipFailed("Stream failed");
+    });
 
     document.addEventListener("keydown", (e) => {
       const tag = document.activeElement && document.activeElement.tagName;
