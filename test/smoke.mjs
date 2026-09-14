@@ -31,7 +31,10 @@ import {
   parseVersion, versionAtLeast, versionEqual, checkVersionSync, isSync,
   readBuildGradleVersion, readPbxprojVersion, readConfigVersion, readAppJsVersion,
 } from "../scripts/version-utils.mjs";
-import { normalizeGain, volumeFor, qualityToYtRange, qualityLabel } from "../scripts/audio-utils.mjs";
+import {
+  normalizeGain, volumeFor, qualityToYtRange, qualityLabel,
+  EQ_FREQS, EQ_PRESETS, clampEqGain, eqFilterType, formatEqFreq, validateEqBands,
+} from "../scripts/audio-utils.mjs";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 
@@ -237,6 +240,21 @@ ok("qualityToYtRange", (() => {
   return r[0] === "hd1080" && r[1] === "highres";
 })());
 ok("qualityLabel", qualityLabel("low") === "Low" && qualityLabel("nope") === "High");
+
+// ── 4b. 10-Band Equalizer verification (scripts/audio-utils.mjs) ────────────
+ok("EQ_FREQS has exactly 10 standard ISO octave bands", EQ_FREQS.length === 10 && EQ_FREQS[0] === 32 && EQ_FREQS[9] === 16000);
+ok("formatEqFreq formats sub-kHz and kHz correctly", formatEqFreq(32) === "32" && formatEqFreq(1000) === "1k" && formatEqFreq(16000) === "16k");
+ok("eqFilterType selects lowshelf / peaking / highshelf", eqFilterType(0) === "lowshelf" && eqFilterType(5) === "peaking" && eqFilterType(9) === "highshelf");
+ok("clampEqGain bounds values within [-12, +12] dB", clampEqGain(15) === 12 && clampEqGain(-20) === -12 && clampEqGain(4.24) === 4.2 && clampEqGain("invalid") === 0);
+ok("EQ_PRESETS all define valid 10-band arrays", Object.keys(EQ_PRESETS).every((k) => {
+  const bands = EQ_PRESETS[k];
+  return Array.isArray(bands) && bands.length === 10 && bands.every((g) => typeof g === "number" && g >= -12 && g <= 12);
+}));
+ok("validateEqBands sanitizes bad input to flat and clamps custom gains", (() => {
+  const bad = validateEqBands([1, 2]);
+  const clamped = validateEqBands([20, -25, 0, 0, 0, 0, 0, 0, 0, 0]);
+  return bad.length === 10 && bad.every((x) => x === 0) && clamped[0] === 12 && clamped[1] === -12;
+})());
 
 // ── 5. Helpers (server.js:1209–1262, 1060–1069) ─────────────────────────────
 ok("tidyTitle strips brackets", tidyTitle("Song (Official Audio)") === "Song");

@@ -187,3 +187,74 @@ export async function deezerCatalog(name, { maxAlbums = 300, maxTrackAlbums = 20
 
   return { artist, albums, songs: uniq };
 }
+
+/*
+ * General Search: tracks, artists, and albums from Deezer public API.
+ * Returns { songs, artists, playlists } so handleSearch can merge them.
+ */
+export async function deezerSearch(query, { limit = 50 } = {}) {
+  const q = clean(query).slice(0, 80);
+  if (!q) return { songs: [], artists: [], playlists: [] };
+  const enc = encodeURIComponent(q);
+
+  const [tracksR, artistsR, albumsR] = await Promise.allSettled([
+    dzFetch(`/search?q=${enc}&limit=${limit}`, 8000),
+    dzFetch(`/search/artist?q=${enc}&limit=15`, 6000),
+    dzFetch(`/search/album?q=${enc}&limit=15`, 6000),
+  ]);
+
+  const songs = [];
+  if (tracksR.status === "fulfilled" && tracksR.value && Array.isArray(tracksR.value.data)) {
+    for (const t of tracksR.value.data) {
+      if (!t || !t.id || !t.title) continue;
+      const artistName = clean(t.artist && t.artist.name) || "Unknown Artist";
+      const title = clean(t.title);
+      songs.push({
+        id: `deezer:${t.id}`,
+        source: "deezer",
+        title,
+        artist: artistName,
+        album: clean(t.album && t.album.title) || "",
+        duration: Number(t.duration || 0),
+        artwork: clean(t.album && (t.album.cover_big || t.album.cover_medium)) || "/cover-default.jpg",
+        previewUrl: clean(t.preview) || "",
+        playQuery: `${title} ${artistName} official audio`.trim(),
+      });
+    }
+  }
+
+  const artists = [];
+  if (artistsR.status === "fulfilled" && artistsR.value && Array.isArray(artistsR.value.data)) {
+    for (const a of artistsR.value.data) {
+      if (!a || !a.id || !a.name) continue;
+      artists.push({
+        id: `artist:deezer:${a.id}`,
+        kind: "artist",
+        name: clean(a.name),
+        artwork: clean(a.picture_medium || a.picture_big) || "/cover-default.jpg",
+        source: "deezer",
+        query: clean(a.name),
+      });
+    }
+  }
+
+  const playlists = [];
+  if (albumsR.status === "fulfilled" && albumsR.value && Array.isArray(albumsR.value.data)) {
+    for (const al of albumsR.value.data) {
+      if (!al || !al.id || !al.title) continue;
+      const an = clean(al.artist && al.artist.name) || "";
+      playlists.push({
+        id: `deezer-album:${al.id}`,
+        kind: "playlist",
+        title: clean(al.title),
+        artist: an,
+        artwork: clean(al.cover_medium || al.cover_big) || "/cover-default.jpg",
+        source: "deezer",
+        query: `${clean(al.title)} ${an}`.trim(),
+        recordType: "Album",
+      });
+    }
+  }
+
+  return { songs, artists, playlists };
+}

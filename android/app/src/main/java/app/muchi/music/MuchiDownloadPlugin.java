@@ -62,14 +62,40 @@ import java.util.concurrent.Future;
  */
 @CapacitorPlugin(
         name = "MuchiDownload",
-        // Storage permission (item 7). Android 10+ (API 29+) writes through
-        // scoped MediaStore and needs NO runtime permission; Android 9 and
-        // below writing to shared storage needs the legacy WRITE_EXTERNAL_STORAGE.
-        // Declaring it here lets the web layer request it at save time via
-        // MuchiDownload.checkPermissions()/requestPermissions().
-        permissions = @Permission(strings = { Manifest.permission.WRITE_EXTERNAL_STORAGE }, alias = "storage")
+        permissions = {
+                @Permission(strings = { Manifest.permission.READ_MEDIA_AUDIO }, alias = "media_audio"),
+                @Permission(strings = { Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE }, alias = "storage")
+        }
 )
 public class MuchiDownloadPlugin extends Plugin {
+
+    @PluginMethod
+    public void ensureStoragePermission(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (!"granted".equals(getPermissionState("media_audio"))) {
+                requestPermissionForAliases(new String[] { "media_audio" }, call, "ensureStorageCallback");
+                return;
+            }
+        } else if (Build.VERSION.SDK_INT < 29) {
+            if (!"granted".equals(getPermissionState("storage"))) {
+                requestPermissionForAliases(new String[] { "storage" }, call, "ensureStorageCallback");
+                return;
+            }
+        }
+        JSObject ret = new JSObject();
+        ret.put("granted", true);
+        call.resolve(ret);
+    }
+
+    @PermissionCallback
+    private void ensureStorageCallback(PluginCall call) {
+        boolean granted = (Build.VERSION.SDK_INT >= 33)
+                ? "granted".equals(getPermissionState("media_audio"))
+                : (Build.VERSION.SDK_INT >= 29 || "granted".equals(getPermissionState("storage")));
+        JSObject ret = new JSObject();
+        ret.put("granted", granted);
+        call.resolve(ret);
+    }
 
     private final ExecutorService io = Executors.newFixedThreadPool(3);
     private final Map<String, Future<?>> active = new ConcurrentHashMap<>();

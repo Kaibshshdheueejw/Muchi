@@ -107,6 +107,7 @@ public class MuchiAudioService extends Service {
     private String trackTitle = "Muchi";
     private String trackArtist = "";
     private Bitmap artworkBitmap;
+    private String currentUrl;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -194,24 +195,31 @@ public class MuchiAudioService extends Service {
 
     @Override
     public boolean onUnbind(Intent intent) {
-        // Keep playing when the WebView side unbinds (app in background).
-        return false;
+        // Clear listener so we don't leak or call destroyed Activity/Plugin
+        listener = null;
+        return true;
+    }
+
+    @Override
+    public void onRebind(Intent intent) {
+        super.onRebind(intent);
     }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
         // The app was swiped away from Recents. Keep the foreground media
         // service alive so background playback continues (the whole point of a
-        // music app); the notification remains so the user can reopen or stop
-        // it. Do NOT stop playback here — that's what made "music stops when I
-        // close the app". If the user explicitly stops (notification action or
-        // the in-app stop), ACTION_STOP clears the service; if the system
-        // needs the process, it re-creates it (START_STICKY) and re-attaches
-        // the notification.
-        startInForeground();
-        ticker.removeCallbacks(tick);
-        ticker.post(tick);
+        // music app); the notification remains so the user can reopen or stop it.
+        if (player != null && player.isPlaying()) {
+            startInForeground();
+            showNotification();
+            ticker.removeCallbacks(tick);
+            ticker.post(tick);
+        }
     }
+
+
 
     @Override
     public void onDestroy() {
@@ -234,6 +242,14 @@ public class MuchiAudioService extends Service {
                                         String artwork, long durationMs) {
         trackTitle = title != null && !title.isEmpty() ? title : "Muchi";
         trackArtist = artist != null ? artist : "";
+
+        if (player != null && currentUrl != null && currentUrl.equals(url) && player.isPlaying()) {
+            session.setMetadata(buildMetadata(durationMs));
+            showNotification();
+            if (artwork != null && !artwork.isEmpty()) fetchArtwork(artwork);
+            return;
+        }
+        currentUrl = url;
 
         if (player == null) {
             player = new ExoPlayer.Builder(this)
@@ -353,6 +369,7 @@ public class MuchiAudioService extends Service {
             session = null;
         }
         artworkBitmap = null;
+        currentUrl = null;
         emitControls("stop", 0L);
         stopInForeground();
         stopSelf();

@@ -72,6 +72,18 @@ async function handleApi(request, env, url) {
   const p = url.pathname;
 
   // ── PREVIEW SEED (dev-only) ────────────────────────────────────────────
+  if (p === "/api/preview/audio") {
+    const wav = previewAudioWav(url.searchParams.get("dur"));
+    return new Response(new Uint8Array(wav), {
+      status: 200,
+      headers: {
+        "Content-Type": "audio/wav",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=86400",
+      },
+    });
+  }
+
   // When MUCHI_PREVIEW_SEED is set (local .dev.vars only), serve curated
   // sample data instead of calling the real providers. This lets the
   // workspace preview show populated, tappable, playable content even though
@@ -87,19 +99,6 @@ async function handleApi(request, env, url) {
       r.headers.set("Cache-Control", "no-store");
       return r;
     };
-    if (p === "/api/preview/audio") {
-      // ?dur=<seconds> tells the seed how long to make the tone so a tapped
-      // song plays for its real duration (the sandbox can't stream real music).
-      const wav = previewAudioWav(url.searchParams.get("dur"));
-      return new Response(new Uint8Array(wav), {
-        status: 200,
-        headers: {
-          "Content-Type": "audio/wav",
-          "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "no-store",
-        },
-      });
-    }
     if (p === "/api/home") return seedJson(200, previewHome(gl));
     if (p === "/api/shelf") {
       return seedJson(200, previewShelf(

@@ -18,7 +18,7 @@ import {
   regionCode, utcDay, LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES, VIRAL_QUERIES,
   moodsForCountry, playlistsOf, uniqPlaylists, buildForYouPlaylists, buildViralPlaylists,
 } from "./data.js";
-import { deezerCatalog } from "./deezer.js";
+import { deezerCatalog, deezerSearch } from "./deezer.js";
 import { strictSongs } from "./parse.js";
 
 const take = (r) => {
@@ -339,10 +339,11 @@ export async function handleSearch(env, url) {
   if (source === "all" || source === "youtube") tasks.push(["youtube", searchYouTube(q, gl)]);
   if (source === "all" || source === "audius") tasks.push(["audius", audiusSearch(q)]);
   if (source === "all" || source === "radio") tasks.push(["radio", radioSearch(q, 16, url.searchParams.get("quality"))]);
-  if (source === "all" || source === "apple") tasks.push(["apple", itunesSearch(q)]);
+  if (source === "all" || source === "apple" || source === "itunes") tasks.push(["apple", itunesSearch(q)]);
+  if (source === "all" || source === "deezer") tasks.push(["deezer", deezerSearch(q)]);
   if (source === "all" || source === "audius") tasks.push(["audiusUsers", audiusUserSearch(q)]);
   const settled = await Promise.allSettled(tasks.map((t) => t[1]));
-  const result = { query: q, youtube: [], audius: [], radio: [], apple: [], artists: [], playlists: [] };
+  const result = { query: q, youtube: [], audius: [], radio: [], apple: [], deezer: [], artists: [], playlists: [] };
   settled.forEach((s, i) => {
     const key = tasks[i][0];
     result[key] = s.status === "fulfilled" ? s.value : [];
@@ -351,6 +352,9 @@ export async function handleSearch(env, url) {
   const apple = result.apple && !Array.isArray(result.apple) ? result.apple : { songs: [], artists: [], playlists: [] };
   if (Array.isArray(result.apple)) result.apple = [];
   else result.apple = apple.songs || [];
+  const dz = result.deezer && !Array.isArray(result.deezer) ? result.deezer : { songs: [], artists: [], playlists: [] };
+  if (Array.isArray(result.deezer)) result.deezer = [];
+  else result.deezer = dz.songs || [];
   const artists = [];
   const playlists = [];
   const seenA = new Set();
@@ -369,6 +373,8 @@ export async function handleSearch(env, url) {
   };
   (apple.artists || []).forEach(pushA);
   (apple.playlists || []).forEach(pushP);
+  (dz.artists || []).forEach(pushA);
+  (dz.playlists || []).forEach(pushP);
   (yt.artists || []).forEach(pushA);
   (yt.playlists || []).forEach(pushP);
   for (const u of result.audiusUsers || []) {
@@ -385,10 +391,11 @@ export async function handleSearch(env, url) {
   result.artists = artists.slice(0, 20);
   result.playlists = playlists.slice(0, 20);
   // STRICT "songs only": search shows single songs — no playlist videos,
-  // Topic re-uploads, 2-hour mixes or non-music. (Audius rows are real
-  // user-uploaded tracks; radio is obviously left alone.)
+  // Topic re-uploads, 2-hour mixes or non-music.
   if (Array.isArray(yt)) result.youtube = strictSongs(yt);
   result.apple = strictSongs(result.apple);
+  result.deezer = strictSongs(result.deezer);
+  result.audius = strictSongs(result.audius || []);
   return json(200, result);
 }
 
@@ -419,31 +426,25 @@ export async function handleYtPlaylist(url) {
 }
 
 export async function handleYtStream(url) {
-  const id = url.searchParams.get("v") || url.searchParams.get("id") || "";
+  const id = url.searchParams.get("v") || url.searchParams.get("id") || url.searchParams.get("videoId") || "";
   if (!id) return json(400, { error: "Missing videoId" });
-  // Cache the resolved stream URL briefly so re-taps are instant and we
-  // don't hammer the resolver (innerTube Tier 1 / Piped Tier 2).
-  // 15 min TTL + in-flight dedupe.
+
   try {
     const stream = await cached(`ytstream:${id}`, 15 * 60 * 1000, () => youtubeAudioStream(id));
-    // Route the (IP/token-restricted) Googlevideo URL through the /api/stream
-    // proxy. Handing a raw Googlevideo URL straight to the device's player
-    // often 403s because it is locked to the resolver's IP; the Worker fetches
-    // it with proper headers and streams it back, which is what makes native
-    // background play + the OS media notification actually work. The proxy URL
-    // is stable and cacheable, so re-taps reuse it instantly.
-    const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}`;
-    return json(200, {
-      url: proxied,
-      format: stream.format || "",
-      mimeType: stream.mimeType || "",
-      quality: stream.quality || "",
-      duration: stream.duration || 0,
-    });
-  } catch (e) {
-    // Always 200 with empty so the client falls back to the iframe player.
-    return json(200, { url: "", error: String((e && e.message) || e) });
-  }
+    if (stream && stream.url) {
+      const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}`;
+      return json(200, {
+        url: proxied,
+        format: stream.format || "",
+        mimeType: stream.mimeType || "",
+        quality: stream.quality || "",
+        duration: stream.duration || 0,
+        source: "youtube",
+      });
+    }
+  } catch {}
+
+  return json(200, { url: "", error: "No direct audio stream available" });
 }
 
 export async function handleArtist(url) {

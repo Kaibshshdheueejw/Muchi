@@ -68,10 +68,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Downloads / saving a song. Requested at runtime the first time you
-         save (item 7). Android 10+ (API 29+) writes through scoped MediaStore
-         and does NOT need this permission, so it is capped at API 28 to avoid
-         a pointless legacy prompt on modern devices. -->
+    <!-- Audio storage permissions: modern Android 13+ (API 33+) requires READ_MEDIA_AUDIO.
+         Android 10-12 (API 29-32) uses READ_EXTERNAL_STORAGE.
+         Legacy Android 9 and below (API <= 28) uses WRITE_EXTERNAL_STORAGE. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <!-- v1.5.4 in-app updater: after MUCHI downloads its own update APK it

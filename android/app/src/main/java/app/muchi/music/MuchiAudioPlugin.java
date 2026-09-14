@@ -5,10 +5,13 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+
+import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -16,44 +19,35 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * MUCHI native background audio bridge (JS ↔ {@link MuchiAudioService}).
  *
- * JS API (public/app.js already drives it — see the nativePlayer() block):
+ * JS API:
  *   play({url,title,artist,artwork,duration})  duration in ms
  *   pause()  resume()  stop()
  *   seekTo({position})                          ms
  *   emit({action,...})                          simple action passthrough
+ *   checkNotificationPermission()
+ *   requestNotificationPermission()
  *
  * Events emitted to JS:
  *   muchiControls  {message: play|pause|next|previous|seek|ended|error|stop, position}
  *   muchiProgress  {positionMs, durationMs, playing}
- *
- * The service binds asynchronously (ServiceConnection). Before it is bound,
- * controls (pause/resume/seek/stop) used to silently no-op — the UI called
- * them while the WebView was still connecting, and the taps did nothing, so
- * playback "stopped" from the user's point of view. Now every control is
- * buffered and replayed as soon as the service connects, so no tap is ever
- * dropped. play() also blocks resolution until the service bound AND started
- * playing, so the web layer can fall back to the WebView <audio> element if
- * the native path could not come up at all.
- *
- * POST_NOTIFICATIONS (Android 13+): declared on @CapacitorPlugin below. The
- * web layer asks once via MuchiAudio.checkPermissions()/requestPermissions()
- * before first play — playback is never blocked on the dialog.
  */
 @CapacitorPlugin(
         name = "MuchiAudio",
-        permissions = @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "muchi_audio")
+        permissions = {
+                @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "notifications"),
+                @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "muchi_audio")
+        }
 )
 public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.PluginListener {
 
-    /** Permission alias — JS asks via MuchiAudio.checkPermissions()/requestPermissions(). */
-    public static final String MUCHI_AUDIO_NOTIFICATION = "muchi_audio";
-
+    public static final String NOTIFICATIONS_ALIAS = "notifications";
     private static final long BIND_TIMEOUT_MS = 8000;
 
     @Override
@@ -69,13 +63,9 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     // on onServiceConnected so none is dropped when the user taps quickly.
     private final ConcurrentLinkedQueue<Runnable> pending = new ConcurrentLinkedQueue<>();
     private final Handler main = new Handler(Looper.getMainLooper());
-    // When set, the next onServiceConnected resolves this pending play call.
     private PluginCall pendingPlay;
     private long pendingPlayAt = 0L;
     private Runnable bindTimeout;
-    // Set when a pendingPlay was rejected by the bind timeout: the web layer
-    // has already fallen back to the <audio> sink. If the service connection
-    // then arrives late, stop native playback so we don't double-play.
     private volatile boolean playTimedOut = false;
 
     private final ServiceConnection conn = new ServiceConnection() {
@@ -97,9 +87,6 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
                 pc.resolve();
             } else if (playTimedOut) {
                 playTimedOut = false;
-                // Late bind after play() already rejected: the WebView is the
-                // active sink now — make sure the service doesn't also play.
-                // (The "stop" echo this emits is ignored by the web layer.)
                 try { service.stopAll(); } catch (Exception ignored) {}
             }
         }
@@ -113,8 +100,6 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     @Override
     protected void handleOnDestroy() {
-        // Do NOT stop the service here — background playback surviving the
-        // WebView is the whole point. The web layer calls stop() explicitly.
         main.removeCallbacks(bindTimeout);
         if (bindTimeout != null) main.removeCallbacks(bindTimeout);
         if (pendingPlay != null) {
@@ -122,11 +107,15 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             pendingPlay = null;
             try { pc.resolve(); } catch (Exception ignored) {}
         }
+        if (service != null) {
+            try {
+                service.setListener(null);
+            } catch (Exception ignored) {}
+        }
         if (bound) {
             try {
                 getContext().unbindService(conn);
-            } catch (Exception ignored) {
-            }
+            } catch (Exception ignored) {}
             bound = false;
         }
         service = null;
@@ -143,7 +132,6 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         try {
             getContext().bindService(new Intent(getContext(), MuchiAudioService.class), conn, Context.BIND_AUTO_CREATE);
         } catch (Exception ignored) {
-            // Bind failed — drop any queued control so it doesn't hang.
             pending.clear();
         }
     }
@@ -178,13 +166,11 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
         i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, call.getLong("duration", 0L));
 
+        // Always ensure the Foreground Service is started so its lifecycle is not
+        // tied solely to activity binding. Background playback continues when swiped away.
+        startService(i);
+
         if (service != null) {
-            // Bound (the normal case while the app is up): hand the track to
-            // the LIVE service through the binder. This deliberately avoids a
-            // startForegroundService round-trip — on Android 12+ a fresh FGS
-            // start is restricted while the app is backgrounded (e.g. auto-next
-            // from the notification with the screen off), but the already
-            // foreground service can always take new work.
             try {
                 service.playIntent(i);
                 call.resolve();
@@ -193,12 +179,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
                 service = null; // binder dead — fall through to the cold path
             }
         }
-        startService(i);
 
-        // Resolve once the service actually connects; REJECT on timeout so the
-        // web layer falls back to the WebView <audio> element instead of
-        // silently "playing" nothing (v1.5.4: resolve-on-timeout was why a
-        // broken service looked like "track is dead" to users).
+        // Resolve once the service connects; reject on timeout so web falls back.
         pendingPlay = call;
         pendingPlayAt = System.currentTimeMillis();
         playTimedOut = false;
@@ -227,6 +209,9 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     @PluginMethod
     public void resume(PluginCall call) {
+        Intent i = new Intent(getContext(), MuchiAudioService.class);
+        i.setAction(MuchiAudioService.ACTION_PLAY);
+        startService(i);
         ensureService(() -> { if (service != null) service.resumePlayback(); });
         call.resolve();
     }
@@ -241,7 +226,6 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         if (service != null) {
             service.stopAll();
         } else {
-            // Service was never started (or died) — start it in stop-mode.
             Intent i = new Intent(getContext(), MuchiAudioService.class);
             i.setAction(MuchiAudioService.ACTION_STOP);
             startService(i);
@@ -257,10 +241,46 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     @PluginMethod
     public void emit(PluginCall call) {
-        // Simple action passthrough from the web layer.
         String action = call.getString("action", "");
         if ("stop".equals(action)) doStop();
         call.resolve();
+    }
+
+    @PluginMethod
+    public void checkNotificationPermission(PluginCall call) {
+        boolean granted = true;
+        if (Build.VERSION.SDK_INT >= 33) {
+            granted = ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+        }
+        JSObject ret = new JSObject();
+        ret.put("granted", granted);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void requestNotificationPermission(PluginCall call) {
+        if (Build.VERSION.SDK_INT < 33) {
+            JSObject ret = new JSObject();
+            ret.put("granted", true);
+            call.resolve(ret);
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            JSObject ret = new JSObject();
+            ret.put("granted", true);
+            call.resolve(ret);
+            return;
+        }
+        requestPermissionForAlias(NOTIFICATIONS_ALIAS, call, "notificationPermCallback");
+    }
+
+    @PermissionCallback
+    private void notificationPermCallback(PluginCall call) {
+        boolean granted = Build.VERSION.SDK_INT < 33 ||
+                ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+        JSObject ret = new JSObject();
+        ret.put("granted", granted);
+        call.resolve(ret);
     }
 
     /* ── service → web ─────────────────────────────────────────────── */

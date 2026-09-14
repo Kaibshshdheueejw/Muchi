@@ -120,18 +120,26 @@ export async function searchYouTube(query, gl, fast) {
     }
   };
   const errors = [];
-  const extra = { limit: fast ? 24 : 120, loose: !fast };
+  const extra = { limit: fast ? 24 : 80, musicOnly: true, loose: false };
   const jobs = fast
     ? [youtubeMusicSearch(query, gl, 6000, extra)]
     : [
-        youtubeMusicSearch(query, gl, 6500, { ...extra, params: YT_SONGS_PARAMS }),
-        youtubeMusicSearch(query, gl, 6500, extra),
-        youtubeWebSearch(query, gl, 6500, extra),
+        youtubeMusicSearch(query, gl, 7000, { ...extra, params: YT_SONGS_PARAMS }),
+        youtubeMusicSearch(query, gl, 7000, extra),
       ];
   const settled = await Promise.allSettled(jobs);
   for (const s of settled) {
     if (s.status === "fulfilled") add(s.value);
     else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
+  }
+  // If YouTube Music had no results, fall back to web search with strict musicOnly
+  if (!out.length && !fast) {
+    try {
+      const webRes = await youtubeWebSearch(query, gl, 6500, { limit: 40, musicOnly: true, loose: false });
+      add(webRes);
+    } catch (e) {
+      errors.push(String(e.message || e));
+    }
   }
   if (!out.length) {
     try {
@@ -441,11 +449,12 @@ export function mapAudiusTrack(t) {
 }
 
 export async function itunesSearch(query) {
-  const q = encodeURIComponent(query);
+  const q = encodeURIComponent(String(query || "").slice(0, 80));
+  if (!q) return { songs: [], artists: [], playlists: [] };
   const [songsR, artistsR, albumsR] = await Promise.allSettled([
-    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50`, {}, 6000),
-    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=20`, {}, 6000),
-    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25`, {}, 6000),
+    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50`, {}, 9000),
+    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=20`, {}, 8000),
+    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25`, {}, 8000),
   ]);
   const songs = [];
   const artists = [];
@@ -465,6 +474,26 @@ export async function itunesSearch(query) {
         playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
       });
     }
+  }
+  // Secondary fallback if specific entity search returned empty
+  if (!songs.length) {
+    try {
+      const fb = await fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&limit=30`, {}, 8000);
+      for (const t of (fb && fb.results) || []) {
+        if (!t.trackId || !t.trackName) continue;
+        songs.push({
+          id: `apple:${t.trackId}`,
+          source: "apple",
+          title: t.trackName,
+          artist: t.artistName || "Artist",
+          album: t.collectionName || "",
+          duration: Math.round((t.trackTimeMillis || 0) / 1000),
+          artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+          previewUrl: t.previewUrl || "",
+          playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
+        });
+      }
+    } catch {}
   }
   if (artistsR.status === "fulfilled") {
     for (const a of (artistsR.value && artistsR.value.results) || []) {

@@ -150,35 +150,39 @@ export function parseVideoRenderer(v) {
   };
 }
 
+// Comprehensive junk filters for strict music enforcement:
+// Specifically eliminates gaming videos, news/politics, movie reviews, reactions,
+// vlogs, tech unboxings, and other non-music media from YouTube pipelines.
+const JUNK_TEXT = /\b(episode|podcast|trailer|teaser|full movie|full length|movie review|film review|movie recap|film recap|ending explained|easter eggs?|scene clip|behind the scenes|critique|spoiler|gameplay|walkthrough|playthrough|let'?s play|speedrun|gaming|streamer|stream highlights?|watch online|vlog|tutorial|how to|diy|unboxing|tech review|hands[- ]on|reaction|highlights?|minecraft|fortnite|roblox|gta\s*[5v]|call of duty|valorant|league of legends|apex legends|overwatch|documentary|full match|press conference|nato|imran khan|breaking news|news bulletin|live news|election|parliament|politics|speech|prank|challenge|standup comedy|asmr|cooking recipe|audiobook|#shorts?)\b/i;
+const JUNK_TITLE = /\b(non[- ]?stop|full album|entire album|album mix|megamix|compilation|dj set|live set|billboard|top ?(?:10|20|40|50|100) ?(?:pop|english|hit|song|music|playlist)? ?songs?|1 ?hour|one hour|hour mix|karaoke|sleep mix|lofi mix|funny moments|best moments|try not to laugh|explained|breakdown|lore explained|tier list)\b/i;
+const JUNK_ARTIST = /^(episode|podcast|clip|news|trailer|gaming|review|tv|cinema|movies?|standup)$/i;
+
 export function isLikelyMusic(t, loose) {
   if (!t || !t.videoId) return false;
   const title = String(t.title || "");
-  const artist = String(t.artist || "");
+  const artist = String(t.artist || "").replace(/\s*-\s*topic$/i, "").trim();
   const blob = `${title} ${artist}`.toLowerCase();
-  if (/^(episode|podcast|clip|news|trailer)$/i.test(artist.trim())) return false;
-  if (/\b(gameplay|walkthrough|playthrough|trailer|teaser|full movie|watch online|episode|season\s*\d|vlog|tutorial|how to|unboxing|reaction|highlights?|podcast|asmr|minecraft|fortnite|roblox|gta\s*5|documentary|full match|press conference|#shorts?)\b/i.test(blob)) return false;
+  if (JUNK_ARTIST.test(artist)) return false;
+  if (JUNK_TEXT.test(blob)) return false;
+  if (JUNK_TITLE.test(title)) return false;
   if (/\b(funny moments|best moments|try not to laugh|top 10|explained|imran khan|nato)\b/i.test(blob)) return false;
-  if (loose) return true;
   const dur = Number(t.duration) || 0;
-  if (dur && dur < 35) return false;
-  if (dur && dur > 20 * 60 && !/\b(mix|album|playlist|compilation|concert|live|set|lofi|lo-fi)\b/i.test(blob)) return false;
+  if (!loose && dur && dur < 25) return false; // less than 25s is usually sound effect or clip unless loose
+  if (dur && dur > 20 * 60) return false; // 20+ minutes is mix/compilation/podcast, not a song
+  if (loose) return true;
   return true;
 }
 
-// ── Strict "songs only" filter (all providers) ───────────────────────────
-// Search, artist and playlist surfaces must list single songs — not
-// playlist videos, 2-hour mixes, Topic-channel re-uploads or non-music
-// content. Mirrors the client's looksLikeSong() so server and client
-// agree on what counts as a song.
-const JUNK_TEXT = /\b(episode|podcast|trailer|teaser|full movie|full length|gameplay|walkthrough|playthrough|watch online|vlog|tutorial|how to|unboxing|reaction|highlights?|minecraft|fortnite|roblox|gta\s*5|documentary|full match|press conference|nato|imran khan|#shorts?)\b/i;
-const JUNK_TITLE = /\b(non[- ]?stop|full album|entire album|album mix|megamix|compilation|collection|dj set|live set|greatest hits|best of|billboard|top ?(?:10|20|40|50|100) ?songs?|hits ?(?:19\d\d|20\d\d|vol\.?\s*\d)|1 ?hour|one hour|hour mix|karaoke|sped ?up|slowed|reverb|mashup|medley|mixtape|mix tape|playlist|sleep mix|lofi mix)\b/i;
-const JUNK_ARTIST = /\b(topic|mix|remix|hits|top|live|radio|station|compilation|various artists)\b/i;
-
 export function isSongRow(t) {
   if (!t || !t.title) return false;
-  const title = String(t.title);
-  const artist = String(t.artist || "");
   const dur = Number(t.duration) || 0;
+  // If source is already apple or deezer or audius, it is verified studio music from official catalogs
+  if (t.source === "apple" || t.source === "deezer" || t.source === "audius") {
+    if (dur > 3600) return false;
+    return true;
+  }
+  const title = String(t.title);
+  const artist = String(t.artist || "").replace(/\s*-\s*topic$/i, "").trim();
   if (dur > 1200) return false; // 20+ minutes = mix/compilation, not a song
   if (JUNK_TEXT.test(`${title} ${artist}`)) return false;
   if (JUNK_TITLE.test(title)) return false;
