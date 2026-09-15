@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Muchi">
+  <defs>
+    <linearGradient id="bg" x1="80" y1="0" x2="480" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#12352c"/>
+      <stop offset="1" stop-color="#081612"/>
+    </linearGradient>
+    <radialGradient id="mint" cx="38%" cy="32%" r="68%">
+      <stop offset="0" stop-color="#d8fff0"/>
+      <stop offset="0.45" stop-color="#5aefc4"/>
+      <stop offset="1" stop-color="#1ecf96"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="118" fill="url(#bg)"/>
+  <circle cx="256" cy="250" r="168" fill="url(#mint)"/>
+  <path d="M170 338V182l86 128 86-128v156" fill="none" stroke="#06241c" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="256" cy="346" r="23" fill="#06241c"/>
+</svg>

@@ -1739,23 +1739,14 @@
 
   function updateEqBand(index, val, skipSave) {
     if (!Array.isArray(state.prefs.eqBands)) state.prefs.eqBands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    const num = Number(val) || 0;
-    state.prefs.eqBands[index] = num;
+    state.prefs.eqBands[index] = Number(val) || 0;
     state.prefs.eqPreset = "custom";
     if (!skipSave) savePrefs();
-    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-      hookSound();
-    }
-    if (fx.ctx && fx.ctx.state === "suspended") {
-      try { fx.ctx.resume(); } catch {}
-    }
     if (fx.eqNodes && fx.eqNodes[index]) {
-      const g = state.prefs.eqEnabled !== false ? num : 0;
       try {
-        fx.eqNodes[index].gain.cancelScheduledValues(0);
-        fx.eqNodes[index].gain.setValueAtTime(g, fx.ctx ? fx.ctx.currentTime : 0);
+        fx.eqNodes[index].gain.setTargetAtTime(Number(val) || 0, fx.ctx ? fx.ctx.currentTime : 0, 0.02);
       } catch {
-        fx.eqNodes[index].gain.value = g;
+        fx.eqNodes[index].gain.value = Number(val) || 0;
       }
     }
   }
@@ -1953,18 +1944,11 @@
     state.prefs.eqBands = p.bands.slice();
     if (p.dolby !== undefined) state.prefs.dolbyAtmos = p.dolby;
     savePrefs();
-    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-      hookSound();
-    }
-    if (fx.ctx && fx.ctx.state === "suspended") {
-      try { fx.ctx.resume(); } catch {}
-    }
     if (fx.eqNodes && fx.eqNodes.length === 10) {
       fx.eqNodes.forEach((node, i) => {
-        const val = state.prefs.eqEnabled !== false ? (Number(state.prefs.eqBands[i]) || 0) : 0;
+        const val = state.prefs.eqBands[i] || 0;
         try {
-          node.gain.cancelScheduledValues(0);
-          node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
+          node.gain.setTargetAtTime(val, fx.ctx ? fx.ctx.currentTime : 0, 0.03);
         } catch {
           node.gain.value = val;
         }
@@ -2077,7 +2061,7 @@
         } else {
           filter.type = "peaking";
           filter.frequency.value = EQ_FREQS[i];
-          filter.Q.value = 1.0;
+          filter.Q.value = 1.2;
         }
         filter.gain.value = hasEq ? (Number(bands[i]) || 0) : 0;
         eqTail.connect(filter);
@@ -2178,11 +2162,11 @@
 
       if (mode === "off") {
         const lim = fxAdd(ctx.createDynamicsCompressor());
-        lim.threshold.value = -0.5;
-        lim.knee.value = 6;
-        lim.ratio.value = 3;
-        lim.attack.value = 0.01;
-        lim.release.value = 0.1;
+        lim.threshold.value = -1.5;
+        lim.knee.value = 3;
+        lim.ratio.value = 16;
+        lim.attack.value = 0.003;
+        lim.release.value = 0.08;
         eqTail.connect(lim);
         lim.connect(ctx.destination);
         return;
@@ -2909,18 +2893,11 @@
         state.prefs.eqEnabled = next;
         savePrefs();
         poEqToggle.textContent = next ? "Enabled" : "Bypassed";
-        if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-          hookSound();
-        }
-        if (fx.ctx && fx.ctx.state === "suspended") {
-          try { fx.ctx.resume(); } catch {}
-        }
         if (fx.eqNodes && fx.eqNodes.length === 10) {
           fx.eqNodes.forEach((node, i) => {
             const val = next ? (Number(state.prefs.eqBands[i]) || 0) : 0;
             try {
-              node.gain.cancelScheduledValues(0);
-              node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
+              node.gain.setTargetAtTime(val, fx.ctx ? fx.ctx.currentTime : 0, 0.02);
             } catch {
               node.gain.value = val;
             }

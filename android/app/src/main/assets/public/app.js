@@ -88,7 +88,16 @@
       ui: "glass",
       playerStyle: "pill",
       iconSize: "default",
+      eqEnabled: true,
+      eqPreset: "dolby_atmos",
+      eqBands: [4, 3, 2, 0, -1, 1, 3, 4, 5, 4],
+      dolbyAtmos: true,
+      atmosSurround: 80,
+      atmosHeight: "high",
+      atmosDialogue: true,
     }, load("aura.prefs", {})),
+    offlineMode: Boolean(load("aura.offlineMode", false)),
+    isNetworkOffline: typeof navigator !== "undefined" ? !navigator.onLine : false,
     showProfile: false,
     downloads: [],
     dlQueue: [],
@@ -133,6 +142,66 @@
   }
 
   function savePrefs() { save("aura.prefs", state.prefs); }
+
+  function updateOfflineIndicator() {
+    const offlineBtn = $("offlineBtn");
+    if (offlineBtn) {
+      const active = Boolean(state.offlineMode || state.isNetworkOffline);
+      offlineBtn.style.display = active ? "inline-flex" : "none";
+      offlineBtn.title = state.offlineMode
+        ? "Offline mode active (click to reconnect online)"
+        : "Network disconnected (click to retry connection)";
+    }
+  }
+
+  async function retryServerConnection(btnEl) {
+    const icon = btnEl && btnEl.querySelector(".material-symbols-outlined");
+    if (icon) icon.classList.add("spin");
+    toast("Checking connection to server…");
+    try {
+      const res = await fetch("/api/version", { cache: "no-store", signal: AbortSignal.timeout(4500) });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      state.isNetworkOffline = false;
+      state.offlineMode = false;
+      save("aura.offlineMode", false);
+      updateOfflineIndicator();
+      toast("Connected to server! Online catalog restored.", false, "success");
+      if (state.query && state.view === "search") {
+        doSearch(state.query);
+      } else {
+        render();
+      }
+    } catch {
+      toast("Server unreachable. Still offline — try again in a moment.", false, "warning");
+    } finally {
+      if (icon) icon.classList.remove("spin");
+    }
+  }
+
+  function setOfflineMode(enabled) {
+    state.offlineMode = Boolean(enabled);
+    save("aura.offlineMode", state.offlineMode);
+    updateOfflineIndicator();
+    toast(state.offlineMode ? "Offline mode active — only downloaded music" : "Online mode restored — all catalogs enabled");
+    if (state.view === "settings" || state.view === "search" || state.view === "home") {
+      render();
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("online", () => {
+      state.isNetworkOffline = false;
+      updateOfflineIndicator();
+      toast("Internet restored");
+      if (state.view === "search" || state.view === "settings") render();
+    });
+    window.addEventListener("offline", () => {
+      state.isNetworkOffline = true;
+      updateOfflineIndicator();
+      toast("Network offline — switched to downloaded music");
+      if (state.view === "search" || state.view === "settings") render();
+    });
+  }
 
   // ── Persistent last-song player (Settings → Playback → Resume) ────────────
   // Saves the live queue + index + position on close/hide so the docked player
@@ -1153,14 +1222,17 @@
   let dlPermAsked = false;
   function nativeEnsureStoragePermission() {
     const ND = nativeDownloader();
-    if (!ND || dlPermAsked) return;
-    dlPermAsked = true;
+    if (!ND) return;
+    if (typeof ND.ensureStoragePermission === "function") {
+      ND.ensureStoragePermission().catch(() => {});
+      return;
+    }
     if (typeof ND.checkPermissions === "function") {
       ND.checkPermissions()
         .then((st) => {
-          if (!st || st.storage !== "granted") {
+          if (!st || (st.storage !== "granted" && st.media_audio !== "granted")) {
             if (typeof ND.requestPermissions === "function") {
-              ND.requestPermissions({ permissions: ["storage"] }).catch(() => {
+              ND.requestPermissions({ permissions: ["media_audio", "storage"] }).catch(() => {
                 ND.requestPermissions().catch(() => {});
               });
             }
@@ -1242,6 +1314,20 @@
   async function ensureStreamForDownload(t) {
     if (!t) return t;
     const out = { ...t };
+    // Audius: resolve active stream url if missing or unverified
+    if (out.source === "audius" && out.trackId) {
+      out.streamMime = "audio/mpeg";
+      if (!out.streamUrl || out.streamUrl.includes("open-audio-validator") || out.streamUrl.includes("audius.co/v1/tracks")) {
+        out.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(out.trackId)}`;
+      }
+      return out;
+    }
+    // Apple / iTunes: resolve via YouTube search or fallback to previewUrl
+    if ((out.source === "apple" || out.source === "itunes") && !out.videoId) {
+      try {
+        await resolveYouTubePlay(out);
+      } catch {}
+    }
     // Already resolved (played / audius / radio carries a streamUrl): keep it.
     if (out.streamUrl) return out;
     // YouTube: resolve via the same /api/yt/stream endpoint playback uses.
@@ -1281,40 +1367,27 @@
   function downloadFilePath(t) {
     const sid = String((t && t.streamUrl) || "");
     const nm = encodeURIComponent(t.title || "track");
-    const proxyFor = () => {
-      if (t && t.videoId) return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}`;
-      if (t && t.source === "audius" && t.trackId) return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}`;
-      return "";
-    };
-    // Optimization: if the track already carries a known-good stream URL (e.g.
-    // the resolver /api/yt/stream returned one at play time, or an Audius/radio
-    // direct URL), reuse it so the download does NOT re-hit the volatile Piped
-    // resolver (/api/download?videoId=… goes through youtubeAudioStream, which
-    // 502s when Piped is down). Reusing a URL we already streamed makes real
-    // downloads land instead of erroring out.
-    //
-    //   • Native (no CORS): hand the ABSOLUTE URL straight to the native
-    //     URLSession/MediaStore downloader. Native plugins do `new URL(url)`,
-    //     so a relative "/api/…" path throws MalformedURLException and the
-    //     download never starts — absolutize here.
-    //   • Web: a cross-origin stream URL can't be fetch()'d directly (CORS), so
-    //     proxy it through the same-origin /api/download?streamUrl=… (SSRF-guarded,
-    //     adds ACAO:* + Content-Disposition filename).
-    //   • Same-origin relative stream URL (offline/preview tone): keep as-is.
+    if (t && t.videoId) {
+      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+    }
+    if (t && t.source === "audius" && t.trackId) {
+      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=audio%2Fmpeg`;
+    }
+    if (t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer")) {
+      return `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${nm}`;
+    }
     if (sid) {
       let resolvedSid = sid;
       if (resolvedSid.startsWith("/")) {
         resolvedSid = API_BASE ? `${API_BASE}${resolvedSid}` : resolvedSid;
       }
       if (IS_NATIVE) {
-        // Hand the plugin an absolute URL so `new URL(url)` always parses.
         if (!/^https?:\/\//i.test(resolvedSid) && API_BASE) resolvedSid = API_BASE.replace(/\/$/, "") + "/" + resolvedSid;
         return resolvedSid;
       }
-      if (isSameOriginStreamUrl(sid)) return resolvedSid;
       return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
-    return proxyFor();
+    return "";
   }
 
   function concatBytes(parts) {
@@ -1398,7 +1471,9 @@
         ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`
         : ((t && t.source === "audius" && t.trackId)
           ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`
-          : "");
+          : ((t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer"))
+            ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}`
+            : ""));
       if (fallbackUrl && meta.url !== fallbackUrl) {
         const retryRes = await fetch(fallbackUrl, { credentials: "same-origin" }).catch(() => null);
         if (retryRes && retryRes.ok) res = retryRes;
@@ -1648,13 +1723,264 @@
     return `<div class="set-card dl-card"><h3>Downloads</h3>${rows}</div>`;
   }
 
-  const fx = { ctx: null, src: null, nodes: [] };
+  const EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+  const EQ_LABELS = ["32Hz", "64Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz"];
+  const EQ_PRESETS = {
+    dolby_atmos: { name: "Dolby Atmos Spatial", bands: [4, 3, 2, 0, -1, 1, 3, 4, 5, 4], dolby: true },
+    atmos_cinema: { name: "Dolby Atmos Cinema", bands: [5, 4, 2, 0, -1, 2, 3, 4, 4, 3], dolby: true },
+    atmos_music: { name: "Dolby Atmos Music", bands: [3, 2, 1, 0, 0, 1, 2, 3, 4, 4], dolby: true },
+    bass_boost: { name: "Bass Boost", bands: [7, 6, 4, 2, 0, 0, 0, 0, 0, -1], dolby: false },
+    vocal_clarity: { name: "Vocal Clarity", bands: [-2, -1, 0, 2, 4, 5, 4, 2, 0, 0], dolby: false },
+    rock: { name: "Rock", bands: [4, 3, 2, 0, -1, -1, 1, 3, 4, 4], dolby: false },
+    electronic: { name: "Electronic", bands: [5, 4, 1, 0, -2, 2, 1, 3, 4, 4], dolby: false },
+    flat: { name: "Flat", bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dolby: false },
+    custom: { name: "Custom", bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dolby: true },
+  };
+
+  function updateEqBand(index, val, skipSave) {
+    if (!Array.isArray(state.prefs.eqBands)) state.prefs.eqBands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const num = Number(val) || 0;
+    state.prefs.eqBands[index] = num;
+    state.prefs.eqPreset = "custom";
+    if (!skipSave) savePrefs();
+    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
+      hookSound();
+    }
+    if (fx.ctx && fx.ctx.state === "suspended") {
+      try { fx.ctx.resume(); } catch {}
+    }
+    if (fx.eqNodes && fx.eqNodes[index]) {
+      const g = state.prefs.eqEnabled !== false ? num : 0;
+      try {
+        fx.eqNodes[index].gain.cancelScheduledValues(0);
+        fx.eqNodes[index].gain.setValueAtTime(g, fx.ctx ? fx.ctx.currentTime : 0);
+      } catch {
+        fx.eqNodes[index].gain.value = g;
+      }
+    }
+  }
+
+  function triggerFabRipple(button, e) {
+    if (!button) return;
+    try {
+      const rect = button.getBoundingClientRect();
+      const d = Math.max(rect.width, rect.height) * 2;
+      const ripple = document.createElement("span");
+      ripple.className = "fab-ripple";
+      ripple.style.width = `${d}px`;
+      ripple.style.height = `${d}px`;
+      const hasCoord = e && typeof e.clientX === "number" && (e.clientX !== 0 || e.clientY !== 0);
+      const x = hasCoord ? (e.clientX - rect.left - d / 2) : (rect.width - d) / 2;
+      const y = hasCoord ? (e.clientY - rect.top - d / 2) : (rect.height - d) / 2;
+      ripple.style.left = `${x}px`;
+      ripple.style.top = `${y}px`;
+      button.appendChild(ripple);
+      setTimeout(() => {
+        if (ripple.parentNode) ripple.remove();
+      }, 550);
+    } catch {}
+  }
+
+  function updateEqFaderVisual(idx, gain, idPrefix = "eq", container = document) {
+    const g = Math.max(-12, Math.min(12, Number(gain) || 0));
+    const sign = g > 0 ? "+" : "";
+    const root = container && container.querySelector ? container : document;
+
+    const valEl = root.querySelector(`#${idPrefix}Val_${idx}, #${idPrefix}GainVal_${idx}`);
+    if (valEl) valEl.textContent = `${sign}${g.toFixed(1)}`;
+
+    const channel = root.querySelector(`#${idPrefix}Channel_${idx}`);
+    if (channel) channel.setAttribute("aria-valuenow", g);
+
+    const pct = Math.max(0, Math.min(100, ((g - (-12)) / 24) * 100));
+    const knob = root.querySelector(`#${idPrefix}Knob_${idx}`);
+    if (knob) knob.style.bottom = `calc(${pct}% - 14px)`;
+
+    const fill = root.querySelector(`#${idPrefix}Fill_${idx}`);
+    if (fill) {
+      const isPos = g >= 0;
+      fill.style.bottom = isPos ? "50%" : `${pct}%`;
+      fill.style.height = isPos ? `${pct - 50}%` : `${50 - pct}%`;
+      fill.className = `eq-slot-fill ${isPos ? "eq-fill-pos" : "eq-fill-neg"}`;
+    }
+
+    const input = root.querySelector(`[data-${idPrefix === "po" ? "po" : "eq"}-band="${idx}"]`);
+    if (input) input.value = g;
+  }
+
+  function renderEqColumnHTML(i, gain, idPrefix = "eq") {
+    const g = Math.max(-12, Math.min(12, Number(gain) || 0));
+    const sign = g > 0 ? "+" : "";
+    const pct = Math.max(0, Math.min(100, ((g - (-12)) / 24) * 100));
+    const isPos = g >= 0;
+    const fillBottom = isPos ? "50%" : `${pct}%`;
+    const fillHeight = isPos ? `${pct - 50}%` : `${50 - pct}%`;
+    const fillClass = isPos ? "eq-fill-pos" : "eq-fill-neg";
+
+    return `
+      <div class="eq-col" data-eq-col="${i}">
+        <span class="eq-gain" id="${idPrefix}Val_${i}">${sign}${g.toFixed(1)}</span>
+        <div class="eq-fader-channel" id="${idPrefix}Channel_${i}" data-fader-idx="${i}" data-fader-prefix="${idPrefix}" role="slider" aria-label="${EQ_LABELS[i]} gain" aria-valuemin="-12" aria-valuemax="12" aria-valuenow="${g}" tabindex="0">
+          <div class="eq-scale-ticks" aria-hidden="true">
+            <span class="eq-tick tick-top" title="+12 dB"></span>
+            <span class="eq-tick tick-mid-top" title="+6 dB"></span>
+            <span class="eq-tick tick-center" title="0 dB"></span>
+            <span class="eq-tick tick-mid-bot" title="-6 dB"></span>
+            <span class="eq-tick tick-bot" title="-12 dB"></span>
+          </div>
+          <div class="eq-slot" aria-hidden="true">
+            <div class="eq-slot-centerline"></div>
+            <div class="eq-slot-fill ${fillClass}" id="${idPrefix}Fill_${i}" style="bottom:${fillBottom};height:${fillHeight};"></div>
+            <div class="eq-fader-knob" id="${idPrefix}Knob_${i}" style="bottom:calc(${pct}% - 14px);">
+              <span class="knob-ridge"></span>
+              <span class="knob-ridge knob-center"></span>
+              <span class="knob-ridge"></span>
+            </div>
+          </div>
+          <input type="range" orient="vertical" class="eq-slider-vert" data-${idPrefix === "po" ? "po" : "eq"}-band="${i}" min="-12" max="12" step="0.5" value="${g}" style="display:none;" aria-hidden="true" tabindex="-1" />
+        </div>
+        <span class="eq-freq">${EQ_LABELS[i]}</span>
+      </div>
+    `;
+  }
+
+  function attachEqFaderInteraction(channel, idPrefix, onValueChange, onCommit) {
+    if (!channel) return;
+    const idx = Number(channel.dataset.faderIdx);
+    channel.style.touchAction = "none";
+    const col = channel.closest(".eq-col");
+    if (col) col.style.touchAction = "none";
+
+    function calcGain(e) {
+      const rect = channel.getBoundingClientRect();
+      if (rect.height <= 0) return 0;
+      // Top of track is +12 dB (ratio 1), bottom is -12 dB (ratio 0)
+      const ratio = 1 - (e.clientY - rect.top) / rect.height;
+      const clamped = Math.max(0, Math.min(1, ratio));
+      const raw = -12 + clamped * 24;
+      const stepped = Math.round(raw * 2) / 2; // 0.5 dB step
+      return Math.max(-12, Math.min(12, stepped));
+    }
+
+    let isDragging = false;
+
+    function onPointerDown(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      isDragging = true;
+      channel.classList.add("dragging");
+      try { channel.setPointerCapture(e.pointerId); } catch {}
+      const val = calcGain(e);
+      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
+      if (onValueChange) onValueChange(val);
+    }
+
+    function onPointerMove(e) {
+      if (!isDragging) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const val = calcGain(e);
+      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
+      if (onValueChange) onValueChange(val);
+    }
+
+    function onPointerUp(e) {
+      if (!isDragging) return;
+      isDragging = false;
+      channel.classList.remove("dragging");
+      try { channel.releasePointerCapture(e.pointerId); } catch {}
+      const val = calcGain(e);
+      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
+      if (onValueChange) onValueChange(val);
+      if (onCommit) onCommit(val);
+    }
+
+    channel.addEventListener("pointerdown", onPointerDown);
+    channel.addEventListener("pointermove", onPointerMove);
+    channel.addEventListener("pointerup", onPointerUp);
+    channel.addEventListener("pointercancel", onPointerUp);
+
+    if (col) {
+      col.addEventListener("pointerdown", (e) => {
+        if (e.target === channel || channel.contains(e.target)) return;
+        onPointerDown(e);
+      });
+    }
+
+    channel.addEventListener("keydown", (e) => {
+      let cur = Number(channel.getAttribute("aria-valuenow")) || 0;
+      let next = cur;
+      if (e.key === "ArrowUp" || e.key === "ArrowRight") next = Math.min(12, cur + 0.5);
+      else if (e.key === "ArrowDown" || e.key === "ArrowLeft") next = Math.max(-12, cur - 0.5);
+      else if (e.key === "PageUp") next = Math.min(12, cur + 3);
+      else if (e.key === "PageDown") next = Math.max(-12, cur - 3);
+      else if (e.key === "Home") next = 12;
+      else if (e.key === "End") next = -12;
+      else return;
+
+      e.preventDefault();
+      updateEqFaderVisual(idx, next, idPrefix, channel.closest(".eq-matrix") || document);
+      if (onValueChange) onValueChange(next);
+      if (onCommit) onCommit(next);
+    });
+
+    channel.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = e.deltaY < 0 ? 0.5 : -0.5;
+      let cur = Number(channel.getAttribute("aria-valuenow")) || 0;
+      const next = Math.max(-12, Math.min(12, cur + delta));
+      updateEqFaderVisual(idx, next, idPrefix, channel.closest(".eq-matrix") || document);
+      if (onValueChange) onValueChange(next);
+      if (onCommit) onCommit(next);
+    }, { passive: false });
+  }
+
+  function attachVerticalSliderInteraction(target, onValueChange, onCommit) {
+    if (!target) return;
+    const channel = target.classList && target.classList.contains("eq-fader-channel")
+      ? target
+      : (target.closest && target.closest(".eq-fader-channel")) || (target.parentElement ? target.parentElement.querySelector(".eq-fader-channel") : null);
+    if (channel) {
+      attachEqFaderInteraction(channel, channel.dataset.faderPrefix || "eq", onValueChange, onCommit);
+    }
+  }
+
+  function applyEqPreset(key) {
+    const p = EQ_PRESETS[key];
+    if (!p) return;
+    state.prefs.eqPreset = key;
+    state.prefs.eqBands = p.bands.slice();
+    if (p.dolby !== undefined) state.prefs.dolbyAtmos = p.dolby;
+    savePrefs();
+    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
+      hookSound();
+    }
+    if (fx.ctx && fx.ctx.state === "suspended") {
+      try { fx.ctx.resume(); } catch {}
+    }
+    if (fx.eqNodes && fx.eqNodes.length === 10) {
+      fx.eqNodes.forEach((node, i) => {
+        const val = state.prefs.eqEnabled !== false ? (Number(state.prefs.eqBands[i]) || 0) : 0;
+        try {
+          node.gain.cancelScheduledValues(0);
+          node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
+        } catch {
+          node.gain.value = val;
+        }
+      });
+    }
+    hookSound();
+  }
+
+  const fx = { ctx: null, src: null, nodes: [], eqNodes: [] };
   function clearFx() {
     (fx.nodes || []).forEach((n) => {
       try { if (n.stop) n.stop(); } catch {}
       try { n.disconnect(); } catch {}
     });
     fx.nodes = [];
+    fx.eqNodes = [];
   }
   function fxAdd(node) {
     fx.nodes.push(node);
@@ -1712,22 +2038,155 @@
 
   function hookSound() {
     const mode = spatialMode();
+    const hasDolby = Boolean(state.prefs.dolbyAtmos);
+    const hasEq = state.prefs.eqEnabled !== false;
     try {
-      if (mode === "off" && !fx.src) return;
-      if (!fx.ctx) fx.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      if (fx.ctx.state === "suspended") fx.ctx.resume();
+      if (mode === "off" && !hasDolby && !hasEq && !fx.src) return;
+      if (!fx.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
+      }
+      if (fx.ctx && fx.ctx.state === "suspended") fx.ctx.resume();
       if (!fx.src) fx.src = fx.ctx.createMediaElementSource(audio);
       fx.src.disconnect();
       clearFx();
       const ctx = fx.ctx;
-      if (mode === "off") {
+      if (mode === "off" && !hasDolby && !hasEq) {
         fx.src.connect(ctx.destination);
         return;
       }
 
       const hpf = fxAdd(ctx.createBiquadFilter());
-      hpf.type = "highpass"; hpf.frequency.value = 28; hpf.Q.value = 0.7;
+      hpf.type = "highpass"; hpf.frequency.value = 24; hpf.Q.value = 0.7;
       fx.src.connect(hpf);
+
+      // ── 10-Band Studio Graphic Equalizer ────────────────────────────
+      let eqTail = hpf;
+      fx.eqNodes = [];
+      const bands = Array.isArray(state.prefs.eqBands) && state.prefs.eqBands.length === 10
+        ? state.prefs.eqBands
+        : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+      for (let i = 0; i < EQ_FREQS.length; i++) {
+        const filter = fxAdd(ctx.createBiquadFilter());
+        if (i === 0) {
+          filter.type = "lowshelf";
+          filter.frequency.value = EQ_FREQS[i];
+        } else if (i === EQ_FREQS.length - 1) {
+          filter.type = "highshelf";
+          filter.frequency.value = EQ_FREQS[i];
+        } else {
+          filter.type = "peaking";
+          filter.frequency.value = EQ_FREQS[i];
+          filter.Q.value = 1.0;
+        }
+        filter.gain.value = hasEq ? (Number(bands[i]) || 0) : 0;
+        eqTail.connect(filter);
+        eqTail = filter;
+        fx.eqNodes.push(filter);
+      }
+
+      // Connect eqTail to Analyser for real-time visualizer spectrum
+      if (!fx.analyser && ctx.createAnalyser) {
+        fx.analyser = ctx.createAnalyser();
+        fx.analyser.fftSize = 128;
+        fx.analyser.smoothingTimeConstant = 0.8;
+      }
+      if (fx.analyser) {
+        try { eqTail.connect(fx.analyser); } catch {}
+      }
+
+      // ── Dolby Atmos 3D Binaural Spatial Audio Virtualizer ───────────
+      if (hasDolby) {
+        const lis = ctx.listener;
+        setAudioVec(lis, "positionX", "positionY", "positionZ", 0, 0, 0, lis.setPosition);
+        try {
+          if (lis.forwardX) {
+            lis.forwardX.value = 0; lis.forwardY.value = 0; lis.forwardZ.value = -1;
+            lis.upX.value = 0; lis.upY.value = 1; lis.upZ.value = 0;
+          } else if (lis.setOrientation) lis.setOrientation(0, 0, -1, 0, 1, 0);
+        } catch {}
+
+        const atmosSplit = fxAdd(ctx.createChannelSplitter(2));
+        eqTail.connect(atmosSplit);
+
+        const spread = Math.max(0.2, Math.min(1.5, (Number(state.prefs.atmosSurround) || 80) / 75));
+        const leftMain = makeHrtfPanner(ctx, -34 * spread, 1.25);
+        const rightMain = makeHrtfPanner(ctx, 34 * spread, 1.25);
+
+        // Center channel with Dialogue & Vocal Clarity Enhancer
+        const center = makeHrtfPanner(ctx, 0, 1.05);
+        setAudioVec(center, "positionX", "positionY", "positionZ", 0, 0.1, -1.05, center.setPosition);
+        const centerGain = fxAdd(ctx.createGain());
+        centerGain.gain.value = 0.45;
+        if (state.prefs.atmosDialogue) {
+          const vocBoost = fxAdd(ctx.createBiquadFilter());
+          vocBoost.type = "peaking"; vocBoost.frequency.value = 2400; vocBoost.Q.value = 0.9; vocBoost.gain.value = 3.5;
+          eqTail.connect(vocBoost);
+          vocBoost.connect(centerGain);
+        } else {
+          eqTail.connect(centerGain);
+        }
+        centerGain.connect(center);
+
+        // Surround L/R panners
+        const surrL = makeHrtfPanner(ctx, -114 * Math.min(1.2, spread), 2.1);
+        const surrR = makeHrtfPanner(ctx, 114 * Math.min(1.2, spread), 2.1);
+        const surrGain = fxAdd(ctx.createGain());
+        surrGain.gain.value = 0.38 * spread;
+        atmosSplit.connect(surrGain, 0);
+        atmosSplit.connect(surrGain, 1);
+        surrGain.connect(surrL);
+        surrGain.connect(surrR);
+
+        // Overhead Height Virtualization (Dolby Atmos ceiling simulation)
+        const heightLevel = state.prefs.atmosHeight === "high" ? 0.42 : state.prefs.atmosHeight === "subtle" ? 0.20 : 0.32;
+        const topL = makeHrtfPanner(ctx, -48, 1.6);
+        const topR = makeHrtfPanner(ctx, 48, 1.6);
+        setAudioVec(topL, "positionX", "positionY", "positionZ", -0.9, 0.85, -0.9, topL.setPosition);
+        setAudioVec(topR, "positionX", "positionY", "positionZ", 0.9, 0.85, -0.9, topR.setPosition);
+        const topGain = fxAdd(ctx.createGain());
+        topGain.gain.value = heightLevel;
+        atmosSplit.connect(topGain, 0);
+        atmosSplit.connect(topGain, 1);
+        topGain.connect(topL);
+        topGain.connect(topR);
+
+        atmosSplit.connect(leftMain, 0);
+        atmosSplit.connect(rightMain, 1);
+
+        const comp = fxAdd(ctx.createDynamicsCompressor());
+        comp.threshold.value = -16;
+        comp.knee.value = 12;
+        comp.ratio.value = 2.4;
+        comp.attack.value = 0.006;
+        comp.release.value = 0.15;
+
+        leftMain.connect(comp);
+        rightMain.connect(comp);
+        center.connect(comp);
+        surrL.connect(comp);
+        surrR.connect(comp);
+        topL.connect(comp);
+        topR.connect(comp);
+
+        const out = fxAdd(ctx.createGain());
+        out.gain.value = 1.25;
+        comp.connect(out);
+        out.connect(ctx.destination);
+        return;
+      }
+
+      if (mode === "off") {
+        const lim = fxAdd(ctx.createDynamicsCompressor());
+        lim.threshold.value = -0.5;
+        lim.knee.value = 6;
+        lim.ratio.value = 3;
+        lim.attack.value = 0.01;
+        lim.release.value = 0.1;
+        eqTail.connect(lim);
+        lim.connect(ctx.destination);
+        return;
+      }
 
       if (mode === "phone") {
         const bass = fxAdd(ctx.createBiquadFilter());
@@ -1742,7 +2201,7 @@
         presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;
         const air = fxAdd(ctx.createBiquadFilter());
         air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 2.6;
-        hpf.connect(bass);
+        eqTail.connect(bass);
         bass.connect(sub);
         sub.connect(body);
         body.connect(scoop);
@@ -1770,7 +2229,7 @@
         lpH.type = "lowpass"; lpH.frequency.value = 340; lpH.Q.value = 0.7;
         const wet = fxAdd(ctx.createGain());
         wet.gain.value = 0.72;
-        hpf.connect(bp);
+        eqTail.connect(bp);
         bp.connect(harm);
         harm.connect(hpH);
         hpH.connect(lpH);
@@ -1829,7 +2288,7 @@
         air.gain.value = 2.4;
       }
 
-      hpf.connect(bass);
+      eqTail.connect(bass);
       bass.connect(sub);
       sub.connect(scoop);
       scoop.connect(presence);
@@ -1910,11 +2369,93 @@
     audio.playsInline = true;
     audio.setAttribute("playsinline", "");
     audio.setAttribute("webkit-playsinline", "");
+    audio.preload = "auto";
   } catch {}
+
+  // ── Adaptive Audio Buffering Strategy ─────────────────────────────────
+  // Balances immediate start latency with smooth playback on high-bitrate
+  // streams (AAC 256k, MP3 320k) under fluctuating network conditions.
+  const adaptiveBuffer = {
+    buffering: false,
+    stallCount: 0,
+    minBufferAhead: 2.0,    // Initial safety margin (seconds) for fast start
+    targetBufferAhead: 2.0, // Dynamically expanded up to 5.5s upon buffer starvation
+    lastStall: 0,
+    startTime: 0,
+  };
+
+  function getBufferedAhead() {
+    try {
+      const pos = audio.currentTime || 0;
+      const b = audio.buffered;
+      if (!b || !b.length) return 0;
+      for (let i = 0; i < b.length; i++) {
+        if (b.start(i) <= pos + 0.35 && pos <= b.end(i)) {
+          return Math.max(0, b.end(i) - pos);
+        }
+      }
+    } catch {}
+    return 0;
+  }
+
+  function renderBufferState(isBuffering) {
+    state.buffering = isBuffering;
+    const playBtn = $("playBtn");
+    if (playBtn) {
+      if (isBuffering && state.playing) playBtn.classList.add("buffering");
+      else playBtn.classList.remove("buffering");
+    }
+    const bar = $("playerBar");
+    if (bar) {
+      if (isBuffering && state.playing) bar.classList.add("is-buffering");
+      else bar.classList.remove("is-buffering");
+    }
+  }
+
+  function onPlaybackWaiting() {
+    if (!state.playing || audio.paused || audio.ended) return;
+    const now = performance.now();
+    adaptiveBuffer.buffering = true;
+    renderBufferState(true);
+
+    // If another stall occurs within 45s, adaptively scale the buffer threshold
+    if (now - adaptiveBuffer.lastStall < 45000) {
+      adaptiveBuffer.stallCount += 1;
+      adaptiveBuffer.targetBufferAhead = Math.min(6.0, 2.0 + adaptiveBuffer.stallCount * 1.0);
+    } else {
+      adaptiveBuffer.stallCount = 1;
+      adaptiveBuffer.targetBufferAhead = 2.5;
+    }
+    adaptiveBuffer.lastStall = now;
+  }
+
+  function checkBufferResume() {
+    if (!adaptiveBuffer.buffering) return;
+    const ahead = getBufferedAhead();
+    const dur = audio.duration;
+    const isNearEnd = dur && isFinite(dur) && (ahead + audio.currentTime >= dur - 0.5);
+
+    if (ahead >= adaptiveBuffer.targetBufferAhead || isNearEnd) {
+      adaptiveBuffer.buffering = false;
+      renderBufferState(false);
+      if (state.playing && audio.paused && !audio.ended) {
+        audio.play().catch(() => {});
+      }
+    }
+  }
+
+  function onPlaybackPlaying() {
+    adaptiveBuffer.buffering = false;
+    renderBufferState(false);
+  }
+
   function unlockSound() {
     try {
-      if (!fx.ctx) fx.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      if (fx.ctx.state === "suspended") fx.ctx.resume();
+      if (!fx.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
+      }
+      if (fx.ctx && fx.ctx.state === "suspended") fx.ctx.resume();
     } catch {}
   }
   window.addEventListener("pointerdown", unlockSound, true);
@@ -2141,6 +2682,7 @@
   function openPlayerOptions() {
     const t = current();
     const saved = !!(t && isSaved(t));
+    hookSound();
     // Same gate as the library cards: a real download needs an Audius
     // trackId or a YouTube videoId — Apple *preview* streamUrls are 30 s
     // clips and must never be offered as "downloads".
@@ -2152,6 +2694,20 @@
             <button type="button" class="chip-btn" id="poYtPl">Add to playlist</button>
           </div></div>`
       : "";
+
+    const curPreset = state.prefs.eqPreset || "dolby_atmos";
+    const curBands = Array.isArray(state.prefs.eqBands) && state.prefs.eqBands.length === 10
+      ? state.prefs.eqBands
+      : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const isEqOn = state.prefs.eqEnabled !== false;
+
+    const presetChips = Object.keys(EQ_PRESETS).filter((k) => k !== "custom").map((k) => {
+      const p = EQ_PRESETS[k];
+      return `<button type="button" class="chip ${curPreset === k ? "active" : ""}" data-po-preset="${k}">${escapeHTML(p.name || k)}</button>`;
+    }).join("");
+
+    const eqSliders = EQ_FREQS.map((f, i) => renderEqColumnHTML(i, curBands[i], "po")).join("");
+
     showModal({
       title: "Player options",
       body: `
@@ -2171,10 +2727,37 @@
               : ""}
           </div>
         </div>
+
+        <div class="set-card po-eq-card">
+          <div class="eq-header-row">
+            <div>
+              <strong style="display:flex;align-items:center;gap:6px">
+                <span class="material-symbols-outlined" style="color:var(--md-sys-color-primary,#7dd3bb);font-size:20px">equalizer</span>
+                Equalizer & Real-time Visualizer
+              </strong>
+              <p style="margin:2px 0 0;font-size:12px;color:var(--md-sys-color-on-surface-variant)">Live audio frequency curve and response</p>
+            </div>
+            <button type="button" class="chip-btn" id="poEqToggle">${isEqOn ? "Enabled" : "Bypassed"}</button>
+          </div>
+
+          <div class="po-eq-canvas-wrap">
+            <canvas id="poEqCanvas" class="po-eq-canvas" width="460" height="130"></canvas>
+          </div>
+
+          <div class="eq-presets-grid" id="poEqPresets">
+            ${presetChips}
+          </div>
+
+          <div class="eq-matrix po-eq-matrix">
+            ${eqSliders}
+          </div>
+        </div>
+
         ${ytChip}`,
-      ok: "Close",
+      ok: "Done",
       onOk: () => {},
     });
+
     $("poSleep").addEventListener("click", () => { hideModal(); openSleepTimerSheet(); });
     const poDl = $("poDl");
     if (poDl) poDl.addEventListener("click", () => { hideModal(); downloadTrack(t); });
@@ -2182,6 +2765,208 @@
     if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
     const poYtPl = $("poYtPl");
     if (poYtPl) poYtPl.addEventListener("click", () => { hideModal(); ytAddToPlaylist(t); });
+
+    // ── Interactive Equalizer Canvas & Controls Setup ───────────────────
+    if (window._poEqCancel) {
+      try { window._poEqCancel(); } catch {}
+      window._poEqCancel = null;
+    }
+
+    const canvas = $("poEqCanvas");
+    let animId = null;
+
+    function renderCanvas() {
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(300, Math.round(rect.width || 460));
+      const h = 130;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      // Grid reference lines
+      const midY = h / 2;
+      const topY = 16;
+      const botY = h - 16;
+
+      // 0 dB dashed line
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(0, midY);
+      ctx.lineTo(w, midY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // +12 dB and -12 dB guideline limits
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+      ctx.beginPath();
+      ctx.moveTo(0, topY); ctx.lineTo(w, topY);
+      ctx.moveTo(0, botY); ctx.lineTo(w, botY);
+      ctx.stroke();
+
+      // Live spectrum bars from Analyser
+      if (fx.analyser && state.playing) {
+        const binCount = fx.analyser.frequencyBinCount || 64;
+        const dataArr = new Uint8Array(binCount);
+        fx.analyser.getByteFrequencyData(dataArr);
+        const barCount = 28;
+        const barW = (w - 24) / barCount;
+        ctx.fillStyle = "rgba(125, 211, 187, 0.18)";
+        for (let b = 0; b < barCount; b++) {
+          const idx = Math.floor((b / barCount) * (binCount * 0.7));
+          const val = dataArr[idx] || 0;
+          const barH = (val / 255) * (h - 28);
+          const bx = 12 + b * barW;
+          const by = h - 14 - barH;
+          ctx.fillRect(bx + 1, by, barW - 2, barH);
+        }
+      }
+
+      // 10-band EQ Frequency Response Curve
+      const bands = state.prefs.eqBands || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+      const enabled = state.prefs.eqEnabled !== false;
+      const padX = 24;
+      const stepX = (w - padX * 2) / (EQ_FREQS.length - 1);
+      const pts = [];
+
+      for (let i = 0; i < EQ_FREQS.length; i++) {
+        const gain = enabled ? (Number(bands[i]) || 0) : 0;
+        // clamp gain between -12 and +12
+        const clamped = Math.max(-12, Math.min(12, gain));
+        const py = midY - (clamped / 12) * (midY - topY);
+        const px = padX + i * stepX;
+        pts.push({ x: px, y: py, gain: clamped });
+      }
+
+      // Fill area under the EQ spline
+      const grad = ctx.createLinearGradient(0, topY, 0, botY);
+      grad.addColorStop(0, enabled ? "rgba(125, 211, 187, 0.32)" : "rgba(255, 255, 255, 0.1)");
+      grad.addColorStop(0.6, enabled ? "rgba(125, 211, 187, 0.08)" : "rgba(255, 255, 255, 0.03)");
+      grad.addColorStop(1, "rgba(125, 211, 187, 0.0)");
+      ctx.fillStyle = grad;
+
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, midY);
+      ctx.lineTo(pts[0].x, pts[0].y);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const cpx = (pts[i].x + pts[i + 1].x) / 2;
+        ctx.bezierCurveTo(cpx, pts[i].y, cpx, pts[i + 1].y, pts[i + 1].x, pts[i + 1].y);
+      }
+      ctx.lineTo(pts[pts.length - 1].x, midY);
+      ctx.closePath();
+      ctx.fill();
+
+      // Stroke the EQ spline curve
+      ctx.strokeStyle = enabled ? "#7dd3bb" : "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const cpx = (pts[i].x + pts[i + 1].x) / 2;
+        ctx.bezierCurveTo(cpx, pts[i].y, cpx, pts[i + 1].y, pts[i + 1].x, pts[i + 1].y);
+      }
+      ctx.stroke();
+
+      // Draw interactive dots at each band node
+      pts.forEach((pt) => {
+        ctx.fillStyle = enabled ? "#7dd3bb" : "#aaa";
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      });
+
+      ctx.restore();
+      if (!canvas || !canvas.isConnected || document.hidden) {
+        animId = null;
+        return;
+      }
+      animId = requestAnimationFrame(renderCanvas);
+    }
+
+    animId = requestAnimationFrame(renderCanvas);
+    window._poEqCancel = () => {
+      if (animId) cancelAnimationFrame(animId);
+      animId = null;
+    };
+
+    // Toggle Master EQ
+    const poEqToggle = $("poEqToggle");
+    if (poEqToggle) {
+      poEqToggle.addEventListener("click", () => {
+        const next = !(state.prefs.eqEnabled !== false);
+        state.prefs.eqEnabled = next;
+        savePrefs();
+        poEqToggle.textContent = next ? "Enabled" : "Bypassed";
+        if (!fx.eqNodes || fx.eqNodes.length !== 10) {
+          hookSound();
+        }
+        if (fx.ctx && fx.ctx.state === "suspended") {
+          try { fx.ctx.resume(); } catch {}
+        }
+        if (fx.eqNodes && fx.eqNodes.length === 10) {
+          fx.eqNodes.forEach((node, i) => {
+            const val = next ? (Number(state.prefs.eqBands[i]) || 0) : 0;
+            try {
+              node.gain.cancelScheduledValues(0);
+              node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
+            } catch {
+              node.gain.value = val;
+            }
+          });
+        }
+      });
+    }
+
+    // Preset selection
+    const presetBox = $("poEqPresets");
+    if (presetBox) {
+      presetBox.querySelectorAll("[data-po-preset]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const k = btn.dataset.poPreset;
+          applyEqPreset(k);
+          presetBox.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+          btn.classList.add("active");
+          // Update matrix faders and gain values
+          const bands = state.prefs.eqBands || [];
+          bands.forEach((val, i) => {
+            updateEqFaderVisual(i, val, "po", $("modalCard"));
+          });
+        });
+      });
+    }
+
+    // Real-time Faders Input
+    const card = $("modalCard");
+    if (card) {
+      card.querySelectorAll(".eq-fader-channel").forEach((channel) => {
+        const idx = Number(channel.dataset.faderIdx);
+        attachEqFaderInteraction(
+          channel,
+          "po",
+          (val) => {
+            updateEqBand(idx, val, true);
+            if (presetBox) {
+              presetBox.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+            }
+          },
+          () => {
+            savePrefs();
+          }
+        );
+      });
+    }
   }
 
   function artUrl(t) {
@@ -2207,7 +2992,7 @@
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
-      ${(t.trackId || t.videoId) ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
+      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
       </div>`;
   }
 
@@ -2217,7 +3002,7 @@
         <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
-          <div class="t-sub">${escapeHTML(t.artist)}${t.source && t.source !== "apple" ? ` · ${escapeHTML(t.source)}` : ""}</div>
+          <div class="t-sub">${escapeHTML(t.artist)}${t.source ? ` · ${t.source === "apple" ? "iTunes" : escapeHTML(t.source)}` : ""}</div>
         </div>
         <span class="t-dur">${t.source === "radio" ? "LIVE" : fmt(t.duration)}</span>
         ${extra}
@@ -2273,7 +3058,13 @@
         state.downloads,
         homeTrackPool(),
         (state.catalogPlaylist && state.catalogPlaylist.tracks) || [],
-        state.search ? [].concat(state.search.youtube, state.search.apple, state.search.audius, state.search.radio) : [],
+        state.search ? [].concat(
+          state.search.youtube || [],
+          state.search.deezer || [],
+          state.search.apple || [],
+          state.search.audius || [],
+          state.search.radio || []
+        ) : [],
         (state.artistPage && state.artistPage.songs) || [],
       ];
       for (const arr of pools) {
@@ -2285,6 +3076,7 @@
   }
 
   function playFromList(list, index) {
+    hapticFeedback("light");
     const next = list && list[index];
     const same = !!(next && current() && current().id === next.id);
     let src = Array.isArray(list) ? list.slice() : [];
@@ -2556,25 +3348,24 @@
 
   function looksLikeSong(t) {
     if (!t) return false;
+    const dur = Number(t.duration) || 0;
+    // Verified official catalogs from iTunes and Deezer are studio music
+    if (t.source === "apple" || t.source === "deezer") {
+      return dur <= 3600;
+    }
     if (t.source === "audius" || t.source === "radio") return true;
-    // Combined videos: 1–2 hour "songs" are mixes/compilations, not songs.
-    const dur = Number(t.duration);
-    if (dur > 1200) return false;
+    if (dur > 1080) return false;
+    if (dur > 0 && dur < 25) return false;
     const artist = String(t.artist || "").toLowerCase();
     const title = String(t.title || "").toLowerCase();
-    if (/^(episode|podcast|clip|news|trailer|various artists|various)$/i.test(artist.trim())) return false;
     const text = `${title} ${artist}`;
-    if (/\b(episode|podcast|trailer|full movie|gameplay|nato|imran khan|vlog|tutorial|reaction|unboxing|live stream)\b/i.test(text)) return false;
-    // YouTube auto "Topic" channels re-upload with garbage metadata.
+    if (/\b(gameplay|walkthrough|playthrough|let'?s play|gaming|fortnite|minecraft|roblox|gta|valorant|call of duty|apex legends|genshin|game review|movie review|film review|movie recap|trailer|teaser|official trailer|full movie|episode|season \d+|vlog|reaction|reacting to|unboxing|tech review|speedrun|stream highlight|news|breaking news|imran khan|nato|modi|biden|trump|putin|ukraine|parliament|election|documentary|tutorial|how to|webinar|ted talk|interview|standup|stand-up|comedy skit|#shorts?)\b/i.test(text)) {
+      return false;
+    }
+    if (/^(episode|podcast|clip|news|trailer|gaming|movie|various artists|various)$/i.test(artist.trim())) return false;
     if (/\btopic\b/i.test(artist)) return false;
-    // YouTube search surfaces a lot of junk — hour-long mixes, compilations,
-    // mashups, karaoke/instrumental covers, "best of" collections, re-upload
-    // channels. Keep playlists/queues listing real songs like Spotify's.
     if (/\b(non[- ]?stop|full album|album mix|megamix|compilation|collection|dj set|live set|greatest hits|best of|billboard|top ?(?:10|20|40|50|100) ?(?:pop|english|hit|song|music|playlist)? ?songs?|hits ?(?:19\d\d|20\d\d|vol\.?\s*\d)|1 ?hour|one hour|hour mix|karaoke|instrumental|sped ?up|slowed|reverb|mashup|medley|mixtape|mix tape|playlist)\b/i.test(text)) return false;
-    // "... mix" / "... remix" as the whole tail of a title is usually a
-    // re-upload collection ("90s hits mix", "pop songs remix").
     if (/\b(?:mix|remix)\b\s*$/i.test(title)) return false;
-    // Channel-style artists that just re-upload other people's songs.
     if (/\b(?:mix|remix|hits|top)\b/i.test(artist)) return false;
     return true;
   }
@@ -2591,32 +3382,84 @@
     return (data && data.tracks) || [];
   }
 
-  async function fillRelatedQueue(seed) {
-    const gen = ++relatedGen;
-    if (!seed || seed.source === "radio") return;
+  let isRefillingQueue = false;
+  async function ensureQueueRefill(seed) {
+    if (isRefillingQueue) return false;
+    const targetSeed = seed || current() || (state.queue && state.queue[state.queue.length - 1]) || (state.recent && state.recent[0]);
+    if (!targetSeed || targetSeed.source === "radio") return false;
+    isRefillingQueue = true;
     try {
-      const rows = await fetchRelated(seed);
-      if (gen !== relatedGen) return;
-      if (!state.queue.some((t) => t && t.id === seed.id)) return;
+      const rows = await fetchRelated(targetSeed);
       const have = new Set();
-      state.queue.forEach((t) => {
+      (state.queue || []).forEach((t) => {
         if (!t) return;
         if (t.id) have.add(t.id);
         if (t.videoId) have.add(t.videoId);
+        if (t.trackId) have.add(String(t.trackId));
       });
-      const extra = [];
-      for (const t of rows) {
-        if (!t || !looksLikeSong(t)) continue;
-        if (have.has(t.id) || (t.videoId && have.has(t.videoId))) continue;
-        have.add(t.id);
+      (state.recent || []).slice(0, 20).forEach((t) => {
+        if (!t) return;
+        if (t.id) have.add(t.id);
         if (t.videoId) have.add(t.videoId);
+        if (t.trackId) have.add(String(t.trackId));
+      });
+
+      let candidates = Array.isArray(rows) ? [...rows] : [];
+
+      // If target seed is Audius, also add trending/popular Audius tracks to candidate pool
+      if (targetSeed.source === "audius") {
+        try {
+          const gData = await api(`/api/home?${glq()}`, 4000);
+          const audList = (gData && gData.audius) || [];
+          for (const a of audList) {
+            if (a && (a.id || a.trackId)) candidates.push(a);
+          }
+        } catch {}
+      }
+
+      // If candidates are sparse, query search for more songs by the same artist or title genre
+      if (candidates.length < 8) {
+        try {
+          const a = artistName(targetSeed) || targetSeed.artist;
+          if (a) {
+            const sData = await api(`/api/search?q=${encodeURIComponent(a)}&${glq()}`, 4000);
+            if (sData && Array.isArray(sData.youtube)) {
+              candidates = candidates.concat(sData.youtube);
+            }
+          }
+        } catch {}
+      }
+
+      const extra = [];
+      for (const t of candidates) {
+        if (!t || !looksLikeSong(t)) continue;
+        const tid = t.id;
+        const vid = t.videoId;
+        const trk = t.trackId ? String(t.trackId) : "";
+        if (tid && have.has(tid)) continue;
+        if (vid && have.has(vid)) continue;
+        if (trk && have.has(trk)) continue;
+        if (tid) have.add(tid);
+        if (vid) have.add(vid);
+        if (trk) have.add(trk);
         extra.push(t);
         if (extra.length >= 20) break;
       }
-      if (!extra.length) return;
+
+      if (!extra.length) return false;
       state.queue = state.queue.concat(extra);
       renderQueue();
-    } catch {}
+      renderChrome();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isRefillingQueue = false;
+    }
+  }
+
+  async function fillRelatedQueue(seed) {
+    return ensureQueueRefill(seed);
   }
 
   async function loadPlaylistRecs(plIndex) {
@@ -2662,61 +3505,64 @@
   let playGen = 0;
   function skipFailed(msg) {
     const now = Date.now();
-    if (now - failSkipAt > 12000) failSkip = 0;
+    if (now - failSkipAt > 15000) failSkip = 0;
     failSkipAt = now;
     failSkip += 1;
     if (failSkip === 1) toast(msg || "Could not play this track", true, "error");
-    if (failSkip >= 3) {
-      toast("Stopped skipping. Pick another song.");
+    if (failSkip >= 2) {
+      toast("Playback stopped. Tap any song to play.");
       state.playing = false;
       renderChrome();
       return;
     }
-    setTimeout(() => next(true), 450);
+    setTimeout(() => next(true), 600);
   }
 
-  // In-memory resolution cache: playQuery -> {videoId, artwork}. Keeping the
-  // resolved YouTube id here means re-tapping a Deezer/iTunes/catalog song
-  // starts instantly (no repeat of the slow YouTube search). This is a small
-  // bounded Map — it never grows unbounded and is per-app-run.
+  // In-memory resolution cache: playQuery -> {videoId, artwork, duration}.
   const ytResolveCache = new Map();
   const YT_RESOLVE_CACHE_MAX = 500;
-  function ytResolveStore(q, videoId, artwork) {
+  function ytResolveStore(q, videoId, artwork, duration) {
     if (ytResolveCache.size >= YT_RESOLVE_CACHE_MAX) {
       const first = ytResolveCache.keys().next().value;
       if (first !== undefined) ytResolveCache.delete(first);
     }
-    ytResolveCache.set(q, { videoId, artwork: artwork || "" });
+    ytResolveCache.set(q, { videoId: videoId || "", artwork: artwork || "", duration: duration || 0 });
   }
   async function resolveYouTubePlay(t) {
-    if (!t || t.videoId) return t;
+    if (!t) return t;
+    if (t.videoId) return t;
     const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
     if (!q) throw new Error("No playable version");
+
     // Instant path: already resolved this exact query this session.
     const cachedHit = ytResolveCache.get(q);
     if (cachedHit && cachedHit.videoId) {
       t.videoId = cachedHit.videoId;
       t.source = "youtube";
       if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
+      if (cachedHit.duration && !t.duration) t.duration = cachedHit.duration;
       return t;
     }
+
     let rows = [];
     try {
-      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 14000);
-      rows = data.tracks || data.youtube || [];
-    } catch {}
-    if (!Array.isArray(rows) || !rows.length) {
+      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 6000);
+      rows = (data && data.tracks) || (data && data.results) || data || [];
+    } catch {
       try {
-        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`, 14000);
-        rows = data.youtube || [];
+        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`, 6000);
+        rows = (data && data.youtube) || [];
       } catch {}
     }
     const hit = (Array.isArray(rows) ? rows : []).find((x) => x && x.videoId);
-    if (!hit) throw new Error("No playable version");
+    if (!hit) {
+      throw new Error("No playable version found");
+    }
     t.videoId = hit.videoId;
     t.source = "youtube";
-    if (!t.artwork || t.artwork === "/cover-default.jpg") t.artwork = hit.artwork;
-    ytResolveStore(q, t.videoId, t.artwork);
+    if (hit.duration && !t.duration) t.duration = hit.duration;
+    if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
+    ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0);
     return t;
   }
 
@@ -2741,12 +3587,31 @@
     loadLyrics(t);
     stopTimer();
     try {
+      const isOfflineActive = Boolean(state.offlineMode || state.isNetworkOffline);
+      if (isOfflineActive) {
+        const saved = (state.downloads || []).find((d) => d.id === t.id);
+        const hasBlob = await idbGet(t.id);
+        if (saved || hasBlob) {
+          await playAudio(t);
+          if (gen !== playGen) return;
+          failSkip = 0;
+          state.playing = true;
+          setWantPlay(true);
+          showEl($("eqBars"), true);
+          updateMediaSession();
+          updateWakeLock();
+          if (state.view === "now" && gen === playGen) render();
+          return;
+        } else {
+          toast(`"${t.title}" is not available offline`);
+          skipFailed("Song not downloaded for offline playback");
+          return;
+        }
+      }
+
       // Metadata-only sources (apple/itunes/deezer from the iTunes or Deezer
       // catalogs, and any youtube row still missing a resolved videoId) have
-      // no direct audio stream — resolve them to a real YouTube stream before
-      // playing. Without this, iTunes-catalog songs hit the audio player with
-      // no URL and silently skip ("can't play"). Audio-native sources
-      // (audius via trackId, radio via streamUrl) are left alone.
+      // no direct audio stream — resolve them to a real stream before playing.
       const needsResolve =
         !t.videoId && !t.streamUrl && !t.url &&
         t.source !== "audius" && t.source !== "radio";
@@ -2754,6 +3619,7 @@
         await resolveYouTubePlay(t);
       }
       if (gen !== playGen) return;
+
       if (t.videoId) {
         // On native shells, play YouTube as a background audio stream when
         // possible so the OS media notification + lock-screen controls work
@@ -2769,18 +3635,18 @@
       }
       else if (t.source === "youtube") throw new Error("No video");
       else await playAudio(t);
+
       if (gen !== playGen) return;
       failSkip = 0;
       state.playing = true;
       setWantPlay(true);
       showEl($("eqBars"), true);
-      // (v1.5.4) The web Notification.requestPermission() ask that used to sit
-      // here was a no-op for the native notification (wrong permission surface)
-      // — the real POST_NOTIFICATIONS prompt fires in nativePlayTrack via the
-      // plugin, at the first track handed to the service.
       updateMediaSession();
       updateWakeLock();
     } catch (err) {
+      if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) {
+        return;
+      }
       console.error(err);
       if (gen === playGen) skipFailed("Could not play this track");
     }
@@ -2788,42 +3654,32 @@
   }
 
   // Try to play a YouTube track through the native audio pipeline
-  // (foreground media service → background play + notification). Resolves the
-  // videoId to a direct audio URL, then hands it to the native player. Only
-  // runs on native shells and only when the user hasn't asked for the video
-  // panel. Returns true if the native player took over; false = keep iframe.
   async function playYtWithAudio(t, reset) {
     if (!t || !t.videoId) return false;
     if (!IS_NATIVE || !nativePlayer()) return false;
     if (state.prefs.ytAudio === false) return false;
-    // If the video panel is explicitly open (user wants the music video),
-    // don't silently switch to audio-only — honor their choice.
     if (state.showVideo) return false;
     let url = "";
     let dur = t.duration || 0;
     try {
-      // Short, bounded timeout so a Piped outage falls back to the iframe
-      // player fast instead of stalling playback. Production Piped is sub-sec;
-      // the server also caches the resolved stream for 15 min.
-      const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}`, 6000);
-      // Resolve only returns a real url; anything empty = no stream available.
+      const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}`, 6000);
       if (data && data.url) {
         url = data.url;
         if (data.duration) dur = Number(data.duration);
       }
     } catch { url = ""; }
-    if (!url) return false; // fall back to the iframe player (safe)
+    if (!url) return false;
     t.streamUrl = url;
     t.duration = dur;
-    // playAudio hands https URLs to the native player and sets playback state.
     await playAudio(t);
     return !!nativePlayer() && npActive;
   }
 
   function stopOthers(keep) {
     if (keep !== "audio") {
-      audio.pause();
-      audio.removeAttribute("src");
+      try {
+        audio.pause();
+      } catch {}
       nativeStopPlayback();
     }
     if (keep !== "yt" && state.yt && state.yt.pauseVideo) {
@@ -2887,9 +3743,20 @@
         if (blob) url = URL.createObjectURL(blob);
       } catch {}
     }
-    if (!url && t.source === "audius" && t.trackId) {
-      const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`);
-      url = data.url;
+    if (t.source === "audius" && t.trackId) {
+      if (IS_NATIVE && !url) {
+        try {
+          const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`, 5000);
+          if (data && data.url) {
+            url = data.url;
+            t.streamUrl = url;
+          }
+        } catch {}
+      }
+      if (!url || !IS_NATIVE) {
+        url = `${API_BASE}/api/audius/file/${encodeURIComponent(t.trackId)}`;
+        t.streamUrl = url;
+      }
     }
     if (t.source === "radio") {
       if (t.stationId) fetch(`${API_BASE}/api/radio/click/${encodeURIComponent(t.stationId)}`).catch(() => {});
@@ -2909,7 +3776,21 @@
         url = `/api/stream?url=${encodeURIComponent(url)}`;
       }
     }
-    if (!url) throw new Error("No stream");
+    if (!url) {
+      if (t.videoId) {
+        try {
+          const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}`, 6000);
+          if (sData && sData.url) {
+            url = sData.url;
+            t.streamUrl = url;
+            if (sData.duration && !t.duration) t.duration = Number(sData.duration);
+          }
+        } catch {}
+      }
+    }
+    if (!url) {
+      throw new Error("No audio stream available");
+    }
     // Proxy URLs from the API (e.g. /api/stream?url=… from /api/yt/stream) are
     // same-origin relative paths. The native player needs an absolute URL, so
     // resolve them against API_BASE before handing over. On the web there is no
@@ -2927,15 +3808,62 @@
         return;
       }
     }
-    playAudioWeb(url);
+    await playAudioWeb(url);
   }
 
+  let audioPlaySeq = 0;
   async function playAudioWeb(url) {
     const t = current();
-    if (!t) return;
-    audio.src = url;
+    if (!t || !url) return;
+    const seq = ++audioPlaySeq;
+    adaptiveBuffer.buffering = false;
+    adaptiveBuffer.startTime = performance.now();
+    renderBufferState(false);
+    if (audio.src !== url) {
+      audio.src = url;
+    }
     applyPlaybackPrefs();
-    await audio.play();
+    try {
+      if (fx.ctx && fx.ctx.state === "suspended") {
+        fx.ctx.resume().catch(() => {});
+      }
+    } catch {}
+    try {
+      const p = audio.play();
+      if (p !== undefined) {
+        await p;
+      }
+    } catch (err) {
+      if (seq !== audioPlaySeq) return;
+      if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) {
+        return;
+      }
+      if (err && err.name === "NotAllowedError") {
+        state.playing = false;
+        renderChrome();
+        return;
+      }
+      // If direct CDN stream failed (CORS/403), retry through Worker proxy
+      if (!url.includes("/api/stream") && !url.includes("/api/preview/audio") && /^https?:\/\//i.test(url)) {
+        try {
+          const proxied = `${API_BASE}/api/stream?url=${encodeURIComponent(url)}`;
+          audio.src = proxied;
+          const p2 = audio.play();
+          if (p2 !== undefined) await p2;
+          return;
+        } catch {}
+      }
+      if (!url.includes("/api/preview/audio")) {
+        try {
+          audio.src = `${API_BASE}/api/preview/audio?dur=30`;
+          const p3 = audio.play();
+          if (p3 !== undefined) await p3;
+          return;
+        } catch {}
+      }
+      throw err;
+    }
+    if (seq !== audioPlaySeq) return;
     // Resume the restored track's saved position once metadata is loaded.
     if (_pendingSeek > 0 && !_pendingSeekApplied) {
       _pendingSeekApplied = true;
@@ -3109,17 +4037,28 @@
     return ytWait;
   }
 
-  function onYouTubeError(code) {
+  async function onYouTubeError(code) {
     const want = ytWanted;
     const cur = current();
     if (!want || !cur || String(cur.videoId || "") !== String(want)) return;
     if (code === 100 || code === 101 || code === 150) {
-      recoverYouTubeAlt(cur);
-      return;
+      state.showVideo = false;
+      showEl($("ytWrap"), false);
+      try {
+        await playAudio(cur);
+        return;
+      } catch {
+        recoverYouTubeAlt(cur);
+        return;
+      }
     }
-    if (ytRetry < 3) {
+    if (ytRetry < 2) {
       ytRetry += 1;
-      setTimeout(() => retryYouTube(want, ytToken), 220 * ytRetry);
+      setTimeout(() => retryYouTube(want, ytToken), 240 * ytRetry);
+    } else {
+      state.showVideo = false;
+      showEl($("ytWrap"), false);
+      try { await playAudio(cur); } catch {}
     }
   }
 
@@ -3233,19 +4172,21 @@
   }
 
   function togglePlay() {
+    hapticFeedback("medium");
     const t = current();
     if (!t) {
       if (state.recents[0]) playFromList(state.recents, 0);
       else testPlay();
       return;
     }
-    if (t.videoId || t.source === "youtube") {
-      const s = state.yt && state.yt.getPlayerState && state.yt.getPlayerState();
-      if (state.yt && (s === 1 || s === 3)) {
+    const isYt = (t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getPlayerState === "function";
+    if (isYt) {
+      const s = state.yt.getPlayerState();
+      if (s === 1 || s === 3) {
         setWantPlay(false);
         try { state.yt.pauseVideo(); } catch {}
         state.playing = false;
-      } else if (state.yt && s === 2) {
+      } else if (s === 2) {
         setWantPlay(true);
         try { state.yt.playVideo(); } catch {}
         state.playing = true;
@@ -3265,27 +4206,41 @@
         state.playing = true;
       }
     } else if (audio.paused) {
+      if (!audio.src || audio.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+        setWantPlay(true);
+        playCurrent(false);
+        return;
+      }
       setWantPlay(true);
-      audio.play();
+      const p = audio.play();
+      if (p && typeof p.catch === "function") {
+        p.catch((err) => {
+          if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) return;
+          playCurrent(false);
+        });
+      }
       state.playing = true;
     } else {
       setWantPlay(false);
-      audio.pause();
+      try { audio.pause(); } catch {}
       state.playing = false;
     }
     if (state.playing && !state.timer) startTimer();
     updateMediaSession();
     renderChrome();
-    if (state.playing) burstHearts($("playBtn"));
+    const pb = $("playBtn");
+    if (pb) triggerFabRipple(pb);
+    if (state.playing) burstHearts(pb);
   }
 
-  function next(force) {
+  async function next(force) {
+    if (force !== true) hapticFeedback("light");
     if (!state.queue.length) return;
     if (!force && state.sleep.mode === "track") {
       pauseForSleep();
       return;
     }
-    if (!force && !state.prefs.autoplay) {
+    if (!force && state.prefs.autoplay === false) {
       state.playing = false;
       renderChrome();
       return;
@@ -3298,6 +4253,12 @@
     } else if (state.repeat === "all") {
       state.index = 0;
     } else {
+      const refilled = await ensureQueueRefill();
+      if (refilled && state.index + 1 < state.queue.length) {
+        state.index += 1;
+        playCurrent(true);
+        return;
+      }
       state.playing = false;
       renderChrome();
       return;
@@ -3306,6 +4267,7 @@
   }
 
   function prev() {
+    hapticFeedback("light");
     const pos = position();
     if (pos > 3) return seekTo(0);
     state.index = (state.index - 1 + state.queue.length) % state.queue.length;
@@ -3316,7 +4278,9 @@
     const t = current();
     if (!t) return 0;
     if (npActive) return npPos || 0;
-    if (t.source === "youtube" && state.yt && state.yt.getCurrentTime) return state.yt.getCurrentTime() || 0;
+    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getCurrentTime === "function") {
+      return state.yt.getCurrentTime() || 0;
+    }
     return audio.currentTime || 0;
   }
 
@@ -3325,7 +4289,9 @@
     if (!t) return 0;
     if (t.source === "radio") return 0;
     if (npActive) return npDur || t.duration || 0;
-    if (t.source === "youtube" && state.yt && state.yt.getDuration) return state.yt.getDuration() || t.duration || 0;
+    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getDuration === "function") {
+      return state.yt.getDuration() || t.duration || 0;
+    }
     return audio.duration && isFinite(audio.duration) ? audio.duration : t.duration || 0;
   }
 
@@ -3334,8 +4300,11 @@
     if (!t || t.source === "radio") return;
     const at = Math.max(0, Number(sec) || 0);
     if (npActive && nativeSeekTo(at)) { updateProgress(); return; }
-    if ((t.source === "youtube" || t.videoId) && state.yt && state.yt.seekTo) state.yt.seekTo(at, true);
-    else audio.currentTime = at;
+    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.seekTo === "function") {
+      state.yt.seekTo(at, true);
+    } else {
+      audio.currentTime = at;
+    }
     updateProgress();
   }
 
@@ -3344,24 +4313,32 @@
   function cheapPhone() {
     return !!(window.matchMedia && (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 980px)").matches));
   }
+  function restartWaveLoop() {
+    if (cheapPhone() || !state.playing || waveRaf || document.hidden || state.view !== "now") return;
+    const loop = (now) => {
+      if (!state.playing) {
+        waveRaf = 0;
+        drawSeekWave();
+        return;
+      }
+      if (document.hidden || state.view !== "now") {
+        waveRaf = 0;
+        return;
+      }
+      if (!waveLast || now - waveLast > 80) {
+        drawSeekWave();
+        waveLast = now;
+      }
+      waveRaf = requestAnimationFrame(loop);
+    };
+    waveRaf = requestAnimationFrame(loop);
+  }
   function startTimer() {
     stopTimer();
     const cheap = cheapPhone();
     state.timer = setInterval(updateProgress, cheap ? 1500 : 500);
     if (!cheap) {
-      const loop = (now) => {
-        if (!state.playing) {
-          waveRaf = 0;
-          drawSeekWave();
-          return;
-        }
-        if (!waveLast || now - waveLast > 80) {
-          drawSeekWave();
-          waveLast = now;
-        }
-        waveRaf = requestAnimationFrame(loop);
-      };
-      waveRaf = requestAnimationFrame(loop);
+      restartWaveLoop();
     } else {
       drawSeekWave();
     }
@@ -3382,6 +4359,40 @@
     updateMediaPosition();
     msPosTick = (msPosTick || 0) + 1;
     if (msPosTick % 5 === 0) updateMediaSession();
+
+    // Adaptive buffering health check
+    checkBufferResume();
+
+    // Proactive queue refill: replenish queue with related tracks when approaching end of queue
+    if (state.playing && state.prefs.autoplay !== false && (state.queue.length - 1 - state.index <= 1)) {
+      ensureQueueRefill();
+    }
+    // Audio playback optimization: pre-resolve next track stream and pre-warm for gapless playback
+    if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
+      const nextT = state.queue[state.index + 1];
+      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
+        nextT._resolving = true;
+        api(`/api/yt/stream?v=${encodeURIComponent(nextT.videoId)}`, 8000).then((res) => {
+          if (res && res.url) {
+            nextT.streamUrl = res.url;
+            if (!nextT._prefetched) {
+              nextT._prefetched = true;
+              fetch(res.url, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+            }
+          }
+        }).catch(() => {}).finally(() => { nextT._resolving = false; });
+      } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
+        nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
+        if (!nextT._prefetched) {
+          nextT._prefetched = true;
+          fetch(nextT.streamUrl, { headers: { Range: "bytes=0-65535" } }).catch(() => {});
+        }
+      } else if (nextT && !nextT.videoId && !nextT.streamUrl && !nextT._resolving && (nextT.source === "apple" || nextT.source === "deezer" || nextT.source === "itunes")) {
+        nextT._resolving = true;
+        resolveYouTubePlay(nextT).catch(() => {}).finally(() => { nextT._resolving = false; });
+      }
+    }
+
     if (document.hidden && cheapPhone()) return;
     $("curTime").textContent = fmt(p);
     $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
@@ -3592,6 +4603,28 @@
     if (!IS_NATIVE || !window.Capacitor || !window.Capacitor.Plugins) return null;
     return window.Capacitor.Plugins;
   }
+
+  /* ── Haptics feedback (Capacitor Haptics plugin with web vibration fallback) ── */
+  function hapticFeedback(style = "light") {
+    try {
+      const H = (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Haptics) ||
+                (window.CapacitorCustomPlatform && window.CapacitorCustomPlatform.plugins && window.CapacitorCustomPlatform.plugins.Haptics);
+      if (H) {
+        if (style === "heavy" && typeof H.impact === "function") {
+          H.impact({ style: "HEAVY" }).catch(() => {});
+        } else if (style === "medium" && typeof H.impact === "function") {
+          H.impact({ style: "MEDIUM" }).catch(() => {});
+        } else if (style === "selection" && typeof H.selectionChanged === "function") {
+          H.selectionChanged().catch(() => {});
+        } else if (typeof H.impact === "function") {
+          H.impact({ style: "LIGHT" }).catch(() => {});
+        }
+      } else if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+        const ms = style === "heavy" ? 28 : style === "medium" ? 18 : style === "selection" ? 8 : 12;
+        navigator.vibrate(ms);
+      }
+    } catch {}
+  }
   /* ── Optional native background player (Android + iOS) ───────────────
      The native shells ship a MuchiAudio plugin: on Android a foreground media
      service (ExoPlayer + MediaSessionCompat notification/controls), on iOS an AVPlayer
@@ -3608,14 +4641,20 @@
   let npPermAsked = false; // one-time native notification permission ask
   function nativeEnsureNotifyPermission() {
     const NP = nativePlayer();
-    if (!NP || npPermAsked) return;
-    npPermAsked = true;
+    if (!NP) {
+      webEnsurePermissions();
+      return;
+    }
+    if (typeof NP.requestNotificationPermission === "function") {
+      NP.requestNotificationPermission().catch(() => {});
+      return;
+    }
     if (typeof NP.checkPermissions === "function") {
       NP.checkPermissions()
         .then((st) => {
-          if (!st || st.muchi_audio !== "granted") {
+          if (!st || (st.notifications !== "granted" && st.muchi_audio !== "granted")) {
             if (typeof NP.requestPermissions === "function") {
-              NP.requestPermissions({ permissions: ["muchi_audio"] }).catch(() => {
+              NP.requestPermissions({ permissions: ["notifications", "muchi_audio"] }).catch(() => {
                 NP.requestPermissions().catch(() => {});
               });
             }
@@ -3830,8 +4869,17 @@
         });
       } catch {}
     }
+
+    // Immediately request Notification and appropriate Storage permissions on app start
+    try {
+      nativeEnsureNotifyPermission();
+      nativeEnsureStoragePermission();
+    } catch {}
   }
   initNativeBridge();
+  if (!IS_NATIVE) {
+    try { webEnsurePermissions(); } catch {}
+  }
 
   /* ── Google Sign-In + YouTube Library (additive) ─────────────────────
      OAuth runs server-side (server.js): Google handles authentication,
@@ -4086,19 +5134,27 @@
   function bindLyricLines(box) {
     if (!box) return;
     box.querySelectorAll("[data-ly]").forEach((el) => {
-      el.addEventListener("click", () => {
+      el.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        hapticFeedback("selection");
         lyFollow = true;
         seekTo(Number(el.dataset.lyT) || 0);
+        setTimeout(() => {
+          lyFollow = true;
+          highlightLyric(position(), true);
+        }, 50);
       });
     });
   }
 
   function paintLyricsBox() {
-    const box = $("lyScroll");
+    const box = $("lyScroll") || document.querySelector(".ly-scroll");
     if (!box) return false;
     box.innerHTML = lyricsBodyHTML();
     bindLyricLines(box);
-    highlightLyric(position());
+    lyFollow = true;
+    highlightLyric(position(), true);
     return true;
   }
 
@@ -4130,8 +5186,8 @@
     if (state.view === "now") paintLyricsBox() || render();
   }
 
-  function highlightLyric(p) {
-    const box = $("lyScroll") || document.querySelector(".lyrics");
+  function highlightLyric(p, forceScroll) {
+    const box = $("lyScroll") || document.querySelector(".ly-scroll") || document.querySelector(".lyrics");
     const lines = box ? box.querySelectorAll("[data-ly]") : document.querySelectorAll("[data-ly]");
     if (!lines.length || !state.lyrics || !state.lyrics.synced || !state.lyrics.synced.length) return;
     let active = -1;
@@ -4139,25 +5195,26 @@
     for (let i = 0; i < rows.length; i++) {
       if (p >= (Number(rows[i].t) || 0)) active = i;
     }
-    if (active === lyActive) return;
+    const changed = active !== lyActive;
+    if (!changed && !forceScroll) return;
     lines.forEach((el, i) => {
       el.classList.toggle("on", i === active);
       el.classList.toggle("past", i < active);
     });
     lyActive = active;
     const on = active >= 0 ? lines[active] : null;
-    if (!on || !lyFollow) return;
+    if (!on || (!lyFollow && !forceScroll)) return;
     lyProg = true;
-    try {
-      on.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-    } catch {
-      if (box) {
-        const top = on.offsetTop - box.clientHeight / 2 + on.clientHeight / 2;
-        box.scrollTop = Math.max(0, top);
+    if (box) {
+      try {
+        on.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+      } catch {
+        const top = on.offsetTop - (box.clientHeight / 2) + (on.clientHeight / 2);
+        box.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
       }
     }
     clearTimeout(highlightLyric._t);
-    highlightLyric._t = setTimeout(() => { lyProg = false; }, 480);
+    highlightLyric._t = setTimeout(() => { lyProg = false; }, 360);
   }
 
   function applySongTheme(hue) {
@@ -4933,9 +5990,21 @@
   }
 
   function searchChips() {
-    const labels = { all: "All", songs: "Songs", artists: "Artists", playlists: "Playlists", albums: "Albums", radio: "Radio", history: "History" };
-    return ["all", "songs", "artists", "playlists", "albums", "radio", "history"].map((f) =>
-      `<button class="chip ${state.filter === f ? "active" : ""}" data-filter="${f}">${labels[f]}</button>`
+    const labels = {
+      all: "All",
+      songs: "Songs",
+      itunes: "iTunes",
+      deezer: "Deezer",
+      youtube: "YouTube",
+      audius: "Audius",
+      artists: "Artists",
+      playlists: "Playlists",
+      albums: "Albums",
+      radio: "Radio",
+      history: "History",
+    };
+    return ["all", "songs", "itunes", "deezer", "youtube", "audius", "artists", "playlists", "albums", "radio", "history"].map((f) =>
+      `<button class="chip ${state.filter === f ? "active" : ""}" data-filter="${f}">${labels[f] || f}</button>`
     ).join("");
   }
 
@@ -5051,13 +6120,33 @@
 
   function searchBody(s) {
     const f = state.filter;
-    const songs = [].concat(s.youtube || [], s.apple || [], s.audius || []);
+    const isOffline = state.offlineMode || state.isNetworkOffline;
+    const offlineBanner = isOffline ? `
+      <div class="offline-banner">
+        <div class="offline-banner-content">
+          <span class="material-symbols-outlined" style="color:#ef4444">cloud_off</span>
+          <div><strong>Offline Mode Active</strong><p>${state.offlineMode ? "Device offline mode is active." : "Network or server connection unavailable."} Showing downloaded tracks.</p></div>
+        </div>
+        <div class="offline-banner-actions">
+          <button type="button" class="offline-retry-btn" id="offlineRetryBtn" title="Try reconnecting to server">
+            <span class="material-symbols-outlined">sync</span>
+            <span>Retry Connection</span>
+          </button>
+        </div>
+      </div>` : "";
+
+    const itunesSongs = s.apple || [];
+    const deezerSongs = s.deezer || [];
+    const youtubeSongs = s.youtube || [];
+    const audiusSongs = s.audius || [];
+    const offlineSongs = s.offline || [];
+    const songs = [].concat(youtubeSongs, itunesSongs, deezerSongs, audiusSongs, offlineSongs);
     const artists = s.artists || [];
-    const playlists = (s.playlists || []).filter((p) => p.source !== "apple");
-    const albums = (s.playlists || []).filter((p) => p.source === "apple");
+    const playlists = (s.playlists || []).filter((p) => p.source !== "apple" && p.source !== "deezer");
+    const albums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "deezer");
     const radio = s.radio || [];
     const empty = !songs.length && !artists.length && !playlists.length && !albums.length && !radio.length;
-    if (empty) return `<div class="empty"><h3>No matches</h3><p>Try another spelling, or paste a YouTube URL.</p></div>`;
+    if (empty) return `${offlineBanner}<div class="empty"><h3>No matches</h3><p>Try another spelling, or verify your downloaded library.</p></div>`;
     const top = pickTopArtist(s, state.query);
     const topIdx = top ? artists.indexOf(top) : -1;
     const hero = (f === "all" && top) ? `
@@ -5070,8 +6159,47 @@
         </div>
         <span class="material-symbols-outlined">chevron_right</span>
       </button>` : "";
+    if (f === "itunes") {
+      return `
+        ${offlineBanner}
+        <div class="section">
+          <div class="section-head"><h2>iTunes Songs</h2><span>${itunesSongs.length}</span></div>
+          <div class="list">${itunesSongs.length ? itunesSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No iTunes songs found for this search.</p>`}</div>
+        </div>
+        ${albums.length ? `<div class="section"><div class="section-head"><h2>iTunes Albums</h2><span>${albums.length}</span></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+      `;
+    }
+    if (f === "deezer") {
+      return `
+        ${offlineBanner}
+        <div class="section">
+          <div class="section-head"><h2>Deezer Songs</h2><span>${deezerSongs.length}</span></div>
+          <div class="list">${deezerSongs.length ? deezerSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Deezer songs found for this search.</p>`}</div>
+        </div>
+        ${albums.length ? `<div class="section"><div class="section-head"><h2>Albums</h2><span>${albums.length}</span></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+      `;
+    }
+    if (f === "youtube") {
+      return `
+        ${offlineBanner}
+        <div class="section">
+          <div class="section-head"><h2>YouTube Music</h2><span>${youtubeSongs.length}</span></div>
+          <div class="list">${youtubeSongs.length ? youtubeSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No YouTube songs found for this search.</p>`}</div>
+        </div>
+        ${playlists.length ? `<div class="section"><div class="section-head"><h2>Playlists</h2><span>${playlists.length}</span></div><div class="lib-list">${playlists.map(playlistHitHTML).join("")}</div></div>` : ""}
+      `;
+    }
+    if (f === "audius") {
+      return `
+        ${offlineBanner}
+        <div class="section">
+          <div class="section-head"><h2>Audius Songs</h2><span>${audiusSongs.length}</span></div>
+          <div class="list">${audiusSongs.length ? audiusSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Audius songs found for this search.</p>`}</div>
+        </div>
+      `;
+    }
     if (f === "songs") {
-      return `<div class="section"><div class="section-head"><h2>Songs</h2></div><div class="list">${songs.map((t, i) => rowHTML(t, i)).join("")}</div></div>`;
+      return `${offlineBanner}<div class="section"><div class="section-head"><h2>Songs</h2><span>${songs.length}</span></div><div class="list">${songs.map((t, i) => rowHTML(t, i)).join("")}</div></div>`;
     }
     if (f === "artists") {
       return `<div class="section"><div class="section-head"><h2>Artists</h2></div><div class="lib-list">${artists.map(artistHitHTML).join("") || `<p class="empty">No artists for this search.</p>`}</div></div>`;
@@ -5086,11 +6214,32 @@
       return `<div class="section"><div class="section-head"><h2>Radio</h2></div><div class="list">${radio.map((t, i) => rowHTML(t, i)).join("") || `<p class="empty">No stations.</p>`}</div></div>`;
     }
     return `
+      ${offlineBanner}
       ${hero}
       <div class="section">
-        <div class="section-head"><h2>Songs</h2><span>${songs.length}</span></div>
-        <div class="list">${songs.map((t, i) => rowHTML(t, i)).join("")}</div>
+        <div class="section-head"><h2>All Songs</h2><span>${songs.length}</span></div>
+        <div class="list">${songs.slice(0, 35).map((t, i) => rowHTML(t, i)).join("")}</div>
       </div>
+      ${(itunesSongs && itunesSongs.length) ? `
+      <div class="section">
+        <div class="section-head"><h2>iTunes Songs</h2><span>${itunesSongs.length}</span></div>
+        <div class="list">${itunesSongs.slice(0, 15).map((t, i) => rowHTML(t, i)).join("")}</div>
+      </div>` : ""}
+      ${(deezerSongs && deezerSongs.length) ? `
+      <div class="section">
+        <div class="section-head"><h2>Deezer Songs</h2><span>${deezerSongs.length}</span></div>
+        <div class="list">${deezerSongs.slice(0, 15).map((t, i) => rowHTML(t, i)).join("")}</div>
+      </div>` : ""}
+      ${(youtubeSongs && youtubeSongs.length) ? `
+      <div class="section">
+        <div class="section-head"><h2>YouTube Songs</h2><span>${youtubeSongs.length}</span></div>
+        <div class="list">${youtubeSongs.slice(0, 15).map((t, i) => rowHTML(t, i)).join("")}</div>
+      </div>` : ""}
+      ${(audiusSongs && audiusSongs.length) ? `
+      <div class="section">
+        <div class="section-head"><h2>Audius Songs</h2><span>${audiusSongs.length}</span></div>
+        <div class="list">${audiusSongs.slice(0, 15).map((t, i) => rowHTML(t, i)).join("")}</div>
+      </div>` : ""}
       ${artists.length ? `<div class="section"><div class="section-head"><h2>Artists</h2></div><div class="lib-list">${artists.slice(0, 20).map(artistHitHTML).join("")}</div></div>` : ""}
       ${albums.length ? `<div class="section"><div class="section-head"><h2>Albums</h2></div><div class="lib-list">${albums.slice(0, 20).map(playlistHitHTML).join("")}</div></div>` : ""}
       ${playlists.length ? `<div class="section"><div class="section-head"><h2>Playlists</h2></div><div class="lib-list">${playlists.slice(0, 20).map(playlistHitHTML).join("")}</div></div>` : ""}
@@ -5982,8 +7131,9 @@
       ["wave", "Wave", "Live wiggly seek line while music plays."],
       ["bar", "Solid bar", "Filled Material bar, less glass."],
     ];
+    const fade = Number(state.prefs.crossfade || 0);
     return `
-      ${settingsSubChrome("Player", "Four looks for the bar. Seek wiggles while a song plays.")}
+      ${settingsSubChrome("Player", "Four looks for the bar, crossfading, and the seek line.")}
       <div class="settings">
         <div class="set-card">
           <h3>Type</h3>
@@ -5994,6 +7144,22 @@
                 <span><strong>${name}</strong><em>${blurb}</em></span>
                 ${cur === id ? `<span class="ui-pick-on">On</span>` : ""}
               </button>`).join("")}
+          </div>
+        </div>
+        <div class="set-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div>
+              <h3 style="margin:0">Crossfade</h3>
+              <p class="set-lead" style="margin:4px 0 0">Smoothly blend songs together without silence between tracks.</p>
+            </div>
+            <span class="chip active" id="playerFadeBadge">${fade ? fade + "s" : "Off"}</span>
+          </div>
+          <div class="eq-presets-grid" style="margin-top:12px">
+            ${[0, 2, 4, 6, 8, 12].map((n) => `
+              <button type="button" class="chip ${fade === n ? "active" : ""}" data-player-fade="${n}">
+                ${n ? n + "s" : "Off"}
+              </button>
+            `).join("")}
           </div>
         </div>
       </div>`;
@@ -6089,10 +7255,86 @@
       </div>`;
   }
 
+  function renderEqualizerPage() {
+    const p = state.prefs;
+    const presets = Object.keys(EQ_PRESETS).map((k) => [k, EQ_PRESETS[k].name]);
+    const curPreset = p.eqPreset || "flat";
+    const gains = Array.isArray(p.eqBands) && p.eqBands.length === 10 ? p.eqBands : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    return `
+      ${settingsSubChrome("Equalizer & Dolby Atmos", "10-Band studio equalizer and Dolby Atmos 3D binaural spatial audio.")}
+      <div class="settings">
+        <div class="set-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <h3 style="margin:0">Dolby Atmos 3D Audio</h3>
+              <span class="dolby-badge"><span class="material-symbols-outlined" style="font-size:14px">surround_sound</span> Atmos</span>
+            </div>
+            <button class="switch ${p.dolbyAtmos ? "on" : ""}" id="dolbyAtmosToggle" type="button"><i></i></button>
+          </div>
+          <p class="set-lead">Binaural HRTF spatial audio with acoustic room widening, dialog clarity, and overhead height virtualization.</p>
+
+          <div class="set-row">
+            <div><strong>Dialogue & Vocal Enhancer</strong><p>Crisp center vocal projection in Atmos mix.</p></div>
+            <button class="switch ${p.atmosDialogue ? "on" : ""}" id="atmosDialogueToggle" type="button"><i></i></button>
+          </div>
+
+          <div class="set-row" style="flex-direction:column;align-items:stretch;gap:8px">
+            <div style="display:flex;justify-content:space-between">
+              <strong>Spatial Soundstage Width</strong>
+              <span id="atmosSurroundVal">${p.atmosSurround || 80}%</span>
+            </div>
+            <input type="range" id="atmosSurround" min="20" max="150" step="5" value="${p.atmosSurround || 80}" style="width:100%" />
+          </div>
+
+          <label class="set-row">
+            <div><strong>Overhead Height Dimension</strong><p>Ceiling virtualization intensity for Atmos.</p></div>
+            <select id="atmosHeight">
+              <option value="subtle" ${p.atmosHeight === "subtle" ? "selected" : ""}>Subtle (20%)</option>
+              <option value="medium" ${p.atmosHeight === "medium" || !p.atmosHeight ? "selected" : ""}>Medium (32%)</option>
+              <option value="high" ${p.atmosHeight === "high" ? "selected" : ""}>High Immersion (42%)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="set-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+              <h3 style="margin:0">10-Band Studio Equalizer</h3>
+              <p class="set-lead" style="margin:4px 0 0">Fine-tune frequencies from deep sub-bass (32 Hz) to crystal highs (16 kHz).</p>
+            </div>
+            <button class="switch ${p.eqEnabled !== false ? "on" : ""}" id="eqMasterToggle" type="button"><i></i></button>
+          </div>
+
+          <div class="set-row" style="padding:8px 0">
+            <div><strong>Presets</strong></div>
+          </div>
+          <div class="eq-presets-grid">
+            ${presets.map(([id, label]) => `
+              <button type="button" class="chip ${curPreset === id ? "active" : ""}" data-eq-preset="${id}">${label}</button>
+            `).join("")}
+          </div>
+
+          <div class="eq-matrix">
+            ${EQ_FREQS.map((freq, i) => renderEqColumnHTML(i, gains[i], "eq")).join("")}
+          </div>
+
+          <div class="set-row" style="margin-top:14px">
+            <div><strong>Reset Tuning</strong><p>Clear gains back to flat response.</p></div>
+            <button type="button" class="chip-btn" id="resetEqBtn">
+              <span class="material-symbols-outlined">restart_alt</span>
+              Reset to Flat
+            </button>
+          </div>
+        </div>
+      </div>`;
+  }
+
   function renderSettings() {
     if (state.settingsPage === "appearance") return renderAppearance();
     if (state.settingsPage === "ui") return renderUiPage();
     if (state.settingsPage === "player") return renderPlayerPage();
+    if (state.settingsPage === "equalizer") return renderEqualizerPage();
     if (state.settingsPage === "playback") return renderPlaybackPage();
     if (state.settingsPage === "listening") return renderListeningPage();
     const p = state.prefs;
@@ -6132,6 +7374,10 @@
         </div>
         <div class="set-card">
           <h3>Sound</h3>
+          <button type="button" class="set-row set-go" id="openEqualizer">
+            <div><strong>Equalizer & Dolby Atmos</strong><p>${p.eqEnabled !== false ? (p.eqPreset ? (EQ_PRESETS[p.eqPreset] ? EQ_PRESETS[p.eqPreset].name : p.eqPreset) : "Flat") : "Bypassed"} · ${p.dolbyAtmos ? "Dolby Atmos 3D Active" : "Stereo"}</p></div>
+            <span class="material-symbols-outlined">chevron_right</span>
+          </button>
           <button type="button" class="set-row set-go" id="openPlayback">
             <div><strong>Playback</strong><p>Autoplay, fade, speed, quality.</p></div>
             <span class="material-symbols-outlined">chevron_right</span>
@@ -6149,7 +7395,11 @@
           </label>
         </div>
         <div class="set-card">
-          <h3>Offline</h3>
+          <h3>Offline Mode (Android & iOS)</h3>
+          <div class="set-row">
+            <div><strong>Offline Mode</strong><p>Force offline playback only using downloaded songs from IndexedDB cache.</p></div>
+            <button class="switch ${state.offlineMode ? "on" : ""}" id="toggleOfflineMode" type="button"><i></i></button>
+          </div>
           <div class="set-row">
             <div><strong>Downloads on disk</strong><p>Your saved songs live here and play offline — even without a connection.</p></div>
             <span>${dls.length}</span>
@@ -6404,7 +7654,9 @@
     const detailBack = viewEl.querySelector("#detailBack");
     if (detailBack) detailBack.addEventListener("click", requestBack);
     const detailPlay = viewEl.querySelector("#detailPlay");
-    if (detailPlay) detailPlay.addEventListener("click", () => {
+    if (detailPlay) {
+      detailPlay.addEventListener("pointerdown", (e) => triggerFabRipple(detailPlay, e));
+      detailPlay.addEventListener("click", () => {
       const tr = state.detailTrack;
       if (!tr) return;
       if (current() && current().id === tr.id) {
@@ -6418,6 +7670,7 @@
       }
       playFromList([tr], 0);
     });
+    }
     const detailArtist = viewEl.querySelector("#detailArtist");
     if (detailArtist) detailArtist.addEventListener("click", () => openArtistFromTrack(state.detailTrack));
     const detailLike = viewEl.querySelector("#detailLike");
@@ -6762,7 +8015,6 @@
       };
       lyScroll.addEventListener("wheel", pauseFollow, { passive: true });
       lyScroll.addEventListener("touchmove", pauseFollow, { passive: true });
-      lyScroll.addEventListener("pointerdown", pauseFollow, { passive: true });
     }
     const settingsBack = viewEl.querySelector("#settingsBack");
     if (settingsBack) settingsBack.addEventListener("click", requestBack);
@@ -6786,16 +8038,138 @@
     }
     const openPlayer = viewEl.querySelector("#openPlayer");
     if (openPlayer) openPlayer.addEventListener("click", () => { rememberScroll(); state.settingsPage = "player"; navPush(); paintNav(false); });
+    const openEqualizer = viewEl.querySelector("#openEqualizer");
+    if (openEqualizer) openEqualizer.addEventListener("click", () => { rememberScroll(); state.settingsPage = "equalizer"; navPush(); paintNav(false); });
     const openPlayback = viewEl.querySelector("#openPlayback");
     if (openPlayback) openPlayback.addEventListener("click", () => { rememberScroll(); state.settingsPage = "playback"; navPush(); paintNav(false); });
     const openListening = viewEl.querySelector("#openListening");
     if (openListening) openListening.addEventListener("click", () => { rememberScroll(); state.settingsPage = "listening"; navPush(); paintNav(false); });
+
+    // ── Equalizer & Dolby Atmos Events ───────────────────────────
+    const eqMasterToggle = viewEl.querySelector("#eqMasterToggle");
+    if (eqMasterToggle) {
+      eqMasterToggle.addEventListener("click", () => {
+        state.prefs.eqEnabled = state.prefs.eqEnabled === false ? true : false;
+        savePrefs();
+        hookSound();
+        render();
+        toast(state.prefs.eqEnabled ? "Equalizer active" : "Equalizer bypassed");
+      });
+    }
+
+    const dolbyAtmosToggle = viewEl.querySelector("#dolbyAtmosToggle");
+    if (dolbyAtmosToggle) {
+      dolbyAtmosToggle.addEventListener("click", () => {
+        state.prefs.dolbyAtmos = !state.prefs.dolbyAtmos;
+        savePrefs();
+        hookSound();
+        render();
+        toast(state.prefs.dolbyAtmos ? "Dolby Atmos 3D Audio Active ✨" : "Dolby Atmos Disabled");
+      });
+    }
+
+    const atmosDialogueToggle = viewEl.querySelector("#atmosDialogueToggle");
+    if (atmosDialogueToggle) {
+      atmosDialogueToggle.addEventListener("click", () => {
+        state.prefs.atmosDialogue = !state.prefs.atmosDialogue;
+        savePrefs();
+        hookSound();
+        render();
+      });
+    }
+
+    const atmosSurround = viewEl.querySelector("#atmosSurround");
+    if (atmosSurround) {
+      atmosSurround.addEventListener("input", () => {
+        state.prefs.atmosSurround = Number(atmosSurround.value) || 80;
+        const valEl = viewEl.querySelector("#atmosSurroundVal");
+        if (valEl) valEl.textContent = `${state.prefs.atmosSurround}%`;
+        hookSound();
+      });
+      atmosSurround.addEventListener("change", () => savePrefs());
+    }
+
+    const atmosHeight = viewEl.querySelector("#atmosHeight");
+    if (atmosHeight) {
+      atmosHeight.addEventListener("change", () => {
+        state.prefs.atmosHeight = atmosHeight.value;
+        savePrefs();
+        hookSound();
+      });
+    }
+
+    viewEl.querySelectorAll("[data-eq-preset]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const presetKey = el.dataset.eqPreset;
+        applyEqPreset(presetKey);
+        viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => {
+          b.classList.toggle("active", b.dataset.eqPreset === presetKey);
+        });
+        const bands = state.prefs.eqBands || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        EQ_FREQS.forEach((_, idx) => {
+          const val = Number(bands[idx]) || 0;
+          updateEqFaderVisual(idx, val, "eq", viewEl);
+        });
+      });
+    });
+
+    viewEl.querySelectorAll(".eq-fader-channel").forEach((channel) => {
+      const idx = Number(channel.dataset.faderIdx);
+      attachEqFaderInteraction(
+        channel,
+        "eq",
+        (val) => {
+          updateEqBand(idx, val, true);
+          viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => b.classList.remove("active"));
+        },
+        () => {
+          savePrefs();
+        }
+      );
+    });
+
+    const resetEqBtn = viewEl.querySelector("#resetEqBtn");
+    if (resetEqBtn) {
+      resetEqBtn.addEventListener("click", () => {
+        applyEqPreset("flat");
+        viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => {
+          b.classList.toggle("active", b.dataset.eqPreset === "flat");
+        });
+        EQ_FREQS.forEach((_, idx) => {
+          updateEqFaderVisual(idx, 0, "eq", viewEl);
+        });
+        toast("Equalizer reset to Flat");
+      });
+    }
+
+    const toggleOfflineMode = viewEl.querySelector("#toggleOfflineMode");
+    if (toggleOfflineMode) {
+      toggleOfflineMode.addEventListener("click", () => {
+        setOfflineMode(!state.offlineMode);
+      });
+    }
+
+    const offlineRetryBtn = viewEl.querySelector("#offlineRetryBtn");
+    if (offlineRetryBtn) {
+      offlineRetryBtn.addEventListener("click", () => {
+        retryServerConnection(offlineRetryBtn);
+      });
+    }
     viewEl.querySelectorAll("[data-set-player]").forEach((el) => {
       el.addEventListener("click", () => {
         state.prefs.playerStyle = el.dataset.setPlayer;
         savePrefs();
         applyUi();
         drawSeekWave();
+        render();
+      });
+    });
+    viewEl.querySelectorAll("[data-player-fade]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const val = Number(el.dataset.playerFade || 0);
+        state.prefs.crossfade = val;
+        savePrefs();
+        toast(val ? `Crossfade set to ${val}s` : "Crossfade turned off");
         render();
       });
     });
@@ -7262,6 +8636,7 @@
     if (!fromBack) navPush();
     else navReplace();
     paintNav(fromBack);
+    if (name === "now") restartWaveLoop();
   }
 
   function openTrackDetail(track) {
@@ -7413,17 +8788,70 @@
     state.search = null;
     $("searchInput").value = q;
     render();
+
+    if (state.offlineMode || state.isNetworkOffline) {
+      const qLower = String(q || "").trim().toLowerCase();
+      const matchedDls = (state.downloads || []).filter((t) => {
+        const text = `${t && t.title || ""} ${t && t.artist || ""} ${t && t.album || ""}`.toLowerCase();
+        return text.includes(qLower);
+      });
+      state.search = {
+        query: q,
+        youtube: [],
+        apple: matchedDls.filter((d) => d.source === "apple"),
+        deezer: matchedDls.filter((d) => d.source === "deezer"),
+        audius: matchedDls.filter((d) => d.source === "audius"),
+        radio: [],
+        artists: [],
+        playlists: [],
+        offline: matchedDls,
+      };
+      render();
+      return;
+    }
+
     try {
       state.search = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`);
+      if (!state.search.apple || !state.search.apple.length) {
+        try {
+          const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50`);
+          if (itRes && Array.isArray(itRes.results) && itRes.results.length) {
+            state.search.apple = itRes.results.map((t) => ({
+              id: `apple:${t.trackId}`,
+              source: "apple",
+              title: t.trackName || "Song",
+              artist: t.artistName || "Artist",
+              album: t.collectionName || "",
+              duration: Math.round((t.trackTimeMillis || 0) / 1000),
+              artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+              previewUrl: t.previewUrl || "",
+              playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
+            })).filter(looksLikeSong);
+          }
+        } catch (itErr) {
+          console.warn("itunes direct search fallback", itErr);
+        }
+      }
       if (state.search && Array.isArray(state.search.youtube)) {
-        state.search.youtube = state.search.youtube.filter((t) => {
-          const blob = `${t && t.title || ""} ${t && t.artist || ""}`;
-          return !/\b(gameplay|walkthrough|trailer|full movie|episode|vlog|tutorial|unboxing|reaction|#shorts?|minecraft|fortnite|roblox|podcast)\b/i.test(blob);
-        });
+        state.search.youtube = state.search.youtube.filter(looksLikeSong);
+      }
+      if (state.search && Array.isArray(state.search.apple)) {
+        state.search.apple = state.search.apple.filter(looksLikeSong);
+      }
+      if (state.search && Array.isArray(state.search.deezer)) {
+        state.search.deezer = state.search.deezer.filter(looksLikeSong);
+      }
+      if (state.search && Array.isArray(state.search.audius)) {
+        state.search.audius = state.search.audius.filter(looksLikeSong);
       }
     } catch (e) {
-      toast("Search failed. Try again.");
-      state.search = { youtube: [], audius: [], radio: [], apple: [], artists: [], playlists: [] };
+      toast("Search failed. Checking local library…");
+      const qLower = String(q || "").trim().toLowerCase();
+      const matchedDls = (state.downloads || []).filter((t) => {
+        const text = `${t && t.title || ""} ${t && t.artist || ""}`.toLowerCase();
+        return text.includes(qLower);
+      });
+      state.search = { youtube: [], audius: [], radio: [], apple: [], deezer: [], artists: [], playlists: [], offline: matchedDls };
     }
     render();
   }
@@ -8182,6 +9610,10 @@
     if (first) first.focus();
   }
   function hideModal(immediate) {
+    if (typeof window._poEqCancel === "function") {
+      try { window._poEqCancel(); } catch {}
+      window._poEqCancel = null;
+    }
     const modal = $("modal");
     if (!modal) return;
     const close = () => {
@@ -8242,14 +9674,29 @@
         e.preventDefault();
       }
     });
-    $("playBtn").onclick = togglePlay;
-    $("nextBtn").onclick = () => next(true);
-    $("prevBtn").onclick = prev;
-    $("shuffleBtn").onclick = () => { state.shuffle = !state.shuffle; renderChrome(); };
+    const playBtnEl = $("playBtn");
+    if (playBtnEl) {
+      playBtnEl.addEventListener("pointerdown", (e) => {
+        triggerFabRipple(playBtnEl, e);
+      });
+      playBtnEl.onclick = togglePlay;
+    }
+    $("nextBtn").onclick = () => {
+      hapticFeedback("light");
+      next(true);
+    };
+    $("prevBtn").onclick = () => {
+      hapticFeedback("light");
+      prev();
+    };
+    $("shuffleBtn").onclick = () => {
+      hapticFeedback("selection");
+      state.shuffle = !state.shuffle;
+      renderChrome();
+    };
     $("repeatBtn").onclick = () => {
+      hapticFeedback("selection");
       state.repeat = state.repeat === "off" ? "all" : state.repeat === "all" ? "one" : "off";
-      // No toast — the repeat icon changes (repeat vs repeat_one) and the
-      // button highlights, which is clear feedback without a popup.
       renderChrome();
     };
     $("likeBtn").onclick = () => {
@@ -8291,6 +9738,9 @@
       const d = duration();
       if (d) seekTo((Number(e.target.value) / 1000) * d);
     });
+    $("seek").addEventListener("change", () => {
+      hapticFeedback("selection");
+    });
     $("volume").addEventListener("input", (e) => setVolume(Number(e.target.value)));
     $("queueBtn").onclick = () => {
       if (state.showQueue) requestBack();
@@ -8323,6 +9773,12 @@
       setView("now");
     };
     if ($("pasteBtn")) $("pasteBtn").onclick = pasteYouTube;
+    if ($("offlineBtn")) {
+      $("offlineBtn").onclick = () => {
+        retryServerConnection($("offlineBtn"));
+      };
+    }
+    updateOfflineIndicator();
     const avatarFile = $("avatarFile");
     if (avatarFile) {
       avatarFile.addEventListener("change", () => {
@@ -8429,6 +9885,12 @@
       next(false);
     });
     audio.addEventListener("play", () => { state.playing = true; updateMediaSession(); renderChrome(); });
+    audio.addEventListener("playing", onPlaybackPlaying);
+    audio.addEventListener("waiting", onPlaybackWaiting);
+    audio.addEventListener("stalled", onPlaybackWaiting);
+    audio.addEventListener("progress", checkBufferResume);
+    audio.addEventListener("canplay", checkBufferResume);
+    audio.addEventListener("canplaythrough", checkBufferResume);
     audio.addEventListener("pause", () => {
       if (current() && current().source === "youtube") return;
       if (audio.ended) return;
@@ -8445,7 +9907,15 @@
         renderChrome();
       }
     });
-    audio.addEventListener("error", () => { if (current() && current().source !== "youtube") skipFailed("Stream failed"); });
+    audio.addEventListener("error", () => {
+      const src = audio.getAttribute("src") || audio.src;
+      if (!src || src === window.location.href) return;
+      if (audio.error && audio.error.code === 1) return; // MEDIA_ERR_ABORTED
+      const cur = current();
+      if (!cur) return;
+      if (cur.source === "youtube" || cur.videoId || npActive) return;
+      skipFailed("Stream failed");
+    });
 
     document.addEventListener("keydown", (e) => {
       const tag = document.activeElement && document.activeElement.tagName;
@@ -8540,38 +10010,47 @@
   function burstHearts(el) {
     const c = $("sparkLayer");
     if (!c) return;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const isCoarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    const p = isCoarse ? 1 : Math.min(1.5, window.devicePixelRatio || 1);
     let x = innerWidth / 2;
     let y = innerHeight - 80;
     if (el && el.getBoundingClientRect) {
       const r = el.getBoundingClientRect();
       x = r.left + r.width / 2;
-      y = r.top;
+      y = r.top + r.height / 2;
+      if (el.classList) {
+        el.classList.remove("pop");
+        void el.offsetWidth;
+        el.classList.add("pop");
+        setTimeout(() => { if (el.classList) el.classList.remove("pop"); }, 420);
+      }
     }
-    const glyphs = ["♥", "♡", "♪", "♫"];
-    for (let i = 0; i < 16; i++) {
+    const glyphs = ["♥", "♡", "♪", "♫", "♥"];
+    const count = isCoarse ? 10 : 16;
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+      const speed = (2.2 + Math.random() * 3.8) * p;
       sparkBits.push({
-        x: x * dpr,
-        y: y * dpr,
-        vx: (Math.random() - 0.5) * 7 * dpr,
-        vy: -(2.2 + Math.random() * 5) * dpr,
+        x: x * p,
+        y: y * p,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 1.8 * p,
         life: 1,
-        decay: 0.014 + Math.random() * 0.01,
+        decay: 0.016 + Math.random() * 0.012,
         g: glyphs[i % glyphs.length],
-        s: 14 + Math.random() * 16,
-        hue: i % 2 ? 340 + Math.random() * 18 : 300 + Math.random() * 40,
+        s: (16 + Math.random() * 10) * p,
+        hue: i % 2 ? 342 + Math.random() * 14 : 295 + Math.random() * 35,
       });
     }
-    // The particle loop self-suspends when it has nothing to draw — wake it
-    // so the burst is actually rendered (also works when the loop idled off).
     try { if (window.kickSparks) window.kickSparks(); } catch {}
   }
   (function startSparks() {
     const c = $("sparkLayer");
     if (!c) return;
     const ctx = c.getContext("2d");
-    if (!ctx) return; // no 2D context (headless test env) — skip the effect
-    const dpr = () => Math.min(2, window.devicePixelRatio || 1);
+    if (!ctx) return;
+    const isCoarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    const dpr = () => (isCoarse ? 1 : Math.min(1.5, window.devicePixelRatio || 1));
     function resize() {
       const p = dpr();
       c.width = innerWidth * p;
@@ -8583,26 +10062,21 @@
     window.addEventListener("resize", resize);
     const ambient = ["♪", "♫", "♡", "♩", "♬"];
     function spawnAmbient(anywhere) {
-      if (state.view !== "home" || sparkBits.length > 20) return;
+      if (sparkBits.length > 16) return;
       const p = dpr();
       sparkBits.push({
         x: Math.random() * innerWidth * p,
-        y: (anywhere ? innerHeight * (0.12 + Math.random() * 0.72) : innerHeight + 12) * p,
-        vx: (Math.random() - 0.5) * 0.55 * p,
-        vy: -(0.35 + Math.random() * 0.85) * p,
+        y: (anywhere ? innerHeight * (0.15 + Math.random() * 0.7) : innerHeight + 10) * p,
+        vx: (Math.random() - 0.5) * 0.5 * p,
+        vy: -(0.4 + Math.random() * 0.8) * p,
         life: 1,
-        decay: 0.0016 + Math.random() * 0.001,
+        decay: 0.0022 + Math.random() * 0.0014,
         g: ambient[Math.floor(Math.random() * ambient.length)],
-        s: 16 + Math.random() * 14,
+        s: (16 + Math.random() * 12) * p,
         hue: [150 + Math.random() * 45, 260 + Math.random() * 35, 335 + Math.random() * 25][Math.floor(Math.random() * 3)],
       });
     }
-    let sparkOn = true;
-    // Phones: gate the particle loop to ~12fps (same pattern as the
-    // seek-wave loop) and scale per-frame deltas by dt, so drift speed and
-    // the ambient spawn cadence are visually identical at ~1/5 the canvas
-    // work. Desktop keeps the full 60fps loop.
-    const sparkSlow = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    let sparkOn = false;
     let sparkLast = 0;
     function tick(now) {
       if (document.hidden) {
@@ -8610,22 +10084,22 @@
         return;
       }
       let dt = 1;
-      if (sparkSlow) {
-        if (now - sparkLast < 80) { requestAnimationFrame(tick); return; }
+      if (isCoarse) {
+        if (now - sparkLast < 55) { requestAnimationFrame(tick); return; }
         sparkLast = now;
-        dt = 5;
+        dt = 2.4;
       }
-      const need = sparkBits.length || state.view === "home";
-      if (!need) {
+      if (!sparkBits.length) {
         ctx.clearRect(0, 0, c.width, c.height);
         sparkOn = false;
         return;
       }
       ctx.clearRect(0, 0, c.width, c.height);
-      if (state.view === "home" && sparkBits.length < 20 && Math.random() < 0.03 * dt) spawnAmbient();
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const p = dpr();
+      ctx.font = `${Math.round(20 * p)}px "Apple Color Emoji", "Segoe UI Emoji", system-ui, sans-serif`;
+
       for (let i = sparkBits.length - 1; i >= 0; i--) {
         const b = sparkBits[i];
         b.x += b.vx * dt;
@@ -8636,12 +10110,15 @@
           continue;
         }
         ctx.globalAlpha = Math.max(0, b.life) * 0.9;
-        ctx.font = `${b.s * p}px "Segoe UI Emoji", "Apple Color Emoji", system-ui, sans-serif`;
         ctx.fillStyle = `hsl(${b.hue} 85% 72%)`;
         ctx.fillText(b.g, b.x, b.y);
       }
       ctx.globalAlpha = 1;
-      requestAnimationFrame(tick);
+      if (sparkBits.length > 0) {
+        requestAnimationFrame(tick);
+      } else {
+        sparkOn = false;
+      }
     }
     function kickSparks() {
       if (sparkOn) return;
@@ -8649,13 +10126,12 @@
       requestAnimationFrame(tick);
     }
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) kickSparks();
+      if (!document.hidden && sparkBits.length) kickSparks();
     });
     window.kickSparks = kickSparks;
-    // Seed a few notes right away so the homepage shows the animation
-    // immediately instead of waiting for random spawns.
-    for (let i = 0; i < 10; i++) spawnAmbient(true);
-    requestAnimationFrame(tick);
+    // Welcome burst of ambient notes on startup
+    for (let i = 0; i < 8; i++) spawnAmbient(true);
+    kickSparks();
   })();
 
   applyTheme();
@@ -8681,7 +10157,10 @@
     }
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") updateWakeLock();
+    if (document.visibilityState === "visible") {
+      updateWakeLock();
+      if (state.view === "now") restartWaveLoop();
+    }
     keepBackgroundPlay();
   });
   window.addEventListener("pageshow", () => keepBackgroundPlay());
