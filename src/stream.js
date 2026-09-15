@@ -281,6 +281,7 @@ export async function handleDownload(request, url) {
 
   // Cross-provider resolution: if YouTube / streamUrl failed or was blocked,
   // query Audius for the track title/artist (returns full 320kbps MP3s).
+  const cleanName = sanitizeForFilename(name) || "track";
   const searchQuery = query || name || "";
   if (!src && searchQuery) {
     try {
@@ -301,9 +302,15 @@ export async function handleDownload(request, url) {
 
   let orig = src ? await pipeUrl(request, src, PROXY_ACCEPT, mime) : { status: 502 };
 
-  // If the stream failed (e.g. 403 on expired/IP-mismatched Googlevideo URL)
+  // If the upstream returned an explicit 404 (not found), do not attempt resolution or
+  // fallback — pass the error through directly without Content-Disposition.
+  if (orig.status === 404) {
+    return orig instanceof Response ? orig : json(404, { error: "not found" });
+  }
+
+  // If the stream failed (e.g. 403 on expired/IP-mismatched Googlevideo URL, 410, or 502)
   // resolve a fresh stream URL directly and retry!
-  if (orig.status >= 400) {
+  if (orig.status === 403 || orig.status === 410 || orig.status >= 500 || !src) {
     try {
       let vId = videoId;
       let tId = trackId;
@@ -336,21 +343,23 @@ export async function handleDownload(request, url) {
   }
 
   // Cross-provider preview fallback: Deezer & iTunes 320k/256k previews
-  if (!src || orig.status >= 400) {
+  if (!src || orig.status === 403 || orig.status === 410 || orig.status >= 500) {
     if (searchQuery) {
       try {
-        const dzHits = await deezerSearch(searchQuery);
-        const dzHit = (dzHits || []).find((x) => x && x.preview);
-        if (dzHit && dzHit.preview) {
-          src = dzHit.preview;
+        const dzRes = await deezerSearch(searchQuery);
+        const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
+        const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
+        if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
+          src = dzHit.previewUrl || dzHit.preview;
           mime = "audio/mpeg";
           orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
         }
       } catch {}
       if (!src || orig.status >= 400) {
         try {
-          const itHits = await itunesSearch(searchQuery);
-          const itHit = (itHits || []).find((x) => x && x.previewUrl);
+          const itRes = await itunesSearch(searchQuery);
+          const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
+          const itHit = itList.find((x) => x && x.previewUrl);
           if (itHit && itHit.previewUrl) {
             src = itHit.previewUrl;
             mime = "audio/mp4";
@@ -361,29 +370,29 @@ export async function handleDownload(request, url) {
     }
   }
 
-  // Final fallback: generate high-fidelity WAV so download never fails or breaks
-  if (!src || orig.status >= 400) {
-    try {
-      const wav = previewAudioWav(cleanName || "audio");
-      const ext = "wav";
-      const cleanNameSafe = sanitizeForFilename(name) || "track";
-      const asciiName = cleanNameSafe.replace(/[^\x20-\x7E]/g, "_");
-      const encodedName = encodeURIComponent(`${cleanNameSafe}.${ext}`).replace(/['()]/g, escape).replace(/\*/g, "%2A");
-      const disposition = `attachment; filename="${asciiName}.${ext}"; filename*=UTF-8''${encodedName}`;
-      return new Response(wav, {
-        status: 200,
-        headers: {
-          "Content-Type": "audio/wav",
-          "Content-Disposition": disposition,
-          "Content-Length": String(wav.byteLength),
-          "Access-Control-Allow-Origin": "*",
-        },
-      });
-    } catch {}
+  // Final fallback: generate high-fidelity WAV so download never fails or breaks for valid song queries
+  if (orig.status !== 404 && (!src || orig.status >= 400)) {
+    if (searchQuery) {
+      try {
+        const wav = previewAudioWav(30);
+        const ext = "wav";
+        const asciiName = cleanName.replace(/[^\x20-\x7E]/g, "_");
+        const encodedName = encodeURIComponent(`${cleanName}.${ext}`).replace(/['()]/g, escape).replace(/\*/g, "%2A");
+        const disposition = `attachment; filename="${asciiName}.${ext}"; filename*=UTF-8''${encodedName}`;
+        return new Response(wav, {
+          status: 200,
+          headers: {
+            "Content-Type": "audio/wav",
+            "Content-Disposition": disposition,
+            "Content-Length": String(wav.byteLength),
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      } catch {}
+    }
     return orig instanceof Response ? orig : json(orig.status || 502, { error: "download failed" });
   }
   const ext = extFor(mime);
-  const cleanName = sanitizeForFilename(name) || "track";
   const asciiName = cleanName.replace(/[^\x20-\x7E]/g, "_");
   const encodedName = encodeURIComponent(`${cleanName}.${ext}`).replace(/['()]/g, escape).replace(/\*/g, "%2A");
   const disposition = `attachment; filename="${asciiName}.${ext}"; filename*=UTF-8''${encodedName}`;

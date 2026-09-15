@@ -212,7 +212,7 @@ public class MuchiDownloadPlugin extends Plugin {
             con.setConnectTimeout(25000);
             con.setReadTimeout(60000);
             con.setInstanceFollowRedirects(true);
-            con.setRequestProperty("User-Agent", "Muchi/" + (version == null || version.isEmpty() ? "1.5.5" : version));
+            con.setRequestProperty("User-Agent", "Muchi/" + (version == null || version.isEmpty() ? "1.5.6" : version));
             con.setRequestProperty("Accept", "*/*");
             code = con.getResponseCode();
             if (code == HttpURLConnection.HTTP_MOVED_PERM || 
@@ -233,7 +233,7 @@ public class MuchiDownloadPlugin extends Plugin {
             throw new IOException("update download failed (" + code + ")");
         }
         try {
-            String name = "Muchi-" + (version == null || version.isEmpty() ? "1.5.5" : version) + ".apk";
+            String name = "Muchi-" + (version == null || version.isEmpty() ? "1.5.6" : version) + ".apk";
             File cacheDir = getContext().getExternalCacheDir();
             if (cacheDir == null) cacheDir = getContext().getCacheDir();
             File updateDir = new File(cacheDir, "updates");
@@ -418,7 +418,7 @@ public class MuchiDownloadPlugin extends Plugin {
         con.setConnectTimeout(20000);
         con.setReadTimeout(30000);
         con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "Muchi/1.5.5");
+        con.setRequestProperty("User-Agent", "Muchi/1.5.6");
         con.setRequestProperty("Accept", "audio/*,*/*");
         // We need the whole file, not a video-dash stream.
         con.setRequestProperty("Range", "bytes=0-");

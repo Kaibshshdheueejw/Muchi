@@ -29,7 +29,11 @@ async function dzFetch(path, ms = 12000) {
   try {
     const r = await fetch(DEEZER + path, {
       signal: ctrl.signal,
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
     });
     if (!r.ok) throw new Error(`deezer ${r.status}`);
     return await r.json();

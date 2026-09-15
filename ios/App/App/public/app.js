@@ -122,7 +122,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.5";
+  const APP_VERSION = "1.5.6";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1466,7 +1466,7 @@
     // Web / PWA — File System Access API, then blob+<a download> fallback.
     let res = await fetch(meta.url, { credentials: "same-origin" }).catch(() => null);
     if (!res || !res.ok) {
-      // Fallback: If direct streamUrl failed (e.g. expired or 403), retry through /api/download?videoId=...
+      // Fallback 1: If direct streamUrl failed (e.g. expired or 403), retry through /api/download?videoId=...
       const fallbackUrl = (t && t.videoId)
         ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`
         : ((t && t.source === "audius" && t.trackId)
@@ -1477,6 +1477,24 @@
       if (fallbackUrl && meta.url !== fallbackUrl) {
         const retryRes = await fetch(fallbackUrl, { credentials: "same-origin" }).catch(() => null);
         if (retryRes && retryRes.ok) res = retryRes;
+      }
+      // Fallback 2: Direct preview URL if available
+      if ((!res || !res.ok) && t && t.previewUrl) {
+        try {
+          const prevRes = await fetch(t.previewUrl).catch(() => null);
+          if (prevRes && prevRes.ok) res = prevRes;
+        } catch {}
+      }
+      // Fallback 3: Query-based server download resolution
+      if (!res || !res.ok) {
+        try {
+          const qName = `${t && t.title || ""} ${t && t.artist || ""}`.trim();
+          if (qName) {
+            const qUrl = `${API_BASE}/api/download?query=${encodeURIComponent(qName)}&name=${encodeURIComponent(t && t.title || "track")}`;
+            const qRes = await fetch(qUrl, { credentials: "same-origin" }).catch(() => null);
+            if (qRes && qRes.ok) res = qRes;
+          }
+        } catch {}
       }
     }
     if (!res || !res.ok) throw new Error(`download failed with status ${res ? res.status : "network"}`);
@@ -1739,14 +1757,23 @@
 
   function updateEqBand(index, val, skipSave) {
     if (!Array.isArray(state.prefs.eqBands)) state.prefs.eqBands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    state.prefs.eqBands[index] = Number(val) || 0;
+    const num = Number(val) || 0;
+    state.prefs.eqBands[index] = num;
     state.prefs.eqPreset = "custom";
     if (!skipSave) savePrefs();
+    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
+      hookSound();
+    }
+    if (fx.ctx && fx.ctx.state === "suspended") {
+      try { fx.ctx.resume(); } catch {}
+    }
     if (fx.eqNodes && fx.eqNodes[index]) {
+      const g = state.prefs.eqEnabled !== false ? num : 0;
       try {
-        fx.eqNodes[index].gain.setTargetAtTime(Number(val) || 0, fx.ctx ? fx.ctx.currentTime : 0, 0.02);
+        fx.eqNodes[index].gain.cancelScheduledValues(0);
+        fx.eqNodes[index].gain.setValueAtTime(g, fx.ctx ? fx.ctx.currentTime : 0);
       } catch {
-        fx.eqNodes[index].gain.value = Number(val) || 0;
+        fx.eqNodes[index].gain.value = g;
       }
     }
   }
@@ -1944,11 +1971,18 @@
     state.prefs.eqBands = p.bands.slice();
     if (p.dolby !== undefined) state.prefs.dolbyAtmos = p.dolby;
     savePrefs();
+    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
+      hookSound();
+    }
+    if (fx.ctx && fx.ctx.state === "suspended") {
+      try { fx.ctx.resume(); } catch {}
+    }
     if (fx.eqNodes && fx.eqNodes.length === 10) {
       fx.eqNodes.forEach((node, i) => {
-        const val = state.prefs.eqBands[i] || 0;
+        const val = state.prefs.eqEnabled !== false ? (Number(state.prefs.eqBands[i]) || 0) : 0;
         try {
-          node.gain.setTargetAtTime(val, fx.ctx ? fx.ctx.currentTime : 0, 0.03);
+          node.gain.cancelScheduledValues(0);
+          node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
         } catch {
           node.gain.value = val;
         }
@@ -2061,7 +2095,7 @@
         } else {
           filter.type = "peaking";
           filter.frequency.value = EQ_FREQS[i];
-          filter.Q.value = 1.2;
+          filter.Q.value = 1.0;
         }
         filter.gain.value = hasEq ? (Number(bands[i]) || 0) : 0;
         eqTail.connect(filter);
@@ -2162,11 +2196,11 @@
 
       if (mode === "off") {
         const lim = fxAdd(ctx.createDynamicsCompressor());
-        lim.threshold.value = -1.5;
-        lim.knee.value = 3;
-        lim.ratio.value = 16;
-        lim.attack.value = 0.003;
-        lim.release.value = 0.08;
+        lim.threshold.value = -0.5;
+        lim.knee.value = 6;
+        lim.ratio.value = 3;
+        lim.attack.value = 0.01;
+        lim.release.value = 0.1;
         eqTail.connect(lim);
         lim.connect(ctx.destination);
         return;
@@ -2893,11 +2927,18 @@
         state.prefs.eqEnabled = next;
         savePrefs();
         poEqToggle.textContent = next ? "Enabled" : "Bypassed";
+        if (!fx.eqNodes || fx.eqNodes.length !== 10) {
+          hookSound();
+        }
+        if (fx.ctx && fx.ctx.state === "suspended") {
+          try { fx.ctx.resume(); } catch {}
+        }
         if (fx.eqNodes && fx.eqNodes.length === 10) {
           fx.eqNodes.forEach((node, i) => {
             const val = next ? (Number(state.prefs.eqBands[i]) || 0) : 0;
             try {
-              node.gain.setTargetAtTime(val, fx.ctx ? fx.ctx.currentTime : 0, 0.02);
+              node.gain.cancelScheduledValues(0);
+              node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
             } catch {
               node.gain.value = val;
             }
@@ -3105,6 +3146,43 @@
   // are read or played. Every track carries a playQuery that resolves
   // through MUCHI's existing playback pipeline for the FULL track.
   const DZ_BASE = "https://api.deezer.com";
+  function dzJsonp(path, params = {}, timeoutMs = 9000) {
+    return new Promise((resolve, reject) => {
+      const cbName = `__dz_cb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      let urlStr = path.startsWith("http") ? path : `${DZ_BASE}${path}`;
+      const sep = urlStr.includes("?") ? "&" : "?";
+      const sp = new URLSearchParams(params);
+      sp.set("output", "jsonp");
+      sp.set("callback", cbName);
+      urlStr = `${urlStr}${sep}${sp.toString()}`;
+
+      const script = document.createElement("script");
+      script.src = urlStr;
+      script.async = true;
+
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("deezer jsonp timeout"));
+      }, timeoutMs);
+
+      function cleanup() {
+        clearTimeout(timer);
+        try { delete window[cbName]; } catch {}
+        if (script.parentNode) script.parentNode.removeChild(script);
+      }
+
+      window[cbName] = (data) => {
+        cleanup();
+        resolve(data);
+      };
+      script.onerror = () => {
+        cleanup();
+        reject(new Error("deezer jsonp error"));
+      };
+      (document.head || document.documentElement).appendChild(script);
+    });
+  }
+
   async function dzFetch(path, ms = 9000) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), ms);
@@ -3112,6 +3190,8 @@
       const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
       if (!r.ok) throw new Error("deezer " + r.status);
       return await r.json();
+    } catch {
+      return await dzJsonp(path, {}, ms);
     } finally {
       clearTimeout(t);
     }
@@ -3533,6 +3613,10 @@
     }
     const hit = (Array.isArray(rows) ? rows : []).find((x) => x && x.videoId);
     if (!hit) {
+      if (t.previewUrl) {
+        t.streamUrl = t.previewUrl;
+        return t;
+      }
       throw new Error("No playable version found");
     }
     t.videoId = hit.videoId;
@@ -6523,6 +6607,16 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.5.6",
+      title: "Muchi 1.5.6",
+      notes: [
+        "Fixed Deezer search song results and added direct client-side JSONP catalog fallback.",
+        "Resolved download 403 stream errors with cross-provider playback stream resolution and high-fidelity fallback.",
+        "Stabilized Android build target to stable Android 15 (API 35) across CI/CD workflows and Gradle configs.",
+        "Enhanced equalizer audio engine and media controls synchronization.",
+      ],
+    },
+    {
       ver: "1.5.5",
       title: "Muchi 1.5.5",
       notes: [
@@ -7681,13 +7775,27 @@
         else if (fromSearch && (state.filter === "songs" || state.filter === "all")) list = [].concat(
           (state.search && state.search.youtube) || [],
           (state.search && state.search.apple) || [],
+          (state.search && state.search.deezer) || [],
           (state.search && state.search.audius) || [],
           (state.search && state.search.radio) || [],
           state.recents
         );
+        else if (fromSearch && state.filter === "deezer") list = [].concat(
+          (state.search && state.search.deezer) || []
+        );
+        else if (fromSearch && state.filter === "itunes") list = [].concat(
+          (state.search && state.search.apple) || []
+        );
+        else if (fromSearch && state.filter === "youtube") list = [].concat(
+          (state.search && state.search.youtube) || []
+        );
+        else if (fromSearch && state.filter === "audius") list = [].concat(
+          (state.search && state.search.audius) || []
+        );
         else if (fromSearch) list = [].concat(
           (state.search && state.search.youtube) || [],
           (state.search && state.search.apple) || [],
+          (state.search && state.search.deezer) || [],
           (state.search && state.search.audius) || [],
           (state.search && state.search.radio) || [],
           state.recents
@@ -8807,6 +8915,26 @@
           }
         } catch (itErr) {
           console.warn("itunes direct search fallback", itErr);
+        }
+      }
+      if (!state.search.deezer || !state.search.deezer.length) {
+        try {
+          const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+          if (dzRes && Array.isArray(dzRes.data) && dzRes.data.length) {
+            state.search.deezer = dzRes.data.map((t) => ({
+              id: `deezer:${t.id}`,
+              source: "deezer",
+              title: t.title || "Song",
+              artist: (t.artist && t.artist.name) || "Artist",
+              album: (t.album && t.album.title) || "",
+              duration: Number(t.duration || 0),
+              artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || "/cover-default.jpg",
+              previewUrl: t.preview || "",
+              playQuery: `${t.title || ""} ${(t.artist && t.artist.name) || ""} official audio`.trim(),
+            })).filter(looksLikeSong);
+          }
+        } catch (dzErr) {
+          console.warn("deezer direct search fallback", dzErr);
         }
       }
       if (state.search && Array.isArray(state.search.youtube)) {

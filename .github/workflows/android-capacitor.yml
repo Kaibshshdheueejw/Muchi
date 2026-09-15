@@ -36,7 +36,7 @@ jobs:
       - name: Accept Android licenses & verify SDK
         run: |
           yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platforms;android-34" "build-tools;34.0.0" || true
 
       - name: Grant execute permission for gradlew
         run: chmod +x android/gradlew
@@ -70,13 +70,6 @@ jobs:
             echo "::warning::MUCHI_KEYSTORE_B64 not set — artifact will be signed with the DEBUG key (not for Play)."
             echo "signed=no" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Clean Gradle cache and refresh dependencies
-        working-directory: android
-        run: |
-          chmod +x ./gradlew
-          ./gradlew clean --refresh-dependencies
-          rm -rf .gradle build app/build
 
       - name: Build release APK + AAB
         working-directory: android
