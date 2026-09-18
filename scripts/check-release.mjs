@@ -55,7 +55,7 @@ function latestTagVersionCode() {
   // release", which is fine).
   let tags = [];
   try {
-    tags = execFileSync("git", ["tag", "--list", "v*"], { cwd: ROOT, encoding: "utf8" })
+    tags = execFileSync("git", ["tag", "--list", "v*"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
       .split("\n").map((s) => s.trim()).filter(Boolean);
   } catch { return null; }
   if (!tags.length) return null;

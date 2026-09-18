@@ -448,18 +448,29 @@ export function mapAudiusTrack(t) {
   };
 }
 
-export async function itunesSearch(query) {
+export async function itunesSearch(query, { includeExtra = true } = {}) {
   const q = encodeURIComponent(String(query || "").slice(0, 80));
   if (!q) return { songs: [], artists: [], playlists: [] };
-  const [songsR, artistsR, albumsR] = await Promise.allSettled([
+
+  const calls = [
     fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50`, {}, 9000),
-    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=20`, {}, 8000),
-    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25`, {}, 8000),
-  ]);
+  ];
+  if (includeExtra) {
+    calls.push(fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=20`, {}, 8000));
+    calls.push(fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25`, {}, 8000));
+  }
+  const settled = await Promise.allSettled(calls);
+  const songsR = settled[0];
+  const artistsR = includeExtra ? settled[1] : null;
+  const albumsR = includeExtra ? settled[2] : null;
+
   const songs = [];
   const artists = [];
   const playlists = [];
-  if (songsR.status === "fulfilled") {
+  const seenArt = new Set();
+  const seenAlb = new Set();
+
+  if (songsR && songsR.status === "fulfilled") {
     for (const t of (songsR.value && songsR.value.results) || []) {
       if (!t.trackId) continue;
       songs.push({
@@ -473,6 +484,29 @@ export async function itunesSearch(query) {
         previewUrl: t.previewUrl || "",
         playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
       });
+      if (t.artistName && !seenArt.has(t.artistName.toLowerCase())) {
+        seenArt.add(t.artistName.toLowerCase());
+        artists.push({
+          id: `artist:apple:${t.artistId || t.artistName}`,
+          kind: "artist",
+          name: t.artistName,
+          artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+          source: "apple",
+          query: t.artistName,
+        });
+      }
+      if (t.collectionId && t.collectionName && !seenAlb.has(String(t.collectionId))) {
+        seenAlb.add(String(t.collectionId));
+        playlists.push({
+          id: `album:${t.collectionId}`,
+          kind: "playlist",
+          title: t.collectionName,
+          artist: t.artistName || "Apple Music",
+          artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+          source: "apple",
+          query: `${t.collectionName} ${t.artistName || ""}`.trim(),
+        });
+      }
     }
   }
   // Secondary fallback if specific entity search returned empty
@@ -495,31 +529,39 @@ export async function itunesSearch(query) {
       }
     } catch {}
   }
-  if (artistsR.status === "fulfilled") {
+  if (artistsR && artistsR.status === "fulfilled") {
     for (const a of (artistsR.value && artistsR.value.results) || []) {
       if (!a.artistName) continue;
-      artists.push({
-        id: `artist:apple:${a.artistId || a.artistName}`,
-        kind: "artist",
-        name: a.artistName,
-        artwork: a.artworkUrl100 || "/cover-default.jpg",
-        source: "apple",
-        query: a.artistName,
-      });
+      const k = a.artistName.toLowerCase();
+      if (!seenArt.has(k)) {
+        seenArt.add(k);
+        artists.push({
+          id: `artist:apple:${a.artistId || a.artistName}`,
+          kind: "artist",
+          name: a.artistName,
+          artwork: a.artworkUrl100 || "/cover-default.jpg",
+          source: "apple",
+          query: a.artistName,
+        });
+      }
     }
   }
-  if (albumsR.status === "fulfilled") {
+  if (albumsR && albumsR.status === "fulfilled") {
     for (const al of (albumsR.value && albumsR.value.results) || []) {
       if (!al.collectionId) continue;
-      playlists.push({
-        id: `album:${al.collectionId}`,
-        kind: "playlist",
-        title: al.collectionName || "Album",
-        artist: al.artistName || "Apple Music",
-        artwork: String(al.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-        source: "apple",
-        query: `${al.collectionName || ""} ${al.artistName || ""}`.trim(),
-      });
+      const k = String(al.collectionId);
+      if (!seenAlb.has(k)) {
+        seenAlb.add(k);
+        playlists.push({
+          id: `album:${al.collectionId}`,
+          kind: "playlist",
+          title: al.collectionName || "Album",
+          artist: al.artistName || "Apple Music",
+          artwork: String(al.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+          source: "apple",
+          query: `${al.collectionName || ""} ${al.artistName || ""}`.trim(),
+        });
+      }
     }
   }
   return { songs, artists, playlists };

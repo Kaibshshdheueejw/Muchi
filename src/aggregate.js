@@ -331,72 +331,136 @@ export async function handleShelf(env, url) {
 }
 
 export async function handleSearch(env, url) {
-  const q = url.searchParams.get("q") || url.searchParams.get("query") || "";
-  if (!q.trim()) return json(400, { error: "Missing query" });
+  const q = (url.searchParams.get("q") || url.searchParams.get("query") || "").trim();
+  if (!q) return json(400, { error: "Missing query" });
   const gl = regionCode(url.searchParams.get("gl"));
   const source = (url.searchParams.get("source") || "all").toLowerCase();
-  const tasks = [];
-  if (source === "all" || source === "youtube") tasks.push(["youtube", searchYouTube(q, gl)]);
-  if (source === "all" || source === "audius") tasks.push(["audius", audiusSearch(q)]);
-  if (source === "all" || source === "radio") tasks.push(["radio", radioSearch(q, 16, url.searchParams.get("quality"))]);
-  if (source === "all" || source === "apple" || source === "itunes") tasks.push(["apple", itunesSearch(q)]);
-  if (source === "all" || source === "deezer") tasks.push(["deezer", deezerSearch(q)]);
-  if (source === "all" || source === "audius") tasks.push(["audiusUsers", audiusUserSearch(q)]);
-  const settled = await Promise.allSettled(tasks.map((t) => t[1]));
-  const result = { query: q, youtube: [], audius: [], radio: [], apple: [], deezer: [], artists: [], playlists: [] };
-  settled.forEach((s, i) => {
-    const key = tasks[i][0];
-    result[key] = s.status === "fulfilled" ? s.value : [];
-  });
-  const yt = result.youtube || [];
-  const apple = result.apple && !Array.isArray(result.apple) ? result.apple : { songs: [], artists: [], playlists: [] };
-  if (Array.isArray(result.apple)) result.apple = [];
-  else result.apple = apple.songs || [];
-  const dz = result.deezer && !Array.isArray(result.deezer) ? result.deezer : { songs: [], artists: [], playlists: [] };
-  if (Array.isArray(result.deezer)) result.deezer = [];
-  else result.deezer = dz.songs || [];
-  const artists = [];
-  const playlists = [];
-  const seenA = new Set();
-  const seenP = new Set();
-  const pushA = (a) => {
-    const k = String((a && a.name) || "").toLowerCase();
-    if (!k || seenA.has(k)) return;
-    seenA.add(k);
-    artists.push(a);
-  };
-  const pushP = (p) => {
-    const k = String((p && (p.playlistId || p.id || p.title)) || "").toLowerCase();
-    if (!k || seenP.has(k)) return;
-    seenP.add(k);
-    playlists.push(p);
-  };
-  (apple.artists || []).forEach(pushA);
-  (apple.playlists || []).forEach(pushP);
-  (dz.artists || []).forEach(pushA);
-  (dz.playlists || []).forEach(pushP);
-  (yt.artists || []).forEach(pushA);
-  (yt.playlists || []).forEach(pushP);
-  for (const u of result.audiusUsers || []) {
-    pushA({
-      id: `artist:audius:${u.id}`,
-      kind: "artist",
-      name: u.name,
-      artwork: u.artwork,
-      source: "audius",
-      query: u.name,
+
+  const cacheKey = `search:${source}:${q.toLowerCase()}:${gl}`;
+  const data = await cached(cacheKey, 60000, async () => {
+    const result = { query: q, youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [] };
+
+    if (source === "apple" || source === "itunes") {
+      const ap = await itunesSearch(q, { includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      const songs = strictSongs(ap.songs || []);
+      result.apple = songs;
+      result.itunes = songs;
+      result.artists = (ap.artists || []).slice(0, 20);
+      result.playlists = (ap.playlists || []).slice(0, 20);
+      return result;
+    }
+
+    if (source === "deezer") {
+      const dz = await deezerSearch(q, { limit: 50, includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      result.deezer = strictSongs(dz.songs || []);
+      result.artists = (dz.artists || []).slice(0, 20);
+      result.playlists = (dz.playlists || []).slice(0, 20);
+      return result;
+    }
+
+    if (source === "youtube") {
+      const yt = await searchYouTube(q, gl).catch(() => []);
+      result.youtube = strictSongs(Array.isArray(yt) ? yt : []);
+      result.artists = (yt.artists || []).slice(0, 20);
+      result.playlists = (yt.playlists || []).slice(0, 20);
+      return result;
+    }
+
+    if (source === "audius") {
+      const [aud, u] = await Promise.allSettled([audiusSearch(q), audiusUserSearch(q)]);
+      result.audius = strictSongs(aud.status === "fulfilled" && Array.isArray(aud.value) ? aud.value : []);
+      const artists = [];
+      if (u.status === "fulfilled" && Array.isArray(u.value)) {
+        for (const usr of u.value) {
+          artists.push({
+            id: `artist:audius:${usr.id}`,
+            kind: "artist",
+            name: usr.name,
+            artwork: usr.artwork,
+            source: "audius",
+            query: usr.name,
+          });
+        }
+      }
+      result.artists = artists.slice(0, 20);
+      return result;
+    }
+
+    if (source === "radio") {
+      const rad = await radioSearch(q, 16, url.searchParams.get("quality")).catch(() => []);
+      result.radio = Array.isArray(rad) ? rad : [];
+      return result;
+    }
+
+    // source === "all": Run all providers concurrently in parallel
+    const allTasks = [
+      ["youtube", searchYouTube(q, gl)],
+      ["apple", itunesSearch(q, { includeExtra: true })],
+      ["deezer", deezerSearch(q, { limit: 50, includeExtra: true })],
+      ["audius", audiusSearch(q)],
+      ["radio", radioSearch(q, 16, url.searchParams.get("quality"))],
+      ["audiusUsers", audiusUserSearch(q)],
+    ];
+    const settled = await Promise.allSettled(allTasks.map((t) => t[1]));
+    settled.forEach((s, i) => {
+      const key = allTasks[i][0];
+      result[key] = s.status === "fulfilled" ? s.value : [];
     });
-  }
-  delete result.audiusUsers;
-  result.artists = artists.slice(0, 20);
-  result.playlists = playlists.slice(0, 20);
-  // STRICT "songs only": search shows single songs — no playlist videos,
-  // Topic re-uploads, 2-hour mixes or non-music.
-  if (Array.isArray(yt)) result.youtube = strictSongs(yt);
-  result.apple = strictSongs(result.apple);
-  result.deezer = strictSongs(result.deezer);
-  result.audius = strictSongs(result.audius || []);
-  return json(200, result);
+
+    const yt = result.youtube || [];
+    const apple = result.apple && !Array.isArray(result.apple) ? result.apple : { songs: [], artists: [], playlists: [] };
+    result.apple = Array.isArray(result.apple) ? result.apple : (apple.songs || []);
+    const dz = result.deezer && !Array.isArray(result.deezer) ? result.deezer : { songs: [], artists: [], playlists: [] };
+    result.deezer = Array.isArray(result.deezer) ? result.deezer : (dz.songs || []);
+
+    const artists = [];
+    const playlists = [];
+    const seenA = new Set();
+    const seenP = new Set();
+    const pushA = (a) => {
+      const k = String((a && a.name) || "").toLowerCase();
+      if (!k || seenA.has(k)) return;
+      seenA.add(k);
+      artists.push(a);
+    };
+    const pushP = (p) => {
+      const k = String((p && (p.playlistId || p.id || p.title)) || "").toLowerCase();
+      if (!k || seenP.has(k)) return;
+      seenP.add(k);
+      playlists.push(p);
+    };
+    (apple.artists || []).forEach(pushA);
+    (apple.playlists || []).forEach(pushP);
+    (dz.artists || []).forEach(pushA);
+    (dz.playlists || []).forEach(pushP);
+    (yt.artists || []).forEach(pushA);
+    (yt.playlists || []).forEach(pushP);
+    for (const u of result.audiusUsers || []) {
+      pushA({
+        id: `artist:audius:${u.id}`,
+        kind: "artist",
+        name: u.name,
+        artwork: u.artwork,
+        source: "audius",
+        query: u.name,
+      });
+    }
+    delete result.audiusUsers;
+    result.artists = artists.slice(0, 20);
+    result.playlists = playlists.slice(0, 20);
+    // STRICT "songs only": search shows single songs — no playlist videos,
+    // Topic re-uploads, 2-hour mixes or non-music.
+    if (Array.isArray(yt)) result.youtube = strictSongs(yt);
+    result.apple = strictSongs(result.apple);
+    result.itunes = result.apple;
+    result.deezer = strictSongs(result.deezer);
+    result.audius = strictSongs(result.audius || []);
+    return result;
+  });
+
+  const res = json(200, data);
+  res.headers.set("Cache-Control", "public, max-age=60, s-maxage=120, stale-while-revalidate=300");
+  return res;
 }
 
 export async function handleYoutubeSearch(url) {

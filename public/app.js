@@ -88,13 +88,6 @@
       ui: "glass",
       playerStyle: "pill",
       iconSize: "default",
-      eqEnabled: true,
-      eqPreset: "dolby_atmos",
-      eqBands: [4, 3, 2, 0, -1, 1, 3, 4, 5, 4],
-      dolbyAtmos: true,
-      atmosSurround: 80,
-      atmosHeight: "high",
-      atmosDialogue: true,
     }, load("aura.prefs", {})),
     offlineMode: Boolean(load("aura.offlineMode", false)),
     isNetworkOffline: typeof navigator !== "undefined" ? !navigator.onLine : false,
@@ -111,6 +104,15 @@
     settingsPage: null,
     catalogPlaylist: null,
   };
+  // Clean up removed equalizer/atmos preferences from state
+  delete state.prefs.eqEnabled;
+  delete state.prefs.eqPreset;
+  delete state.prefs.eqBands;
+  delete state.prefs.dolbyAtmos;
+  delete state.prefs.atmosSurround;
+  delete state.prefs.atmosHeight;
+  delete state.prefs.atmosDialogue;
+
   // One-time migration: the old theme values "light"/"dark"/"system" were the
   // appearance mode itself — move them into the new `appearance` preference
   // so existing users keep exactly what they had. Only fires when the user
@@ -122,7 +124,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.6";
+  const APP_VERSION = "1.5.7";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1741,43 +1743,6 @@
     return `<div class="set-card dl-card"><h3>Downloads</h3>${rows}</div>`;
   }
 
-  const EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
-  const EQ_LABELS = ["32Hz", "64Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz"];
-  const EQ_PRESETS = {
-    dolby_atmos: { name: "Dolby Atmos Spatial", bands: [4, 3, 2, 0, -1, 1, 3, 4, 5, 4], dolby: true },
-    atmos_cinema: { name: "Dolby Atmos Cinema", bands: [5, 4, 2, 0, -1, 2, 3, 4, 4, 3], dolby: true },
-    atmos_music: { name: "Dolby Atmos Music", bands: [3, 2, 1, 0, 0, 1, 2, 3, 4, 4], dolby: true },
-    bass_boost: { name: "Bass Boost", bands: [7, 6, 4, 2, 0, 0, 0, 0, 0, -1], dolby: false },
-    vocal_clarity: { name: "Vocal Clarity", bands: [-2, -1, 0, 2, 4, 5, 4, 2, 0, 0], dolby: false },
-    rock: { name: "Rock", bands: [4, 3, 2, 0, -1, -1, 1, 3, 4, 4], dolby: false },
-    electronic: { name: "Electronic", bands: [5, 4, 1, 0, -2, 2, 1, 3, 4, 4], dolby: false },
-    flat: { name: "Flat", bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dolby: false },
-    custom: { name: "Custom", bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dolby: true },
-  };
-
-  function updateEqBand(index, val, skipSave) {
-    if (!Array.isArray(state.prefs.eqBands)) state.prefs.eqBands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    const num = Number(val) || 0;
-    state.prefs.eqBands[index] = num;
-    state.prefs.eqPreset = "custom";
-    if (!skipSave) savePrefs();
-    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-      hookSound();
-    }
-    if (fx.ctx && fx.ctx.state === "suspended") {
-      try { fx.ctx.resume(); } catch {}
-    }
-    if (fx.eqNodes && fx.eqNodes[index]) {
-      const g = state.prefs.eqEnabled !== false ? num : 0;
-      try {
-        fx.eqNodes[index].gain.cancelScheduledValues(0);
-        fx.eqNodes[index].gain.setValueAtTime(g, fx.ctx ? fx.ctx.currentTime : 0);
-      } catch {
-        fx.eqNodes[index].gain.value = g;
-      }
-    }
-  }
-
   function triggerFabRipple(button, e) {
     if (!button) return;
     try {
@@ -1799,206 +1764,13 @@
     } catch {}
   }
 
-  function updateEqFaderVisual(idx, gain, idPrefix = "eq", container = document) {
-    const g = Math.max(-12, Math.min(12, Number(gain) || 0));
-    const sign = g > 0 ? "+" : "";
-    const root = container && container.querySelector ? container : document;
-
-    const valEl = root.querySelector(`#${idPrefix}Val_${idx}, #${idPrefix}GainVal_${idx}`);
-    if (valEl) valEl.textContent = `${sign}${g.toFixed(1)}`;
-
-    const channel = root.querySelector(`#${idPrefix}Channel_${idx}`);
-    if (channel) channel.setAttribute("aria-valuenow", g);
-
-    const pct = Math.max(0, Math.min(100, ((g - (-12)) / 24) * 100));
-    const knob = root.querySelector(`#${idPrefix}Knob_${idx}`);
-    if (knob) knob.style.bottom = `calc(${pct}% - 14px)`;
-
-    const fill = root.querySelector(`#${idPrefix}Fill_${idx}`);
-    if (fill) {
-      const isPos = g >= 0;
-      fill.style.bottom = isPos ? "50%" : `${pct}%`;
-      fill.style.height = isPos ? `${pct - 50}%` : `${50 - pct}%`;
-      fill.className = `eq-slot-fill ${isPos ? "eq-fill-pos" : "eq-fill-neg"}`;
-    }
-
-    const input = root.querySelector(`[data-${idPrefix === "po" ? "po" : "eq"}-band="${idx}"]`);
-    if (input) input.value = g;
-  }
-
-  function renderEqColumnHTML(i, gain, idPrefix = "eq") {
-    const g = Math.max(-12, Math.min(12, Number(gain) || 0));
-    const sign = g > 0 ? "+" : "";
-    const pct = Math.max(0, Math.min(100, ((g - (-12)) / 24) * 100));
-    const isPos = g >= 0;
-    const fillBottom = isPos ? "50%" : `${pct}%`;
-    const fillHeight = isPos ? `${pct - 50}%` : `${50 - pct}%`;
-    const fillClass = isPos ? "eq-fill-pos" : "eq-fill-neg";
-
-    return `
-      <div class="eq-col" data-eq-col="${i}">
-        <span class="eq-gain" id="${idPrefix}Val_${i}">${sign}${g.toFixed(1)}</span>
-        <div class="eq-fader-channel" id="${idPrefix}Channel_${i}" data-fader-idx="${i}" data-fader-prefix="${idPrefix}" role="slider" aria-label="${EQ_LABELS[i]} gain" aria-valuemin="-12" aria-valuemax="12" aria-valuenow="${g}" tabindex="0">
-          <div class="eq-scale-ticks" aria-hidden="true">
-            <span class="eq-tick tick-top" title="+12 dB"></span>
-            <span class="eq-tick tick-mid-top" title="+6 dB"></span>
-            <span class="eq-tick tick-center" title="0 dB"></span>
-            <span class="eq-tick tick-mid-bot" title="-6 dB"></span>
-            <span class="eq-tick tick-bot" title="-12 dB"></span>
-          </div>
-          <div class="eq-slot" aria-hidden="true">
-            <div class="eq-slot-centerline"></div>
-            <div class="eq-slot-fill ${fillClass}" id="${idPrefix}Fill_${i}" style="bottom:${fillBottom};height:${fillHeight};"></div>
-            <div class="eq-fader-knob" id="${idPrefix}Knob_${i}" style="bottom:calc(${pct}% - 14px);">
-              <span class="knob-ridge"></span>
-              <span class="knob-ridge knob-center"></span>
-              <span class="knob-ridge"></span>
-            </div>
-          </div>
-          <input type="range" orient="vertical" class="eq-slider-vert" data-${idPrefix === "po" ? "po" : "eq"}-band="${i}" min="-12" max="12" step="0.5" value="${g}" style="display:none;" aria-hidden="true" tabindex="-1" />
-        </div>
-        <span class="eq-freq">${EQ_LABELS[i]}</span>
-      </div>
-    `;
-  }
-
-  function attachEqFaderInteraction(channel, idPrefix, onValueChange, onCommit) {
-    if (!channel) return;
-    const idx = Number(channel.dataset.faderIdx);
-    channel.style.touchAction = "none";
-    const col = channel.closest(".eq-col");
-    if (col) col.style.touchAction = "none";
-
-    function calcGain(e) {
-      const rect = channel.getBoundingClientRect();
-      if (rect.height <= 0) return 0;
-      // Top of track is +12 dB (ratio 1), bottom is -12 dB (ratio 0)
-      const ratio = 1 - (e.clientY - rect.top) / rect.height;
-      const clamped = Math.max(0, Math.min(1, ratio));
-      const raw = -12 + clamped * 24;
-      const stepped = Math.round(raw * 2) / 2; // 0.5 dB step
-      return Math.max(-12, Math.min(12, stepped));
-    }
-
-    let isDragging = false;
-
-    function onPointerDown(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      isDragging = true;
-      channel.classList.add("dragging");
-      try { channel.setPointerCapture(e.pointerId); } catch {}
-      const val = calcGain(e);
-      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(val);
-    }
-
-    function onPointerMove(e) {
-      if (!isDragging) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const val = calcGain(e);
-      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(val);
-    }
-
-    function onPointerUp(e) {
-      if (!isDragging) return;
-      isDragging = false;
-      channel.classList.remove("dragging");
-      try { channel.releasePointerCapture(e.pointerId); } catch {}
-      const val = calcGain(e);
-      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(val);
-      if (onCommit) onCommit(val);
-    }
-
-    channel.addEventListener("pointerdown", onPointerDown);
-    channel.addEventListener("pointermove", onPointerMove);
-    channel.addEventListener("pointerup", onPointerUp);
-    channel.addEventListener("pointercancel", onPointerUp);
-
-    if (col) {
-      col.addEventListener("pointerdown", (e) => {
-        if (e.target === channel || channel.contains(e.target)) return;
-        onPointerDown(e);
-      });
-    }
-
-    channel.addEventListener("keydown", (e) => {
-      let cur = Number(channel.getAttribute("aria-valuenow")) || 0;
-      let next = cur;
-      if (e.key === "ArrowUp" || e.key === "ArrowRight") next = Math.min(12, cur + 0.5);
-      else if (e.key === "ArrowDown" || e.key === "ArrowLeft") next = Math.max(-12, cur - 0.5);
-      else if (e.key === "PageUp") next = Math.min(12, cur + 3);
-      else if (e.key === "PageDown") next = Math.max(-12, cur - 3);
-      else if (e.key === "Home") next = 12;
-      else if (e.key === "End") next = -12;
-      else return;
-
-      e.preventDefault();
-      updateEqFaderVisual(idx, next, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(next);
-      if (onCommit) onCommit(next);
-    });
-
-    channel.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const delta = e.deltaY < 0 ? 0.5 : -0.5;
-      let cur = Number(channel.getAttribute("aria-valuenow")) || 0;
-      const next = Math.max(-12, Math.min(12, cur + delta));
-      updateEqFaderVisual(idx, next, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(next);
-      if (onCommit) onCommit(next);
-    }, { passive: false });
-  }
-
-  function attachVerticalSliderInteraction(target, onValueChange, onCommit) {
-    if (!target) return;
-    const channel = target.classList && target.classList.contains("eq-fader-channel")
-      ? target
-      : (target.closest && target.closest(".eq-fader-channel")) || (target.parentElement ? target.parentElement.querySelector(".eq-fader-channel") : null);
-    if (channel) {
-      attachEqFaderInteraction(channel, channel.dataset.faderPrefix || "eq", onValueChange, onCommit);
-    }
-  }
-
-  function applyEqPreset(key) {
-    const p = EQ_PRESETS[key];
-    if (!p) return;
-    state.prefs.eqPreset = key;
-    state.prefs.eqBands = p.bands.slice();
-    if (p.dolby !== undefined) state.prefs.dolbyAtmos = p.dolby;
-    savePrefs();
-    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-      hookSound();
-    }
-    if (fx.ctx && fx.ctx.state === "suspended") {
-      try { fx.ctx.resume(); } catch {}
-    }
-    if (fx.eqNodes && fx.eqNodes.length === 10) {
-      fx.eqNodes.forEach((node, i) => {
-        const val = state.prefs.eqEnabled !== false ? (Number(state.prefs.eqBands[i]) || 0) : 0;
-        try {
-          node.gain.cancelScheduledValues(0);
-          node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
-        } catch {
-          node.gain.value = val;
-        }
-      });
-    }
-    hookSound();
-  }
-
-  const fx = { ctx: null, src: null, nodes: [], eqNodes: [] };
+  const fx = { ctx: null, src: null, nodes: [] };
   function clearFx() {
     (fx.nodes || []).forEach((n) => {
       try { if (n.stop) n.stop(); } catch {}
       try { n.disconnect(); } catch {}
     });
     fx.nodes = [];
-    fx.eqNodes = [];
   }
   function fxAdd(node) {
     fx.nodes.push(node);
@@ -2056,10 +1828,8 @@
 
   function hookSound() {
     const mode = spatialMode();
-    const hasDolby = Boolean(state.prefs.dolbyAtmos);
-    const hasEq = state.prefs.eqEnabled !== false;
     try {
-      if (mode === "off" && !hasDolby && !hasEq && !fx.src) return;
+      if (mode === "off" && !fx.src) return;
       if (!fx.ctx) {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
@@ -2069,7 +1839,7 @@
       fx.src.disconnect();
       clearFx();
       const ctx = fx.ctx;
-      if (mode === "off" && !hasDolby && !hasEq) {
+      if (mode === "off") {
         fx.src.connect(ctx.destination);
         return;
       }
@@ -2077,134 +1847,6 @@
       const hpf = fxAdd(ctx.createBiquadFilter());
       hpf.type = "highpass"; hpf.frequency.value = 24; hpf.Q.value = 0.7;
       fx.src.connect(hpf);
-
-      // ── 10-Band Studio Graphic Equalizer ────────────────────────────
-      let eqTail = hpf;
-      fx.eqNodes = [];
-      const bands = Array.isArray(state.prefs.eqBands) && state.prefs.eqBands.length === 10
-        ? state.prefs.eqBands
-        : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-      for (let i = 0; i < EQ_FREQS.length; i++) {
-        const filter = fxAdd(ctx.createBiquadFilter());
-        if (i === 0) {
-          filter.type = "lowshelf";
-          filter.frequency.value = EQ_FREQS[i];
-        } else if (i === EQ_FREQS.length - 1) {
-          filter.type = "highshelf";
-          filter.frequency.value = EQ_FREQS[i];
-        } else {
-          filter.type = "peaking";
-          filter.frequency.value = EQ_FREQS[i];
-          filter.Q.value = 1.0;
-        }
-        filter.gain.value = hasEq ? (Number(bands[i]) || 0) : 0;
-        eqTail.connect(filter);
-        eqTail = filter;
-        fx.eqNodes.push(filter);
-      }
-
-      // Connect eqTail to Analyser for real-time visualizer spectrum
-      if (!fx.analyser && ctx.createAnalyser) {
-        fx.analyser = ctx.createAnalyser();
-        fx.analyser.fftSize = 128;
-        fx.analyser.smoothingTimeConstant = 0.8;
-      }
-      if (fx.analyser) {
-        try { eqTail.connect(fx.analyser); } catch {}
-      }
-
-      // ── Dolby Atmos 3D Binaural Spatial Audio Virtualizer ───────────
-      if (hasDolby) {
-        const lis = ctx.listener;
-        setAudioVec(lis, "positionX", "positionY", "positionZ", 0, 0, 0, lis.setPosition);
-        try {
-          if (lis.forwardX) {
-            lis.forwardX.value = 0; lis.forwardY.value = 0; lis.forwardZ.value = -1;
-            lis.upX.value = 0; lis.upY.value = 1; lis.upZ.value = 0;
-          } else if (lis.setOrientation) lis.setOrientation(0, 0, -1, 0, 1, 0);
-        } catch {}
-
-        const atmosSplit = fxAdd(ctx.createChannelSplitter(2));
-        eqTail.connect(atmosSplit);
-
-        const spread = Math.max(0.2, Math.min(1.5, (Number(state.prefs.atmosSurround) || 80) / 75));
-        const leftMain = makeHrtfPanner(ctx, -34 * spread, 1.25);
-        const rightMain = makeHrtfPanner(ctx, 34 * spread, 1.25);
-
-        // Center channel with Dialogue & Vocal Clarity Enhancer
-        const center = makeHrtfPanner(ctx, 0, 1.05);
-        setAudioVec(center, "positionX", "positionY", "positionZ", 0, 0.1, -1.05, center.setPosition);
-        const centerGain = fxAdd(ctx.createGain());
-        centerGain.gain.value = 0.45;
-        if (state.prefs.atmosDialogue) {
-          const vocBoost = fxAdd(ctx.createBiquadFilter());
-          vocBoost.type = "peaking"; vocBoost.frequency.value = 2400; vocBoost.Q.value = 0.9; vocBoost.gain.value = 3.5;
-          eqTail.connect(vocBoost);
-          vocBoost.connect(centerGain);
-        } else {
-          eqTail.connect(centerGain);
-        }
-        centerGain.connect(center);
-
-        // Surround L/R panners
-        const surrL = makeHrtfPanner(ctx, -114 * Math.min(1.2, spread), 2.1);
-        const surrR = makeHrtfPanner(ctx, 114 * Math.min(1.2, spread), 2.1);
-        const surrGain = fxAdd(ctx.createGain());
-        surrGain.gain.value = 0.38 * spread;
-        atmosSplit.connect(surrGain, 0);
-        atmosSplit.connect(surrGain, 1);
-        surrGain.connect(surrL);
-        surrGain.connect(surrR);
-
-        // Overhead Height Virtualization (Dolby Atmos ceiling simulation)
-        const heightLevel = state.prefs.atmosHeight === "high" ? 0.42 : state.prefs.atmosHeight === "subtle" ? 0.20 : 0.32;
-        const topL = makeHrtfPanner(ctx, -48, 1.6);
-        const topR = makeHrtfPanner(ctx, 48, 1.6);
-        setAudioVec(topL, "positionX", "positionY", "positionZ", -0.9, 0.85, -0.9, topL.setPosition);
-        setAudioVec(topR, "positionX", "positionY", "positionZ", 0.9, 0.85, -0.9, topR.setPosition);
-        const topGain = fxAdd(ctx.createGain());
-        topGain.gain.value = heightLevel;
-        atmosSplit.connect(topGain, 0);
-        atmosSplit.connect(topGain, 1);
-        topGain.connect(topL);
-        topGain.connect(topR);
-
-        atmosSplit.connect(leftMain, 0);
-        atmosSplit.connect(rightMain, 1);
-
-        const comp = fxAdd(ctx.createDynamicsCompressor());
-        comp.threshold.value = -16;
-        comp.knee.value = 12;
-        comp.ratio.value = 2.4;
-        comp.attack.value = 0.006;
-        comp.release.value = 0.15;
-
-        leftMain.connect(comp);
-        rightMain.connect(comp);
-        center.connect(comp);
-        surrL.connect(comp);
-        surrR.connect(comp);
-        topL.connect(comp);
-        topR.connect(comp);
-
-        const out = fxAdd(ctx.createGain());
-        out.gain.value = 1.25;
-        comp.connect(out);
-        out.connect(ctx.destination);
-        return;
-      }
-
-      if (mode === "off") {
-        const lim = fxAdd(ctx.createDynamicsCompressor());
-        lim.threshold.value = -0.5;
-        lim.knee.value = 6;
-        lim.ratio.value = 3;
-        lim.attack.value = 0.01;
-        lim.release.value = 0.1;
-        eqTail.connect(lim);
-        lim.connect(ctx.destination);
-        return;
-      }
 
       if (mode === "phone") {
         const bass = fxAdd(ctx.createBiquadFilter());
@@ -2219,7 +1861,7 @@
         presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;
         const air = fxAdd(ctx.createBiquadFilter());
         air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 2.6;
-        eqTail.connect(bass);
+        hpf.connect(bass);
         bass.connect(sub);
         sub.connect(body);
         body.connect(scoop);
@@ -2247,7 +1889,7 @@
         lpH.type = "lowpass"; lpH.frequency.value = 340; lpH.Q.value = 0.7;
         const wet = fxAdd(ctx.createGain());
         wet.gain.value = 0.72;
-        eqTail.connect(bp);
+        hpf.connect(bp);
         bp.connect(harm);
         harm.connect(hpH);
         hpH.connect(lpH);
@@ -2306,7 +1948,7 @@
         air.gain.value = 2.4;
       }
 
-      eqTail.connect(bass);
+      hpf.connect(bass);
       bass.connect(sub);
       sub.connect(scoop);
       scoop.connect(presence);
@@ -2713,19 +2355,6 @@
           </div></div>`
       : "";
 
-    const curPreset = state.prefs.eqPreset || "dolby_atmos";
-    const curBands = Array.isArray(state.prefs.eqBands) && state.prefs.eqBands.length === 10
-      ? state.prefs.eqBands
-      : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    const isEqOn = state.prefs.eqEnabled !== false;
-
-    const presetChips = Object.keys(EQ_PRESETS).filter((k) => k !== "custom").map((k) => {
-      const p = EQ_PRESETS[k];
-      return `<button type="button" class="chip ${curPreset === k ? "active" : ""}" data-po-preset="${k}">${escapeHTML(p.name || k)}</button>`;
-    }).join("");
-
-    const eqSliders = EQ_FREQS.map((f, i) => renderEqColumnHTML(i, curBands[i], "po")).join("");
-
     showModal({
       title: "Player options",
       body: `
@@ -2745,32 +2374,6 @@
               : ""}
           </div>
         </div>
-
-        <div class="set-card po-eq-card">
-          <div class="eq-header-row">
-            <div>
-              <strong style="display:flex;align-items:center;gap:6px">
-                <span class="material-symbols-outlined" style="color:var(--md-sys-color-primary,#7dd3bb);font-size:20px">equalizer</span>
-                Equalizer & Real-time Visualizer
-              </strong>
-              <p style="margin:2px 0 0;font-size:12px;color:var(--md-sys-color-on-surface-variant)">Live audio frequency curve and response</p>
-            </div>
-            <button type="button" class="chip-btn" id="poEqToggle">${isEqOn ? "Enabled" : "Bypassed"}</button>
-          </div>
-
-          <div class="po-eq-canvas-wrap">
-            <canvas id="poEqCanvas" class="po-eq-canvas" width="460" height="130"></canvas>
-          </div>
-
-          <div class="eq-presets-grid" id="poEqPresets">
-            ${presetChips}
-          </div>
-
-          <div class="eq-matrix po-eq-matrix">
-            ${eqSliders}
-          </div>
-        </div>
-
         ${ytChip}`,
       ok: "Done",
       onOk: () => {},
@@ -2783,208 +2386,6 @@
     if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
     const poYtPl = $("poYtPl");
     if (poYtPl) poYtPl.addEventListener("click", () => { hideModal(); ytAddToPlaylist(t); });
-
-    // ── Interactive Equalizer Canvas & Controls Setup ───────────────────
-    if (window._poEqCancel) {
-      try { window._poEqCancel(); } catch {}
-      window._poEqCancel = null;
-    }
-
-    const canvas = $("poEqCanvas");
-    let animId = null;
-
-    function renderCanvas() {
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const rect = canvas.getBoundingClientRect();
-      const w = Math.max(300, Math.round(rect.width || 460));
-      const h = 130;
-      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
-      }
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, w, h);
-
-      // Grid reference lines
-      const midY = h / 2;
-      const topY = 16;
-      const botY = h - 16;
-
-      // 0 dB dashed line
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(0, midY);
-      ctx.lineTo(w, midY);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // +12 dB and -12 dB guideline limits
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
-      ctx.beginPath();
-      ctx.moveTo(0, topY); ctx.lineTo(w, topY);
-      ctx.moveTo(0, botY); ctx.lineTo(w, botY);
-      ctx.stroke();
-
-      // Live spectrum bars from Analyser
-      if (fx.analyser && state.playing) {
-        const binCount = fx.analyser.frequencyBinCount || 64;
-        const dataArr = new Uint8Array(binCount);
-        fx.analyser.getByteFrequencyData(dataArr);
-        const barCount = 28;
-        const barW = (w - 24) / barCount;
-        ctx.fillStyle = "rgba(125, 211, 187, 0.18)";
-        for (let b = 0; b < barCount; b++) {
-          const idx = Math.floor((b / barCount) * (binCount * 0.7));
-          const val = dataArr[idx] || 0;
-          const barH = (val / 255) * (h - 28);
-          const bx = 12 + b * barW;
-          const by = h - 14 - barH;
-          ctx.fillRect(bx + 1, by, barW - 2, barH);
-        }
-      }
-
-      // 10-band EQ Frequency Response Curve
-      const bands = state.prefs.eqBands || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-      const enabled = state.prefs.eqEnabled !== false;
-      const padX = 24;
-      const stepX = (w - padX * 2) / (EQ_FREQS.length - 1);
-      const pts = [];
-
-      for (let i = 0; i < EQ_FREQS.length; i++) {
-        const gain = enabled ? (Number(bands[i]) || 0) : 0;
-        // clamp gain between -12 and +12
-        const clamped = Math.max(-12, Math.min(12, gain));
-        const py = midY - (clamped / 12) * (midY - topY);
-        const px = padX + i * stepX;
-        pts.push({ x: px, y: py, gain: clamped });
-      }
-
-      // Fill area under the EQ spline
-      const grad = ctx.createLinearGradient(0, topY, 0, botY);
-      grad.addColorStop(0, enabled ? "rgba(125, 211, 187, 0.32)" : "rgba(255, 255, 255, 0.1)");
-      grad.addColorStop(0.6, enabled ? "rgba(125, 211, 187, 0.08)" : "rgba(255, 255, 255, 0.03)");
-      grad.addColorStop(1, "rgba(125, 211, 187, 0.0)");
-      ctx.fillStyle = grad;
-
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, midY);
-      ctx.lineTo(pts[0].x, pts[0].y);
-      for (let i = 0; i < pts.length - 1; i++) {
-        const cpx = (pts[i].x + pts[i + 1].x) / 2;
-        ctx.bezierCurveTo(cpx, pts[i].y, cpx, pts[i + 1].y, pts[i + 1].x, pts[i + 1].y);
-      }
-      ctx.lineTo(pts[pts.length - 1].x, midY);
-      ctx.closePath();
-      ctx.fill();
-
-      // Stroke the EQ spline curve
-      ctx.strokeStyle = enabled ? "#7dd3bb" : "rgba(255, 255, 255, 0.4)";
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 0; i < pts.length - 1; i++) {
-        const cpx = (pts[i].x + pts[i + 1].x) / 2;
-        ctx.bezierCurveTo(cpx, pts[i].y, cpx, pts[i + 1].y, pts[i + 1].x, pts[i + 1].y);
-      }
-      ctx.stroke();
-
-      // Draw interactive dots at each band node
-      pts.forEach((pt) => {
-        ctx.fillStyle = enabled ? "#7dd3bb" : "#aaa";
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-      });
-
-      ctx.restore();
-      if (!canvas || !canvas.isConnected || document.hidden) {
-        animId = null;
-        return;
-      }
-      animId = requestAnimationFrame(renderCanvas);
-    }
-
-    animId = requestAnimationFrame(renderCanvas);
-    window._poEqCancel = () => {
-      if (animId) cancelAnimationFrame(animId);
-      animId = null;
-    };
-
-    // Toggle Master EQ
-    const poEqToggle = $("poEqToggle");
-    if (poEqToggle) {
-      poEqToggle.addEventListener("click", () => {
-        const next = !(state.prefs.eqEnabled !== false);
-        state.prefs.eqEnabled = next;
-        savePrefs();
-        poEqToggle.textContent = next ? "Enabled" : "Bypassed";
-        if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-          hookSound();
-        }
-        if (fx.ctx && fx.ctx.state === "suspended") {
-          try { fx.ctx.resume(); } catch {}
-        }
-        if (fx.eqNodes && fx.eqNodes.length === 10) {
-          fx.eqNodes.forEach((node, i) => {
-            const val = next ? (Number(state.prefs.eqBands[i]) || 0) : 0;
-            try {
-              node.gain.cancelScheduledValues(0);
-              node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
-            } catch {
-              node.gain.value = val;
-            }
-          });
-        }
-      });
-    }
-
-    // Preset selection
-    const presetBox = $("poEqPresets");
-    if (presetBox) {
-      presetBox.querySelectorAll("[data-po-preset]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const k = btn.dataset.poPreset;
-          applyEqPreset(k);
-          presetBox.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
-          btn.classList.add("active");
-          // Update matrix faders and gain values
-          const bands = state.prefs.eqBands || [];
-          bands.forEach((val, i) => {
-            updateEqFaderVisual(i, val, "po", $("modalCard"));
-          });
-        });
-      });
-    }
-
-    // Real-time Faders Input
-    const card = $("modalCard");
-    if (card) {
-      card.querySelectorAll(".eq-fader-channel").forEach((channel) => {
-        const idx = Number(channel.dataset.faderIdx);
-        attachEqFaderInteraction(
-          channel,
-          "po",
-          (val) => {
-            updateEqBand(idx, val, true);
-            if (presetBox) {
-              presetBox.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
-            }
-          },
-          () => {
-            savePrefs();
-          }
-        );
-      });
-    }
   }
 
   function artUrl(t) {
@@ -3407,7 +2808,7 @@
     if (!t) return false;
     const dur = Number(t.duration) || 0;
     // Verified official catalogs from iTunes and Deezer are studio music
-    if (t.source === "apple" || t.source === "deezer") {
+    if (t.source === "apple" || t.source === "itunes" || t.source === "deezer") {
       return dur <= 3600;
     }
     if (t.source === "audius" || t.source === "radio") return true;
@@ -6196,15 +5597,17 @@
         </div>
       </div>` : "";
 
-    const itunesSongs = s.apple || [];
-    const deezerSongs = s.deezer || [];
+    const itunesSongs = (Array.isArray(s.itunes) && s.itunes.length) ? s.itunes : (Array.isArray(s.apple) && s.apple.length ? s.apple : (s.itunes || s.apple || []));
+    const deezerSongs = Array.isArray(s.deezer) ? s.deezer : [];
     const youtubeSongs = s.youtube || [];
     const audiusSongs = s.audius || [];
     const offlineSongs = s.offline || [];
     const songs = [].concat(youtubeSongs, itunesSongs, deezerSongs, audiusSongs, offlineSongs);
     const artists = s.artists || [];
-    const playlists = (s.playlists || []).filter((p) => p.source !== "apple" && p.source !== "deezer");
-    const albums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "deezer");
+    const playlists = (s.playlists || []).filter((p) => p.source !== "apple" && p.source !== "deezer" && p.source !== "itunes");
+    const albums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "deezer" || p.source === "itunes");
+    const itunesAlbums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "itunes");
+    const deezerAlbums = (s.playlists || []).filter((p) => p.source === "deezer");
     const radio = s.radio || [];
     const empty = !songs.length && !artists.length && !playlists.length && !albums.length && !radio.length;
     if (empty) return `${offlineBanner}<div class="empty"><h3>No matches</h3><p>Try another spelling, or verify your downloaded library.</p></div>`;
@@ -6227,7 +5630,7 @@
           <div class="section-head"><h2>iTunes Songs</h2><span>${itunesSongs.length}</span></div>
           <div class="list">${itunesSongs.length ? itunesSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No iTunes songs found for this search.</p>`}</div>
         </div>
-        ${albums.length ? `<div class="section"><div class="section-head"><h2>iTunes Albums</h2><span>${albums.length}</span></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+        ${itunesAlbums.length ? `<div class="section"><div class="section-head"><h2>iTunes Albums</h2><span>${itunesAlbums.length}</span></div><div class="lib-list">${itunesAlbums.map(playlistHitHTML).join("")}</div></div>` : ""}
       `;
     }
     if (f === "deezer") {
@@ -6237,7 +5640,7 @@
           <div class="section-head"><h2>Deezer Songs</h2><span>${deezerSongs.length}</span></div>
           <div class="list">${deezerSongs.length ? deezerSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Deezer songs found for this search.</p>`}</div>
         </div>
-        ${albums.length ? `<div class="section"><div class="section-head"><h2>Albums</h2><span>${albums.length}</span></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+        ${deezerAlbums.length ? `<div class="section"><div class="section-head"><h2>Deezer Albums</h2><span>${deezerAlbums.length}</span></div><div class="lib-list">${deezerAlbums.map(playlistHitHTML).join("")}</div></div>` : ""}
       `;
     }
     if (f === "youtube") {
@@ -7326,86 +6729,10 @@
       </div>`;
   }
 
-  function renderEqualizerPage() {
-    const p = state.prefs;
-    const presets = Object.keys(EQ_PRESETS).map((k) => [k, EQ_PRESETS[k].name]);
-    const curPreset = p.eqPreset || "flat";
-    const gains = Array.isArray(p.eqBands) && p.eqBands.length === 10 ? p.eqBands : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-    return `
-      ${settingsSubChrome("Equalizer & Dolby Atmos", "10-Band studio equalizer and Dolby Atmos 3D binaural spatial audio.")}
-      <div class="settings">
-        <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <div style="display:flex;align-items:center;gap:10px">
-              <h3 style="margin:0">Dolby Atmos 3D Audio</h3>
-              <span class="dolby-badge"><span class="material-symbols-outlined" style="font-size:14px">surround_sound</span> Atmos</span>
-            </div>
-            <button class="switch ${p.dolbyAtmos ? "on" : ""}" id="dolbyAtmosToggle" type="button"><i></i></button>
-          </div>
-          <p class="set-lead">Binaural HRTF spatial audio with acoustic room widening, dialog clarity, and overhead height virtualization.</p>
-
-          <div class="set-row">
-            <div><strong>Dialogue & Vocal Enhancer</strong><p>Crisp center vocal projection in Atmos mix.</p></div>
-            <button class="switch ${p.atmosDialogue ? "on" : ""}" id="atmosDialogueToggle" type="button"><i></i></button>
-          </div>
-
-          <div class="set-row" style="flex-direction:column;align-items:stretch;gap:8px">
-            <div style="display:flex;justify-content:space-between">
-              <strong>Spatial Soundstage Width</strong>
-              <span id="atmosSurroundVal">${p.atmosSurround || 80}%</span>
-            </div>
-            <input type="range" id="atmosSurround" min="20" max="150" step="5" value="${p.atmosSurround || 80}" style="width:100%" />
-          </div>
-
-          <label class="set-row">
-            <div><strong>Overhead Height Dimension</strong><p>Ceiling virtualization intensity for Atmos.</p></div>
-            <select id="atmosHeight">
-              <option value="subtle" ${p.atmosHeight === "subtle" ? "selected" : ""}>Subtle (20%)</option>
-              <option value="medium" ${p.atmosHeight === "medium" || !p.atmosHeight ? "selected" : ""}>Medium (32%)</option>
-              <option value="high" ${p.atmosHeight === "high" ? "selected" : ""}>High Immersion (42%)</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <div>
-              <h3 style="margin:0">10-Band Studio Equalizer</h3>
-              <p class="set-lead" style="margin:4px 0 0">Fine-tune frequencies from deep sub-bass (32 Hz) to crystal highs (16 kHz).</p>
-            </div>
-            <button class="switch ${p.eqEnabled !== false ? "on" : ""}" id="eqMasterToggle" type="button"><i></i></button>
-          </div>
-
-          <div class="set-row" style="padding:8px 0">
-            <div><strong>Presets</strong></div>
-          </div>
-          <div class="eq-presets-grid">
-            ${presets.map(([id, label]) => `
-              <button type="button" class="chip ${curPreset === id ? "active" : ""}" data-eq-preset="${id}">${label}</button>
-            `).join("")}
-          </div>
-
-          <div class="eq-matrix">
-            ${EQ_FREQS.map((freq, i) => renderEqColumnHTML(i, gains[i], "eq")).join("")}
-          </div>
-
-          <div class="set-row" style="margin-top:14px">
-            <div><strong>Reset Tuning</strong><p>Clear gains back to flat response.</p></div>
-            <button type="button" class="chip-btn" id="resetEqBtn">
-              <span class="material-symbols-outlined">restart_alt</span>
-              Reset to Flat
-            </button>
-          </div>
-        </div>
-      </div>`;
-  }
-
   function renderSettings() {
     if (state.settingsPage === "appearance") return renderAppearance();
     if (state.settingsPage === "ui") return renderUiPage();
     if (state.settingsPage === "player") return renderPlayerPage();
-    if (state.settingsPage === "equalizer") return renderEqualizerPage();
     if (state.settingsPage === "playback") return renderPlaybackPage();
     if (state.settingsPage === "listening") return renderListeningPage();
     const p = state.prefs;
@@ -7445,10 +6772,6 @@
         </div>
         <div class="set-card">
           <h3>Sound</h3>
-          <button type="button" class="set-row set-go" id="openEqualizer">
-            <div><strong>Equalizer & Dolby Atmos</strong><p>${p.eqEnabled !== false ? (p.eqPreset ? (EQ_PRESETS[p.eqPreset] ? EQ_PRESETS[p.eqPreset].name : p.eqPreset) : "Flat") : "Bypassed"} · ${p.dolbyAtmos ? "Dolby Atmos 3D Active" : "Stereo"}</p></div>
-            <span class="material-symbols-outlined">chevron_right</span>
-          </button>
           <button type="button" class="set-row set-go" id="openPlayback">
             <div><strong>Playback</strong><p>Autoplay, fade, speed, quality.</p></div>
             <span class="material-symbols-outlined">chevron_right</span>
@@ -7850,7 +7173,11 @@
       if ((state.discovery.tracks || []).length) openDisc();
     });
     viewEl.querySelectorAll("[data-filter]").forEach((el) => {
-      el.addEventListener("click", () => { state.filter = el.dataset.filter; render(); });
+      el.addEventListener("click", () => {
+        state.filter = el.dataset.filter;
+        render();
+        ensureProviderResults(state.filter);
+      });
     });
     viewEl.querySelectorAll("[data-open-artist]").forEach((el) => {
       el.addEventListener("click", () => {
@@ -8123,109 +7450,10 @@
     }
     const openPlayer = viewEl.querySelector("#openPlayer");
     if (openPlayer) openPlayer.addEventListener("click", () => { rememberScroll(); state.settingsPage = "player"; navPush(); paintNav(false); });
-    const openEqualizer = viewEl.querySelector("#openEqualizer");
-    if (openEqualizer) openEqualizer.addEventListener("click", () => { rememberScroll(); state.settingsPage = "equalizer"; navPush(); paintNav(false); });
     const openPlayback = viewEl.querySelector("#openPlayback");
     if (openPlayback) openPlayback.addEventListener("click", () => { rememberScroll(); state.settingsPage = "playback"; navPush(); paintNav(false); });
     const openListening = viewEl.querySelector("#openListening");
     if (openListening) openListening.addEventListener("click", () => { rememberScroll(); state.settingsPage = "listening"; navPush(); paintNav(false); });
-
-    // ── Equalizer & Dolby Atmos Events ───────────────────────────
-    const eqMasterToggle = viewEl.querySelector("#eqMasterToggle");
-    if (eqMasterToggle) {
-      eqMasterToggle.addEventListener("click", () => {
-        state.prefs.eqEnabled = state.prefs.eqEnabled === false ? true : false;
-        savePrefs();
-        hookSound();
-        render();
-        toast(state.prefs.eqEnabled ? "Equalizer active" : "Equalizer bypassed");
-      });
-    }
-
-    const dolbyAtmosToggle = viewEl.querySelector("#dolbyAtmosToggle");
-    if (dolbyAtmosToggle) {
-      dolbyAtmosToggle.addEventListener("click", () => {
-        state.prefs.dolbyAtmos = !state.prefs.dolbyAtmos;
-        savePrefs();
-        hookSound();
-        render();
-        toast(state.prefs.dolbyAtmos ? "Dolby Atmos 3D Audio Active ✨" : "Dolby Atmos Disabled");
-      });
-    }
-
-    const atmosDialogueToggle = viewEl.querySelector("#atmosDialogueToggle");
-    if (atmosDialogueToggle) {
-      atmosDialogueToggle.addEventListener("click", () => {
-        state.prefs.atmosDialogue = !state.prefs.atmosDialogue;
-        savePrefs();
-        hookSound();
-        render();
-      });
-    }
-
-    const atmosSurround = viewEl.querySelector("#atmosSurround");
-    if (atmosSurround) {
-      atmosSurround.addEventListener("input", () => {
-        state.prefs.atmosSurround = Number(atmosSurround.value) || 80;
-        const valEl = viewEl.querySelector("#atmosSurroundVal");
-        if (valEl) valEl.textContent = `${state.prefs.atmosSurround}%`;
-        hookSound();
-      });
-      atmosSurround.addEventListener("change", () => savePrefs());
-    }
-
-    const atmosHeight = viewEl.querySelector("#atmosHeight");
-    if (atmosHeight) {
-      atmosHeight.addEventListener("change", () => {
-        state.prefs.atmosHeight = atmosHeight.value;
-        savePrefs();
-        hookSound();
-      });
-    }
-
-    viewEl.querySelectorAll("[data-eq-preset]").forEach((el) => {
-      el.addEventListener("click", () => {
-        const presetKey = el.dataset.eqPreset;
-        applyEqPreset(presetKey);
-        viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => {
-          b.classList.toggle("active", b.dataset.eqPreset === presetKey);
-        });
-        const bands = state.prefs.eqBands || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        EQ_FREQS.forEach((_, idx) => {
-          const val = Number(bands[idx]) || 0;
-          updateEqFaderVisual(idx, val, "eq", viewEl);
-        });
-      });
-    });
-
-    viewEl.querySelectorAll(".eq-fader-channel").forEach((channel) => {
-      const idx = Number(channel.dataset.faderIdx);
-      attachEqFaderInteraction(
-        channel,
-        "eq",
-        (val) => {
-          updateEqBand(idx, val, true);
-          viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => b.classList.remove("active"));
-        },
-        () => {
-          savePrefs();
-        }
-      );
-    });
-
-    const resetEqBtn = viewEl.querySelector("#resetEqBtn");
-    if (resetEqBtn) {
-      resetEqBtn.addEventListener("click", () => {
-        applyEqPreset("flat");
-        viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => {
-          b.classList.toggle("active", b.dataset.eqPreset === "flat");
-        });
-        EQ_FREQS.forEach((_, idx) => {
-          updateEqFaderVisual(idx, 0, "eq", viewEl);
-        });
-        toast("Equalizer reset to Flat");
-      });
-    }
 
     const toggleOfflineMode = viewEl.querySelector("#toggleOfflineMode");
     if (toggleOfflineMode) {
@@ -8866,6 +8094,105 @@
     }
   }
 
+  let providerFetchInFlight = false;
+  async function ensureProviderResults(filter) {
+    if (!state.query || !state.search || providerFetchInFlight) return;
+    const q = (state.query || "").trim();
+    if (!q) return;
+    const srcMap = {
+      itunes: "apple",
+      apple: "apple",
+      deezer: "deezer",
+      youtube: "youtube",
+      audius: "audius",
+      radio: "radio",
+    };
+    const src = srcMap[filter];
+    if (!src) return;
+    const targetKey = src === "apple" ? "apple" : src;
+    if (filter === "itunes" && ((Array.isArray(state.search.itunes) && state.search.itunes.length > 0) || (Array.isArray(state.search.apple) && state.search.apple.length > 0))) {
+      return;
+    }
+    if (filter === "deezer" && Array.isArray(state.search.deezer) && state.search.deezer.length > 0) {
+      return;
+    }
+    if (src !== "apple" && src !== "deezer" && Array.isArray(state.search[targetKey]) && state.search[targetKey].length > 0) {
+      return;
+    }
+    providerFetchInFlight = true;
+    try {
+      const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=${src}&${glq()}`);
+      if (data && ((Array.isArray(data[targetKey]) && data[targetKey].length > 0) || (src === "apple" && Array.isArray(data.itunes) && data.itunes.length > 0))) {
+        const songs = (data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || [])).filter(looksLikeSong);
+        state.search[targetKey] = songs;
+        if (src === "apple") state.search.itunes = songs;
+        if (Array.isArray(data.artists) && data.artists.length) {
+          const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
+          for (const a of data.artists) {
+            if (a && a.name && !seen.has(a.name.toLowerCase())) {
+              seen.add(a.name.toLowerCase());
+              state.search.artists.push(a);
+            }
+          }
+        }
+        if (Array.isArray(data.playlists) && data.playlists.length) {
+          const seenP = new Set((state.search.playlists || []).map((p) => String(p.id || p.title)));
+          for (const p of data.playlists) {
+            if (p && !seenP.has(String(p.id || p.title))) {
+              seenP.add(String(p.id || p.title));
+              state.search.playlists.push(p);
+            }
+          }
+        }
+        render();
+      }
+    } catch (err) {
+      console.warn("ensureProviderResults error:", src, err);
+    } finally {
+      providerFetchInFlight = false;
+    }
+
+    if (src === "apple" && (!state.search.apple || !state.search.apple.length)) {
+      try {
+        const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50`);
+        if (itRes && Array.isArray(itRes.results) && itRes.results.length) {
+          state.search.apple = itRes.results.map((t) => ({
+            id: `apple:${t.trackId}`,
+            source: "apple",
+            title: t.trackName || "Song",
+            artist: t.artistName || "Artist",
+            album: t.collectionName || "",
+            duration: Math.round((t.trackTimeMillis || 0) / 1000),
+            artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+            previewUrl: t.previewUrl || "",
+            playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
+          })).filter(looksLikeSong);
+          state.search.itunes = state.search.apple;
+          render();
+        }
+      } catch {}
+    }
+    if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length)) {
+      try {
+        const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+        if (dzRes && Array.isArray(dzRes.data) && dzRes.data.length) {
+          state.search.deezer = dzRes.data.map((t) => ({
+            id: `deezer:${t.id}`,
+            source: "deezer",
+            title: t.title || "Song",
+            artist: (t.artist && t.artist.name) || "Artist",
+            album: (t.album && t.album.title) || "",
+            duration: Number(t.duration || 0),
+            artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || "/cover-default.jpg",
+            previewUrl: t.preview || "",
+            playQuery: `${t.title || ""} ${(t.artist && t.artist.name) || ""} official audio`.trim(),
+          })).filter(looksLikeSong);
+          render();
+        }
+      } catch {}
+    }
+  }
+
   async function runSearch(q) {
     state.query = q;
     state.view = "search";
@@ -8899,6 +8226,21 @@
       state.search = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`);
       if (!state.search.apple || !state.search.apple.length) {
         try {
+          const itData = await api(`/api/search?q=${encodeURIComponent(q)}&source=apple&${glq()}`);
+          if (itData && Array.isArray(itData.apple) && itData.apple.length) {
+            state.search.apple = itData.apple;
+            state.search.itunes = state.search.apple;
+            if (Array.isArray(itData.artists) && itData.artists.length) {
+              state.search.artists = (state.search.artists || []).concat(itData.artists);
+            }
+            if (Array.isArray(itData.playlists) && itData.playlists.length) {
+              state.search.playlists = (state.search.playlists || []).concat(itData.playlists);
+            }
+          }
+        } catch {}
+      }
+      if (!state.search.apple || !state.search.apple.length) {
+        try {
           const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50`);
           if (itRes && Array.isArray(itRes.results) && itRes.results.length) {
             state.search.apple = itRes.results.map((t) => ({
@@ -8912,10 +8254,25 @@
               previewUrl: t.previewUrl || "",
               playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
             })).filter(looksLikeSong);
+            state.search.itunes = state.search.apple;
           }
         } catch (itErr) {
           console.warn("itunes direct search fallback", itErr);
         }
+      }
+      if (!state.search.deezer || !state.search.deezer.length) {
+        try {
+          const dzData = await api(`/api/search?q=${encodeURIComponent(q)}&source=deezer&${glq()}`);
+          if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length) {
+            state.search.deezer = dzData.deezer;
+            if (Array.isArray(dzData.artists) && dzData.artists.length) {
+              state.search.artists = (state.search.artists || []).concat(dzData.artists);
+            }
+            if (Array.isArray(dzData.playlists) && dzData.playlists.length) {
+              state.search.playlists = (state.search.playlists || []).concat(dzData.playlists);
+            }
+          }
+        } catch {}
       }
       if (!state.search.deezer || !state.search.deezer.length) {
         try {
@@ -8942,6 +8299,7 @@
       }
       if (state.search && Array.isArray(state.search.apple)) {
         state.search.apple = state.search.apple.filter(looksLikeSong);
+        state.search.itunes = state.search.apple;
       }
       if (state.search && Array.isArray(state.search.deezer)) {
         state.search.deezer = state.search.deezer.filter(looksLikeSong);
@@ -8956,7 +8314,7 @@
         const text = `${t && t.title || ""} ${t && t.artist || ""}`.toLowerCase();
         return text.includes(qLower);
       });
-      state.search = { youtube: [], audius: [], radio: [], apple: [], deezer: [], artists: [], playlists: [], offline: matchedDls };
+      state.search = { youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [], offline: matchedDls };
     }
     render();
   }

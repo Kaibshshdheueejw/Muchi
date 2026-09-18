@@ -506,14 +506,35 @@ function matchTracks(q) {
 export function previewSearch(q) {
   const tracks = matchTracks(q);
   const needle = String(q || "").toLowerCase().trim();
-  const apple = catalogTracks().filter((t) =>
+  const pool = tracks.length ? tracks : allTracks().slice(0, 24);
+  const rawCatalog = catalogTracks().filter((t) =>
     !needle || `${t.title} ${t.artist}`.toLowerCase().includes(needle)
   );
+  const matched = rawCatalog.length ? rawCatalog : pool;
+  const apple = matched.map((t, i) => ({
+    ...t,
+    id: `apple:preview:${i}:${t.id || i}`,
+    source: "apple",
+    previewUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
+    playQuery: `${t.title || ""} ${t.artist || ""} official audio`.trim(),
+  }));
+  const deezer = matched.map((t, i) => ({
+    ...t,
+    id: `deezer:preview:${i}:${t.id || i}`,
+    source: "deezer",
+    previewUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
+    playQuery: `${t.title || ""} ${t.artist || ""} official audio`.trim(),
+  }));
   return {
+    query: q,
     tracks: tracks.slice(0, 20),
     youtube: tracks.slice(0, 20),
     apple,
+    itunes: apple,
+    deezer,
     audius: [],
+    artists: [],
+    playlists: [],
   };
 }
 
