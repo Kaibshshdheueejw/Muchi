@@ -115,6 +115,10 @@ async function ytApi(session, env, pathAndQuery) {
   };
   let r = await doFetch();
   if (r.status === 401 && (await googleRefresh(session, env))) r = await doFetch();
+  if (r.status === 404) {
+    // A 404 from playlists.list or videos.list(myRating) means no channel or no rated items exist yet
+    return { items: [] };
+  }
   if (!r.ok) {
     try {
       const body = await r.text().catch(() => "");
@@ -220,14 +224,13 @@ export async function handleAuthUrl(request, env, url, path) {
     platform,
     exp: Date.now() + 10 * 60 * 1000,
   });
-  // A write-capable scope so a connected-user can LIKE a song and add it to one
-  // of their YouTube playlists from the app. NOTE: users who connected before
-  // this change granted only youtube.readonly — they must tap "Connect" again
-  // to re-authorize with the wider scope (the API surfaces that cleanly).
-  const scope = step === "youtube"
-    ? "openid email profile https://www.googleapis.com/auth/youtube.force-ssl"
-    : "openid email profile";
-  const extra = step === "youtube" ? { access_type: "offline", prompt: "consent" } : { prompt: "select_account" };
+  // Request scopes so a connected user can authenticate, read their YouTube
+  // likes & playlists, and like songs or add them to playlists from MUCHI.
+  // Using access_type: "offline" + prompt: "consent" ensures Google issues
+  // a refresh_token for background refreshes.
+  const ytScopes = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl";
+  const scope = "openid email profile " + ytScopes;
+  const extra = { access_type: "offline", prompt: "consent" };
   return json(200, { url: makeOAuthUrl(scope, state, extra, env) });
 }
 
@@ -247,22 +250,23 @@ export async function handleGoogleCallback(request, env, url) {
   // The youtube step lands HERE too: both flows share the single registered
   // redirect URI (GOOGLE_REDIRECT_URI), so a youtube-scope authorization code
   // arrives at this callback. Attach the token to the EXISTING session instead
-  // of creating a fresh yt:null one — the old behavior silently dropped the
-  // YouTube token, so the Library never loaded. Mirrors handleYoutubeCallback.
+  // of creating a fresh yt:null one — mirrors handleYoutubeCallback.
   if (st.step === "youtube") {
     let s = st.sid ? await getSession(env, st.sid) : null;
     if (!s) s = await readSession(request, env);
     if (!s) return redirect(errHome);
     s.yt = {
       access: tok.access_token,
-      refresh: tok.refresh_token || "",
+      refresh: tok.refresh_token || (s.yt && s.yt.refresh) || "",
       expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),
       at: Date.now(),
     };
     await putSession(env, s);
     ytCache.delete(s.sid);
+    const tokStr = encodeURIComponent(sessionToken(s.sid, env.MUCHI_SESSION_SECRET));
     const ytHome = platform === "native" ? "muchi://youtube/success" : "/?youtube=success";
-    return redirect(ytHome);
+    const dest = ytHome + (ytHome.includes("?") ? "&" : "?") + "token=" + tokStr;
+    return withCookie(redirect(dest), sessionCookie(s.sid, env.MUCHI_SESSION_SECRET));
   }
   const sid = randomBytes(24).toString("hex");
   const session = {
@@ -271,13 +275,17 @@ export async function handleGoogleCallback(request, env, url) {
     name: String(id.name || id.email || "Google user"),
     email: String(id.email || ""),
     picture: String(id.picture || ""),
-    yt: null,
+    yt: tok.access_token ? {
+      access: tok.access_token,
+      refresh: tok.refresh_token || "",
+      expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),
+      at: Date.now(),
+    } : null,
   };
   await putSession(env, session);
-  if (platform === "native") {
-    return redirect(home + "?token=" + encodeURIComponent(sessionToken(sid, env.MUCHI_SESSION_SECRET)));
-  }
-  return withCookie(redirect(home), sessionCookie(sid, env.MUCHI_SESSION_SECRET));
+  const tokStr = encodeURIComponent(sessionToken(sid, env.MUCHI_SESSION_SECRET));
+  const dest = home + (home.includes("?") ? "&" : "?") + "token=" + tokStr;
+  return withCookie(redirect(dest), sessionCookie(sid, env.MUCHI_SESSION_SECRET));
 }
 
 export async function handleYoutubeCallback(request, env, url) {
@@ -296,13 +304,15 @@ export async function handleYoutubeCallback(request, env, url) {
   if (!tok) return redirect(errHome);
   s.yt = {
     access: tok.access_token,
-    refresh: tok.refresh_token || "",
+    refresh: tok.refresh_token || (s.yt && s.yt.refresh) || "",
     expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),
     at: Date.now(),
   };
   await putSession(env, s);
   ytCache.delete(s.sid);
-  return redirect(home);
+  const tokStr = encodeURIComponent(sessionToken(s.sid, env.MUCHI_SESSION_SECRET));
+  const dest = home + (home.includes("?") ? "&" : "?") + "token=" + tokStr;
+  return withCookie(redirect(dest), sessionCookie(s.sid, env.MUCHI_SESSION_SECRET));
 }
 
 export async function handleSignout(request, env) {
@@ -368,7 +378,7 @@ export async function handleYoutubeData(request, env, url, path) {
           const q = new URLSearchParams({ part: "snippet,contentDetails", myRating: "like", maxResults: "50" });
           if (pageToken) q.set("pageToken", pageToken);
           const j = await ytApi(s, env, "videos?" + q.toString());
-          if (!j) throw new Error("yt");
+          if (!j) break;
           pages.push(...(j.items || []));
           pageToken = j.nextPageToken || "";
           if (!pageToken) break;
@@ -386,7 +396,7 @@ export async function handleYoutubeData(request, env, url, path) {
           const q = new URLSearchParams({ part: "snippet,contentDetails", mine: "true", maxResults: "50" });
           if (pageToken) q.set("pageToken", pageToken);
           const j = await ytApi(s, env, "playlists?" + q.toString());
-          if (!j) throw new Error("yt");
+          if (!j) break;
           for (const it of j.items || []) {
             const sn = it.snippet || {};
             if (!it.id || !sn.title) continue;
@@ -415,7 +425,7 @@ export async function handleYoutubeData(request, env, url, path) {
         const q = new URLSearchParams({ part: "snippet,contentDetails", playlistId: plId, maxResults: "50" });
         if (pageToken) q.set("pageToken", pageToken);
         const j = await ytApi(s, env, "playlistItems?" + q.toString());
-        if (!j) throw new Error("yt");
+        if (!j) break;
         pages.push(...(j.items || []));
         pageToken = j.nextPageToken || "";
         if (!pageToken) break;

@@ -4883,6 +4883,9 @@ html[data-native="1"] .filled-btn {
 .lib-liked-art.yt {
   background: linear-gradient(135deg, #ff0033, #ff4d6d);
 }
+.lib-liked-art.dl {
+  background: linear-gradient(135deg, #0284c7, #0369a1 45%, #38bdf8);
+}
 .acct-user {
   display: flex;
   align-items: center;

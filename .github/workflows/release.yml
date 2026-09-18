@@ -26,10 +26,10 @@ jobs:
           SDKMGR="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
           if [ -x "$SDKMGR" ]; then
             yes | "$SDKMGR" --licenses || true
-            "$SDKMGR" "platforms;android-35" "build-tools;35.0.0" || true
+            "$SDKMGR" "platforms;android-36" "platforms;android-35" "build-tools;36.0.0" "build-tools;35.0.0" || true
           else
             yes | sdkmanager --licenses || true
-            sdkmanager "platforms;android-35" "build-tools;35.0.0" || true
+            sdkmanager "platforms;android-36" "platforms;android-35" "build-tools;36.0.0" "build-tools;35.0.0" || true
           fi
       - name: Grant execute permission for gradlew
         run: chmod +x android/gradlew

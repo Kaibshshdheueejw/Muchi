@@ -124,7 +124,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.7";
+  const APP_VERSION = "1.5.8";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -686,7 +686,7 @@
     // (which exists precisely to bypass caches).
     const cacheable =
       method === "GET" &&
-      !/\/api\/(auth|health|version|geo|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
+      !/\/api\/(auth|youtube|health|version|geo|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
       !/[?&]refresh=1\b/.test(path);
     const cacheKey = cacheable ? `${API_CACHE_V}:${path}` : "";
     if (cacheable) {
@@ -697,7 +697,7 @@
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const headers = Object.assign({}, (opts && opts.headers) || {}, authHeaders());
-      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal }, opts || {}, { headers }));
+      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal, credentials: "include" }, opts || {}, { headers }));
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       if (cacheable && apiCacheIsUsable(data)) await apiCachePut(cacheKey, data).catch(() => {});
@@ -4418,8 +4418,8 @@
     // resolves (infinite recursion). The UI already shows a "Loading"
     // placeholder while state.ytLiked is null.
     try {
-      const d = await api("/api/youtube/liked");
-      state.ytLiked = { tracks: (d && d.tracks) || [], truncated: !!(d && d.truncated) };
+      const d = await api("/api/youtube/liked" + (force ? "?refresh=1" : ""));
+      state.ytLiked = { tracks: (d && Array.isArray(d.tracks)) ? d.tracks : [], truncated: !!(d && d.truncated) };
       state.ytReconnect = false;
     } catch (err) {
       state.ytLiked = { tracks: [], error: true };
@@ -4432,8 +4432,8 @@
     if (!state.auth || !state.auth.youtube || !state.auth.youtube.connected) return;
     if (!force && state.ytPlaylists) return;
     try {
-      const d = await api("/api/youtube/playlists");
-      state.ytPlaylists = (d && d.playlists) || [];
+      const d = await api("/api/youtube/playlists" + (force ? "?refresh=1" : ""));
+      state.ytPlaylists = (d && Array.isArray(d.playlists)) ? d.playlists : [];
       state.ytReconnect = false;
     } catch (err) {
       state.ytPlaylists = { error: true };
@@ -4537,6 +4537,8 @@
           });
         }
       } else if (pathname === "youtube/success") {
+        const t = params.get("token") || "";
+        if (t) setAuthToken(t);
         refreshAuth(true).then(() => {
           toast("YouTube connected");
           if (state.view === "settings" || state.view === "library") render();
@@ -4548,10 +4550,15 @@
     } catch { return false; }
   }
   async function initAuth() {
-    // Web: the OAuth callback redirects back to "/?auth=success" etc.
+    // Web & mobile: OAuth callbacks redirect back with token and status params
     let touched = false;
     try {
       const params = new URLSearchParams(window.location.search || "");
+      const token = params.get("token");
+      if (token) {
+        setAuthToken(token);
+        touched = true;
+      }
       if (params.get("auth") === "success") { touched = true; toast("Signed in with Google"); }
       else if (params.get("youtube") === "success") { touched = true; toast("YouTube connected"); }
       else if (params.get("auth") === "error" || params.get("youtube") === "error") { touched = true; toast("Google sign-in was cancelled or failed"); }
@@ -4873,6 +4880,7 @@
     if (!$("playlistNav")) return;
     $("playlistNav").innerHTML = [
       `<button data-open-liked>Liked songs · ${state.liked.length}</button>`,
+      `<button data-open-downloads>Downloads · ${state.downloads.length}</button>`,
       ...state.playlists.map((p, i) => `<button data-pl="${i}">${escapeHTML(p.name)} · ${p.tracks.length}</button>`),
     ].join("");
   }
@@ -5778,6 +5786,24 @@
           <div class="list">${state.liked.map((t, i) => libTrackHTML(t, i)).join("") || emptyLib()}</div>
         </div>`;
     }
+    if (pl === "downloads") {
+      const tracks = state.downloads || [];
+      return `
+        <div class="lib-detail">
+          <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
+          <div class="lib-hero liked dl-hero">
+            <div class="lib-liked-art dl" aria-hidden="true"><span class="material-symbols-outlined filled">download_for_offline</span></div>
+            <div class="lib-hero-copy">
+              <p class="lib-kicker">Playlist</p>
+              <h1>Downloads</h1>
+              <p class="lib-stats">${trackStats(tracks)}</p>
+              <p class="lib-note">Saved on this device for offline listening</p>
+              ${tracks.length ? `<button class="filled-btn" id="playDownloads" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+            </div>
+          </div>
+          <div class="list">${tracks.map((t, i) => libTrackHTML(t, i)).join("") || emptyLib()}</div>
+        </div>`;
+    }
     if (pl === "yt-liked") {
       const L = state.ytLiked || { tracks: [], loading: true };
       const tracks = L.tracks || [];
@@ -5882,6 +5908,14 @@
           <div class="t-sub">Playlist · ${trackStats(state.liked)}</div>
         </div>
       </button>`;
+    const downloadRow = `
+      <button type="button" class="lib-row" data-open-downloads>
+        <div class="lib-liked-art sm dl"><span class="material-symbols-outlined filled">download_for_offline</span></div>
+        <div>
+          <div class="t-title">Downloads</div>
+          <div class="t-sub">Playlist · ${trackStats(state.downloads)}</div>
+        </div>
+      </button>`;
     const playlistRows = state.playlists.map((p, i) => `
       <button type="button" class="lib-row" data-open-pl="${i}">
         <img src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.jpg'"/>
@@ -5948,15 +5982,15 @@
     }
     let body = "";
     if (f === "playlists") {
-      body = likedRow + ytRows + (playlistRows || `<p class="empty">Create a playlist with the + button.</p>`);
+      body = likedRow + downloadRow + ytRows + (playlistRows || `<p class="empty">Create a playlist with the + button.</p>`);
     } else if (f === "artists") {
       body = artistRows || `<p class="empty">Follow an artist from the player.</p>`;
     } else if (f === "downloaded") {
-      body = dlRows || `<p class="empty">Save a track (YouTube or independent Audius) from the player to listen offline.</p>`;
+      body = downloadRow + (dlRows || `<p class="empty">Save a track (YouTube or independent Audius) from the player to listen offline.</p>`);
     } else {
-      body = likedRow + ytRows + playlistRows + artistRows;
-      if (!state.playlists.length && !state.following.length) {
-        body += `<p class="empty">Heart songs, follow artists, or make a playlist — they’ll land here.</p>`;
+      body = likedRow + downloadRow + ytRows + playlistRows + artistRows;
+      if (!state.playlists.length && !state.following.length && !state.downloads.length) {
+        body += `<p class="empty">Heart songs, save downloads, follow artists, or make a playlist — they’ll land here.</p>`;
       }
     }
     return `
@@ -7087,6 +7121,7 @@
         const fromSearch = state.view === "search";
         let list = [];
         if (state.view === "library" && state.activePlaylist === "liked") list = state.liked;
+        else if (state.view === "library" && state.activePlaylist === "downloads") list = state.downloads;
         else if (state.view === "library" && state.activePlaylist === "yt-liked") list = (state.ytLiked && state.ytLiked.tracks) || [];
         else if (state.view === "library" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0) list = (state.ytOpen && state.ytOpen.tracks) || [];
         else if (state.view === "library" && state.activePlaylist === "discovery") list = (state.discovery && state.discovery.tracks) || [];
@@ -7310,6 +7345,9 @@
     viewEl.querySelectorAll("[data-open-liked]").forEach((el) => {
       el.addEventListener("click", () => { rememberScroll(); state.activePlaylist = "liked"; navPush(); paintNav(false); });
     });
+    viewEl.querySelectorAll("[data-open-downloads]").forEach((el) => {
+      el.addEventListener("click", () => { rememberScroll(); state.activePlaylist = "downloads"; navPush(); paintNav(false); });
+    });
     viewEl.querySelectorAll("[data-lib-filter]").forEach((el) => {
       el.addEventListener("click", () => { state.libFilter = el.dataset.libFilter; render(); });
     });
@@ -7317,6 +7355,8 @@
     if (libBack) libBack.addEventListener("click", requestBack);
     const playLiked = viewEl.querySelector("#playLiked");
     if (playLiked) playLiked.addEventListener("click", () => { if (state.liked[0]) playFromList(state.liked, 0); });
+    const playDownloads = viewEl.querySelector("#playDownloads");
+    if (playDownloads) playDownloads.addEventListener("click", () => { if (state.downloads && state.downloads[0]) playFromList(state.downloads, 0); });
     const plBanner = viewEl.querySelector("#plBanner");
     if (plBanner && typeof state.activePlaylist === "number") {
       const cur = state.playlists[state.activePlaylist];
@@ -9299,6 +9339,7 @@
       if (!b) return;
       closeOverlays();
       if (b.hasAttribute("data-open-liked")) { state.view = "library"; state.activePlaylist = "liked"; render(); }
+      if (b.hasAttribute("data-open-downloads")) { state.view = "library"; state.activePlaylist = "downloads"; render(); }
       if (b.dataset.pl) { state.view = "library"; state.activePlaylist = Number(b.dataset.pl); render(); }
     });
     $("queueList").addEventListener("click", (e) => {
