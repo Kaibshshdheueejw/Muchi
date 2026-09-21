@@ -815,11 +815,43 @@ export async function handleRelated(url) {
         }
         if (out.length >= 30) break;
       }
+
+      // If YouTube yielded fewer than 10 tracks, supplement with studio catalog recommendations
+      if (out.length < 12 && a) {
+        try {
+          const [ap, dz] = await Promise.allSettled([
+            itunesSearch(a, { includeExtra: false, country: gl }),
+            deezerSearch(a, { limit: 15, includeExtra: false }),
+          ]);
+          const catalog = [];
+          if (ap.status === "fulfilled" && ap.value && Array.isArray(ap.value.songs)) {
+            catalog.push(...ap.value.songs);
+          }
+          if (dz.status === "fulfilled" && dz.value && Array.isArray(dz.value.songs)) {
+            catalog.push(...dz.value.songs);
+          }
+          for (const row of catalog) {
+            if (!row || row.source === "radio") continue;
+            const k = String(row.id || row.videoId || "");
+            if (!k || seen.has(k)) continue;
+            seen.add(k);
+            out.push(row);
+            if (out.length >= 30) break;
+          }
+        } catch {}
+      }
+
       return out;
     });
     const skipSet = new Set(String(skip).split(",").map((x) => x.trim()).filter(Boolean));
+    let finalTracks = (tracks || []).filter((row) => row && !skipSet.has(row.id) && !skipSet.has(row.videoId));
+    if (!finalTracks.length && Array.isArray(tracks) && tracks.length) {
+      // Don't starve recommendations if all exact IDs were in skipSet: keep tracks whose title differs
+      finalTracks = tracks.filter((row) => row && String(row.title || "").toLowerCase() !== String(title).toLowerCase());
+      if (!finalTracks.length) finalTracks = tracks.slice(0, 15);
+    }
     return json(200, {
-      tracks: (tracks || []).filter((row) => row && !skipSet.has(row.id) && !skipSet.has(row.videoId)).slice(0, 24),
+      tracks: finalTracks.slice(0, 24),
     });
   } catch (e) {
     return json(200, { tracks: [], error: String(e.message || e) });

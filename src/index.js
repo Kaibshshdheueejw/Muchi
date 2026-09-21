@@ -45,12 +45,18 @@ export default {
     try {
       const url = new URL(request.url);
       if (request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders() });
+        return new Response(null, { status: 204, headers: corsHeaders(request) });
       }
       let response;
       if (url.pathname.startsWith("/api/")) {
         await maybeSweep(env);
         response = await handleApi(request, env, url);
+        if (response) {
+          const cors = corsHeaders(request);
+          for (const [k, v] of Object.entries(cors)) {
+            response.headers.set(k, v);
+          }
+        }
       } else {
         // Non-/api paths: served by Workers Static Assets (run_worker_first
         // sends only /api/* here; this fallback covers manual routing).

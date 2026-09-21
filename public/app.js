@@ -699,7 +699,8 @@
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const headers = Object.assign({}, (opts && opts.headers) || {}, authHeaders());
-      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal, credentials: "include" }, opts || {}, { headers }));
+      const creds = (API_BASE && IS_NATIVE) ? "omit" : "include";
+      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal, credentials: creds }, opts || {}, { headers }));
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       if (cacheable && apiCacheIsUsable(data)) await apiCachePut(cacheKey, data).catch(() => {});
@@ -1160,7 +1161,9 @@
     if (Array.isArray(data.youtube) && data.youtube.length === 0) return false;
     if (Array.isArray(data.countryPlaylists) && data.countryPlaylists.length < 6) return false;
     if (Array.isArray(data.youtubeLocal) && data.youtubeLocal.length < 5) return false;
-    if (Array.isArray(data.apple) && data.apple.length === 0 && Array.isArray(data.deezer) && data.deezer.length === 0) return false;
+    if (Array.isArray(data.apple) && data.apple.length === 0) return false;
+    if (Array.isArray(data.deezer) && data.deezer.length === 0) return false;
+    if (Array.isArray(data.itunes) && data.itunes.length === 0) return false;
     if (Array.isArray(data.shelves)) {
       if (data.shelves.length === 0) return false;
       // A home payload whose every shelf is empty adds nothing.
@@ -2667,31 +2670,10 @@
   }
 
   async function dzFetch(path, ms = 9000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
-    // 1. Direct fetch (native/CORS-enabled environments)
+    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : path;
+    // 1. Worker proxy (/api/deezer/proxy) - fast, reliable server-to-server egress without browser CORS or adblock issues
     try {
-      const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
-      if (r.ok) {
-        const j = await r.json();
-        if (j) return j;
-      }
-    } catch {
-      // Direct fetch failed (e.g. browser CORS)
-    } finally {
-      clearTimeout(t);
-    }
-    // 2. JSONP script tag
-    try {
-      const jRes = await dzJsonp(path, {}, ms);
-      if (jRes) return jRes;
-    } catch {
-      // JSONP failed (e.g. adblocker / restrictive CSP)
-    }
-    // 3. Worker proxy fallback (/api/deezer/proxy)
-    try {
-      const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : path;
-      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, ms);
+      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 6000));
       if (proxyRes && (Array.isArray(proxyRes.data) || Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer) || proxyRes.id)) {
         if (!proxyRes.data && (Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer))) {
           proxyRes.data = proxyRes.results || proxyRes.deezer;
@@ -2699,6 +2681,42 @@
         return proxyRes;
       }
     } catch {}
+
+    // 2. Direct fetch (native app shells / CORS enabled environments)
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
+    try {
+      const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
+      if (r.ok) {
+        const j = await r.json();
+        if (j) return j;
+      }
+    } catch {
+      // Direct fetch failed (browser CORS)
+    } finally {
+      clearTimeout(t);
+    }
+
+    // 3. JSONP script tag with brief timeout
+    try {
+      const jRes = await dzJsonp(path, {}, Math.min(ms, 3000));
+      if (jRes) return jRes;
+    } catch {
+      // JSONP failed or blocked
+    }
+
+    // 4. Targeted provider search fallback
+    try {
+      const u = new URL(path.startsWith("http") ? path : `${DZ_BASE}${path}`);
+      const q = u.searchParams.get("q") || "";
+      if (q) {
+        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, ms);
+        if (sr && Array.isArray(sr.deezer) && sr.deezer.length) {
+          return { data: sr.deezer };
+        }
+      }
+    } catch {}
+
     throw new Error("deezer search request failed across all channels");
   }
   const dzFold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -3033,19 +3051,19 @@
       return dur <= 3600;
     }
     if (t.source === "audius" || t.source === "radio") return true;
-    if (dur > 1080) return false;
-    if (dur > 0 && dur < 25) return false;
-    const artist = String(t.artist || "").toLowerCase();
-    const title = String(t.title || "").toLowerCase();
+    if (dur > 1200) return false;
+    if (dur > 0 && dur < 20) return false;
+    if (t.artist && typeof t.artist === "string" && /\s*-\s*topic$/i.test(t.artist)) {
+      t.artist = t.artist.replace(/\s*-\s*topic$/i, "").trim();
+    }
+    const artist = String(t.artist || "").toLowerCase().trim();
+    const title = String(t.title || "").toLowerCase().trim();
     const text = `${title} ${artist}`;
-    if (/\b(gameplay|walkthrough|playthrough|let'?s play|gaming|fortnite|minecraft|roblox|gta|valorant|call of duty|apex legends|genshin|game review|movie review|film review|movie recap|trailer|teaser|official trailer|full movie|episode|season \d+|vlog|reaction|reacting to|unboxing|tech review|speedrun|stream highlight|news|breaking news|imran khan|nato|modi|biden|trump|putin|ukraine|parliament|election|documentary|tutorial|how to|webinar|ted talk|interview|standup|stand-up|comedy skit|#shorts?)\b/i.test(text)) {
+    if (/\b(gameplay|walkthrough|playthrough|let'?s play|gaming|fortnite|minecraft|roblox|gta\s*[5v]?|valorant|call of duty|apex legends|genshin|game review|movie review|film review|movie recap|trailer|teaser|official trailer|full movie|episode|season \d+|vlog|reaction|reacting to|unboxing|tech review|speedrun|stream highlight|news|breaking news|imran khan|nato|modi|biden|trump|putin|ukraine|parliament|election|documentary|tutorial|how to|webinar|ted talk|interview|standup|stand-up|comedy skit|#shorts?)\b/i.test(text)) {
       return false;
     }
-    if (/^(episode|podcast|clip|news|trailer|gaming|movie|various artists|various)$/i.test(artist.trim())) return false;
-    if (/\btopic\b/i.test(artist)) return false;
-    if (/\b(non[- ]?stop|full album|album mix|megamix|compilation|collection|dj set|live set|greatest hits|best of|billboard|top ?(?:10|20|40|50|100) ?(?:pop|english|hit|song|music|playlist)? ?songs?|hits ?(?:19\d\d|20\d\d|vol\.?\s*\d)|1 ?hour|one hour|hour mix|karaoke|instrumental|sped ?up|slowed|reverb|mashup|medley|mixtape|mix tape|playlist)\b/i.test(text)) return false;
-    if (/\b(?:mix|remix)\b\s*$/i.test(title)) return false;
-    if (/\b(?:mix|remix|hits|top)\b/i.test(artist)) return false;
+    if (/^(episode|podcast|clip|news|trailer|gaming|movie)$/i.test(artist)) return false;
+    if (/\b(non[- ]?stop|full album|album mix|megamix|compilation|dj set|live set|billboard|1 ?hour|one hour|hour mix|karaoke)\b/i.test(text)) return false;
     return true;
   }
 
@@ -3063,7 +3081,7 @@
 
   let isQueueRecsLoading = false;
   async function loadQueueRecs(force = false) {
-    const cur = current() || (state.recent && state.recent[0]);
+    const cur = current() || (state.recent && state.recent[0]) || (state.queue && state.queue[0]) || (state.liked && state.liked[0]);
     if (!cur || cur.source === "radio") {
       if (!cur) {
         state.queueRecs = [];
@@ -3079,6 +3097,7 @@
     isQueueRecsLoading = true;
     const refBtn = $("refreshQueueRecs");
     if (refBtn) refBtn.classList.add("rotating");
+    renderQueue();
     try {
       const skipSet = new Set();
       (state.queue || []).forEach((t) => {
@@ -3092,26 +3111,64 @@
         if (t.videoId) skipSet.add(t.videoId);
       });
       const extraSkip = Array.from(skipSet).slice(0, 25).join(",");
-      const tracks = await fetchRelated(cur, extraSkip);
+      let tracks = await fetchRelated(cur, extraSkip).catch(() => []);
       const filtered = [];
       const seenIds = new Set(skipSet);
-      for (const t of tracks || []) {
-        if (!t || !looksLikeSong(t)) continue;
+
+      const addTrack = (t) => {
+        if (!t || !looksLikeSong(t)) return false;
         const k = t.id || t.videoId;
-        if (!k || seenIds.has(k)) continue;
+        if (!k || seenIds.has(k)) return false;
+        // Skip identical title matching seed song
+        const cleanT = String(t.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+        const cleanCur = String(cur.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+        if (cleanT && cleanCur && cleanT === cleanCur) return false;
         seenIds.add(k);
         filtered.push(t);
+        return true;
+      };
+
+      for (const t of tracks || []) {
+        addTrack(t);
         if (filtered.length >= 15) break;
       }
+
+      // If related returned fewer than 6 songs, fetch artist catalog recommendations
+      if (filtered.length < 6 && cur.artist) {
+        const art = artistName(cur);
+        if (art && !/^(various artists|unknown)$/i.test(art)) {
+          try {
+            const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
+            const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
+            for (const t of artTracks) {
+              addTrack(t);
+              if (filtered.length >= 15) break;
+            }
+          } catch {}
+        }
+      }
+
+      // If still fewer than 6, pull from discovery / shelf
+      if (filtered.length < 6) {
+        try {
+          const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
+          const discTracks = (disc && disc.tracks) || [];
+          for (const t of discTracks) {
+            addTrack(t);
+            if (filtered.length >= 15) break;
+          }
+        } catch {}
+      }
+
       state.queueRecs = filtered;
       state._queueRecsSeed = seedKey;
-      renderQueue();
     } catch (err) {
       console.warn("loadQueueRecs failed:", err);
     } finally {
       isQueueRecsLoading = false;
       const refBtn = $("refreshQueueRecs");
       if (refBtn) refBtn.classList.remove("rotating");
+      renderQueue();
     }
   }
 
@@ -5279,7 +5336,15 @@
                   <span class="material-symbols-outlined">add</span>
                 </button>
               </div>
-            `).join("") : `<p class="q-recs-empty">Tap refresh to get new song recommendations.</p>`)}
+            `).join("") : `
+              <div class="q-recs-empty-wrap">
+                <p class="q-recs-empty">Tap refresh to get new song recommendations.</p>
+                <button type="button" class="btn secondary sm" id="refreshQueueRecsEmpty" style="margin: 8px auto 0 auto; display: flex; align-items: center; gap: 6px;">
+                  <span class="material-symbols-outlined" style="font-size: 18px;">refresh</span>
+                  <span>Load Recommendations</span>
+                </button>
+              </div>
+            `)}
           </div>
         </div>
       `;
@@ -8604,34 +8669,43 @@
       return;
     }
     providerFetchInFlight = true;
+    render();
     const itCountry = String((state.prefs && state.prefs.country) || "US");
     try {
-      const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=${src}&country=${encodeURIComponent(itCountry)}&${glq()}`);
-      if (data && ((Array.isArray(data[targetKey]) && data[targetKey].length > 0) || (src === "apple" && Array.isArray(data.itunes) && data.itunes.length > 0))) {
-        const songs = (data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || [])).filter(looksLikeSong);
-        state.search[targetKey] = songs;
-        if (src === "apple") state.search.itunes = songs;
-        if (Array.isArray(data.artists) && data.artists.length) {
-          const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
-          for (const a of data.artists) {
-            if (a && a.name && !seen.has(a.name.toLowerCase())) {
-              seen.add(a.name.toLowerCase());
-              state.search.artists.push(a);
+      // 1. Primary targeted backend search (with refresh=1 to bypass stale empty responses)
+      try {
+        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=${src}&country=${encodeURIComponent(itCountry)}&refresh=1&${glq()}`, 10000);
+        if (data && ((Array.isArray(data[targetKey]) && data[targetKey].length > 0) || (src === "apple" && Array.isArray(data.itunes) && data.itunes.length > 0))) {
+          const songs = (data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || [])).filter(looksLikeSong);
+          if (songs.length) {
+            state.search[targetKey] = songs;
+            if (src === "apple") state.search.itunes = songs;
+            if (Array.isArray(data.artists) && data.artists.length) {
+              const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
+              for (const a of data.artists) {
+                if (a && a.name && !seen.has(a.name.toLowerCase())) {
+                  seen.add(a.name.toLowerCase());
+                  state.search.artists.push(a);
+                }
+              }
             }
+            if (Array.isArray(data.playlists) && data.playlists.length) {
+              const seenP = new Set((state.search.playlists || []).map((p) => String(p.id || p.title)));
+              for (const p of data.playlists) {
+                if (p && !seenP.has(String(p.id || p.title))) {
+                  seenP.add(String(p.id || p.title));
+                  state.search.playlists.push(p);
+                }
+              }
+            }
+            render();
           }
         }
-        if (Array.isArray(data.playlists) && data.playlists.length) {
-          const seenP = new Set((state.search.playlists || []).map((p) => String(p.id || p.title)));
-          for (const p of data.playlists) {
-            if (p && !seenP.has(String(p.id || p.title))) {
-              seenP.add(String(p.id || p.title));
-              state.search.playlists.push(p);
-            }
-          }
-        }
-        render();
+      } catch (primaryErr) {
+        console.warn("Primary provider search failed, falling through to direct channels:", src, primaryErr);
       }
 
+      // 2. iTunes / Apple direct channel fallback
       if ((src === "apple" || src === "itunes") && (!state.search.itunes || !state.search.itunes.length || !state.search.apple || !state.search.apple.length)) {
         try {
           const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
@@ -8663,6 +8737,8 @@
           console.warn("iTunes fallback in ensureProviderResults failed:", itErr);
         }
       }
+
+      // 3. Deezer direct channel fallback
       if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length)) {
         try {
           const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
@@ -8689,7 +8765,9 @@
             }).filter(looksLikeSong);
             render();
           }
-        } catch {}
+        } catch (dzErr) {
+          console.warn("Deezer fallback in ensureProviderResults failed:", dzErr);
+        }
       }
       if (src === "youtube" && (!state.search.youtube || !state.search.youtube.length)) {
         try {
@@ -8762,7 +8840,7 @@
       state.search = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`);
       if (!state.search.apple || !state.search.apple.length) {
         try {
-          const itData = await api(`/api/search?q=${encodeURIComponent(q)}&source=apple&${glq()}`);
+          const itData = await api(`/api/search?q=${encodeURIComponent(q)}&source=apple&refresh=1&${glq()}`);
           if (itData && Array.isArray(itData.apple) && itData.apple.length) {
             state.search.apple = itData.apple;
             state.search.itunes = state.search.apple;
@@ -8808,7 +8886,7 @@
       }
       if (!state.search.deezer || !state.search.deezer.length) {
         try {
-          const dzData = await api(`/api/search?q=${encodeURIComponent(q)}&source=deezer&${glq()}`);
+          const dzData = await api(`/api/search?q=${encodeURIComponent(q)}&source=deezer&refresh=1&${glq()}`);
           if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length) {
             state.search.deezer = dzData.deezer;
             if (Array.isArray(dzData.artists) && dzData.artists.length) {
@@ -9933,10 +10011,11 @@
         removeQueued(Number(del.dataset.qDel));
         return;
       }
-      const ref = e.target.closest("#refreshQueueRecs");
+      const ref = e.target.closest("#refreshQueueRecs") || e.target.closest("#refreshQueueRecsEmpty");
       if (ref) {
         e.stopPropagation();
-        ref.classList.add("rotating");
+        const icon = ref.querySelector(".material-symbols-outlined") || ref;
+        icon.classList.add("rotating");
         loadQueueRecs(true);
         return;
       }

@@ -8,18 +8,31 @@
 //      (protects the YouTube quota + keeps CPU ~0 on cache hits). Key space is
 //      bounded (~30 writes/day) — inside KV free's 1k writes/day.
 
-export function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
+export function corsHeaders(reqOrOrigin) {
+  let origin = "";
+  if (typeof reqOrOrigin === "string") {
+    origin = reqOrOrigin;
+  } else if (reqOrOrigin && reqOrOrigin.headers && typeof reqOrOrigin.headers.get === "function") {
+    origin = reqOrOrigin.headers.get("origin") || "";
+  }
+  const headers = {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
   };
+  if (origin) {
+    headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Credentials"] = "true";
+    headers["Vary"] = "Origin";
+  } else {
+    headers["Access-Control-Allow-Origin"] = "*";
+  }
+  return headers;
 }
 
-export function json(status, obj) {
+export function json(status, obj, reqOrOrigin) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders() },
+    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders(reqOrOrigin) },
   });
 }
 
