@@ -2632,46 +2632,12 @@
   // are read or played. Every track carries a playQuery that resolves
   // through MUCHI's existing playback pipeline for the FULL track.
   const DZ_BASE = "https://api.deezer.com";
-  function dzJsonp(path, params = {}, timeoutMs = 9000) {
-    return new Promise((resolve, reject) => {
-      const cbName = `__dz_cb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let urlStr = path.startsWith("http") ? path : `${DZ_BASE}${path}`;
-      const sep = urlStr.includes("?") ? "&" : "?";
-      const sp = new URLSearchParams(params);
-      sp.set("output", "jsonp");
-      sp.set("callback", cbName);
-      urlStr = `${urlStr}${sep}${sp.toString()}`;
 
-      const script = document.createElement("script");
-      script.src = urlStr;
-      script.async = true;
+  async function dzFetch(path, ms = 7000) {
+    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
 
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("deezer jsonp timeout"));
-      }, timeoutMs);
-
-      function cleanup() {
-        clearTimeout(timer);
-        try { delete window[cbName]; } catch {}
-        if (script.parentNode) script.parentNode.removeChild(script);
-      }
-
-      window[cbName] = (data) => {
-        cleanup();
-        resolve(data);
-      };
-      script.onerror = () => {
-        cleanup();
-        reject(new Error("deezer jsonp error"));
-      };
-      (document.head || document.documentElement).appendChild(script);
-    });
-  }
-
-  async function dzFetch(path, ms = 9000) {
-    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : path;
-    // 1. Worker proxy (/api/deezer/proxy) - fast, reliable server-to-server egress without browser CORS or adblock issues
+    // 1. Primary channel: First-party Worker proxy (/api/deezer/proxy)
+    // Runs on the app's own origin — completely immune to ad blockers, tracker shields, and mobile WebView CORS policies.
     try {
       const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 6000));
       if (proxyRes && (Array.isArray(proxyRes.data) || Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer) || proxyRes.id)) {
@@ -2682,40 +2648,35 @@
       }
     } catch {}
 
-    // 2. Direct fetch (native app shells / CORS enabled environments)
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
+    // 2. Secondary channel: First-party search fallback (/api/search?source=deezer)
     try {
-      const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
-      if (r.ok) {
-        const j = await r.json();
-        if (j) return j;
-      }
-    } catch {
-      // Direct fetch failed (browser CORS)
-    } finally {
-      clearTimeout(t);
-    }
-
-    // 3. JSONP script tag with brief timeout
-    try {
-      const jRes = await dzJsonp(path, {}, Math.min(ms, 3000));
-      if (jRes) return jRes;
-    } catch {
-      // JSONP failed or blocked
-    }
-
-    // 4. Targeted provider search fallback
-    try {
-      const u = new URL(path.startsWith("http") ? path : `${DZ_BASE}${path}`);
-      const q = u.searchParams.get("q") || "";
+      let q = "";
+      try {
+        const u = new URL(path.startsWith("http") ? path : `https://api.deezer.com${cleanPath}`);
+        q = u.searchParams.get("q") || "";
+      } catch {}
       if (q) {
-        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, ms);
+        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, Math.min(ms, 5000));
         if (sr && Array.isArray(sr.deezer) && sr.deezer.length) {
           return { data: sr.deezer };
         }
       }
     } catch {}
+
+    // 3. Tertiary direct fetch fallback with short timeout (silently catch adblock / CORS rejections)
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 2500));
+    try {
+      const r = await fetch(DZ_BASE + cleanPath, { signal: ctrl.signal, headers: { Accept: "application/json" } });
+      if (r.ok) {
+        const j = await r.json();
+        if (j) return j;
+      }
+    } catch {
+      // Ignored: adblock or CORS prevented direct third-party fetch
+    } finally {
+      clearTimeout(t);
+    }
 
     throw new Error("deezer search request failed across all channels");
   }
@@ -2807,130 +2768,102 @@
     return { artist, popular: top, songs: all, albums };
   }
 
-  // ── iTunes Search (worldwide catalogue, CORS-open, no key) ─────────────
+  // ── iTunes Search (worldwide catalogue, first-party proxied, adblock-immune) ────
   const ITUNES_BASE = "https://itunes.apple.com";
-  function itJsonp(path, params = {}, timeoutMs = 9000) {
-    return new Promise((resolve, reject) => {
-      const cbName = `__it_cb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let urlStr = path.startsWith("http") ? path : `${ITUNES_BASE}${path}`;
-      const sep = urlStr.includes("?") ? "&" : "?";
-      const sp = new URLSearchParams(params);
-      sp.set("callback", cbName);
-      urlStr = `${urlStr}${sep}${sp.toString()}`;
 
-      const script = document.createElement("script");
-      script.src = urlStr;
-      script.async = true;
-
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("itunes jsonp timeout"));
-      }, timeoutMs);
-
-      function cleanup() {
-        clearTimeout(timer);
-        try { delete window[cbName]; } catch {}
-        if (script.parentNode) script.parentNode.removeChild(script);
-      }
-
-      window[cbName] = (data) => {
-        cleanup();
-        resolve(data);
-      };
-      script.onerror = () => {
-        cleanup();
-        reject(new Error("itunes jsonp error"));
-      };
-      (document.head || document.documentElement).appendChild(script);
-    });
+  function normalizeItunesItem(item) {
+    if (!item) return null;
+    const cleanId = String(item.trackId || item.id || item.collectionId || "").replace(/^apple:|^itunes:/, "");
+    const title = item.trackName || item.title || "Song";
+    const artist = item.artistName || item.artist || "Artist";
+    const album = item.collectionName || item.album || "";
+    const duration = Math.round((item.trackTimeMillis || 0) / 1000) || Number(item.duration) || 0;
+    const artwork = String(item.artworkUrl100 || item.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+    return {
+      ...item,
+      id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      source: "apple",
+      title,
+      artist,
+      album,
+      duration,
+      artwork,
+      previewUrl: item.previewUrl || "",
+      playQuery: `${title} ${artist} official audio`.trim(),
+      trackId: cleanId || item.trackId,
+      trackName: title,
+      artistName: artist,
+      collectionName: album,
+      trackTimeMillis: duration * 1000,
+      artworkUrl100: artwork,
+    };
   }
 
-  async function itFetch(path, ms = 9000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
-    // 1. Direct fetch without restrictive headers
+  async function itFetch(path, ms = 7000) {
+    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
+
+    let term = "";
+    let country = (state.prefs && state.prefs.country) || "";
     try {
-      const r = await fetch(ITUNES_BASE + path, { signal: ctrl.signal });
-      if (r.ok) {
-        const j = await r.json();
-        if (j && Array.isArray(j.results)) {
-          j.results = j.results.map((item) => ({
-            ...item,
-            id: item.id || `apple:${item.trackId || item.collectionId || ""}`,
-            title: item.title || item.trackName || "Song",
-            artist: item.artist || item.artistName || "Artist",
-            album: item.album || item.collectionName || "",
-            duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
-            artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-            trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
-            trackName: item.trackName || item.title || "Song",
-            artistName: item.artistName || item.artist || "Artist",
-            collectionName: item.collectionName || item.album || "",
-            trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
-            artworkUrl100: item.artworkUrl100 || item.artwork || "",
-          }));
-        }
-        return j;
+      const u = new URL(path.startsWith("http") ? path : `https://itunes.apple.com${cleanPath}`);
+      term = u.searchParams.get("term") || u.searchParams.get("q") || "";
+      country = u.searchParams.get("country") || country;
+    } catch {}
+
+    // 1. Primary channel: First-party Worker proxy (/api/itunes/proxy)
+    // Runs on the app's own origin — completely immune to ad blockers, tracker shields, and mobile WebView CORS policies.
+    try {
+      const proxyRes = await api(`/api/itunes/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 6000));
+      const list = (proxyRes && (Array.isArray(proxyRes.results) ? proxyRes.results : (Array.isArray(proxyRes.apple) ? proxyRes.apple : proxyRes.itunes))) || [];
+      if (Array.isArray(list) && list.length) {
+        return {
+          results: list.map(normalizeItunesItem).filter(Boolean),
+        };
       }
-    } catch {
-      // Direct fetch failed (e.g. mobile WebView or browser CORS)
-    } finally {
-      clearTimeout(t);
-    }
-    // 2. Direct JSONP script tag
-    try {
-      const jRes = await itJsonp(path, {}, ms);
-      if (jRes && Array.isArray(jRes.results)) {
-        jRes.results = jRes.results.map((item) => ({
-          ...item,
-          id: item.id || `apple:${item.trackId || item.collectionId || ""}`,
-          title: item.title || item.trackName || "Song",
-          artist: item.artist || item.artistName || "Artist",
-          album: item.album || item.collectionName || "",
-          duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
-          artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-          trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
-          trackName: item.trackName || item.title || "Song",
-          artistName: item.artistName || item.artist || "Artist",
-          collectionName: item.collectionName || item.album || "",
-          trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
-          artworkUrl100: item.artworkUrl100 || item.artwork || "",
-        }));
-        return jRes;
-      }
-    } catch {
-      // JSONP failed - fall through
-    }
-    // 3. Backend proxy fallback (/api/itunes/search)
-    try {
-      const full = path.startsWith("http") ? path : `${ITUNES_BASE}${path}`;
-      const u = new URL(full);
-      const term = u.searchParams.get("term") || u.searchParams.get("q") || "";
-      const country = u.searchParams.get("country") || (state.prefs && state.prefs.country) || "";
-      if (term) {
-        const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, ms);
+    } catch {}
+
+    // 2. Secondary channel: First-party search fallback (/api/itunes/search or /api/search?source=apple)
+    if (term) {
+      try {
+        const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 5000));
         const list = (pr && (pr.results || pr.apple || pr.itunes)) || [];
         if (Array.isArray(list) && list.length) {
           return {
-            results: list.map((item) => ({
-              ...item,
-              id: item.id || `apple:${item.trackId || ""}`,
-              title: item.title || item.trackName || "Song",
-              artist: item.artist || item.artistName || "Artist",
-              album: item.album || item.collectionName || "",
-              duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
-              artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-              trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
-              trackName: item.trackName || item.title || "Song",
-              artistName: item.artistName || item.artist || "Artist",
-              collectionName: item.collectionName || item.album || "",
-              trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
-              artworkUrl100: item.artworkUrl100 || item.artwork || "",
-            })),
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+
+      try {
+        const sr = await api(`/api/search?source=apple&q=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&refresh=1&${glq()}`, Math.min(ms, 5000));
+        const list = (sr && (sr.apple || sr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+    }
+
+    // 3. Tertiary direct fetch fallback with short timeout (silently catch adblock / CORS rejections)
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 2500));
+    try {
+      const r = await fetch(ITUNES_BASE + cleanPath, { signal: ctrl.signal });
+      if (r.ok) {
+        const j = await r.json();
+        if (j && Array.isArray(j.results)) {
+          return {
+            results: j.results.map(normalizeItunesItem).filter(Boolean),
           };
         }
       }
-    } catch {}
+    } catch {
+      // Ignored: adblock or CORS prevented direct third-party fetch
+    } finally {
+      clearTimeout(t);
+    }
+
     throw new Error("itunes search request failed across all channels");
   }
   async function itunesBrowserCatalog(name) {
@@ -3145,6 +3078,42 @@
               if (filtered.length >= 15) break;
             }
           } catch {}
+        }
+      }
+
+      // If still fewer than 6, supplement from iTunes / Apple Music catalog
+      if (filtered.length < 6) {
+        const art = artistName(cur);
+        const searchQ = art || cur.title || "";
+        if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
+          try {
+            const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
+            const itList = (itRes && itRes.results) || [];
+            for (const t of itList) {
+              addTrack(t);
+              if (filtered.length >= 15) break;
+            }
+          } catch {}
+          if (filtered.length < 6) {
+            try {
+              const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
+              const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
+              for (const t of dzList) {
+                const s = {
+                  id: `deezer:${t.id}`,
+                  source: "deezer",
+                  title: t.title || t.trackName || "Song",
+                  artist: (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist",
+                  album: (t.album && (t.album.title || t.album)) || t.collectionName || "",
+                  duration: Number(t.duration || 0),
+                  artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg",
+                  playQuery: `${t.title || ""} ${(t.artist && (t.artist.name || t.artist)) || ""} official audio`.trim(),
+                };
+                addTrack(s);
+                if (filtered.length >= 15) break;
+              }
+            } catch {}
+          }
         }
       }
 

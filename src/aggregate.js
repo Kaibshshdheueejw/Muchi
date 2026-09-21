@@ -859,8 +859,43 @@ export async function handleRelated(url) {
 }
 
 export async function handleItunesSearch(url) {
+  const path = url.searchParams.get("path") || "";
   const q = (url.searchParams.get("q") || url.searchParams.get("term") || url.searchParams.get("query") || "").trim();
-  if (!q) return json(400, { error: "Missing query", results: [], apple: [], itunes: [] });
+
+  // Mode 1: Proxy raw iTunes path (e.g. /search?term=...&entity=song&limit=50, /lookup?id=...)
+  if (path) {
+    try {
+      const cleanPath = path.startsWith("/") ? path : `/${path}`;
+      const allowed = ["/search", "/lookup"];
+      if (!allowed.some((prefix) => cleanPath.startsWith(prefix))) {
+        return json(400, { error: "Disallowed iTunes path" });
+      }
+      const targetUrl = `https://itunes.apple.com${cleanPath}`;
+      const ctrl = new AbortController();
+      const tm = setTimeout(() => ctrl.abort(), 9000);
+      try {
+        const r = await fetch(targetUrl, {
+          signal: ctrl.signal,
+          headers: {
+            Accept: "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          },
+        });
+        if (!r.ok) return json(r.status, { error: `iTunes upstream ${r.status}` });
+        const data = await r.json();
+        const resp = json(200, data);
+        resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+        return resp;
+      } finally {
+        clearTimeout(tm);
+      }
+    } catch (e) {
+      return json(502, { error: String(e.message || e) });
+    }
+  }
+
+  // Mode 2: Query search
+  if (!q) return json(400, { error: "Missing query or path", results: [], apple: [], itunes: [] });
   const gl = regionCode(url.searchParams.get("gl") || url.searchParams.get("country"));
   try {
     const res = await itunesSearch(q, { includeExtra: true, country: gl });
