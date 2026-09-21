@@ -234,6 +234,8 @@ export async function deezerSearch(query, { limit = 50, includeExtra = true } = 
         artwork: clean(t.album && (t.album.cover_big || t.album.cover_medium)) || "/cover-default.jpg",
         previewUrl: clean(t.preview) || "",
         playQuery: `${title} ${artistName} official audio`.trim(),
+        rawId: t.id,
+        preview: clean(t.preview) || "",
       });
       if (t.artist && t.artist.name) {
         const k = clean(t.artist.name).toLowerCase();

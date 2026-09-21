@@ -26,7 +26,7 @@ import {
 import {
   handleHome, handleShelf, handleSearch, handleYoutubeSearch, handleYtPlaylist,
   handleArtist, handleRadio, handleRadioClick, handleDiscover, handleRelated,
-  handleLyrics, handleYtStream, handleItunesSearch,
+  handleLyrics, handleYtStream, handleItunesSearch, handleDeezerProxy,
 } from "./aggregate.js";
 import { handleStream, handleImg, handleAudiusStream, handleAudiusFile, handleDownload } from "./stream.js";
 import { maybeSweep } from "./db.js";
@@ -137,6 +137,7 @@ async function handleApi(request, env, url) {
   if (p === "/api/shelf") return handleShelf(env, url);
   if (p === "/api/search") return handleSearch(env, url);
   if (p === "/api/itunes/search" || p === "/api/apple/search") return handleItunesSearch(url);
+  if (p === "/api/deezer/search" || p === "/api/deezer/proxy" || p === "/api/deezer") return handleDeezerProxy(url);
   if (p === "/api/youtube/search") return handleYoutubeSearch(url);
   if (p === "/api/yt/playlist") return handleYtPlaylist(url);
   if (p === "/api/yt/stream") return handleYtStream(url);

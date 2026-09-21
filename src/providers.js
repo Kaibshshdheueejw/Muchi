@@ -457,10 +457,10 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   const countryParam = country ? `&country=${encodeURIComponent(country)}` : "";
   const fetchItunes = async (url) => {
     try {
-      return await fetchJSON(url, {}, 9000);
+      return await fetchJSON(url, {}, 6000);
     } catch {
       const ctrl = new AbortController();
-      const tm = setTimeout(() => ctrl.abort(), 8000);
+      const tm = setTimeout(() => ctrl.abort(), 5000);
       try {
         const r = await fetch(url, { signal: ctrl.signal });
         if (!r.ok) return null;
@@ -505,6 +505,12 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
         artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
         previewUrl: t.previewUrl || "",
         playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
+        trackId: t.trackId,
+        trackName: t.trackName || "Song",
+        artistName: t.artistName || "Artist",
+        collectionName: t.collectionName || "",
+        trackTimeMillis: t.trackTimeMillis || 0,
+        artworkUrl100: t.artworkUrl100 || "",
       });
       if (t.artistName && !seenArt.has(t.artistName.toLowerCase())) {
         seenArt.add(t.artistName.toLowerCase());
@@ -534,7 +540,7 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   // Secondary fallback if specific entity search returned empty
   if (!songs.length) {
     try {
-      const fb = await fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&limit=30`, {}, 8000);
+      const fb = await fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&limit=30`, {}, 6000);
       for (const t of (fb && fb.results) || []) {
         if (!t.trackId || !t.trackName) continue;
         songs.push({
@@ -547,6 +553,12 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
           artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
           previewUrl: t.previewUrl || "",
           playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
+          trackId: t.trackId,
+          trackName: t.trackName,
+          artistName: t.artistName || "Artist",
+          collectionName: t.collectionName || "",
+          trackTimeMillis: t.trackTimeMillis || 0,
+          artworkUrl100: t.artworkUrl100 || "",
         });
       }
     } catch {}

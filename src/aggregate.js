@@ -829,7 +829,7 @@ export async function handleRelated(url) {
 export async function handleItunesSearch(url) {
   const q = (url.searchParams.get("q") || url.searchParams.get("term") || url.searchParams.get("query") || "").trim();
   if (!q) return json(400, { error: "Missing query", results: [], apple: [], itunes: [] });
-  const gl = regionCode(url.searchParams.get("gl"));
+  const gl = regionCode(url.searchParams.get("gl") || url.searchParams.get("country"));
   try {
     const res = await itunesSearch(q, { includeExtra: true, country: gl });
     const songs = strictSongs(res.songs || []);
@@ -845,6 +845,65 @@ export async function handleItunesSearch(url) {
   } catch (err) {
     return json(500, { error: String(err && err.message || err), results: [], apple: [], itunes: [] });
   }
+}
+
+export async function handleDeezerProxy(url) {
+  const path = url.searchParams.get("path") || "";
+  const q = (url.searchParams.get("q") || url.searchParams.get("term") || url.searchParams.get("query") || "").trim();
+
+  // Mode 1: Proxy raw Deezer path (e.g. /search?q=..., /artist/..., /album/...)
+  if (path) {
+    try {
+      const cleanPath = path.startsWith("/") ? path : `/${path}`;
+      const allowed = ["/search", "/artist/", "/album/", "/track/", "/chart", "/genre"];
+      if (!allowed.some((prefix) => cleanPath.startsWith(prefix))) {
+        return json(400, { error: "Disallowed Deezer path" });
+      }
+      const targetUrl = `https://api.deezer.com${cleanPath}`;
+      const ctrl = new AbortController();
+      const tm = setTimeout(() => ctrl.abort(), 9000);
+      try {
+        const r = await fetch(targetUrl, {
+          signal: ctrl.signal,
+          headers: {
+            Accept: "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+        });
+        if (!r.ok) return json(r.status, { error: `Deezer upstream ${r.status}` });
+        const data = await r.json();
+        const resp = json(200, data);
+        resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+        return resp;
+      } finally {
+        clearTimeout(tm);
+      }
+    } catch (e) {
+      return json(502, { error: String(e.message || e) });
+    }
+  }
+
+  // Mode 2: Search query fallback
+  if (q) {
+    try {
+      const dz = await deezerSearch(q, { limit: 50, includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      const songs = strictSongs(dz.songs || []);
+      const resp = json(200, {
+        results: songs,
+        data: songs,
+        deezer: songs,
+        artists: dz.artists || [],
+        playlists: dz.playlists || [],
+      });
+      resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+      return resp;
+    } catch (e) {
+      return json(500, { error: String(e.message || e), results: [], data: [], deezer: [] });
+    }
+  }
+
+  return json(400, { error: "Missing path or query" });
 }
 
 export async function handleLyrics(url) {

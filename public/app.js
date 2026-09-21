@@ -126,7 +126,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.9";
+  const APP_VERSION = "1.6.1";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1144,7 +1144,7 @@
   // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
   // a stale IndexedDB/payload from the previous deployment (which is exactly
   // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
-  const API_CACHE_V = "v7-top25-country12";
+  const API_CACHE_V = "v8-sync-161";
   // Never cache an "empty" catalog payload. If a provider is temporarily
   // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
   // tracks); caching that would freeze the shelf empty for the whole TTL.
@@ -1160,6 +1160,7 @@
     if (Array.isArray(data.youtube) && data.youtube.length === 0) return false;
     if (Array.isArray(data.countryPlaylists) && data.countryPlaylists.length < 6) return false;
     if (Array.isArray(data.youtubeLocal) && data.youtubeLocal.length < 5) return false;
+    if (Array.isArray(data.apple) && data.apple.length === 0 && Array.isArray(data.deezer) && data.deezer.length === 0) return false;
     if (Array.isArray(data.shelves)) {
       if (data.shelves.length === 0) return false;
       // A home payload whose every shelf is empty adds nothing.
@@ -2668,24 +2669,43 @@
   async function dzFetch(path, ms = 9000) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), ms);
+    // 1. Direct fetch (native/CORS-enabled environments)
     try {
       const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
-      if (!r.ok) throw new Error("deezer " + r.status);
-      return await r.json();
+      if (r.ok) {
+        const j = await r.json();
+        if (j) return j;
+      }
     } catch {
-      return await dzJsonp(path, {}, ms);
+      // Direct fetch failed (e.g. browser CORS)
     } finally {
       clearTimeout(t);
     }
+    // 2. JSONP script tag
+    try {
+      const jRes = await dzJsonp(path, {}, ms);
+      if (jRes) return jRes;
+    } catch {
+      // JSONP failed (e.g. adblocker / restrictive CSP)
+    }
+    // 3. Worker proxy fallback (/api/deezer/proxy)
+    try {
+      const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : path;
+      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, ms);
+      if (proxyRes && (Array.isArray(proxyRes.data) || Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer) || proxyRes.id)) {
+        if (!proxyRes.data && (Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer))) {
+          proxyRes.data = proxyRes.results || proxyRes.deezer;
+        }
+        return proxyRes;
+      }
+    } catch {}
+    throw new Error("deezer search request failed across all channels");
   }
   const dzFold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 
   async function deezerBrowserCatalog(name) {
     const want = dzFold(name);
     if (!want) return null;
-    // Same matching rule as the worker: exact (accent-folded) name, else
-    // the shortest "starts with" candidate — never a blind first row
-    // ("adele" must not resolve to the duo "Adèle & Robin").
     const sj = await dzFetch(`/search/artist?q=${encodeURIComponent(String(name).slice(0, 80))}&limit=10`);
     const rows = (sj && sj.data) || [];
 
@@ -2696,23 +2716,31 @@
     }
     if (!a || !a.id) return null;
     const artist = { name: a.name || name, artwork: a.picture_medium || "" };
-    const dzSong = (t, srcArt) => (!t || !t.title) ? null : {
-      id: `deezer:${t.id}`,
-      source: "deezer",
-      title: t.title,
-      artist: (t.artist && t.artist.name) || artist.name,
-      album: (t.album && t.album.title) || "",
-      duration: Number(t.duration || 0),
-      artwork: (t.album && t.album.cover_medium) || srcArt || "",
-      playQuery: `${t.title} ${(t.artist && t.artist.name) || artist.name} official audio`.trim(),
+    const dzSong = (t, srcArt) => {
+      if (!t || (!t.title && !t.trackName)) return null;
+      const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
+      const title = t.title || t.trackName || "Song";
+      const artName = (t.artist && (t.artist.name || t.artist)) || t.artistName || artist.name;
+      const albName = (t.album && (t.album.title || t.album)) || t.collectionName || "";
+      const art = (t.album && (t.album.cover_medium || t.album.cover_big)) || t.artwork || srcArt || "";
+      return {
+        id: `deezer:${cleanId}`,
+        source: "deezer",
+        title,
+        artist: artName,
+        album: albName,
+        duration: Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0,
+        artwork: art,
+        playQuery: `${title} ${artName} official audio`.trim(),
+      };
     };
-    // 1) Most popular tracks (Deezer ranks the artist's top list by popularity).
+    // 1) Most popular tracks
     const top = [];
     try {
       const tj = await dzFetch(`/artist/${a.id}/top?limit=50`);
       for (const t of (tj && tj.data) || []) { const s = dzSong(t, artist.artwork); if (s) top.push(s); }
     } catch {}
-    // 2) Complete discography (offset pagination, capped at 100 albums).
+    // 2) Complete discography
     const albums = [];
     let index = 0;
     for (let page = 0; page < 3; page++) {
@@ -2723,8 +2751,9 @@
       for (const al of list) {
         if (!al || !al.id) continue;
         const rt = String(al.record_type || "").toLowerCase();
+        const cleanAlbId = String(al.id).replace(/^deezer-album:/, "");
         albums.push({
-          id: `deezer-album:${al.id}`,
+          id: `deezer-album:${cleanAlbId}`,
           kind: "playlist",
           title: al.title || "Album",
           artist: artist.name,
@@ -2738,7 +2767,7 @@
       index += list.length;
       if (index >= Number(aj.total || 0) || index >= 100) break;
     }
-    // 3) Newest 8 albums → full track lists (correct order + album).
+    // 3) Newest 8 albums → full track lists
     const all = [...top];
     const seen = new Set(all.map((t) => dzFold(t.title) + "|" + dzFold(t.artist)));
     const expand = albums.slice(0, 8);
@@ -2761,9 +2790,6 @@
   }
 
   // ── iTunes Search (worldwide catalogue, CORS-open, no key) ─────────────
-  // Backbone for the browser-side catalogue: up to 200 songs + 200 albums
-  // per artist. Metadata only — playback resolves through the app's
-  // normal search pipeline via playQuery, exactly like the Deezer rows.
   const ITUNES_BASE = "https://itunes.apple.com";
   function itJsonp(path, params = {}, timeoutMs = 9000) {
     return new Promise((resolve, reject) => {
@@ -2804,21 +2830,56 @@
   async function itFetch(path, ms = 9000) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), ms);
-    // 1. Direct fetch without restrictive headers (avoids CORS preflight)
+    // 1. Direct fetch without restrictive headers
     try {
       const r = await fetch(ITUNES_BASE + path, { signal: ctrl.signal });
       if (r.ok) {
-        return await r.json();
+        const j = await r.json();
+        if (j && Array.isArray(j.results)) {
+          j.results = j.results.map((item) => ({
+            ...item,
+            id: item.id || `apple:${item.trackId || item.collectionId || ""}`,
+            title: item.title || item.trackName || "Song",
+            artist: item.artist || item.artistName || "Artist",
+            album: item.album || item.collectionName || "",
+            duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
+            artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+            trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
+            trackName: item.trackName || item.title || "Song",
+            artistName: item.artistName || item.artist || "Artist",
+            collectionName: item.collectionName || item.album || "",
+            trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
+            artworkUrl100: item.artworkUrl100 || item.artwork || "",
+          }));
+        }
+        return j;
       }
     } catch {
-      // Direct fetch failed or blocked (e.g. WebView, strict browser tracking) - fall through
+      // Direct fetch failed (e.g. mobile WebView or browser CORS)
     } finally {
       clearTimeout(t);
     }
-    // 2. Direct JSONP script tag (bypasses browser CORS & WebView blocks)
+    // 2. Direct JSONP script tag
     try {
       const jRes = await itJsonp(path, {}, ms);
-      if (jRes) return jRes;
+      if (jRes && Array.isArray(jRes.results)) {
+        jRes.results = jRes.results.map((item) => ({
+          ...item,
+          id: item.id || `apple:${item.trackId || item.collectionId || ""}`,
+          title: item.title || item.trackName || "Song",
+          artist: item.artist || item.artistName || "Artist",
+          album: item.album || item.collectionName || "",
+          duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
+          artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+          trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
+          trackName: item.trackName || item.title || "Song",
+          artistName: item.artistName || item.artist || "Artist",
+          collectionName: item.collectionName || item.album || "",
+          trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
+          artworkUrl100: item.artworkUrl100 || item.artwork || "",
+        }));
+        return jRes;
+      }
     } catch {
       // JSONP failed - fall through
     }
@@ -2826,12 +2887,29 @@
     try {
       const full = path.startsWith("http") ? path : `${ITUNES_BASE}${path}`;
       const u = new URL(full);
-      const term = u.searchParams.get("term") || "";
+      const term = u.searchParams.get("term") || u.searchParams.get("q") || "";
       const country = u.searchParams.get("country") || (state.prefs && state.prefs.country) || "";
       if (term) {
         const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, ms);
-        if (pr && (Array.isArray(pr.results) || Array.isArray(pr.apple) || Array.isArray(pr.itunes))) {
-          return { results: pr.results || pr.apple || pr.itunes || [] };
+        const list = (pr && (pr.results || pr.apple || pr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map((item) => ({
+              ...item,
+              id: item.id || `apple:${item.trackId || ""}`,
+              title: item.title || item.trackName || "Song",
+              artist: item.artist || item.artistName || "Artist",
+              album: item.album || item.collectionName || "",
+              duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
+              artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+              trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
+              trackName: item.trackName || item.title || "Song",
+              artistName: item.artistName || item.artist || "Artist",
+              collectionName: item.collectionName || item.album || "",
+              trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
+              artworkUrl100: item.artworkUrl100 || item.artwork || "",
+            })),
+          };
         }
       }
     } catch {}
@@ -2841,61 +2919,62 @@
     const want = dzFold(name);
     if (!want) return null;
     const country = String((state.prefs && state.prefs.country) || "IN");
-    // iTunes Search (verified API surface: term/entity/limit/country only —
-    // there is no artist entity and no attribute param). Step 1 pulls the
-    // artist's songs; the canonical artist name is derived from the
-    // dominant artistName among rows that actually relate to the query,
-    // so "post malone" never resolves to the Sam Feldt track that merely
-    // features him.
     const ssj = await itFetch(`/search?term=${encodeURIComponent(String(name).slice(0, 80))}&entity=song&limit=200&country=${country}`);
     const rows = (ssj && ssj.results) || [];
     const related = rows.filter((t) => {
-      const na = dzFold(t.artistName);
+      const na = dzFold(t.artistName || t.artist || "");
       return na && (na === want || na.includes(want) || want.includes(na));
     });
     if (!related.length) return null;
     const freq = new Map();
     for (const t of related.slice(0, 50)) {
-      const na = dzFold(t.artistName);
+      const na = dzFold(t.artistName || t.artist || "");
       freq.set(na, (freq.get(na) || 0) + 1);
     }
     let an = "";
     let best = 0;
     for (const [k, v] of freq) if (v > best || (v === best && k.length > an.length)) { an = k; best = v; }
-    const orig = related.find((t) => dzFold(t.artistName) === an) || related[0];
-    const artistName = orig.artistName || name;
-    const art = String(orig.artworkUrl100 || "").replace("100x100bb", "500x500bb");
-    const itSong = (t) => (!t || !t.trackName) ? null : {
-      id: `itunes:${t.trackId}`,
-      source: "itunes",
-      title: t.trackName,
-      artist: t.artistName || artistName,
-      album: t.collectionName || "",
-      duration: Math.round(Number(t.trackTimeMillis || 0) / 1000),
-      artwork: String(t.artworkUrl100 || "").replace("100x100bb", "300x300bb"),
-      playQuery: `${t.trackName} ${t.artistName || artistName} official audio`.trim(),
+    const orig = related.find((t) => dzFold(t.artistName || t.artist || "") === an) || related[0];
+    const artistName = orig.artistName || orig.artist || name;
+    const art = String(orig.artworkUrl100 || orig.artwork || "").replace("100x100bb", "500x500bb");
+    const itSong = (t) => {
+      if (!t || (!t.trackName && !t.title)) return null;
+      const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
+      const title = t.trackName || t.title;
+      const artName = t.artistName || t.artist || artistName;
+      const albName = t.collectionName || t.album || "";
+      const duration = Math.round(Number(t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
+      const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "300x300bb") || "/cover-default.jpg";
+      return {
+        id: `itunes:${cleanId}`,
+        source: "itunes",
+        title,
+        artist: artName,
+        album: albName,
+        duration,
+        artwork,
+        playQuery: `${title} ${artName} official audio`.trim(),
+      };
     };
-    // Strict artist match: the row's artist IS the canonical name or a
-    // collaboration with it ("Post Malone & Swae Lee" keeps; a track that
-    // merely mentions the name in its title does not).
     const byArtist = (na) => na === an || na.includes(an);
     const songs = [];
-    for (const t of rows) if (byArtist(dzFold(t.artistName))) { const s = itSong(t); if (s) songs.push(s); }
+    for (const t of rows) if (byArtist(dzFold(t.artistName || t.artist || ""))) { const s = itSong(t); if (s) songs.push(s); }
     const sj2 = await itFetch(`/search?term=${encodeURIComponent(artistName.slice(0, 80))}&entity=album&limit=200&country=${country}`).catch(() => null);
     const albums = [];
     for (const t of (sj2 && sj2.results) || []) {
-      if (!t || !t.collectionName) continue;
-      // Album rows carry the collection's artist in artistName — an album
-      // that only features the queried artist belongs to its main artist.
-      if (!byArtist(dzFold(t.artistName))) continue;
+      if (!t || (!t.collectionName && !t.title)) continue;
+      if (!byArtist(dzFold(t.artistName || t.artist || ""))) continue;
+      const albCol = t.collectionName || t.title;
+      const albArt = t.artistName || t.artist || artistName;
+      const cleanAlbId = String(t.collectionId || t.id || "").replace(/^itunes-album:/, "");
       albums.push({
-        id: `itunes-album:${t.collectionId}`,
+        id: `itunes-album:${cleanAlbId}`,
         kind: "playlist",
-        title: t.collectionName,
-        artist: t.artistName || artistName,
-        artwork: String(t.artworkUrl100 || "").replace("100x100bb", "300x300bb"),
+        title: albCol,
+        artist: albArt,
+        artwork: String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "300x300bb") || "/cover-default.jpg",
         source: "itunes",
-        query: `${t.collectionName} ${t.artistName || artistName}`.trim(),
+        query: `${albCol} ${albArt}`.trim(),
         year: t.releaseDate ? String(t.releaseDate).slice(0, 4) : "",
         recordType: "Album",
       });
@@ -6381,6 +6460,16 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.6.1",
+      title: "Muchi 1.6.1",
+      notes: [
+        "Fixed cross-platform Deezer and iTunes music search discrepancy across web browser, Android, and iOS app builds.",
+        "Tri-channel search engine: unified Direct CORS fetch, JSONP script bypass, and resilient backend worker proxying (/api/deezer/proxy & /api/itunes/search).",
+        "Universal track normalization: dual compatibility layer for both provider-raw schema and normalized audio models.",
+        "Optimized provider timeouts and cache invalidation so stale or empty results are never frozen.",
+      ],
+    },
+    {
       ver: "1.5.9",
       title: "Muchi 1.5.9",
       notes: [
@@ -8546,18 +8635,27 @@
       if ((src === "apple" || src === "itunes") && (!state.search.itunes || !state.search.itunes.length || !state.search.apple || !state.search.apple.length)) {
         try {
           const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
-          if (itRes && Array.isArray(itRes.results) && itRes.results.length) {
-            state.search.apple = itRes.results.map((t) => ({
-              id: `apple:${t.trackId || t.id}`,
-              source: "apple",
-              title: t.trackName || t.title || "Song",
-              artist: t.artistName || t.artist || "Artist",
-              album: t.collectionName || t.album || "",
-              duration: Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0,
-              artwork: String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-              previewUrl: t.previewUrl || "",
-              playQuery: `${t.trackName || t.title || ""} ${t.artistName || t.artist || ""} official audio`.trim(),
-            })).filter(looksLikeSong);
+          const rows = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
+          if (rows.length) {
+            state.search.apple = rows.map((t) => {
+              const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
+              const title = t.trackName || t.title || "Song";
+              const artist = t.artistName || t.artist || "Artist";
+              const album = t.collectionName || t.album || "";
+              const duration = Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
+              const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+              return {
+                id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "apple",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
             state.search.itunes = state.search.apple;
             render();
           }
@@ -8568,18 +8666,27 @@
       if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length)) {
         try {
           const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
-          if (dzRes && Array.isArray(dzRes.data) && dzRes.data.length) {
-            state.search.deezer = dzRes.data.map((t) => ({
-              id: `deezer:${t.id}`,
-              source: "deezer",
-              title: t.title || "Song",
-              artist: (t.artist && t.artist.name) || "Artist",
-              album: (t.album && t.album.title) || "",
-              duration: Number(t.duration || 0),
-              artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || "/cover-default.jpg",
-              previewUrl: t.preview || "",
-              playQuery: `${t.title || ""} ${(t.artist && t.artist.name) || ""} official audio`.trim(),
-            })).filter(looksLikeSong);
+          const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
+          if (rows.length) {
+            state.search.deezer = rows.map((t) => {
+              const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
+              const title = t.title || t.trackName || "Song";
+              const artist = (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist";
+              const album = (t.album && (t.album.title || t.album)) || t.collectionName || "";
+              const duration = Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0;
+              const artwork = (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg";
+              return {
+                id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "deezer",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.preview || t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
             render();
           }
         } catch {}
@@ -8672,18 +8779,27 @@
         try {
           const itCountry = String((state.prefs && state.prefs.country) || "US");
           const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
-          if (itRes && Array.isArray(itRes.results) && itRes.results.length) {
-            state.search.apple = itRes.results.map((t) => ({
-              id: `apple:${t.trackId || t.id}`,
-              source: "apple",
-              title: t.trackName || t.title || "Song",
-              artist: t.artistName || t.artist || "Artist",
-              album: t.collectionName || t.album || "",
-              duration: Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0,
-              artwork: String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-              previewUrl: t.previewUrl || "",
-              playQuery: `${t.trackName || t.title || ""} ${t.artistName || t.artist || ""} official audio`.trim(),
-            })).filter(looksLikeSong);
+          const rows = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
+          if (rows.length) {
+            state.search.apple = rows.map((t) => {
+              const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
+              const title = t.trackName || t.title || "Song";
+              const artist = t.artistName || t.artist || "Artist";
+              const album = t.collectionName || t.album || "";
+              const duration = Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
+              const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+              return {
+                id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "apple",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
             state.search.itunes = state.search.apple;
           }
         } catch (itErr) {
@@ -8707,18 +8823,27 @@
       if (!state.search.deezer || !state.search.deezer.length) {
         try {
           const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
-          if (dzRes && Array.isArray(dzRes.data) && dzRes.data.length) {
-            state.search.deezer = dzRes.data.map((t) => ({
-              id: `deezer:${t.id}`,
-              source: "deezer",
-              title: t.title || "Song",
-              artist: (t.artist && t.artist.name) || "Artist",
-              album: (t.album && t.album.title) || "",
-              duration: Number(t.duration || 0),
-              artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || "/cover-default.jpg",
-              previewUrl: t.preview || "",
-              playQuery: `${t.title || ""} ${(t.artist && t.artist.name) || ""} official audio`.trim(),
-            })).filter(looksLikeSong);
+          const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
+          if (rows.length) {
+            state.search.deezer = rows.map((t) => {
+              const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
+              const title = t.title || t.trackName || "Song";
+              const artist = (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist";
+              const album = (t.album && (t.album.title || t.album)) || t.collectionName || "";
+              const duration = Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0;
+              const artwork = (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg";
+              return {
+                id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "deezer",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.preview || t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
           }
         } catch (dzErr) {
           console.warn("deezer direct search fallback", dzErr);
