@@ -126,16 +126,17 @@ export async function searchYouTube(query, gl, fast) {
     : [
         youtubeMusicSearch(query, gl, 7000, { ...extra, params: YT_SONGS_PARAMS }),
         youtubeMusicSearch(query, gl, 7000, extra),
+        youtubeWebSearch(query, gl, 6500, { limit: 40, musicOnly: true, loose: false }),
       ];
   const settled = await Promise.allSettled(jobs);
   for (const s of settled) {
     if (s.status === "fulfilled") add(s.value);
     else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
   }
-  // If YouTube Music had no results, fall back to web search with strict musicOnly
-  if (!out.length && !fast) {
+  // If we still have fewer than 20 songs, search with official audio keyword
+  if (out.length < 20 && !fast) {
     try {
-      const webRes = await youtubeWebSearch(query, gl, 6500, { limit: 40, musicOnly: true, loose: false });
+      const webRes = await youtubeWebSearch(`${query} official audio`, gl, 6000, { limit: 30, musicOnly: true, loose: false });
       add(webRes);
     } catch (e) {
       errors.push(String(e.message || e));
@@ -448,16 +449,37 @@ export function mapAudiusTrack(t) {
   };
 }
 
-export async function itunesSearch(query, { includeExtra = true } = {}) {
-  const q = encodeURIComponent(String(query || "").slice(0, 80));
+export async function itunesSearch(query, { includeExtra = true, country = "" } = {}) {
+  const cleanQ = String(query || "").trim().slice(0, 80);
+  const q = encodeURIComponent(cleanQ);
   if (!q) return { songs: [], artists: [], playlists: [] };
 
+  const countryParam = country ? `&country=${encodeURIComponent(country)}` : "";
+  const fetchItunes = async (url) => {
+    try {
+      return await fetchJSON(url, {}, 9000);
+    } catch {
+      const ctrl = new AbortController();
+      const tm = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const r = await fetch(url, { signal: ctrl.signal });
+        if (!r.ok) return null;
+        return await r.json();
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(tm);
+      }
+    }
+  };
+
   const calls = [
-    fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50`, {}, 9000),
+    fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50${countryParam}`)
+      .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50`) : res),
   ];
   if (includeExtra) {
-    calls.push(fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=20`, {}, 8000));
-    calls.push(fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25`, {}, 8000));
+    calls.push(fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=20${countryParam}`));
+    calls.push(fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25${countryParam}`));
   }
   const settled = await Promise.allSettled(calls);
   const songsR = settled[0];

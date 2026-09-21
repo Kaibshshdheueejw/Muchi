@@ -341,7 +341,7 @@ export async function handleSearch(env, url) {
     const result = { query: q, youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [] };
 
     if (source === "apple" || source === "itunes") {
-      const ap = await itunesSearch(q, { includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      const ap = await itunesSearch(q, { includeExtra: true, country: gl }).catch(() => ({ songs: [], artists: [], playlists: [] }));
       const songs = strictSongs(ap.songs || []);
       result.apple = songs;
       result.itunes = songs;
@@ -395,7 +395,7 @@ export async function handleSearch(env, url) {
     // source === "all": Run all providers concurrently in parallel
     const allTasks = [
       ["youtube", searchYouTube(q, gl)],
-      ["apple", itunesSearch(q, { includeExtra: true })],
+      ["apple", itunesSearch(q, { includeExtra: true, country: gl })],
       ["deezer", deezerSearch(q, { limit: 50, includeExtra: true })],
       ["audius", audiusSearch(q)],
       ["radio", radioSearch(q, 16, url.searchParams.get("quality"))],
@@ -776,19 +776,26 @@ export async function handleRelated(url) {
   const a = artist.replace(/\s*[|–—-]\s*topic$/i, "").trim();
   const t = title.replace(/\s*\((official|lyrics|audio|video).*?\)/ig, "").trim();
   const qs = [];
+  // Spotify-style queue recommendation seeds:
+  // 1. Song radio / playlist mix (YouTube Music's song radio)
+  if (t && a) qs.push(`${t} ${a} radio`);
+  // 2. Artist radio mix
   if (a && !/^(youtube|various artists|unknown)$/i.test(a)) {
-    qs.push(`${a} official audio`);
+    qs.push(`${a} radio`);
     qs.push(`${a} mix`);
   }
+  // 3. Similar vibe audio
   if (t && a) qs.push(`${t} ${a} official audio`);
-  else if (t) qs.push(`${t} official audio`);
-  const queries = [...new Set(qs.filter(Boolean))].slice(0, 1);
+  else if (t) qs.push(`${t} radio`);
+
+  const queries = [...new Set(qs.filter(Boolean))].slice(0, 3);
   if (!queries.length) return json(200, { tracks: [] });
   const cacheKey = `related:${gl}:${queries.join("|")}`;
   try {
     const tracks = await cached(cacheKey, 180000, async () => {
       const settled = await Promise.allSettled(queries.map((q) => searchYouTube(q, gl, true)));
       const seen = new Set();
+      const artistCounts = new Map();
       const out = [];
       for (const s of settled) {
         const rows = s.status === "fulfilled" ? s.value : [];
@@ -796,12 +803,17 @@ export async function handleRelated(url) {
           if (!row || row.source === "radio") continue;
           const k = String(row.videoId || row.id || "");
           if (!k || seen.has(k) || seen.has(row.id)) continue;
+          const rowArt = String(row.artist || "").toLowerCase().trim();
+          // Spotify-style diversity: cap max 2 songs from the same artist so recommendations feel like a curated radio
+          const count = artistCounts.get(rowArt) || 0;
+          if (count >= 2 && out.length >= 6) continue;
           seen.add(k);
           if (row.id) seen.add(row.id);
+          artistCounts.set(rowArt, count + 1);
           out.push(row);
-          if (out.length >= 28) break;
+          if (out.length >= 30) break;
         }
-        if (out.length >= 28) break;
+        if (out.length >= 30) break;
       }
       return out;
     });
@@ -811,6 +823,27 @@ export async function handleRelated(url) {
     });
   } catch (e) {
     return json(200, { tracks: [], error: String(e.message || e) });
+  }
+}
+
+export async function handleItunesSearch(url) {
+  const q = (url.searchParams.get("q") || url.searchParams.get("term") || url.searchParams.get("query") || "").trim();
+  if (!q) return json(400, { error: "Missing query", results: [], apple: [], itunes: [] });
+  const gl = regionCode(url.searchParams.get("gl"));
+  try {
+    const res = await itunesSearch(q, { includeExtra: true, country: gl });
+    const songs = strictSongs(res.songs || []);
+    const r = json(200, {
+      results: songs,
+      apple: songs,
+      itunes: songs,
+      artists: res.artists || [],
+      playlists: res.playlists || [],
+    });
+    r.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+    return r;
+  } catch (err) {
+    return json(500, { error: String(err && err.message || err), results: [], apple: [], itunes: [] });
   }
 }
 

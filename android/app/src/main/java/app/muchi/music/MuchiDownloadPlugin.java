@@ -460,29 +460,13 @@ public class MuchiDownloadPlugin extends Plugin {
         OutputStream out = null;
         File plainFile = null;
 
-        if (Build.VERSION.SDK_INT >= 29) {
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Audio.Media.DISPLAY_NAME, safeName);
-            values.put(MediaStore.Audio.Media.MIME_TYPE, mimeType);
-            values.put(MediaStore.Audio.Media.TITLE, title.isEmpty() ? stripExt(safeName) : title);
-            if (!artist.isEmpty()) values.put(MediaStore.Audio.Media.ARTIST, artist);
-            if (!album.isEmpty()) values.put(MediaStore.Audio.Media.ALBUM, album);
-            values.put(MediaStore.Audio.Media.IS_MUSIC, 1);
-            values.put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Muchi");
-            values.put(MediaStore.Audio.Media.BUCKET_DISPLAY_NAME, "Muchi");
-            values.put(MediaStore.Audio.Media.DATE_ADDED, System.currentTimeMillis() / 1000);
-            values.put(MediaStore.Audio.Media.DATE_TAKEN, System.currentTimeMillis());
-            outputUri = resolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
-            if (outputUri != null) out = resolver.openOutputStream(outputUri);
+        File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_MUSIC), "Muchi");
+        if (!dir.exists() && !dir.mkdirs()) {
+            dir = new File(getContext().getFilesDir(), "music");
+            if (!dir.exists()) dir.mkdirs();
         }
-
-        if (out == null) {
-            // Fallback (API < 29 or insert failed): app-visible Music folder.
-            File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_MUSIC), "Muchi");
-            if (!dir.exists() && !dir.mkdirs()) destError(id, "could not create download folder");
-            plainFile = new File(dir, safeName);
-            out = new FileOutputStream(plainFile);
-        }
+        plainFile = new File(dir, safeName);
+        out = new FileOutputStream(plainFile);
 
         try (InputStream in = con.getInputStream()) {
             byte[] buf = new byte[64 * 1024];
@@ -504,16 +488,45 @@ public class MuchiDownloadPlugin extends Plugin {
         } catch (Exception e) {
             // Cancelled or network error mid-stream → clean up the partial file.
             try { out.close(); } catch (Exception ignored) {}
-            if (outputUri != null) resolver.delete(outputUri, null, null);
             if (plainFile != null) plainFile.delete();
             throw e;
         } finally {
             try { out.close(); } catch (Exception ignored) {}
         }
 
-        if (outputUri != null) {
-            return outputUri;
+        // Publish to MediaStore so other apps and system players can index the song as well
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Audio.Media.DISPLAY_NAME, safeName);
+                values.put(MediaStore.Audio.Media.MIME_TYPE, mimeType);
+                values.put(MediaStore.Audio.Media.TITLE, title.isEmpty() ? stripExt(safeName) : title);
+                if (!artist.isEmpty()) values.put(MediaStore.Audio.Media.ARTIST, artist);
+                if (!album.isEmpty()) values.put(MediaStore.Audio.Media.ALBUM, album);
+                values.put(MediaStore.Audio.Media.IS_MUSIC, 1);
+                values.put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Muchi");
+                values.put(MediaStore.Audio.Media.BUCKET_DISPLAY_NAME, "Muchi");
+                values.put(MediaStore.Audio.Media.IS_PENDING, 1);
+                values.put(MediaStore.Audio.Media.DATE_ADDED, System.currentTimeMillis() / 1000);
+                values.put(MediaStore.Audio.Media.DATE_TAKEN, System.currentTimeMillis());
+                outputUri = resolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+                if (outputUri != null) {
+                    try (OutputStream mediaOut = resolver.openOutputStream(outputUri);
+                         InputStream fileIn = new FileInputStream(plainFile)) {
+                        byte[] copyBuf = new byte[64 * 1024];
+                        int r;
+                        while ((r = fileIn.read(copyBuf)) > 0) {
+                            mediaOut.write(copyBuf, 0, r);
+                        }
+                    }
+                    ContentValues doneValues = new ContentValues();
+                    doneValues.put(MediaStore.Audio.Media.IS_PENDING, 0);
+                    resolver.update(outputUri, doneValues, null, null);
+                }
+            } catch (Exception ignored) {}
         }
+
+        // Always return the direct local file URI so Muchi plays it completely offline with zero permissions
         return Uri.fromFile(plainFile);
     }
 

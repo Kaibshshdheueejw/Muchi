@@ -525,6 +525,14 @@ export function previewSearch(q) {
     previewUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
     playQuery: `${t.title || ""} ${t.artist || ""} official audio`.trim(),
   }));
+  const audius = matched.map((t, i) => ({
+    ...t,
+    id: `audius:preview:${i}:${t.id || i}`,
+    trackId: `track_${i}_${t.id || i}`,
+    source: "audius",
+    previewUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
+    streamUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
+  }));
   return {
     query: q,
     tracks: tracks.slice(0, 20),
@@ -532,7 +540,7 @@ export function previewSearch(q) {
     apple,
     itunes: apple,
     deezer,
-    audius: [],
+    audius,
     artists: [],
     playlists: [],
   };

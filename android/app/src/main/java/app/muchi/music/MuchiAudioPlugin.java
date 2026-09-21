@@ -161,6 +161,12 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         Intent i = new Intent(getContext(), MuchiAudioService.class);
         i.setAction(MuchiAudioService.ACTION_PLAY);
         i.putExtra(MuchiAudioService.EXTRA_URL, url);
+        if (url.startsWith("content://")) {
+            try {
+                i.setData(android.net.Uri.parse(url));
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {}
+        }
         i.putExtra(MuchiAudioService.EXTRA_TITLE, call.getString("title", "Muchi"));
         i.putExtra(MuchiAudioService.EXTRA_ARTIST, call.getString("artist", ""));
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
