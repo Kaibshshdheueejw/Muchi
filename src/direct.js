@@ -74,7 +74,8 @@ export async function handleHealth(env) {
     name: APP_NAME,
     version: pick.version,
     time: new Date().toISOString(),
-    github,
+    github: !!github,
+    repo: String((env && env.MUCHI_GITHUB_REPO) || DEFAULT_RELEASE_REPO),
     api: "",
     // In-app updater (public/app.js checkUpdates) reads these.
     android: { apkUrl: pick.apkUrl },

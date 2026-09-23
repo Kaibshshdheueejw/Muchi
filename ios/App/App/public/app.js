@@ -88,13 +88,6 @@
       ui: "glass",
       playerStyle: "pill",
       iconSize: "default",
-      eqEnabled: true,
-      eqPreset: "dolby_atmos",
-      eqBands: [4, 3, 2, 0, -1, 1, 3, 4, 5, 4],
-      dolbyAtmos: true,
-      atmosSurround: 80,
-      atmosHeight: "high",
-      atmosDialogue: true,
     }, load("aura.prefs", {})),
     offlineMode: Boolean(load("aura.offlineMode", false)),
     isNetworkOffline: typeof navigator !== "undefined" ? !navigator.onLine : false,
@@ -110,7 +103,18 @@
     detailTrack: null,
     settingsPage: null,
     catalogPlaylist: null,
+    queueRecs: [],
+    _queueRecsSeed: "",
   };
+  // Clean up removed equalizer/atmos preferences from state
+  delete state.prefs.eqEnabled;
+  delete state.prefs.eqPreset;
+  delete state.prefs.eqBands;
+  delete state.prefs.dolbyAtmos;
+  delete state.prefs.atmosSurround;
+  delete state.prefs.atmosHeight;
+  delete state.prefs.atmosDialogue;
+
   // One-time migration: the old theme values "light"/"dark"/"system" were the
   // appearance mode itself — move them into the new `appearance` preference
   // so existing users keep exactly what they had. Only fires when the user
@@ -122,7 +126,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.5.6";
+  const APP_VERSION = "1.6.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -684,7 +688,7 @@
     // (which exists precisely to bypass caches).
     const cacheable =
       method === "GET" &&
-      !/\/api\/(auth|health|version|geo|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
+      !/\/api\/(auth|youtube|health|version|geo|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
       !/[?&]refresh=1\b/.test(path);
     const cacheKey = cacheable ? `${API_CACHE_V}:${path}` : "";
     if (cacheable) {
@@ -695,7 +699,8 @@
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const headers = Object.assign({}, (opts && opts.headers) || {}, authHeaders());
-      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal }, opts || {}, { headers }));
+      const creds = (API_BASE && IS_NATIVE) ? "omit" : "include";
+      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal, credentials: creds }, opts || {}, { headers }));
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       if (cacheable && apiCacheIsUsable(data)) await apiCachePut(cacheKey, data).catch(() => {});
@@ -723,10 +728,37 @@
     return state.liked.some((t) => trackKey(t) === k);
   }
 
+  function findSavedTrack(t) {
+    if (!t) return null;
+    const k = trackKey(t);
+    const vId = t.videoId ? String(t.videoId) : "";
+    const tId = t.trackId ? String(t.trackId) : "";
+    const downloads = state.downloads || [];
+    let hit = downloads.find((d) => {
+      if (!d) return false;
+      if (d.id && (d.id === t.id || d.id === k)) return true;
+      if (k && trackKey(d) === k) return true;
+      if (vId && (d.videoId === vId || d.id === vId || d.id === `yt:${vId}`)) return true;
+      if (tId && (d.trackId === tId || d.id === tId || d.id === `audius:${tId}`)) return true;
+      return false;
+    });
+    if (hit) return hit;
+    if (t.title) {
+      const tNorm = String(t.title).trim().toLowerCase();
+      const aNorm = String(artistName(t) || t.artist || "").trim().toLowerCase();
+      hit = downloads.find((d) => {
+        if (!d || !d.title) return false;
+        if (String(d.title).trim().toLowerCase() !== tNorm) return false;
+        if (!aNorm) return true;
+        const daNorm = String(artistName(d) || d.artist || "").trim().toLowerCase();
+        return !daNorm || daNorm === aNorm || daNorm.includes(aNorm) || aNorm.includes(daNorm);
+      });
+    }
+    return hit || null;
+  }
+
   function isSaved(track) {
-    if (!track) return false;
-    const k = trackKey(track);
-    return state.downloads.some((t) => trackKey(t) === k);
+    return Boolean(findSavedTrack(track));
   }
 
   function toggleLike(track) {
@@ -1113,7 +1145,7 @@
   // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
   // a stale IndexedDB/payload from the previous deployment (which is exactly
   // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
-  const API_CACHE_V = "v7-top25-country12";
+  const API_CACHE_V = "v8-sync-161";
   // Never cache an "empty" catalog payload. If a provider is temporarily
   // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
   // tracks); caching that would freeze the shelf empty for the whole TTL.
@@ -1129,6 +1161,9 @@
     if (Array.isArray(data.youtube) && data.youtube.length === 0) return false;
     if (Array.isArray(data.countryPlaylists) && data.countryPlaylists.length < 6) return false;
     if (Array.isArray(data.youtubeLocal) && data.youtubeLocal.length < 5) return false;
+    if (Array.isArray(data.apple) && data.apple.length === 0) return false;
+    if (Array.isArray(data.deezer) && data.deezer.length === 0) return false;
+    if (Array.isArray(data.itunes) && data.itunes.length === 0) return false;
     if (Array.isArray(data.shelves)) {
       if (data.shelves.length === 0) return false;
       // A home payload whose every shelf is empty adds nothing.
@@ -1197,6 +1232,44 @@
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
+  }
+
+  async function getOfflineAudioBlob(t) {
+    if (!t) return null;
+    const saved = findSavedTrack(t);
+    const candidateKeys = [
+      t.id,
+      trackKey(t),
+      t.videoId ? `yt:${t.videoId}` : "",
+      t.videoId || "",
+      t.trackId ? `audius:${t.trackId}` : "",
+      t.trackId || "",
+      saved ? saved.id : "",
+      saved ? trackKey(saved) : "",
+      saved && saved.videoId ? `yt:${saved.videoId}` : "",
+      saved && saved.videoId ? saved.videoId : "",
+      saved && saved.trackId ? `audius:${saved.trackId}` : "",
+      saved && saved.trackId ? saved.trackId : "",
+    ].filter(Boolean);
+
+    for (const k of candidateKeys) {
+      try {
+        const item = await idbGet(k);
+        if (!item) continue;
+        if (item instanceof Blob) return item;
+        if (item && item.blob instanceof Blob) return item.blob;
+        if (item && item.handle && typeof item.handle.getFile === "function") {
+          try {
+            const f = await item.handle.getFile();
+            if (f) return f;
+          } catch {}
+        }
+        if (item && item.data && (item.data instanceof ArrayBuffer || item.data instanceof Uint8Array)) {
+          return new Blob([item.data], { type: item.mime || "audio/mp4" });
+        }
+      } catch {}
+    }
+    return null;
   }
 
   /* ── Real offline downloads (user-visible files on disk) ─────────────
@@ -1322,8 +1395,8 @@
       }
       return out;
     }
-    // Apple / iTunes: resolve via YouTube search or fallback to previewUrl
-    if ((out.source === "apple" || out.source === "itunes") && !out.videoId) {
+    // Apple / iTunes / Deezer: resolve via YouTube search or fallback to previewUrl
+    if ((out.source === "apple" || out.source === "itunes" || out.source === "deezer") && !out.videoId) {
       try {
         await resolveYouTubePlay(out);
       } catch {}
@@ -1557,9 +1630,19 @@
       }
     }
     const blobType = ctype || "audio/webm";
-    // Always persist into IndexedDB first so offline playback works immediately.
+    // Always persist raw Blob into IndexedDB first under all candidate keys so offline playback works immediately.
     const blob = new Blob([audioBytes], { type: blobType });
-    try { await idbPut(t.id, blob); } catch {}
+    const keysToPersist = [
+      t.id,
+      trackKey(t),
+      t.videoId ? `yt:${t.videoId}` : "",
+      t.videoId || "",
+      t.trackId ? `audius:${t.trackId}` : "",
+      t.trackId || "",
+    ].filter(Boolean);
+    for (const k of keysToPersist) {
+      try { await idbPut(k, blob); } catch {}
+    }
 
     // File System Access API (showSaveFilePicker) requires active user gesture,
     // which expires during streaming download. We try it safely in try/catch,
@@ -1570,7 +1653,11 @@
         const writable = await handle.createWritable();
         await writable.write(audioBytes);
         await writable.close();
-        try { await idbPut(t.id, { handle, fname }); } catch {}
+        // IMPORTANT: preserve { blob, handle, fname } so offline playback works
+        // even if browser revokes file handle permission on page reload / offline!
+        for (const k of keysToPersist) {
+          try { await idbPut(k, { blob, handle, fname }); } catch {}
+        }
         return `fsp:${fname}`;
       } catch (pickerErr) {
         if (pickerErr && pickerErr.name === "AbortError") {
@@ -1735,47 +1822,10 @@
             <div class="dl-progress"><div class="dl-progress-bar" id="dlBar-${job.id}" style="width:${pct}%"></div></div>
             <div class="dl-stat" id="dlStat-${job.id}">${label}${job.total ? " · " + escapeHTML(fmtBytes(job.bytes)) + " / " + escapeHTML(fmtBytes(job.total)) : ""}</div>
           </div>
-          ${job.status === "downloading" || job.status === "saving" ? `<button class="icon-btn dl-cancel-btn" data-cancel-dl="${job.id}" title="Cancel"><span class="material-symbols-outlined">close</span></button>` : ""}
+          ${job.status === "downloading" || job.status === "saving" ? `<button class="icon-btn dl-cancel-btn" data-cancel-dl="${escapeAttr(job.id)}" title="Cancel"><span class="material-symbols-outlined">close</span></button>` : ""}
         </div>`;
     }).join("");
     return `<div class="set-card dl-card"><h3>Downloads</h3>${rows}</div>`;
-  }
-
-  const EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
-  const EQ_LABELS = ["32Hz", "64Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz"];
-  const EQ_PRESETS = {
-    dolby_atmos: { name: "Dolby Atmos Spatial", bands: [4, 3, 2, 0, -1, 1, 3, 4, 5, 4], dolby: true },
-    atmos_cinema: { name: "Dolby Atmos Cinema", bands: [5, 4, 2, 0, -1, 2, 3, 4, 4, 3], dolby: true },
-    atmos_music: { name: "Dolby Atmos Music", bands: [3, 2, 1, 0, 0, 1, 2, 3, 4, 4], dolby: true },
-    bass_boost: { name: "Bass Boost", bands: [7, 6, 4, 2, 0, 0, 0, 0, 0, -1], dolby: false },
-    vocal_clarity: { name: "Vocal Clarity", bands: [-2, -1, 0, 2, 4, 5, 4, 2, 0, 0], dolby: false },
-    rock: { name: "Rock", bands: [4, 3, 2, 0, -1, -1, 1, 3, 4, 4], dolby: false },
-    electronic: { name: "Electronic", bands: [5, 4, 1, 0, -2, 2, 1, 3, 4, 4], dolby: false },
-    flat: { name: "Flat", bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dolby: false },
-    custom: { name: "Custom", bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dolby: true },
-  };
-
-  function updateEqBand(index, val, skipSave) {
-    if (!Array.isArray(state.prefs.eqBands)) state.prefs.eqBands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    const num = Number(val) || 0;
-    state.prefs.eqBands[index] = num;
-    state.prefs.eqPreset = "custom";
-    if (!skipSave) savePrefs();
-    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-      hookSound();
-    }
-    if (fx.ctx && fx.ctx.state === "suspended") {
-      try { fx.ctx.resume(); } catch {}
-    }
-    if (fx.eqNodes && fx.eqNodes[index]) {
-      const g = state.prefs.eqEnabled !== false ? num : 0;
-      try {
-        fx.eqNodes[index].gain.cancelScheduledValues(0);
-        fx.eqNodes[index].gain.setValueAtTime(g, fx.ctx ? fx.ctx.currentTime : 0);
-      } catch {
-        fx.eqNodes[index].gain.value = g;
-      }
-    }
   }
 
   function triggerFabRipple(button, e) {
@@ -1799,206 +1849,13 @@
     } catch {}
   }
 
-  function updateEqFaderVisual(idx, gain, idPrefix = "eq", container = document) {
-    const g = Math.max(-12, Math.min(12, Number(gain) || 0));
-    const sign = g > 0 ? "+" : "";
-    const root = container && container.querySelector ? container : document;
-
-    const valEl = root.querySelector(`#${idPrefix}Val_${idx}, #${idPrefix}GainVal_${idx}`);
-    if (valEl) valEl.textContent = `${sign}${g.toFixed(1)}`;
-
-    const channel = root.querySelector(`#${idPrefix}Channel_${idx}`);
-    if (channel) channel.setAttribute("aria-valuenow", g);
-
-    const pct = Math.max(0, Math.min(100, ((g - (-12)) / 24) * 100));
-    const knob = root.querySelector(`#${idPrefix}Knob_${idx}`);
-    if (knob) knob.style.bottom = `calc(${pct}% - 14px)`;
-
-    const fill = root.querySelector(`#${idPrefix}Fill_${idx}`);
-    if (fill) {
-      const isPos = g >= 0;
-      fill.style.bottom = isPos ? "50%" : `${pct}%`;
-      fill.style.height = isPos ? `${pct - 50}%` : `${50 - pct}%`;
-      fill.className = `eq-slot-fill ${isPos ? "eq-fill-pos" : "eq-fill-neg"}`;
-    }
-
-    const input = root.querySelector(`[data-${idPrefix === "po" ? "po" : "eq"}-band="${idx}"]`);
-    if (input) input.value = g;
-  }
-
-  function renderEqColumnHTML(i, gain, idPrefix = "eq") {
-    const g = Math.max(-12, Math.min(12, Number(gain) || 0));
-    const sign = g > 0 ? "+" : "";
-    const pct = Math.max(0, Math.min(100, ((g - (-12)) / 24) * 100));
-    const isPos = g >= 0;
-    const fillBottom = isPos ? "50%" : `${pct}%`;
-    const fillHeight = isPos ? `${pct - 50}%` : `${50 - pct}%`;
-    const fillClass = isPos ? "eq-fill-pos" : "eq-fill-neg";
-
-    return `
-      <div class="eq-col" data-eq-col="${i}">
-        <span class="eq-gain" id="${idPrefix}Val_${i}">${sign}${g.toFixed(1)}</span>
-        <div class="eq-fader-channel" id="${idPrefix}Channel_${i}" data-fader-idx="${i}" data-fader-prefix="${idPrefix}" role="slider" aria-label="${EQ_LABELS[i]} gain" aria-valuemin="-12" aria-valuemax="12" aria-valuenow="${g}" tabindex="0">
-          <div class="eq-scale-ticks" aria-hidden="true">
-            <span class="eq-tick tick-top" title="+12 dB"></span>
-            <span class="eq-tick tick-mid-top" title="+6 dB"></span>
-            <span class="eq-tick tick-center" title="0 dB"></span>
-            <span class="eq-tick tick-mid-bot" title="-6 dB"></span>
-            <span class="eq-tick tick-bot" title="-12 dB"></span>
-          </div>
-          <div class="eq-slot" aria-hidden="true">
-            <div class="eq-slot-centerline"></div>
-            <div class="eq-slot-fill ${fillClass}" id="${idPrefix}Fill_${i}" style="bottom:${fillBottom};height:${fillHeight};"></div>
-            <div class="eq-fader-knob" id="${idPrefix}Knob_${i}" style="bottom:calc(${pct}% - 14px);">
-              <span class="knob-ridge"></span>
-              <span class="knob-ridge knob-center"></span>
-              <span class="knob-ridge"></span>
-            </div>
-          </div>
-          <input type="range" orient="vertical" class="eq-slider-vert" data-${idPrefix === "po" ? "po" : "eq"}-band="${i}" min="-12" max="12" step="0.5" value="${g}" style="display:none;" aria-hidden="true" tabindex="-1" />
-        </div>
-        <span class="eq-freq">${EQ_LABELS[i]}</span>
-      </div>
-    `;
-  }
-
-  function attachEqFaderInteraction(channel, idPrefix, onValueChange, onCommit) {
-    if (!channel) return;
-    const idx = Number(channel.dataset.faderIdx);
-    channel.style.touchAction = "none";
-    const col = channel.closest(".eq-col");
-    if (col) col.style.touchAction = "none";
-
-    function calcGain(e) {
-      const rect = channel.getBoundingClientRect();
-      if (rect.height <= 0) return 0;
-      // Top of track is +12 dB (ratio 1), bottom is -12 dB (ratio 0)
-      const ratio = 1 - (e.clientY - rect.top) / rect.height;
-      const clamped = Math.max(0, Math.min(1, ratio));
-      const raw = -12 + clamped * 24;
-      const stepped = Math.round(raw * 2) / 2; // 0.5 dB step
-      return Math.max(-12, Math.min(12, stepped));
-    }
-
-    let isDragging = false;
-
-    function onPointerDown(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      isDragging = true;
-      channel.classList.add("dragging");
-      try { channel.setPointerCapture(e.pointerId); } catch {}
-      const val = calcGain(e);
-      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(val);
-    }
-
-    function onPointerMove(e) {
-      if (!isDragging) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const val = calcGain(e);
-      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(val);
-    }
-
-    function onPointerUp(e) {
-      if (!isDragging) return;
-      isDragging = false;
-      channel.classList.remove("dragging");
-      try { channel.releasePointerCapture(e.pointerId); } catch {}
-      const val = calcGain(e);
-      updateEqFaderVisual(idx, val, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(val);
-      if (onCommit) onCommit(val);
-    }
-
-    channel.addEventListener("pointerdown", onPointerDown);
-    channel.addEventListener("pointermove", onPointerMove);
-    channel.addEventListener("pointerup", onPointerUp);
-    channel.addEventListener("pointercancel", onPointerUp);
-
-    if (col) {
-      col.addEventListener("pointerdown", (e) => {
-        if (e.target === channel || channel.contains(e.target)) return;
-        onPointerDown(e);
-      });
-    }
-
-    channel.addEventListener("keydown", (e) => {
-      let cur = Number(channel.getAttribute("aria-valuenow")) || 0;
-      let next = cur;
-      if (e.key === "ArrowUp" || e.key === "ArrowRight") next = Math.min(12, cur + 0.5);
-      else if (e.key === "ArrowDown" || e.key === "ArrowLeft") next = Math.max(-12, cur - 0.5);
-      else if (e.key === "PageUp") next = Math.min(12, cur + 3);
-      else if (e.key === "PageDown") next = Math.max(-12, cur - 3);
-      else if (e.key === "Home") next = 12;
-      else if (e.key === "End") next = -12;
-      else return;
-
-      e.preventDefault();
-      updateEqFaderVisual(idx, next, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(next);
-      if (onCommit) onCommit(next);
-    });
-
-    channel.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const delta = e.deltaY < 0 ? 0.5 : -0.5;
-      let cur = Number(channel.getAttribute("aria-valuenow")) || 0;
-      const next = Math.max(-12, Math.min(12, cur + delta));
-      updateEqFaderVisual(idx, next, idPrefix, channel.closest(".eq-matrix") || document);
-      if (onValueChange) onValueChange(next);
-      if (onCommit) onCommit(next);
-    }, { passive: false });
-  }
-
-  function attachVerticalSliderInteraction(target, onValueChange, onCommit) {
-    if (!target) return;
-    const channel = target.classList && target.classList.contains("eq-fader-channel")
-      ? target
-      : (target.closest && target.closest(".eq-fader-channel")) || (target.parentElement ? target.parentElement.querySelector(".eq-fader-channel") : null);
-    if (channel) {
-      attachEqFaderInteraction(channel, channel.dataset.faderPrefix || "eq", onValueChange, onCommit);
-    }
-  }
-
-  function applyEqPreset(key) {
-    const p = EQ_PRESETS[key];
-    if (!p) return;
-    state.prefs.eqPreset = key;
-    state.prefs.eqBands = p.bands.slice();
-    if (p.dolby !== undefined) state.prefs.dolbyAtmos = p.dolby;
-    savePrefs();
-    if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-      hookSound();
-    }
-    if (fx.ctx && fx.ctx.state === "suspended") {
-      try { fx.ctx.resume(); } catch {}
-    }
-    if (fx.eqNodes && fx.eqNodes.length === 10) {
-      fx.eqNodes.forEach((node, i) => {
-        const val = state.prefs.eqEnabled !== false ? (Number(state.prefs.eqBands[i]) || 0) : 0;
-        try {
-          node.gain.cancelScheduledValues(0);
-          node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
-        } catch {
-          node.gain.value = val;
-        }
-      });
-    }
-    hookSound();
-  }
-
-  const fx = { ctx: null, src: null, nodes: [], eqNodes: [] };
+  const fx = { ctx: null, src: null, nodes: [] };
   function clearFx() {
     (fx.nodes || []).forEach((n) => {
       try { if (n.stop) n.stop(); } catch {}
       try { n.disconnect(); } catch {}
     });
     fx.nodes = [];
-    fx.eqNodes = [];
   }
   function fxAdd(node) {
     fx.nodes.push(node);
@@ -2056,10 +1913,8 @@
 
   function hookSound() {
     const mode = spatialMode();
-    const hasDolby = Boolean(state.prefs.dolbyAtmos);
-    const hasEq = state.prefs.eqEnabled !== false;
     try {
-      if (mode === "off" && !hasDolby && !hasEq && !fx.src) return;
+      if (mode === "off" && !fx.src) return;
       if (!fx.ctx) {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
@@ -2069,7 +1924,7 @@
       fx.src.disconnect();
       clearFx();
       const ctx = fx.ctx;
-      if (mode === "off" && !hasDolby && !hasEq) {
+      if (mode === "off") {
         fx.src.connect(ctx.destination);
         return;
       }
@@ -2077,134 +1932,6 @@
       const hpf = fxAdd(ctx.createBiquadFilter());
       hpf.type = "highpass"; hpf.frequency.value = 24; hpf.Q.value = 0.7;
       fx.src.connect(hpf);
-
-      // ── 10-Band Studio Graphic Equalizer ────────────────────────────
-      let eqTail = hpf;
-      fx.eqNodes = [];
-      const bands = Array.isArray(state.prefs.eqBands) && state.prefs.eqBands.length === 10
-        ? state.prefs.eqBands
-        : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-      for (let i = 0; i < EQ_FREQS.length; i++) {
-        const filter = fxAdd(ctx.createBiquadFilter());
-        if (i === 0) {
-          filter.type = "lowshelf";
-          filter.frequency.value = EQ_FREQS[i];
-        } else if (i === EQ_FREQS.length - 1) {
-          filter.type = "highshelf";
-          filter.frequency.value = EQ_FREQS[i];
-        } else {
-          filter.type = "peaking";
-          filter.frequency.value = EQ_FREQS[i];
-          filter.Q.value = 1.0;
-        }
-        filter.gain.value = hasEq ? (Number(bands[i]) || 0) : 0;
-        eqTail.connect(filter);
-        eqTail = filter;
-        fx.eqNodes.push(filter);
-      }
-
-      // Connect eqTail to Analyser for real-time visualizer spectrum
-      if (!fx.analyser && ctx.createAnalyser) {
-        fx.analyser = ctx.createAnalyser();
-        fx.analyser.fftSize = 128;
-        fx.analyser.smoothingTimeConstant = 0.8;
-      }
-      if (fx.analyser) {
-        try { eqTail.connect(fx.analyser); } catch {}
-      }
-
-      // ── Dolby Atmos 3D Binaural Spatial Audio Virtualizer ───────────
-      if (hasDolby) {
-        const lis = ctx.listener;
-        setAudioVec(lis, "positionX", "positionY", "positionZ", 0, 0, 0, lis.setPosition);
-        try {
-          if (lis.forwardX) {
-            lis.forwardX.value = 0; lis.forwardY.value = 0; lis.forwardZ.value = -1;
-            lis.upX.value = 0; lis.upY.value = 1; lis.upZ.value = 0;
-          } else if (lis.setOrientation) lis.setOrientation(0, 0, -1, 0, 1, 0);
-        } catch {}
-
-        const atmosSplit = fxAdd(ctx.createChannelSplitter(2));
-        eqTail.connect(atmosSplit);
-
-        const spread = Math.max(0.2, Math.min(1.5, (Number(state.prefs.atmosSurround) || 80) / 75));
-        const leftMain = makeHrtfPanner(ctx, -34 * spread, 1.25);
-        const rightMain = makeHrtfPanner(ctx, 34 * spread, 1.25);
-
-        // Center channel with Dialogue & Vocal Clarity Enhancer
-        const center = makeHrtfPanner(ctx, 0, 1.05);
-        setAudioVec(center, "positionX", "positionY", "positionZ", 0, 0.1, -1.05, center.setPosition);
-        const centerGain = fxAdd(ctx.createGain());
-        centerGain.gain.value = 0.45;
-        if (state.prefs.atmosDialogue) {
-          const vocBoost = fxAdd(ctx.createBiquadFilter());
-          vocBoost.type = "peaking"; vocBoost.frequency.value = 2400; vocBoost.Q.value = 0.9; vocBoost.gain.value = 3.5;
-          eqTail.connect(vocBoost);
-          vocBoost.connect(centerGain);
-        } else {
-          eqTail.connect(centerGain);
-        }
-        centerGain.connect(center);
-
-        // Surround L/R panners
-        const surrL = makeHrtfPanner(ctx, -114 * Math.min(1.2, spread), 2.1);
-        const surrR = makeHrtfPanner(ctx, 114 * Math.min(1.2, spread), 2.1);
-        const surrGain = fxAdd(ctx.createGain());
-        surrGain.gain.value = 0.38 * spread;
-        atmosSplit.connect(surrGain, 0);
-        atmosSplit.connect(surrGain, 1);
-        surrGain.connect(surrL);
-        surrGain.connect(surrR);
-
-        // Overhead Height Virtualization (Dolby Atmos ceiling simulation)
-        const heightLevel = state.prefs.atmosHeight === "high" ? 0.42 : state.prefs.atmosHeight === "subtle" ? 0.20 : 0.32;
-        const topL = makeHrtfPanner(ctx, -48, 1.6);
-        const topR = makeHrtfPanner(ctx, 48, 1.6);
-        setAudioVec(topL, "positionX", "positionY", "positionZ", -0.9, 0.85, -0.9, topL.setPosition);
-        setAudioVec(topR, "positionX", "positionY", "positionZ", 0.9, 0.85, -0.9, topR.setPosition);
-        const topGain = fxAdd(ctx.createGain());
-        topGain.gain.value = heightLevel;
-        atmosSplit.connect(topGain, 0);
-        atmosSplit.connect(topGain, 1);
-        topGain.connect(topL);
-        topGain.connect(topR);
-
-        atmosSplit.connect(leftMain, 0);
-        atmosSplit.connect(rightMain, 1);
-
-        const comp = fxAdd(ctx.createDynamicsCompressor());
-        comp.threshold.value = -16;
-        comp.knee.value = 12;
-        comp.ratio.value = 2.4;
-        comp.attack.value = 0.006;
-        comp.release.value = 0.15;
-
-        leftMain.connect(comp);
-        rightMain.connect(comp);
-        center.connect(comp);
-        surrL.connect(comp);
-        surrR.connect(comp);
-        topL.connect(comp);
-        topR.connect(comp);
-
-        const out = fxAdd(ctx.createGain());
-        out.gain.value = 1.25;
-        comp.connect(out);
-        out.connect(ctx.destination);
-        return;
-      }
-
-      if (mode === "off") {
-        const lim = fxAdd(ctx.createDynamicsCompressor());
-        lim.threshold.value = -0.5;
-        lim.knee.value = 6;
-        lim.ratio.value = 3;
-        lim.attack.value = 0.01;
-        lim.release.value = 0.1;
-        eqTail.connect(lim);
-        lim.connect(ctx.destination);
-        return;
-      }
 
       if (mode === "phone") {
         const bass = fxAdd(ctx.createBiquadFilter());
@@ -2219,7 +1946,7 @@
         presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;
         const air = fxAdd(ctx.createBiquadFilter());
         air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 2.6;
-        eqTail.connect(bass);
+        hpf.connect(bass);
         bass.connect(sub);
         sub.connect(body);
         body.connect(scoop);
@@ -2247,7 +1974,7 @@
         lpH.type = "lowpass"; lpH.frequency.value = 340; lpH.Q.value = 0.7;
         const wet = fxAdd(ctx.createGain());
         wet.gain.value = 0.72;
-        eqTail.connect(bp);
+        hpf.connect(bp);
         bp.connect(harm);
         harm.connect(hpH);
         hpH.connect(lpH);
@@ -2306,7 +2033,7 @@
         air.gain.value = 2.4;
       }
 
-      eqTail.connect(bass);
+      hpf.connect(bass);
       bass.connect(sub);
       sub.connect(scoop);
       scoop.connect(presence);
@@ -2713,19 +2440,6 @@
           </div></div>`
       : "";
 
-    const curPreset = state.prefs.eqPreset || "dolby_atmos";
-    const curBands = Array.isArray(state.prefs.eqBands) && state.prefs.eqBands.length === 10
-      ? state.prefs.eqBands
-      : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    const isEqOn = state.prefs.eqEnabled !== false;
-
-    const presetChips = Object.keys(EQ_PRESETS).filter((k) => k !== "custom").map((k) => {
-      const p = EQ_PRESETS[k];
-      return `<button type="button" class="chip ${curPreset === k ? "active" : ""}" data-po-preset="${k}">${escapeHTML(p.name || k)}</button>`;
-    }).join("");
-
-    const eqSliders = EQ_FREQS.map((f, i) => renderEqColumnHTML(i, curBands[i], "po")).join("");
-
     showModal({
       title: "Player options",
       body: `
@@ -2745,32 +2459,6 @@
               : ""}
           </div>
         </div>
-
-        <div class="set-card po-eq-card">
-          <div class="eq-header-row">
-            <div>
-              <strong style="display:flex;align-items:center;gap:6px">
-                <span class="material-symbols-outlined" style="color:var(--md-sys-color-primary,#7dd3bb);font-size:20px">equalizer</span>
-                Equalizer & Real-time Visualizer
-              </strong>
-              <p style="margin:2px 0 0;font-size:12px;color:var(--md-sys-color-on-surface-variant)">Live audio frequency curve and response</p>
-            </div>
-            <button type="button" class="chip-btn" id="poEqToggle">${isEqOn ? "Enabled" : "Bypassed"}</button>
-          </div>
-
-          <div class="po-eq-canvas-wrap">
-            <canvas id="poEqCanvas" class="po-eq-canvas" width="460" height="130"></canvas>
-          </div>
-
-          <div class="eq-presets-grid" id="poEqPresets">
-            ${presetChips}
-          </div>
-
-          <div class="eq-matrix po-eq-matrix">
-            ${eqSliders}
-          </div>
-        </div>
-
         ${ytChip}`,
       ok: "Done",
       onOk: () => {},
@@ -2783,209 +2471,18 @@
     if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
     const poYtPl = $("poYtPl");
     if (poYtPl) poYtPl.addEventListener("click", () => { hideModal(); ytAddToPlaylist(t); });
-
-    // ── Interactive Equalizer Canvas & Controls Setup ───────────────────
-    if (window._poEqCancel) {
-      try { window._poEqCancel(); } catch {}
-      window._poEqCancel = null;
-    }
-
-    const canvas = $("poEqCanvas");
-    let animId = null;
-
-    function renderCanvas() {
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const rect = canvas.getBoundingClientRect();
-      const w = Math.max(300, Math.round(rect.width || 460));
-      const h = 130;
-      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
-      }
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, w, h);
-
-      // Grid reference lines
-      const midY = h / 2;
-      const topY = 16;
-      const botY = h - 16;
-
-      // 0 dB dashed line
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(0, midY);
-      ctx.lineTo(w, midY);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // +12 dB and -12 dB guideline limits
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
-      ctx.beginPath();
-      ctx.moveTo(0, topY); ctx.lineTo(w, topY);
-      ctx.moveTo(0, botY); ctx.lineTo(w, botY);
-      ctx.stroke();
-
-      // Live spectrum bars from Analyser
-      if (fx.analyser && state.playing) {
-        const binCount = fx.analyser.frequencyBinCount || 64;
-        const dataArr = new Uint8Array(binCount);
-        fx.analyser.getByteFrequencyData(dataArr);
-        const barCount = 28;
-        const barW = (w - 24) / barCount;
-        ctx.fillStyle = "rgba(125, 211, 187, 0.18)";
-        for (let b = 0; b < barCount; b++) {
-          const idx = Math.floor((b / barCount) * (binCount * 0.7));
-          const val = dataArr[idx] || 0;
-          const barH = (val / 255) * (h - 28);
-          const bx = 12 + b * barW;
-          const by = h - 14 - barH;
-          ctx.fillRect(bx + 1, by, barW - 2, barH);
-        }
-      }
-
-      // 10-band EQ Frequency Response Curve
-      const bands = state.prefs.eqBands || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-      const enabled = state.prefs.eqEnabled !== false;
-      const padX = 24;
-      const stepX = (w - padX * 2) / (EQ_FREQS.length - 1);
-      const pts = [];
-
-      for (let i = 0; i < EQ_FREQS.length; i++) {
-        const gain = enabled ? (Number(bands[i]) || 0) : 0;
-        // clamp gain between -12 and +12
-        const clamped = Math.max(-12, Math.min(12, gain));
-        const py = midY - (clamped / 12) * (midY - topY);
-        const px = padX + i * stepX;
-        pts.push({ x: px, y: py, gain: clamped });
-      }
-
-      // Fill area under the EQ spline
-      const grad = ctx.createLinearGradient(0, topY, 0, botY);
-      grad.addColorStop(0, enabled ? "rgba(125, 211, 187, 0.32)" : "rgba(255, 255, 255, 0.1)");
-      grad.addColorStop(0.6, enabled ? "rgba(125, 211, 187, 0.08)" : "rgba(255, 255, 255, 0.03)");
-      grad.addColorStop(1, "rgba(125, 211, 187, 0.0)");
-      ctx.fillStyle = grad;
-
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, midY);
-      ctx.lineTo(pts[0].x, pts[0].y);
-      for (let i = 0; i < pts.length - 1; i++) {
-        const cpx = (pts[i].x + pts[i + 1].x) / 2;
-        ctx.bezierCurveTo(cpx, pts[i].y, cpx, pts[i + 1].y, pts[i + 1].x, pts[i + 1].y);
-      }
-      ctx.lineTo(pts[pts.length - 1].x, midY);
-      ctx.closePath();
-      ctx.fill();
-
-      // Stroke the EQ spline curve
-      ctx.strokeStyle = enabled ? "#7dd3bb" : "rgba(255, 255, 255, 0.4)";
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 0; i < pts.length - 1; i++) {
-        const cpx = (pts[i].x + pts[i + 1].x) / 2;
-        ctx.bezierCurveTo(cpx, pts[i].y, cpx, pts[i + 1].y, pts[i + 1].x, pts[i + 1].y);
-      }
-      ctx.stroke();
-
-      // Draw interactive dots at each band node
-      pts.forEach((pt) => {
-        ctx.fillStyle = enabled ? "#7dd3bb" : "#aaa";
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-      });
-
-      ctx.restore();
-      if (!canvas || !canvas.isConnected || document.hidden) {
-        animId = null;
-        return;
-      }
-      animId = requestAnimationFrame(renderCanvas);
-    }
-
-    animId = requestAnimationFrame(renderCanvas);
-    window._poEqCancel = () => {
-      if (animId) cancelAnimationFrame(animId);
-      animId = null;
-    };
-
-    // Toggle Master EQ
-    const poEqToggle = $("poEqToggle");
-    if (poEqToggle) {
-      poEqToggle.addEventListener("click", () => {
-        const next = !(state.prefs.eqEnabled !== false);
-        state.prefs.eqEnabled = next;
-        savePrefs();
-        poEqToggle.textContent = next ? "Enabled" : "Bypassed";
-        if (!fx.eqNodes || fx.eqNodes.length !== 10) {
-          hookSound();
-        }
-        if (fx.ctx && fx.ctx.state === "suspended") {
-          try { fx.ctx.resume(); } catch {}
-        }
-        if (fx.eqNodes && fx.eqNodes.length === 10) {
-          fx.eqNodes.forEach((node, i) => {
-            const val = next ? (Number(state.prefs.eqBands[i]) || 0) : 0;
-            try {
-              node.gain.cancelScheduledValues(0);
-              node.gain.setValueAtTime(val, fx.ctx ? fx.ctx.currentTime : 0);
-            } catch {
-              node.gain.value = val;
-            }
-          });
-        }
-      });
-    }
-
-    // Preset selection
-    const presetBox = $("poEqPresets");
-    if (presetBox) {
-      presetBox.querySelectorAll("[data-po-preset]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const k = btn.dataset.poPreset;
-          applyEqPreset(k);
-          presetBox.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
-          btn.classList.add("active");
-          // Update matrix faders and gain values
-          const bands = state.prefs.eqBands || [];
-          bands.forEach((val, i) => {
-            updateEqFaderVisual(i, val, "po", $("modalCard"));
-          });
-        });
-      });
-    }
-
-    // Real-time Faders Input
-    const card = $("modalCard");
-    if (card) {
-      card.querySelectorAll(".eq-fader-channel").forEach((channel) => {
-        const idx = Number(channel.dataset.faderIdx);
-        attachEqFaderInteraction(
-          channel,
-          "po",
-          (val) => {
-            updateEqBand(idx, val, true);
-            if (presetBox) {
-              presetBox.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
-            }
-          },
-          () => {
-            savePrefs();
-          }
-        );
-      });
-    }
   }
+
+  window.handleImgErr = function(img) {
+    if (!img) return;
+    const src = img.getAttribute("src") || "";
+    if (src && !src.startsWith("data:") && !src.includes("/cover-default.jpg") && !src.includes("/api/img?url=")) {
+      img.onerror = function() { this.src = "/cover-default.jpg"; };
+      img.src = `${API_BASE}/api/img?url=${encodeURIComponent(src)}`;
+    } else {
+      img.src = "/cover-default.jpg";
+    }
+  };
 
   function artUrl(t) {
     return t && t.artwork ? t.artwork : "/cover-default.jpg";
@@ -2999,7 +2496,7 @@
       <div class="card">
         <button type="button" class="card-hit" data-open-detail="${escapeAttr(t.id)}" title="Details">
           <div class="art">
-            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
             ${sourceBadge(t.source)}
             ${liked ? `<span class="liked-dot"><span class="material-symbols-outlined filled">favorite</span></span>` : ""}
           </div>
@@ -3010,14 +2507,14 @@
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
-      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
+      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes" || t.source === "deezer") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
       </div>`;
   }
 
   function rowHTML(t, i, extra = "") {
     return `
       <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
           <div class="t-sub">${escapeHTML(t.artist)}${t.source ? ` · ${t.source === "apple" ? "iTunes" : escapeHTML(t.source)}` : ""}</div>
@@ -3031,7 +2528,7 @@
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
         <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
           <div>
             <div class="t-title">${escapeHTML(t.title)}</div>
             <div class="t-sub">${escapeHTML(t.artist)}</div>
@@ -3146,64 +2643,77 @@
   // are read or played. Every track carries a playQuery that resolves
   // through MUCHI's existing playback pipeline for the FULL track.
   const DZ_BASE = "https://api.deezer.com";
-  function dzJsonp(path, params = {}, timeoutMs = 9000) {
-    return new Promise((resolve, reject) => {
-      const cbName = `__dz_cb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let urlStr = path.startsWith("http") ? path : `${DZ_BASE}${path}`;
-      const sep = urlStr.includes("?") ? "&" : "?";
-      const sp = new URLSearchParams(params);
-      sp.set("output", "jsonp");
-      sp.set("callback", cbName);
-      urlStr = `${urlStr}${sep}${sp.toString()}`;
 
-      const script = document.createElement("script");
-      script.src = urlStr;
-      script.async = true;
-
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("deezer jsonp timeout"));
-      }, timeoutMs);
-
-      function cleanup() {
-        clearTimeout(timer);
-        try { delete window[cbName]; } catch {}
-        if (script.parentNode) script.parentNode.removeChild(script);
-      }
-
-      window[cbName] = (data) => {
-        cleanup();
-        resolve(data);
-      };
-      script.onerror = () => {
-        cleanup();
-        reject(new Error("deezer jsonp error"));
-      };
-      (document.head || document.documentElement).appendChild(script);
-    });
-  }
-
-  async function dzFetch(path, ms = 9000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
+  async function dzFetch(path, ms = 12000) {
+    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
+    let q = "";
     try {
-      const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
-      if (!r.ok) throw new Error("deezer " + r.status);
-      return await r.json();
+      const u = new URL(path.startsWith("http") ? path : `https://api.deezer.com${cleanPath}`);
+      q = u.searchParams.get("q") || "";
+    } catch {}
+
+    // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers & track blockers)
+    try {
+      const catRes = await api(`/api/catalog/proxy?provider=deezer&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      if (catRes && (Array.isArray(catRes.data) || Array.isArray(catRes.results) || Array.isArray(catRes.deezer) || catRes.id)) {
+        if (!catRes.data && (Array.isArray(catRes.results) || Array.isArray(catRes.deezer))) {
+          catRes.data = catRes.results || catRes.deezer;
+        }
+        return catRes;
+      }
+    } catch {}
+
+    // 2. Secondary channel: First-party Worker proxy (/api/deezer/proxy)
+    try {
+      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      if (proxyRes && (Array.isArray(proxyRes.data) || Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer) || proxyRes.id)) {
+        if (!proxyRes.data && (Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer))) {
+          proxyRes.data = proxyRes.results || proxyRes.deezer;
+        }
+        return proxyRes;
+      }
+    } catch {}
+
+    // 3. Tertiary channel: Neutral catalog query search
+    if (q) {
+      try {
+        const catSr = await api(`/api/catalog/search?provider=deezer&q=${encodeURIComponent(q)}&${glq()}`, Math.min(ms, 10000));
+        const list = (catSr && (catSr.deezer || catSr.data || catSr.results)) || [];
+        if (Array.isArray(list) && list.length) {
+          return { data: list };
+        }
+      } catch {}
+
+      try {
+        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, Math.min(ms, 10000));
+        if (sr && Array.isArray(sr.deezer) && sr.deezer.length) {
+          return { data: sr.deezer };
+        }
+      } catch {}
+    }
+
+    // 4. Direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
+    try {
+      const r = await fetch(DZ_BASE + cleanPath, { signal: ctrl.signal, headers: { Accept: "application/json" } });
+      if (r.ok) {
+        const j = await r.json();
+        if (j) return j;
+      }
     } catch {
-      return await dzJsonp(path, {}, ms);
+      // Ignored: adblock or CORS prevented direct third-party fetch
     } finally {
       clearTimeout(t);
     }
+
+    throw new Error("deezer search request failed across all channels");
   }
   const dzFold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 
   async function deezerBrowserCatalog(name) {
     const want = dzFold(name);
     if (!want) return null;
-    // Same matching rule as the worker: exact (accent-folded) name, else
-    // the shortest "starts with" candidate — never a blind first row
-    // ("adele" must not resolve to the duo "Adèle & Robin").
     const sj = await dzFetch(`/search/artist?q=${encodeURIComponent(String(name).slice(0, 80))}&limit=10`);
     const rows = (sj && sj.data) || [];
 
@@ -3214,23 +2724,31 @@
     }
     if (!a || !a.id) return null;
     const artist = { name: a.name || name, artwork: a.picture_medium || "" };
-    const dzSong = (t, srcArt) => (!t || !t.title) ? null : {
-      id: `deezer:${t.id}`,
-      source: "deezer",
-      title: t.title,
-      artist: (t.artist && t.artist.name) || artist.name,
-      album: (t.album && t.album.title) || "",
-      duration: Number(t.duration || 0),
-      artwork: (t.album && t.album.cover_medium) || srcArt || "",
-      playQuery: `${t.title} ${(t.artist && t.artist.name) || artist.name} official audio`.trim(),
+    const dzSong = (t, srcArt) => {
+      if (!t || (!t.title && !t.trackName)) return null;
+      const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
+      const title = t.title || t.trackName || "Song";
+      const artName = (t.artist && (t.artist.name || t.artist)) || t.artistName || artist.name;
+      const albName = (t.album && (t.album.title || t.album)) || t.collectionName || "";
+      const art = (t.album && (t.album.cover_medium || t.album.cover_big)) || t.artwork || srcArt || "";
+      return {
+        id: `deezer:${cleanId}`,
+        source: "deezer",
+        title,
+        artist: artName,
+        album: albName,
+        duration: Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0,
+        artwork: art,
+        playQuery: `${title} ${artName} official audio`.trim(),
+      };
     };
-    // 1) Most popular tracks (Deezer ranks the artist's top list by popularity).
+    // 1) Most popular tracks
     const top = [];
     try {
       const tj = await dzFetch(`/artist/${a.id}/top?limit=50`);
       for (const t of (tj && tj.data) || []) { const s = dzSong(t, artist.artwork); if (s) top.push(s); }
     } catch {}
-    // 2) Complete discography (offset pagination, capped at 100 albums).
+    // 2) Complete discography
     const albums = [];
     let index = 0;
     for (let page = 0; page < 3; page++) {
@@ -3241,8 +2759,9 @@
       for (const al of list) {
         if (!al || !al.id) continue;
         const rt = String(al.record_type || "").toLowerCase();
+        const cleanAlbId = String(al.id).replace(/^deezer-album:/, "");
         albums.push({
-          id: `deezer-album:${al.id}`,
+          id: `deezer-album:${cleanAlbId}`,
           kind: "playlist",
           title: al.title || "Album",
           artist: artist.name,
@@ -3256,7 +2775,7 @@
       index += list.length;
       if (index >= Number(aj.total || 0) || index >= 100) break;
     }
-    // 3) Newest 8 albums → full track lists (correct order + album).
+    // 3) Newest 8 albums → full track lists
     const all = [...top];
     const seen = new Set(all.map((t) => dzFold(t.title) + "|" + dzFold(t.artist)));
     const expand = albums.slice(0, 8);
@@ -3278,81 +2797,184 @@
     return { artist, popular: top, songs: all, albums };
   }
 
-  // ── iTunes Search (worldwide catalogue, CORS-open, no key) ─────────────
-  // Backbone for the browser-side catalogue: up to 200 songs + 200 albums
-  // per artist. Metadata only — playback resolves through the app's
-  // normal search pipeline via playQuery, exactly like the Deezer rows.
+  // ── iTunes Search (worldwide catalogue, first-party proxied, adblock-immune) ────
   const ITUNES_BASE = "https://itunes.apple.com";
-  async function itFetch(path, ms = 9000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
+
+  function normalizeItunesItem(item) {
+    if (!item) return null;
+    const cleanId = String(item.trackId || item.id || item.collectionId || "").replace(/^apple:|^itunes:/, "");
+    const title = item.trackName || item.title || "Song";
+    const artist = item.artistName || item.artist || "Artist";
+    const album = item.collectionName || item.album || "";
+    const duration = Math.round((item.trackTimeMillis || 0) / 1000) || Number(item.duration) || 0;
+    const artwork = String(item.artworkUrl100 || item.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+    return {
+      ...item,
+      id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      source: "apple",
+      title,
+      artist,
+      album,
+      duration,
+      artwork,
+      previewUrl: item.previewUrl || "",
+      playQuery: `${title} ${artist} official audio`.trim(),
+      trackId: cleanId || item.trackId,
+      trackName: title,
+      artistName: artist,
+      collectionName: album,
+      trackTimeMillis: duration * 1000,
+      artworkUrl100: artwork,
+    };
+  }
+
+  async function itFetch(path, ms = 12000) {
+    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
+
+    let term = "";
+    let country = (state.prefs && state.prefs.country) || "";
     try {
-      const r = await fetch(ITUNES_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
-      if (!r.ok) throw new Error("itunes " + r.status);
-      return await r.json();
+      const u = new URL(path.startsWith("http") ? path : `https://itunes.apple.com${cleanPath}`);
+      term = u.searchParams.get("term") || u.searchParams.get("q") || "";
+      country = u.searchParams.get("country") || country;
+    } catch {}
+
+    // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers)
+    try {
+      const catRes = await api(`/api/catalog/proxy?provider=apple&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      const list = (catRes && (Array.isArray(catRes.results) ? catRes.results : (Array.isArray(catRes.apple) ? catRes.apple : catRes.itunes))) || [];
+      if (Array.isArray(list) && list.length) {
+        return {
+          results: list.map(normalizeItunesItem).filter(Boolean),
+        };
+      }
+    } catch {}
+
+    // 2. Secondary channel: Dedicated worker proxy (/api/itunes/proxy)
+    try {
+      const proxyRes = await api(`/api/itunes/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      const list = (proxyRes && (Array.isArray(proxyRes.results) ? proxyRes.results : (Array.isArray(proxyRes.apple) ? proxyRes.apple : proxyRes.itunes))) || [];
+      if (Array.isArray(list) && list.length) {
+        return {
+          results: list.map(normalizeItunesItem).filter(Boolean),
+        };
+      }
+    } catch {}
+
+    // 3. Tertiary channel: First-party search fallback (/api/catalog/search or /api/itunes/search)
+    if (term) {
+      try {
+        const catSr = await api(`/api/catalog/search?provider=apple&term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 10000));
+        const list = (catSr && (catSr.results || catSr.apple || catSr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+
+      try {
+        const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 10000));
+        const list = (pr && (pr.results || pr.apple || pr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+
+      try {
+        const sr = await api(`/api/search?source=apple&q=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&refresh=1&${glq()}`, Math.min(ms, 10000));
+        const list = (sr && (sr.apple || sr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+    }
+
+    // 4. Quaternary direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
+    try {
+      const r = await fetch(ITUNES_BASE + cleanPath, { signal: ctrl.signal });
+      if (r.ok) {
+        const j = await r.json();
+        if (j && Array.isArray(j.results)) {
+          return {
+            results: j.results.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      }
+    } catch {
+      // Ignored: adblock or CORS prevented direct third-party fetch
     } finally {
       clearTimeout(t);
     }
+
+    throw new Error("itunes search request failed across all channels");
   }
   async function itunesBrowserCatalog(name) {
     const want = dzFold(name);
     if (!want) return null;
     const country = String((state.prefs && state.prefs.country) || "IN");
-    // iTunes Search (verified API surface: term/entity/limit/country only —
-    // there is no artist entity and no attribute param). Step 1 pulls the
-    // artist's songs; the canonical artist name is derived from the
-    // dominant artistName among rows that actually relate to the query,
-    // so "post malone" never resolves to the Sam Feldt track that merely
-    // features him.
     const ssj = await itFetch(`/search?term=${encodeURIComponent(String(name).slice(0, 80))}&entity=song&limit=200&country=${country}`);
     const rows = (ssj && ssj.results) || [];
     const related = rows.filter((t) => {
-      const na = dzFold(t.artistName);
+      const na = dzFold(t.artistName || t.artist || "");
       return na && (na === want || na.includes(want) || want.includes(na));
     });
     if (!related.length) return null;
     const freq = new Map();
     for (const t of related.slice(0, 50)) {
-      const na = dzFold(t.artistName);
+      const na = dzFold(t.artistName || t.artist || "");
       freq.set(na, (freq.get(na) || 0) + 1);
     }
     let an = "";
     let best = 0;
     for (const [k, v] of freq) if (v > best || (v === best && k.length > an.length)) { an = k; best = v; }
-    const orig = related.find((t) => dzFold(t.artistName) === an) || related[0];
-    const artistName = orig.artistName || name;
-    const art = String(orig.artworkUrl100 || "").replace("100x100bb", "500x500bb");
-    const itSong = (t) => (!t || !t.trackName) ? null : {
-      id: `itunes:${t.trackId}`,
-      source: "itunes",
-      title: t.trackName,
-      artist: t.artistName || artistName,
-      album: t.collectionName || "",
-      duration: Math.round(Number(t.trackTimeMillis || 0) / 1000),
-      artwork: String(t.artworkUrl100 || "").replace("100x100bb", "300x300bb"),
-      playQuery: `${t.trackName} ${t.artistName || artistName} official audio`.trim(),
+    const orig = related.find((t) => dzFold(t.artistName || t.artist || "") === an) || related[0];
+    const artistName = orig.artistName || orig.artist || name;
+    const art = String(orig.artworkUrl100 || orig.artwork || "").replace("100x100bb", "500x500bb");
+    const itSong = (t) => {
+      if (!t || (!t.trackName && !t.title)) return null;
+      const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
+      const title = t.trackName || t.title;
+      const artName = t.artistName || t.artist || artistName;
+      const albName = t.collectionName || t.album || "";
+      const duration = Math.round(Number(t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
+      const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "300x300bb") || "/cover-default.jpg";
+      return {
+        id: `itunes:${cleanId}`,
+        source: "itunes",
+        title,
+        artist: artName,
+        album: albName,
+        duration,
+        artwork,
+        playQuery: `${title} ${artName} official audio`.trim(),
+      };
     };
-    // Strict artist match: the row's artist IS the canonical name or a
-    // collaboration with it ("Post Malone & Swae Lee" keeps; a track that
-    // merely mentions the name in its title does not).
     const byArtist = (na) => na === an || na.includes(an);
     const songs = [];
-    for (const t of rows) if (byArtist(dzFold(t.artistName))) { const s = itSong(t); if (s) songs.push(s); }
+    for (const t of rows) if (byArtist(dzFold(t.artistName || t.artist || ""))) { const s = itSong(t); if (s) songs.push(s); }
     const sj2 = await itFetch(`/search?term=${encodeURIComponent(artistName.slice(0, 80))}&entity=album&limit=200&country=${country}`).catch(() => null);
     const albums = [];
     for (const t of (sj2 && sj2.results) || []) {
-      if (!t || !t.collectionName) continue;
-      // Album rows carry the collection's artist in artistName — an album
-      // that only features the queried artist belongs to its main artist.
-      if (!byArtist(dzFold(t.artistName))) continue;
+      if (!t || (!t.collectionName && !t.title)) continue;
+      if (!byArtist(dzFold(t.artistName || t.artist || ""))) continue;
+      const albCol = t.collectionName || t.title;
+      const albArt = t.artistName || t.artist || artistName;
+      const cleanAlbId = String(t.collectionId || t.id || "").replace(/^itunes-album:/, "");
       albums.push({
-        id: `itunes-album:${t.collectionId}`,
+        id: `itunes-album:${cleanAlbId}`,
         kind: "playlist",
-        title: t.collectionName,
-        artist: t.artistName || artistName,
-        artwork: String(t.artworkUrl100 || "").replace("100x100bb", "300x300bb"),
+        title: albCol,
+        artist: albArt,
+        artwork: String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "300x300bb") || "/cover-default.jpg",
         source: "itunes",
-        query: `${t.collectionName} ${t.artistName || artistName}`.trim(),
+        query: `${albCol} ${albArt}`.trim(),
         year: t.releaseDate ? String(t.releaseDate).slice(0, 4) : "",
         recordType: "Album",
       });
@@ -3407,23 +3029,23 @@
     if (!t) return false;
     const dur = Number(t.duration) || 0;
     // Verified official catalogs from iTunes and Deezer are studio music
-    if (t.source === "apple" || t.source === "deezer") {
+    if (t.source === "apple" || t.source === "itunes" || t.source === "deezer") {
       return dur <= 3600;
     }
     if (t.source === "audius" || t.source === "radio") return true;
-    if (dur > 1080) return false;
-    if (dur > 0 && dur < 25) return false;
-    const artist = String(t.artist || "").toLowerCase();
-    const title = String(t.title || "").toLowerCase();
+    if (dur > 1200) return false;
+    if (dur > 0 && dur < 20) return false;
+    if (t.artist && typeof t.artist === "string" && /\s*-\s*topic$/i.test(t.artist)) {
+      t.artist = t.artist.replace(/\s*-\s*topic$/i, "").trim();
+    }
+    const artist = String(t.artist || "").toLowerCase().trim();
+    const title = String(t.title || "").toLowerCase().trim();
     const text = `${title} ${artist}`;
-    if (/\b(gameplay|walkthrough|playthrough|let'?s play|gaming|fortnite|minecraft|roblox|gta|valorant|call of duty|apex legends|genshin|game review|movie review|film review|movie recap|trailer|teaser|official trailer|full movie|episode|season \d+|vlog|reaction|reacting to|unboxing|tech review|speedrun|stream highlight|news|breaking news|imran khan|nato|modi|biden|trump|putin|ukraine|parliament|election|documentary|tutorial|how to|webinar|ted talk|interview|standup|stand-up|comedy skit|#shorts?)\b/i.test(text)) {
+    if (/\b(gameplay|walkthrough|playthrough|let'?s play|gaming|fortnite|minecraft|roblox|gta\s*[5v]?|valorant|call of duty|apex legends|genshin|game review|movie review|film review|movie recap|trailer|teaser|official trailer|full movie|episode|season \d+|vlog|reaction|reacting to|unboxing|tech review|speedrun|stream highlight|news|breaking news|imran khan|nato|modi|biden|trump|putin|ukraine|parliament|election|documentary|tutorial|how to|webinar|ted talk|interview|standup|stand-up|comedy skit|#shorts?)\b/i.test(text)) {
       return false;
     }
-    if (/^(episode|podcast|clip|news|trailer|gaming|movie|various artists|various)$/i.test(artist.trim())) return false;
-    if (/\btopic\b/i.test(artist)) return false;
-    if (/\b(non[- ]?stop|full album|album mix|megamix|compilation|collection|dj set|live set|greatest hits|best of|billboard|top ?(?:10|20|40|50|100) ?(?:pop|english|hit|song|music|playlist)? ?songs?|hits ?(?:19\d\d|20\d\d|vol\.?\s*\d)|1 ?hour|one hour|hour mix|karaoke|instrumental|sped ?up|slowed|reverb|mashup|medley|mixtape|mix tape|playlist)\b/i.test(text)) return false;
-    if (/\b(?:mix|remix)\b\s*$/i.test(title)) return false;
-    if (/\b(?:mix|remix|hits|top)\b/i.test(artist)) return false;
+    if (/^(episode|podcast|clip|news|trailer|gaming|movie)$/i.test(artist)) return false;
+    if (/\b(non[- ]?stop|full album|album mix|megamix|compilation|dj set|live set|billboard|1 ?hour|one hour|hour mix|karaoke)\b/i.test(text)) return false;
     return true;
   }
 
@@ -3439,6 +3061,135 @@
     return (data && data.tracks) || [];
   }
 
+  let isQueueRecsLoading = false;
+  async function loadQueueRecs(force = false) {
+    const cur = current() || (state.recent && state.recent[0]) || (state.queue && state.queue[0]) || (state.liked && state.liked[0]);
+    if (!cur || cur.source === "radio") {
+      if (!cur) {
+        state.queueRecs = [];
+        renderQueue();
+      }
+      return;
+    }
+    const seedKey = `${cur.id || cur.videoId || ""}:${cur.title || ""}:${cur.artist || ""}`;
+    if (!force && state._queueRecsSeed === seedKey && Array.isArray(state.queueRecs) && state.queueRecs.length > 0) {
+      return;
+    }
+    if (isQueueRecsLoading) return;
+    isQueueRecsLoading = true;
+    const refBtn = $("refreshQueueRecs");
+    if (refBtn) refBtn.classList.add("rotating");
+    renderQueue();
+    try {
+      const skipSet = new Set();
+      (state.queue || []).forEach((t) => {
+        if (!t) return;
+        if (t.id) skipSet.add(t.id);
+        if (t.videoId) skipSet.add(t.videoId);
+      });
+      (state.recent || []).slice(0, 20).forEach((t) => {
+        if (!t) return;
+        if (t.id) skipSet.add(t.id);
+        if (t.videoId) skipSet.add(t.videoId);
+      });
+      const extraSkip = Array.from(skipSet).slice(0, 25).join(",");
+      let tracks = await fetchRelated(cur, extraSkip).catch(() => []);
+      const filtered = [];
+      const seenIds = new Set(skipSet);
+
+      const addTrack = (t) => {
+        if (!t || !looksLikeSong(t)) return false;
+        const k = t.id || t.videoId;
+        if (!k || seenIds.has(k)) return false;
+        // Skip identical title matching seed song
+        const cleanT = String(t.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+        const cleanCur = String(cur.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+        if (cleanT && cleanCur && cleanT === cleanCur) return false;
+        seenIds.add(k);
+        filtered.push(t);
+        return true;
+      };
+
+      for (const t of tracks || []) {
+        addTrack(t);
+        if (filtered.length >= 15) break;
+      }
+
+      // If related returned fewer than 6 songs, fetch artist catalog recommendations
+      if (filtered.length < 6 && cur.artist) {
+        const art = artistName(cur);
+        if (art && !/^(various artists|unknown)$/i.test(art)) {
+          try {
+            const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
+            const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
+            for (const t of artTracks) {
+              addTrack(t);
+              if (filtered.length >= 15) break;
+            }
+          } catch {}
+        }
+      }
+
+      // If still fewer than 6, supplement from iTunes / Apple Music catalog
+      if (filtered.length < 6) {
+        const art = artistName(cur);
+        const searchQ = art || cur.title || "";
+        if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
+          try {
+            const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
+            const itList = (itRes && itRes.results) || [];
+            for (const t of itList) {
+              addTrack(t);
+              if (filtered.length >= 15) break;
+            }
+          } catch {}
+          if (filtered.length < 6) {
+            try {
+              const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
+              const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
+              for (const t of dzList) {
+                const s = {
+                  id: `deezer:${t.id}`,
+                  source: "deezer",
+                  title: t.title || t.trackName || "Song",
+                  artist: (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist",
+                  album: (t.album && (t.album.title || t.album)) || t.collectionName || "",
+                  duration: Number(t.duration || 0),
+                  artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg",
+                  playQuery: `${t.title || ""} ${(t.artist && (t.artist.name || t.artist)) || ""} official audio`.trim(),
+                };
+                addTrack(s);
+                if (filtered.length >= 15) break;
+              }
+            } catch {}
+          }
+        }
+      }
+
+      // If still fewer than 6, pull from discovery / shelf
+      if (filtered.length < 6) {
+        try {
+          const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
+          const discTracks = (disc && disc.tracks) || [];
+          for (const t of discTracks) {
+            addTrack(t);
+            if (filtered.length >= 15) break;
+          }
+        } catch {}
+      }
+
+      state.queueRecs = filtered;
+      state._queueRecsSeed = seedKey;
+    } catch (err) {
+      console.warn("loadQueueRecs failed:", err);
+    } finally {
+      isQueueRecsLoading = false;
+      const refBtn = $("refreshQueueRecs");
+      if (refBtn) refBtn.classList.remove("rotating");
+      renderQueue();
+    }
+  }
+
   let isRefillingQueue = false;
   async function ensureQueueRefill(seed) {
     if (isRefillingQueue) return false;
@@ -3446,6 +3197,17 @@
     if (!targetSeed || targetSeed.source === "radio") return false;
     isRefillingQueue = true;
     try {
+      // 1. If we already have fresh Spotify-style recommendations, use them first for instantaneous queue extension!
+      if (Array.isArray(state.queueRecs) && state.queueRecs.length >= 4) {
+        const toAdd = state.queueRecs.slice(0, 8);
+        state.queueRecs = state.queueRecs.slice(8);
+        state.queue = state.queue.concat(toAdd);
+        renderQueue();
+        renderChrome();
+        // Background refresh next batch
+        loadQueueRecs(true);
+        return true;
+      }
       const rows = await fetchRelated(targetSeed);
       const have = new Set();
       (state.queue || []).forEach((t) => {
@@ -3645,14 +3407,32 @@
     // as the user keeps playing songs.
     paintHomeSoon();
     renderChrome();
-    loadLyrics(t);
+    const isNetworkOff = Boolean(
+      state.offlineMode ||
+      state.isNetworkOffline ||
+      (typeof navigator !== "undefined" && navigator.onLine === false)
+    );
+
+    if (!isNetworkOff) {
+      loadLyrics(t);
+      loadQueueRecs();
+      const hasQueueFollowers = Array.isArray(state.queue) && (state.queueIdx + 1 < state.queue.length);
+      if (!hasQueueFollowers && t.source !== "radio") {
+        fillRelatedQueue(t);
+      }
+    }
     stopTimer();
+
     try {
-      const isOfflineActive = Boolean(state.offlineMode || state.isNetworkOffline);
-      if (isOfflineActive) {
-        const saved = (state.downloads || []).find((d) => d.id === t.id);
-        const hasBlob = await idbGet(t.id);
-        if (saved || hasBlob) {
+      const saved = findSavedTrack(t);
+      const offlineBlob = (saved || isNetworkOff) ? await getOfflineAudioBlob(t) : null;
+      const hasOfflinePlayback = Boolean((saved && saved.uri && (nativePlayer() || !saved.uri.startsWith("fsp:"))) || offlineBlob);
+
+      // If the song is downloaded or device is offline:
+      // ALWAYS play using the saved local audio file/blob via playAudio.
+      // Never attempt to load YouTube iframe or remote stream over internet!
+      if (hasOfflinePlayback || isNetworkOff) {
+        if (hasOfflinePlayback) {
           await playAudio(t);
           if (gen !== playGen) return;
           failSkip = 0;
@@ -3709,6 +3489,23 @@
         return;
       }
       console.error(err);
+      // Last-chance offline fallback if network failed unexpectedly (e.g. data turned off)
+      try {
+        const fallbackBlob = await getOfflineAudioBlob(t);
+        if (fallbackBlob) {
+          const fallbackUrl = URL.createObjectURL(fallbackBlob);
+          await playAudioWeb(fallbackUrl);
+          if (gen !== playGen) return;
+          failSkip = 0;
+          state.playing = true;
+          setWantPlay(true);
+          showEl($("eqBars"), true);
+          updateMediaSession();
+          updateWakeLock();
+          if (state.view === "now" && gen === playGen) render();
+          return;
+        }
+      } catch {}
       if (gen === playGen) skipFailed("Could not play this track");
     }
     if (state.view === "now" && gen === playGen) render();
@@ -3769,43 +3566,38 @@
       nativeEnsureStoragePermission();
     }
     stopOthers("audio");
-    let url = t.streamUrl;
-    // Offline: replay the real file saved on disk. Native keeps a content URI /
-    // file path; the web keeps a File System Access handle cached in IndexedDB.
-    const saved = state.downloads.find((d) => d.id === t.id);
-    if (saved) {
-      if (saved.uri && nativePlayer()) {
-        url = saved.uri;
-        if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
-          setWantPlay(true); state.playing = true; showEl($("eqBars"), true);
-          applyNativePendingSeek();
-          updateMediaSession(); updateWakeLock(); startTimer(); return;
-        }
-        url = t.streamUrl;
-      } else if (saved.uri && /^fsp:/.test(saved.uri)) {
-        // web File System Access file saved as a handle — re-open it offline.
-        try {
-          const stored = await idbGet(t.id);
-          if (stored && stored.handle && typeof stored.handle.getFile === "function") {
-            const f = await stored.handle.getFile();
-            url = URL.createObjectURL(f);
-          }
-        } catch {}
-      } else {
-        // blob:<name> or plain IndexedDB blob — replay the stored Blob.
-        try {
-          const blob = await idbGet(t.id);
-          if (blob && typeof blob === "object" && !blob.handle) url = URL.createObjectURL(blob);
-        } catch {}
-      }
-    } else {
-      try {
-        const blob = await idbGet(t.id);
-        if (blob) url = URL.createObjectURL(blob);
-      } catch {}
+    let url = "";
+    const isNetworkOff = Boolean(
+      state.offlineMode ||
+      state.isNetworkOffline ||
+      (typeof navigator !== "undefined" && navigator.onLine === false)
+    );
+
+    // Check for offline saved version first
+    const saved = findSavedTrack(t);
+    let offlineBlob = null;
+    if (saved || isNetworkOff) {
+      offlineBlob = await getOfflineAudioBlob(t);
     }
-    if (t.source === "audius" && t.trackId) {
-      if (IS_NATIVE && !url) {
+
+    if (saved && saved.uri && nativePlayer() && !saved.uri.startsWith("fsp:") && !saved.uri.startsWith("blob:")) {
+      url = saved.uri;
+      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
+        setWantPlay(true); state.playing = true; showEl($("eqBars"), true);
+        applyNativePendingSeek();
+        updateMediaSession(); updateWakeLock(); startTimer(); return;
+      }
+      url = "";
+    }
+
+    if (offlineBlob) {
+      url = URL.createObjectURL(offlineBlob);
+    } else if (!isNetworkOff) {
+      url = t.streamUrl || "";
+    }
+
+    if (!url && t.source === "audius" && t.trackId) {
+      if (IS_NATIVE) {
         try {
           const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`, 5000);
           if (data && data.url) {
@@ -3814,7 +3606,7 @@
           }
         } catch {}
       }
-      if (!url || !IS_NATIVE) {
+      if (!url) {
         url = `${API_BASE}/api/audius/file/${encodeURIComponent(t.trackId)}`;
         t.streamUrl = url;
       }
@@ -3837,7 +3629,7 @@
         url = `/api/stream?url=${encodeURIComponent(url)}`;
       }
     }
-    if (!url) {
+    if (!url && !isNetworkOff) {
       if (t.videoId) {
         try {
           const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}`, 6000);
@@ -3850,6 +3642,9 @@
       }
     }
     if (!url) {
+      if (isNetworkOff) {
+        throw new Error("Track is not available offline");
+      }
       throw new Error("No audio stream available");
     }
     // Proxy URLs from the API (e.g. /api/stream?url=… from /api/yt/stream) are
@@ -4030,6 +3825,8 @@
     if (typeof YT === "undefined" || !YT.Player) return null;
     const host = $("ytPlayer");
     if (!host) return null;
+    const isCapacitorOrLocal = !location.origin || location.origin === "null" || location.origin.startsWith("file:") || location.origin.startsWith("capacitor:");
+    const ytOrigin = isCapacitorOrLocal ? "https://www.youtube.com" : location.origin;
     const opts = {
       width: "360",
       height: "202",
@@ -4040,7 +3837,7 @@
         modestbranding: 1,
         playsinline: 1,
         enablejsapi: 1,
-        origin: location.origin,
+        origin: ytOrigin,
         fs: 1,
         vq: ytQualityVq(),
       },
@@ -4105,13 +3902,12 @@
     if (code === 100 || code === 101 || code === 150) {
       state.showVideo = false;
       showEl($("ytWrap"), false);
+      const recovered = await recoverYouTubeAlt(cur);
+      if (recovered) return;
       try {
         await playAudio(cur);
         return;
-      } catch {
-        recoverYouTubeAlt(cur);
-        return;
-      }
+      } catch {}
     }
     if (ytRetry < 2) {
       ytRetry += 1;
@@ -4119,23 +3915,41 @@
     } else {
       state.showVideo = false;
       showEl($("ytWrap"), false);
-      try { await playAudio(cur); } catch {}
+      const rec = await recoverYouTubeAlt(cur);
+      if (!rec) {
+        try { await playAudio(cur); } catch {}
+      }
     }
   }
 
   async function recoverYouTubeAlt(t) {
-    if (!t) return;
+    if (!t) return false;
     const blocked = String(t.videoId || "");
     const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
-    if (!q) return;
+    if (!q) return false;
     try {
       const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 12000);
       const hit = (data.tracks || []).find((x) => x && x.videoId && x.videoId !== blocked);
-      if (!hit || current() !== t) return;
-      t.videoId = hit.videoId;
-      ytRetry = 0;
-      await playYouTube(t);
+      if (hit && current() === t) {
+        t.videoId = hit.videoId;
+        ytRetry = 0;
+        await playYouTube(t);
+        return true;
+      }
     } catch {}
+    try {
+      if (!t.streamUrl && t.title) {
+        const altData = await api(`/api/search?q=${encodeURIComponent(`${t.title} ${artistName(t) || t.artist || ""}`)}&source=deezer&${glq()}`, 8000);
+        const altHit = (altData && altData.deezer && altData.deezer[0]) || (altData && altData.apple && altData.apple[0]);
+        if (altHit && (altHit.previewUrl || altHit.streamUrl) && current() === t) {
+          t.previewUrl = altHit.previewUrl;
+          t.streamUrl = altHit.streamUrl || altHit.previewUrl;
+          await playAudio(t);
+          return true;
+        }
+      }
+    } catch {}
+    return false;
   }
 
   function retryYouTube(id, token) {
@@ -4209,6 +4023,7 @@
     if (open) {
       navPush();
       renderQueue();
+      loadQueueRecs();
     } else {
       // Rewriting the entry that navPush() added on open is mandatory:
       // leaving a stale "queue: true" entry in the stack means a later
@@ -5017,8 +4832,8 @@
     // resolves (infinite recursion). The UI already shows a "Loading"
     // placeholder while state.ytLiked is null.
     try {
-      const d = await api("/api/youtube/liked");
-      state.ytLiked = { tracks: (d && d.tracks) || [], truncated: !!(d && d.truncated) };
+      const d = await api("/api/youtube/liked" + (force ? "?refresh=1" : ""));
+      state.ytLiked = { tracks: (d && Array.isArray(d.tracks)) ? d.tracks : [], truncated: !!(d && d.truncated) };
       state.ytReconnect = false;
     } catch (err) {
       state.ytLiked = { tracks: [], error: true };
@@ -5031,8 +4846,8 @@
     if (!state.auth || !state.auth.youtube || !state.auth.youtube.connected) return;
     if (!force && state.ytPlaylists) return;
     try {
-      const d = await api("/api/youtube/playlists");
-      state.ytPlaylists = (d && d.playlists) || [];
+      const d = await api("/api/youtube/playlists" + (force ? "?refresh=1" : ""));
+      state.ytPlaylists = (d && Array.isArray(d.playlists)) ? d.playlists : [];
       state.ytReconnect = false;
     } catch (err) {
       state.ytPlaylists = { error: true };
@@ -5136,6 +4951,8 @@
           });
         }
       } else if (pathname === "youtube/success") {
+        const t = params.get("token") || "";
+        if (t) setAuthToken(t);
         refreshAuth(true).then(() => {
           toast("YouTube connected");
           if (state.view === "settings" || state.view === "library") render();
@@ -5147,10 +4964,15 @@
     } catch { return false; }
   }
   async function initAuth() {
-    // Web: the OAuth callback redirects back to "/?auth=success" etc.
+    // Web & mobile: OAuth callbacks redirect back with token and status params
     let touched = false;
     try {
       const params = new URLSearchParams(window.location.search || "");
+      const token = params.get("token");
+      if (token) {
+        setAuthToken(token);
+        touched = true;
+      }
       if (params.get("auth") === "success") { touched = true; toast("Signed in with Google"); }
       else if (params.get("youtube") === "success") { touched = true; toast("YouTube connected"); }
       else if (params.get("auth") === "error" || params.get("youtube") === "error") { touched = true; toast("Google sign-in was cancelled or failed"); }
@@ -5396,7 +5218,7 @@
     }
     const dl = $("dlBtn");
     if (dl) {
-      const can = !!(t && (t.trackId || t.videoId));
+      const can = !!(t && (t.trackId || t.videoId || t.source === "apple" || t.source === "itunes" || t.source === "deezer"));
       const saved = !!(t && isSaved(t));
       dl.classList.toggle("on", saved);
       dl.classList.toggle("dim", !can);
@@ -5446,32 +5268,114 @@
   function renderQueue() {
     const el = $("queueList");
     if (!el) return;
-    if (!state.queue.length) {
-      el.innerHTML = `<div class="empty">Queue is empty</div>`;
-      if ($("queueSub")) $("queueSub").textContent = "Play next · drag to reorder";
-      return;
+    const cur = current();
+    const curIdx = state.index >= 0 ? state.index : 0;
+    const upcoming = Math.max(0, state.queue.length - 1 - curIdx);
+    if ($("queueSub")) {
+      $("queueSub").textContent = state.queue.length
+        ? `${state.queue.length} in queue · ${upcoming} up next`
+        : "Play next · drag to reorder";
     }
-    const upcoming = Math.max(0, state.queue.length - 1);
-    if ($("queueSub")) $("queueSub").textContent = `${state.queue.length} in queue · ${upcoming} up next`;
-    el.innerHTML = state.queue.map((t, i) => {
-      const now = i === state.index;
-      return `
-        <div class="q-row ${now ? "now" : ""}" draggable="true" data-q-i="${i}">
+
+    let out = "";
+
+    // 1. Now Playing Section
+    if (cur) {
+      out += `
+        <div class="q-section-head">
+          <span class="q-section-title">Now Playing</span>
+        </div>
+        <div class="q-row now" data-q-i="${curIdx}">
+          <span class="q-handle q-now-badge" title="Now playing"><span class="material-symbols-outlined">volume_up</span></span>
+          <img src="${escapeAttr(artUrl(cur))}" alt="" onerror="this.src='/cover-default.jpg'"/>
+          <button type="button" class="q-main" data-play="${escapeAttr(cur.id)}" data-idx="${curIdx}">
+            <div class="t-title">${escapeHTML(cur.title)}</div>
+            <div class="t-sub">${escapeHTML(cur.artist)}</div>
+          </button>
+          <span class="q-now-tag">Playing</span>
+        </div>
+      `;
+    }
+
+    // 2. Next In Queue Section
+    const nextList = state.queue.map((t, i) => ({ t, i })).filter((item) => item.i > curIdx);
+    if (nextList.length) {
+      out += `
+        <div class="q-section-head">
+          <span class="q-section-title">Next In Queue</span>
+          <span class="q-count">${nextList.length}</span>
+        </div>
+      `;
+      out += nextList.map(({ t, i }) => `
+        <div class="q-row" draggable="true" data-q-i="${i}">
           <span class="q-handle" title="Drag to reorder">⋮⋮</span>
           <img src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.jpg'"/>
           <button type="button" class="q-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
             <div class="t-title">${escapeHTML(t.title)}</div>
             <div class="t-sub">${escapeHTML(t.artist)}</div>
           </button>
-          ${now ? `<span class="q-now-tag">Now</span>` : `<button type="button" class="icon-btn q-del" data-q-del="${i}" title="Remove"><span class="material-symbols-outlined">close</span></button>`}
-        </div>`;
-    }).join("");
+          <button type="button" class="icon-btn q-del" data-q-del="${i}" title="Remove">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+      `).join("");
+    } else if (!cur) {
+      out += `<div class="empty">Queue is empty</div>`;
+    }
+
+    // 3. Spotify-style Recommended Section
+    const recs = (state.queueRecs || []).filter((t) => !state.queue.some((q) => q && t && (q.id === t.id || (q.videoId && q.videoId === t.videoId))));
+    if (cur || recs.length || isQueueRecsLoading) {
+      out += `
+        <div class="q-recs-wrap">
+          <div class="q-recs-head">
+            <div>
+              <div class="q-recs-title">Recommended</div>
+              <div class="q-recs-sub">Based on what's in your queue</div>
+            </div>
+            <button type="button" class="icon-btn q-refresh-btn ${isQueueRecsLoading ? "rotating" : ""}" id="refreshQueueRecs" title="Refresh recommendations">
+              <span class="material-symbols-outlined">refresh</span>
+            </button>
+          </div>
+          <div class="q-recs-list">
+            ${isQueueRecsLoading && !recs.length ? `
+              <div class="q-recs-loading">
+                <div class="spinner"></div>
+                <span>Finding matching songs…</span>
+              </div>
+            ` : (recs.length ? recs.map((t, idx) => `
+              <div class="q-rec-row" data-rec-idx="${idx}">
+                <img src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.jpg'"/>
+                <button type="button" class="q-main q-rec-play" data-rec-play="${idx}" title="Play song">
+                  <div class="t-title">${escapeHTML(t.title)}</div>
+                  <div class="t-sub">${escapeHTML(t.artist)}</div>
+                </button>
+                <button type="button" class="icon-btn q-add-rec" data-rec-add="${idx}" title="Add to queue">
+                  <span class="material-symbols-outlined">add</span>
+                </button>
+              </div>
+            `).join("") : `
+              <div class="q-recs-empty-wrap">
+                <p class="q-recs-empty">Tap refresh to get new song recommendations.</p>
+                <button type="button" class="btn secondary sm" id="refreshQueueRecsEmpty" style="margin: 8px auto 0 auto; display: flex; align-items: center; gap: 6px;">
+                  <span class="material-symbols-outlined" style="font-size: 18px;">refresh</span>
+                  <span>Load Recommendations</span>
+                </button>
+              </div>
+            `)}
+          </div>
+        </div>
+      `;
+    }
+
+    el.innerHTML = out;
   }
 
   function renderPlaylistsNav() {
     if (!$("playlistNav")) return;
     $("playlistNav").innerHTML = [
       `<button data-open-liked>Liked songs · ${state.liked.length}</button>`,
+      `<button data-open-downloads>Downloads · ${state.downloads.length}</button>`,
       ...state.playlists.map((p, i) => `<button data-pl="${i}">${escapeHTML(p.name)} · ${p.tracks.length}</button>`),
     ].join("");
   }
@@ -6196,18 +6100,24 @@
         </div>
       </div>` : "";
 
-    const itunesSongs = s.apple || [];
-    const deezerSongs = s.deezer || [];
+    const itunesSongs = (Array.isArray(s.itunes) && s.itunes.length) ? s.itunes : (Array.isArray(s.apple) && s.apple.length ? s.apple : (s.itunes || s.apple || []));
+    const deezerSongs = Array.isArray(s.deezer) ? s.deezer : [];
     const youtubeSongs = s.youtube || [];
     const audiusSongs = s.audius || [];
     const offlineSongs = s.offline || [];
     const songs = [].concat(youtubeSongs, itunesSongs, deezerSongs, audiusSongs, offlineSongs);
     const artists = s.artists || [];
-    const playlists = (s.playlists || []).filter((p) => p.source !== "apple" && p.source !== "deezer");
-    const albums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "deezer");
+    const playlists = (s.playlists || []).filter((p) => p.source !== "apple" && p.source !== "deezer" && p.source !== "itunes");
+    const albums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "deezer" || p.source === "itunes");
+    const itunesAlbums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "itunes");
+    const deezerAlbums = (s.playlists || []).filter((p) => p.source === "deezer");
     const radio = s.radio || [];
+    const isSearchingItunes = providerFetchInFlight && !itunesSongs.length;
+    const isSearchingDeezer = providerFetchInFlight && !deezerSongs.length;
+    const isSearchingYoutube = providerFetchInFlight && !youtubeSongs.length;
+    const isSearchingAudius = providerFetchInFlight && !audiusSongs.length;
     const empty = !songs.length && !artists.length && !playlists.length && !albums.length && !radio.length;
-    if (empty) return `${offlineBanner}<div class="empty"><h3>No matches</h3><p>Try another spelling, or verify your downloaded library.</p></div>`;
+    if (empty && !providerFetchInFlight) return `${offlineBanner}<div class="empty"><h3>No matches</h3><p>Try another spelling, or verify your downloaded library.</p></div>`;
     const top = pickTopArtist(s, state.query);
     const topIdx = top ? artists.indexOf(top) : -1;
     const hero = (f === "all" && top) ? `
@@ -6224,28 +6134,28 @@
       return `
         ${offlineBanner}
         <div class="section">
-          <div class="section-head"><h2>iTunes Songs</h2><span>${itunesSongs.length}</span></div>
-          <div class="list">${itunesSongs.length ? itunesSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No iTunes songs found for this search.</p>`}</div>
+          <div class="section-head"><h2>iTunes Songs</h2><span>${isSearchingItunes ? "" : itunesSongs.length}</span></div>
+          <div class="list">${isSearchingItunes ? `<div class="loading-wrap" style="padding: 24px; text-align: center;"><div class="spinner" style="margin: 0 auto 10px;"></div><p style="color: var(--md-sys-color-on-surface-variant); font-size: 13px;">Searching iTunes catalogue…</p></div>` : (itunesSongs.length ? itunesSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No iTunes songs found for this search.</p>`)}</div>
         </div>
-        ${albums.length ? `<div class="section"><div class="section-head"><h2>iTunes Albums</h2><span>${albums.length}</span></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+        ${itunesAlbums.length ? `<div class="section"><div class="section-head"><h2>iTunes Albums</h2><span>${itunesAlbums.length}</span></div><div class="lib-list">${itunesAlbums.map(playlistHitHTML).join("")}</div></div>` : ""}
       `;
     }
     if (f === "deezer") {
       return `
         ${offlineBanner}
         <div class="section">
-          <div class="section-head"><h2>Deezer Songs</h2><span>${deezerSongs.length}</span></div>
-          <div class="list">${deezerSongs.length ? deezerSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Deezer songs found for this search.</p>`}</div>
+          <div class="section-head"><h2>Deezer Songs</h2><span>${isSearchingDeezer ? "" : deezerSongs.length}</span></div>
+          <div class="list">${isSearchingDeezer ? `<div class="loading-wrap" style="padding: 24px; text-align: center;"><div class="spinner" style="margin: 0 auto 10px;"></div><p style="color: var(--md-sys-color-on-surface-variant); font-size: 13px;">Searching Deezer catalogue…</p></div>` : (deezerSongs.length ? deezerSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Deezer songs found for this search.</p>`)}</div>
         </div>
-        ${albums.length ? `<div class="section"><div class="section-head"><h2>Albums</h2><span>${albums.length}</span></div><div class="lib-list">${albums.map(playlistHitHTML).join("")}</div></div>` : ""}
+        ${deezerAlbums.length ? `<div class="section"><div class="section-head"><h2>Deezer Albums</h2><span>${deezerAlbums.length}</span></div><div class="lib-list">${deezerAlbums.map(playlistHitHTML).join("")}</div></div>` : ""}
       `;
     }
     if (f === "youtube") {
       return `
         ${offlineBanner}
         <div class="section">
-          <div class="section-head"><h2>YouTube Music</h2><span>${youtubeSongs.length}</span></div>
-          <div class="list">${youtubeSongs.length ? youtubeSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No YouTube songs found for this search.</p>`}</div>
+          <div class="section-head"><h2>YouTube Music</h2><span>${isSearchingYoutube ? "" : youtubeSongs.length}</span></div>
+          <div class="list">${isSearchingYoutube ? `<div class="loading-wrap" style="padding: 24px; text-align: center;"><div class="spinner" style="margin: 0 auto 10px;"></div><p style="color: var(--md-sys-color-on-surface-variant); font-size: 13px;">Searching YouTube catalogue…</p></div>` : (youtubeSongs.length ? youtubeSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No YouTube songs found for this search.</p>`)}</div>
         </div>
         ${playlists.length ? `<div class="section"><div class="section-head"><h2>Playlists</h2><span>${playlists.length}</span></div><div class="lib-list">${playlists.map(playlistHitHTML).join("")}</div></div>` : ""}
       `;
@@ -6254,8 +6164,8 @@
       return `
         ${offlineBanner}
         <div class="section">
-          <div class="section-head"><h2>Audius Songs</h2><span>${audiusSongs.length}</span></div>
-          <div class="list">${audiusSongs.length ? audiusSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Audius songs found for this search.</p>`}</div>
+          <div class="section-head"><h2>Audius Songs</h2><span>${isSearchingAudius ? "" : audiusSongs.length}</span></div>
+          <div class="list">${isSearchingAudius ? `<div class="loading-wrap" style="padding: 24px; text-align: center;"><div class="spinner" style="margin: 0 auto 10px;"></div><p style="color: var(--md-sys-color-on-surface-variant); font-size: 13px;">Searching Audius catalogue…</p></div>` : (audiusSongs.length ? audiusSongs.map((t, i) => rowHTML(t, i)).join("") : `<p class="empty">No Audius songs found for this search.</p>`)}</div>
         </div>
       `;
     }
@@ -6375,6 +6285,24 @@
           <div class="list">${state.liked.map((t, i) => libTrackHTML(t, i)).join("") || emptyLib()}</div>
         </div>`;
     }
+    if (pl === "downloads") {
+      const tracks = state.downloads || [];
+      return `
+        <div class="lib-detail">
+          <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
+          <div class="lib-hero liked dl-hero">
+            <div class="lib-liked-art dl" aria-hidden="true"><span class="material-symbols-outlined filled">download_for_offline</span></div>
+            <div class="lib-hero-copy">
+              <p class="lib-kicker">Playlist</p>
+              <h1>Downloads</h1>
+              <p class="lib-stats">${trackStats(tracks)}</p>
+              <p class="lib-note">Saved on this device for offline listening</p>
+              ${tracks.length ? `<button class="filled-btn" id="playDownloads" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+            </div>
+          </div>
+          <div class="list">${tracks.map((t, i) => libTrackHTML(t, i)).join("") || emptyLib()}</div>
+        </div>`;
+    }
     if (pl === "yt-liked") {
       const L = state.ytLiked || { tracks: [], loading: true };
       const tracks = L.tracks || [];
@@ -6479,6 +6407,14 @@
           <div class="t-sub">Playlist · ${trackStats(state.liked)}</div>
         </div>
       </button>`;
+    const downloadRow = `
+      <button type="button" class="lib-row" data-open-downloads>
+        <div class="lib-liked-art sm dl"><span class="material-symbols-outlined filled">download_for_offline</span></div>
+        <div>
+          <div class="t-title">Downloads</div>
+          <div class="t-sub">Playlist · ${trackStats(state.downloads)}</div>
+        </div>
+      </button>`;
     const playlistRows = state.playlists.map((p, i) => `
       <button type="button" class="lib-row" data-open-pl="${i}">
         <img src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.jpg'"/>
@@ -6545,15 +6481,15 @@
     }
     let body = "";
     if (f === "playlists") {
-      body = likedRow + ytRows + (playlistRows || `<p class="empty">Create a playlist with the + button.</p>`);
+      body = likedRow + downloadRow + ytRows + (playlistRows || `<p class="empty">Create a playlist with the + button.</p>`);
     } else if (f === "artists") {
       body = artistRows || `<p class="empty">Follow an artist from the player.</p>`;
     } else if (f === "downloaded") {
-      body = dlRows || `<p class="empty">Save a track (YouTube or independent Audius) from the player to listen offline.</p>`;
+      body = downloadRow + (dlRows || `<p class="empty">Save a track (YouTube or independent Audius) from the player to listen offline.</p>`);
     } else {
-      body = likedRow + ytRows + playlistRows + artistRows;
-      if (!state.playlists.length && !state.following.length) {
-        body += `<p class="empty">Heart songs, follow artists, or make a playlist — they’ll land here.</p>`;
+      body = likedRow + downloadRow + ytRows + playlistRows + artistRows;
+      if (!state.playlists.length && !state.following.length && !state.downloads.length) {
+        body += `<p class="empty">Heart songs, save downloads, follow artists, or make a playlist — they’ll land here.</p>`;
       }
     }
     return `
@@ -6606,6 +6542,45 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.2",
+      title: "Muchi 1.6.2",
+      notes: [
+        "Full protection of administrative routes with strict server-side RBAC permissions.",
+        "Verified Google Sign-In email authentication (email_verified validation) for security.",
+        "Cryptographic HMAC-SHA256 signature verification for webhooks with anti-replay protection.",
+        "Hardened image proxy against Cross-Site Scripting (XSS) and content type sniffing.",
+        "Isolated sensitive internal debugging output and credentials from production responses.",
+      ],
+    },
+    {
+      ver: "1.6.1",
+      title: "Muchi 1.6.1",
+      notes: [
+        "Fixed cross-platform Deezer and iTunes music search discrepancy across web browser, Android, and iOS app builds.",
+        "Tri-channel search engine: unified Direct CORS fetch, JSONP script bypass, and resilient backend worker proxying (/api/deezer/proxy & /api/itunes/search).",
+        "Universal track normalization: dual compatibility layer for both provider-raw schema and normalized audio models.",
+        "Optimized provider timeouts and cache invalidation so stale or empty results are never frozen.",
+      ],
+    },
+    {
+      ver: "1.5.9",
+      title: "Muchi 1.5.9",
+      notes: [
+        "Fixed iTunes songs search in real app and website: multi-tier resolution with direct queries, JSONP script bypass, and backend country-aware fallback.",
+        "Spotify-style Queue suggestions: instant 'Recommended' tracks based on your active queue vibe with one-tap add (+) and quick play.",
+        "Smarter autoplay mix: enhanced artist and genre diversity capping for seamless continuous radio playback.",
+        "On-demand refresh: easily regenerate fresh song suggestions right from your queue.",
+      ],
+    },
+    {
+      ver: "1.5.8",
+      title: "Muchi 1.5.8",
+      notes: [
+        "Android build stabilization and modern Android 16 (API 36) compatibility.",
+        "Audio engine node stability and background playback reliability.",
+      ],
+    },
     {
       ver: "1.5.6",
       title: "Muchi 1.5.6",
@@ -7326,86 +7301,10 @@
       </div>`;
   }
 
-  function renderEqualizerPage() {
-    const p = state.prefs;
-    const presets = Object.keys(EQ_PRESETS).map((k) => [k, EQ_PRESETS[k].name]);
-    const curPreset = p.eqPreset || "flat";
-    const gains = Array.isArray(p.eqBands) && p.eqBands.length === 10 ? p.eqBands : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-    return `
-      ${settingsSubChrome("Equalizer & Dolby Atmos", "10-Band studio equalizer and Dolby Atmos 3D binaural spatial audio.")}
-      <div class="settings">
-        <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <div style="display:flex;align-items:center;gap:10px">
-              <h3 style="margin:0">Dolby Atmos 3D Audio</h3>
-              <span class="dolby-badge"><span class="material-symbols-outlined" style="font-size:14px">surround_sound</span> Atmos</span>
-            </div>
-            <button class="switch ${p.dolbyAtmos ? "on" : ""}" id="dolbyAtmosToggle" type="button"><i></i></button>
-          </div>
-          <p class="set-lead">Binaural HRTF spatial audio with acoustic room widening, dialog clarity, and overhead height virtualization.</p>
-
-          <div class="set-row">
-            <div><strong>Dialogue & Vocal Enhancer</strong><p>Crisp center vocal projection in Atmos mix.</p></div>
-            <button class="switch ${p.atmosDialogue ? "on" : ""}" id="atmosDialogueToggle" type="button"><i></i></button>
-          </div>
-
-          <div class="set-row" style="flex-direction:column;align-items:stretch;gap:8px">
-            <div style="display:flex;justify-content:space-between">
-              <strong>Spatial Soundstage Width</strong>
-              <span id="atmosSurroundVal">${p.atmosSurround || 80}%</span>
-            </div>
-            <input type="range" id="atmosSurround" min="20" max="150" step="5" value="${p.atmosSurround || 80}" style="width:100%" />
-          </div>
-
-          <label class="set-row">
-            <div><strong>Overhead Height Dimension</strong><p>Ceiling virtualization intensity for Atmos.</p></div>
-            <select id="atmosHeight">
-              <option value="subtle" ${p.atmosHeight === "subtle" ? "selected" : ""}>Subtle (20%)</option>
-              <option value="medium" ${p.atmosHeight === "medium" || !p.atmosHeight ? "selected" : ""}>Medium (32%)</option>
-              <option value="high" ${p.atmosHeight === "high" ? "selected" : ""}>High Immersion (42%)</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <div>
-              <h3 style="margin:0">10-Band Studio Equalizer</h3>
-              <p class="set-lead" style="margin:4px 0 0">Fine-tune frequencies from deep sub-bass (32 Hz) to crystal highs (16 kHz).</p>
-            </div>
-            <button class="switch ${p.eqEnabled !== false ? "on" : ""}" id="eqMasterToggle" type="button"><i></i></button>
-          </div>
-
-          <div class="set-row" style="padding:8px 0">
-            <div><strong>Presets</strong></div>
-          </div>
-          <div class="eq-presets-grid">
-            ${presets.map(([id, label]) => `
-              <button type="button" class="chip ${curPreset === id ? "active" : ""}" data-eq-preset="${id}">${label}</button>
-            `).join("")}
-          </div>
-
-          <div class="eq-matrix">
-            ${EQ_FREQS.map((freq, i) => renderEqColumnHTML(i, gains[i], "eq")).join("")}
-          </div>
-
-          <div class="set-row" style="margin-top:14px">
-            <div><strong>Reset Tuning</strong><p>Clear gains back to flat response.</p></div>
-            <button type="button" class="chip-btn" id="resetEqBtn">
-              <span class="material-symbols-outlined">restart_alt</span>
-              Reset to Flat
-            </button>
-          </div>
-        </div>
-      </div>`;
-  }
-
   function renderSettings() {
     if (state.settingsPage === "appearance") return renderAppearance();
     if (state.settingsPage === "ui") return renderUiPage();
     if (state.settingsPage === "player") return renderPlayerPage();
-    if (state.settingsPage === "equalizer") return renderEqualizerPage();
     if (state.settingsPage === "playback") return renderPlaybackPage();
     if (state.settingsPage === "listening") return renderListeningPage();
     const p = state.prefs;
@@ -7445,10 +7344,6 @@
         </div>
         <div class="set-card">
           <h3>Sound</h3>
-          <button type="button" class="set-row set-go" id="openEqualizer">
-            <div><strong>Equalizer & Dolby Atmos</strong><p>${p.eqEnabled !== false ? (p.eqPreset ? (EQ_PRESETS[p.eqPreset] ? EQ_PRESETS[p.eqPreset].name : p.eqPreset) : "Flat") : "Bypassed"} · ${p.dolbyAtmos ? "Dolby Atmos 3D Active" : "Stereo"}</p></div>
-            <span class="material-symbols-outlined">chevron_right</span>
-          </button>
           <button type="button" class="set-row set-go" id="openPlayback">
             <div><strong>Playback</strong><p>Autoplay, fade, speed, quality.</p></div>
             <span class="material-symbols-outlined">chevron_right</span>
@@ -7764,6 +7659,7 @@
         const fromSearch = state.view === "search";
         let list = [];
         if (state.view === "library" && state.activePlaylist === "liked") list = state.liked;
+        else if (state.view === "library" && state.activePlaylist === "downloads") list = state.downloads;
         else if (state.view === "library" && state.activePlaylist === "yt-liked") list = (state.ytLiked && state.ytLiked.tracks) || [];
         else if (state.view === "library" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0) list = (state.ytOpen && state.ytOpen.tracks) || [];
         else if (state.view === "library" && state.activePlaylist === "discovery") list = (state.discovery && state.discovery.tracks) || [];
@@ -7850,7 +7746,11 @@
       if ((state.discovery.tracks || []).length) openDisc();
     });
     viewEl.querySelectorAll("[data-filter]").forEach((el) => {
-      el.addEventListener("click", () => { state.filter = el.dataset.filter; render(); });
+      el.addEventListener("click", () => {
+        state.filter = el.dataset.filter;
+        render();
+        ensureProviderResults(state.filter);
+      });
     });
     viewEl.querySelectorAll("[data-open-artist]").forEach((el) => {
       el.addEventListener("click", () => {
@@ -7983,6 +7883,9 @@
     viewEl.querySelectorAll("[data-open-liked]").forEach((el) => {
       el.addEventListener("click", () => { rememberScroll(); state.activePlaylist = "liked"; navPush(); paintNav(false); });
     });
+    viewEl.querySelectorAll("[data-open-downloads]").forEach((el) => {
+      el.addEventListener("click", () => { rememberScroll(); state.activePlaylist = "downloads"; navPush(); paintNav(false); });
+    });
     viewEl.querySelectorAll("[data-lib-filter]").forEach((el) => {
       el.addEventListener("click", () => { state.libFilter = el.dataset.libFilter; render(); });
     });
@@ -7990,6 +7893,8 @@
     if (libBack) libBack.addEventListener("click", requestBack);
     const playLiked = viewEl.querySelector("#playLiked");
     if (playLiked) playLiked.addEventListener("click", () => { if (state.liked[0]) playFromList(state.liked, 0); });
+    const playDownloads = viewEl.querySelector("#playDownloads");
+    if (playDownloads) playDownloads.addEventListener("click", () => { if (state.downloads && state.downloads[0]) playFromList(state.downloads, 0); });
     const plBanner = viewEl.querySelector("#plBanner");
     if (plBanner && typeof state.activePlaylist === "number") {
       const cur = state.playlists[state.activePlaylist];
@@ -8123,109 +8028,10 @@
     }
     const openPlayer = viewEl.querySelector("#openPlayer");
     if (openPlayer) openPlayer.addEventListener("click", () => { rememberScroll(); state.settingsPage = "player"; navPush(); paintNav(false); });
-    const openEqualizer = viewEl.querySelector("#openEqualizer");
-    if (openEqualizer) openEqualizer.addEventListener("click", () => { rememberScroll(); state.settingsPage = "equalizer"; navPush(); paintNav(false); });
     const openPlayback = viewEl.querySelector("#openPlayback");
     if (openPlayback) openPlayback.addEventListener("click", () => { rememberScroll(); state.settingsPage = "playback"; navPush(); paintNav(false); });
     const openListening = viewEl.querySelector("#openListening");
     if (openListening) openListening.addEventListener("click", () => { rememberScroll(); state.settingsPage = "listening"; navPush(); paintNav(false); });
-
-    // ── Equalizer & Dolby Atmos Events ───────────────────────────
-    const eqMasterToggle = viewEl.querySelector("#eqMasterToggle");
-    if (eqMasterToggle) {
-      eqMasterToggle.addEventListener("click", () => {
-        state.prefs.eqEnabled = state.prefs.eqEnabled === false ? true : false;
-        savePrefs();
-        hookSound();
-        render();
-        toast(state.prefs.eqEnabled ? "Equalizer active" : "Equalizer bypassed");
-      });
-    }
-
-    const dolbyAtmosToggle = viewEl.querySelector("#dolbyAtmosToggle");
-    if (dolbyAtmosToggle) {
-      dolbyAtmosToggle.addEventListener("click", () => {
-        state.prefs.dolbyAtmos = !state.prefs.dolbyAtmos;
-        savePrefs();
-        hookSound();
-        render();
-        toast(state.prefs.dolbyAtmos ? "Dolby Atmos 3D Audio Active ✨" : "Dolby Atmos Disabled");
-      });
-    }
-
-    const atmosDialogueToggle = viewEl.querySelector("#atmosDialogueToggle");
-    if (atmosDialogueToggle) {
-      atmosDialogueToggle.addEventListener("click", () => {
-        state.prefs.atmosDialogue = !state.prefs.atmosDialogue;
-        savePrefs();
-        hookSound();
-        render();
-      });
-    }
-
-    const atmosSurround = viewEl.querySelector("#atmosSurround");
-    if (atmosSurround) {
-      atmosSurround.addEventListener("input", () => {
-        state.prefs.atmosSurround = Number(atmosSurround.value) || 80;
-        const valEl = viewEl.querySelector("#atmosSurroundVal");
-        if (valEl) valEl.textContent = `${state.prefs.atmosSurround}%`;
-        hookSound();
-      });
-      atmosSurround.addEventListener("change", () => savePrefs());
-    }
-
-    const atmosHeight = viewEl.querySelector("#atmosHeight");
-    if (atmosHeight) {
-      atmosHeight.addEventListener("change", () => {
-        state.prefs.atmosHeight = atmosHeight.value;
-        savePrefs();
-        hookSound();
-      });
-    }
-
-    viewEl.querySelectorAll("[data-eq-preset]").forEach((el) => {
-      el.addEventListener("click", () => {
-        const presetKey = el.dataset.eqPreset;
-        applyEqPreset(presetKey);
-        viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => {
-          b.classList.toggle("active", b.dataset.eqPreset === presetKey);
-        });
-        const bands = state.prefs.eqBands || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        EQ_FREQS.forEach((_, idx) => {
-          const val = Number(bands[idx]) || 0;
-          updateEqFaderVisual(idx, val, "eq", viewEl);
-        });
-      });
-    });
-
-    viewEl.querySelectorAll(".eq-fader-channel").forEach((channel) => {
-      const idx = Number(channel.dataset.faderIdx);
-      attachEqFaderInteraction(
-        channel,
-        "eq",
-        (val) => {
-          updateEqBand(idx, val, true);
-          viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => b.classList.remove("active"));
-        },
-        () => {
-          savePrefs();
-        }
-      );
-    });
-
-    const resetEqBtn = viewEl.querySelector("#resetEqBtn");
-    if (resetEqBtn) {
-      resetEqBtn.addEventListener("click", () => {
-        applyEqPreset("flat");
-        viewEl.querySelectorAll("[data-eq-preset]").forEach((b) => {
-          b.classList.toggle("active", b.dataset.eqPreset === "flat");
-        });
-        EQ_FREQS.forEach((_, idx) => {
-          updateEqFaderVisual(idx, 0, "eq", viewEl);
-        });
-        toast("Equalizer reset to Flat");
-      });
-    }
 
     const toggleOfflineMode = viewEl.querySelector("#toggleOfflineMode");
     if (toggleOfflineMode) {
@@ -8866,6 +8672,170 @@
     }
   }
 
+  let providerFetchInFlight = false;
+  async function ensureProviderResults(filter) {
+    if (!state.query || !state.search || providerFetchInFlight) return;
+    const q = (state.query || "").trim();
+    if (!q) return;
+    const srcMap = {
+      itunes: "apple",
+      apple: "apple",
+      deezer: "deezer",
+      youtube: "youtube",
+      audius: "audius",
+      radio: "radio",
+    };
+    const src = srcMap[filter];
+    if (!src) return;
+    const targetKey = src === "apple" ? "apple" : src;
+    if (filter === "itunes" && ((Array.isArray(state.search.itunes) && state.search.itunes.length > 0) || (Array.isArray(state.search.apple) && state.search.apple.length > 0))) {
+      return;
+    }
+    if (filter === "deezer" && Array.isArray(state.search.deezer) && state.search.deezer.length > 0) {
+      return;
+    }
+    if (src !== "apple" && src !== "deezer" && Array.isArray(state.search[targetKey]) && state.search[targetKey].length > 0) {
+      return;
+    }
+    providerFetchInFlight = true;
+    render();
+    const itCountry = String((state.prefs && state.prefs.country) || "US");
+    try {
+      // 1. Primary targeted backend search (with refresh=1 to bypass stale empty responses)
+      try {
+        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=${src}&country=${encodeURIComponent(itCountry)}&refresh=1&${glq()}`, 10000);
+        if (data && ((Array.isArray(data[targetKey]) && data[targetKey].length > 0) || (src === "apple" && Array.isArray(data.itunes) && data.itunes.length > 0))) {
+          const songs = (data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || [])).filter(looksLikeSong);
+          if (songs.length) {
+            state.search[targetKey] = songs;
+            if (src === "apple") state.search.itunes = songs;
+            if (Array.isArray(data.artists) && data.artists.length) {
+              const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
+              for (const a of data.artists) {
+                if (a && a.name && !seen.has(a.name.toLowerCase())) {
+                  seen.add(a.name.toLowerCase());
+                  state.search.artists.push(a);
+                }
+              }
+            }
+            if (Array.isArray(data.playlists) && data.playlists.length) {
+              const seenP = new Set((state.search.playlists || []).map((p) => String(p.id || p.title)));
+              for (const p of data.playlists) {
+                if (p && !seenP.has(String(p.id || p.title))) {
+                  seenP.add(String(p.id || p.title));
+                  state.search.playlists.push(p);
+                }
+              }
+            }
+            render();
+          }
+        }
+      } catch (primaryErr) {
+        console.warn("Primary provider search failed, falling through to direct channels:", src, primaryErr);
+      }
+
+      // 2. iTunes / Apple direct channel fallback
+      if ((src === "apple" || src === "itunes") && (!state.search.itunes || !state.search.itunes.length || !state.search.apple || !state.search.apple.length)) {
+        try {
+          const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
+          const rows = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
+          if (rows.length) {
+            state.search.apple = rows.map((t) => {
+              const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
+              const title = t.trackName || t.title || "Song";
+              const artist = t.artistName || t.artist || "Artist";
+              const album = t.collectionName || t.album || "";
+              const duration = Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
+              const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+              return {
+                id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "apple",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
+            state.search.itunes = state.search.apple;
+            render();
+          }
+        } catch (itErr) {
+          console.warn("iTunes fallback in ensureProviderResults failed:", itErr);
+        }
+      }
+
+      // 3. Deezer direct channel fallback
+      if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length)) {
+        try {
+          const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
+          const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
+          if (rows.length) {
+            state.search.deezer = rows.map((t) => {
+              const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
+              const title = t.title || t.trackName || "Song";
+              const artist = (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist";
+              const album = (t.album && (t.album.title || t.album)) || t.collectionName || "";
+              const duration = Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0;
+              const artwork = (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg";
+              return {
+                id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "deezer",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.preview || t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
+            render();
+          }
+        } catch (dzErr) {
+          console.warn("Deezer fallback in ensureProviderResults failed:", dzErr);
+        }
+      }
+      if (src === "youtube" && (!state.search.youtube || !state.search.youtube.length)) {
+        try {
+          const ytRaw = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`);
+          if (ytRaw && Array.isArray(ytRaw.tracks) && ytRaw.tracks.length) {
+            state.search.youtube = ytRaw.tracks.filter(looksLikeSong);
+            render();
+          }
+        } catch {}
+      }
+      if (src === "audius" && (!state.search.audius || !state.search.audius.length)) {
+        try {
+          const r = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=muchi`, { mode: "cors" });
+          if (r.ok) {
+            const j = await r.json();
+            if (j && Array.isArray(j.data) && j.data.length) {
+              state.search.audius = j.data.map((t) => ({
+                id: `audius:${t.id}`,
+                trackId: String(t.id),
+                source: "audius",
+                title: t.title || "Track",
+                artist: (t.user && (t.user.name || t.user.handle)) || "Artist",
+                duration: t.duration || 0,
+                artwork: (t.artwork && (t.artwork["480x480"] || t.artwork["150x150"])) || "/cover-default.jpg",
+                streamUrl: `${API_BASE}/api/audius/file/${encodeURIComponent(t.id)}`,
+              })).filter(looksLikeSong);
+              render();
+            }
+          }
+        } catch {}
+      }
+    } catch (err) {
+      console.warn("ensureProviderResults error:", src, err);
+    } finally {
+      providerFetchInFlight = false;
+      render();
+    }
+  }
+
   async function runSearch(q) {
     state.query = q;
     state.view = "search";
@@ -8899,19 +8869,45 @@
       state.search = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`);
       if (!state.search.apple || !state.search.apple.length) {
         try {
-          const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50`);
-          if (itRes && Array.isArray(itRes.results) && itRes.results.length) {
-            state.search.apple = itRes.results.map((t) => ({
-              id: `apple:${t.trackId}`,
-              source: "apple",
-              title: t.trackName || "Song",
-              artist: t.artistName || "Artist",
-              album: t.collectionName || "",
-              duration: Math.round((t.trackTimeMillis || 0) / 1000),
-              artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-              previewUrl: t.previewUrl || "",
-              playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
-            })).filter(looksLikeSong);
+          const itData = await api(`/api/search?q=${encodeURIComponent(q)}&source=apple&refresh=1&${glq()}`);
+          if (itData && Array.isArray(itData.apple) && itData.apple.length) {
+            state.search.apple = itData.apple;
+            state.search.itunes = state.search.apple;
+            if (Array.isArray(itData.artists) && itData.artists.length) {
+              state.search.artists = (state.search.artists || []).concat(itData.artists);
+            }
+            if (Array.isArray(itData.playlists) && itData.playlists.length) {
+              state.search.playlists = (state.search.playlists || []).concat(itData.playlists);
+            }
+          }
+        } catch {}
+      }
+      if (!state.search.apple || !state.search.apple.length) {
+        try {
+          const itCountry = String((state.prefs && state.prefs.country) || "US");
+          const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
+          const rows = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
+          if (rows.length) {
+            state.search.apple = rows.map((t) => {
+              const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
+              const title = t.trackName || t.title || "Song";
+              const artist = t.artistName || t.artist || "Artist";
+              const album = t.collectionName || t.album || "";
+              const duration = Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
+              const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+              return {
+                id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "apple",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
+            state.search.itunes = state.search.apple;
           }
         } catch (itErr) {
           console.warn("itunes direct search fallback", itErr);
@@ -8919,29 +8915,99 @@
       }
       if (!state.search.deezer || !state.search.deezer.length) {
         try {
+          const dzData = await api(`/api/search?q=${encodeURIComponent(q)}&source=deezer&refresh=1&${glq()}`);
+          if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length) {
+            state.search.deezer = dzData.deezer;
+            if (Array.isArray(dzData.artists) && dzData.artists.length) {
+              state.search.artists = (state.search.artists || []).concat(dzData.artists);
+            }
+            if (Array.isArray(dzData.playlists) && dzData.playlists.length) {
+              state.search.playlists = (state.search.playlists || []).concat(dzData.playlists);
+            }
+          }
+        } catch {}
+      }
+      if (!state.search.deezer || !state.search.deezer.length) {
+        try {
           const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
-          if (dzRes && Array.isArray(dzRes.data) && dzRes.data.length) {
-            state.search.deezer = dzRes.data.map((t) => ({
-              id: `deezer:${t.id}`,
-              source: "deezer",
-              title: t.title || "Song",
-              artist: (t.artist && t.artist.name) || "Artist",
-              album: (t.album && t.album.title) || "",
-              duration: Number(t.duration || 0),
-              artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || "/cover-default.jpg",
-              previewUrl: t.preview || "",
-              playQuery: `${t.title || ""} ${(t.artist && t.artist.name) || ""} official audio`.trim(),
-            })).filter(looksLikeSong);
+          const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
+          if (rows.length) {
+            state.search.deezer = rows.map((t) => {
+              const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
+              const title = t.title || t.trackName || "Song";
+              const artist = (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist";
+              const album = (t.album && (t.album.title || t.album)) || t.collectionName || "";
+              const duration = Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0;
+              const artwork = (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg";
+              return {
+                id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                source: "deezer",
+                title,
+                artist,
+                album,
+                duration,
+                artwork,
+                previewUrl: t.preview || t.previewUrl || "",
+                playQuery: `${title} ${artist} official audio`.trim(),
+              };
+            }).filter(looksLikeSong);
           }
         } catch (dzErr) {
           console.warn("deezer direct search fallback", dzErr);
         }
+      }
+      if (!state.search.youtube || !state.search.youtube.length) {
+        try {
+          const ytData = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`);
+          if (ytData && Array.isArray(ytData.youtube) && ytData.youtube.length) {
+            state.search.youtube = ytData.youtube;
+          }
+        } catch {}
+      }
+      if (!state.search.youtube || !state.search.youtube.length || !state.search.youtube.some((t) => t && t.videoId)) {
+        try {
+          const ytRaw = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`);
+          if (ytRaw && Array.isArray(ytRaw.tracks) && ytRaw.tracks.length) {
+            state.search.youtube = ytRaw.tracks.filter((t) => t && t.videoId);
+          }
+        } catch {}
+      }
+      state.search.itunes = (state.search.itunes && state.search.itunes.length) ? state.search.itunes : (state.search.apple || []);
+      state.search.apple = (state.search.apple && state.search.apple.length) ? state.search.apple : (state.search.itunes || []);
+      if (!state.search.audius || !state.search.audius.length) {
+        try {
+          const adData = await api(`/api/search?q=${encodeURIComponent(q)}&source=audius&${glq()}`);
+          if (adData && Array.isArray(adData.audius) && adData.audius.length) {
+            state.search.audius = adData.audius;
+          }
+        } catch {}
+      }
+      if (!state.search.audius || !state.search.audius.length) {
+        try {
+          const r = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=muchi`, { mode: "cors" });
+          if (r.ok) {
+            const j = await r.json();
+            if (j && Array.isArray(j.data) && j.data.length) {
+              state.search.audius = j.data.map((t) => ({
+                id: `audius:${t.id}`,
+                trackId: String(t.id),
+                source: "audius",
+                title: t.title || "Track",
+                artist: (t.user && (t.user.name || t.user.handle)) || "Artist",
+                duration: t.duration || 0,
+                artwork: (t.artwork && (t.artwork["480x480"] || t.artwork["150x150"])) || "/cover-default.jpg",
+                streamUrl: `${API_BASE}/api/audius/file/${encodeURIComponent(t.id)}`,
+              })).filter(looksLikeSong);
+            }
+          }
+        } catch {}
       }
       if (state.search && Array.isArray(state.search.youtube)) {
         state.search.youtube = state.search.youtube.filter(looksLikeSong);
       }
       if (state.search && Array.isArray(state.search.apple)) {
         state.search.apple = state.search.apple.filter(looksLikeSong);
+        state.search.itunes = state.search.apple;
       }
       if (state.search && Array.isArray(state.search.deezer)) {
         state.search.deezer = state.search.deezer.filter(looksLikeSong);
@@ -8956,7 +9022,7 @@
         const text = `${t && t.title || ""} ${t && t.artist || ""}`.toLowerCase();
         return text.includes(qLower);
       });
-      state.search = { youtube: [], audius: [], radio: [], apple: [], deezer: [], artists: [], playlists: [], offline: matchedDls };
+      state.search = { youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [], offline: matchedDls };
     }
     render();
   }
@@ -9278,10 +9344,30 @@
     };
   }
 
+  function persistHomeCache() {
+    try {
+      if (state.home && Array.isArray(state.home.shelves) && state.home.shelves.some((s) => s.tracks && s.tracks.length)) {
+        localStorage.setItem("aura.home_cache", JSON.stringify(state.home));
+      }
+    } catch {}
+  }
+
   async function loadHome(force) {
     if (!force && state.home && Date.now() - homeFetchedAt < 86400000 && state.home.day === utcDayClient()) {
       if (state.view === "home") render();
       return;
+    }
+    if (!state.home) {
+      try {
+        const cached = localStorage.getItem("aura.home_cache");
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
+            state.home = parsed;
+            if (state.view === "home") render();
+          }
+        }
+      } catch {}
     }
     if (API_BASE) {
       // Remote API mode (live preview): show connection state so it's obvious
@@ -9327,6 +9413,7 @@
         state.home.youtubeLocal = keepBestTracks(state.home.youtubeLocal);
         state.home.youtubeIndia = keepBestTracks(state.home.youtubeIndia);
         state.home.youtubeCharts = keepBestTracks(state.home.youtubeCharts);
+        persistHomeCache();
       }
       homeRetries = 0;
       clearTimeout(homeRetryT);
@@ -9347,6 +9434,7 @@
       state.home.shelves = FALLBACK_SHELVES.map((s) => ({ ...s, tracks: [] }));
     }
     homeFetchedAt = Date.now();
+    persistHomeCache();
     loadForYou();
     checkFollowReleases();
     if (state.view === "home") render();
@@ -9362,6 +9450,7 @@
     clearTimeout(homePaintT);
     homePaintT = setTimeout(() => {
       if (state.view === "home") render();
+      persistHomeCache();
     }, 160);
   }
 
@@ -9941,6 +10030,7 @@
       if (!b) return;
       closeOverlays();
       if (b.hasAttribute("data-open-liked")) { state.view = "library"; state.activePlaylist = "liked"; render(); }
+      if (b.hasAttribute("data-open-downloads")) { state.view = "library"; state.activePlaylist = "downloads"; render(); }
       if (b.dataset.pl) { state.view = "library"; state.activePlaylist = Number(b.dataset.pl); render(); }
     });
     $("queueList").addEventListener("click", (e) => {
@@ -9948,6 +10038,39 @@
       if (del) {
         e.stopPropagation();
         removeQueued(Number(del.dataset.qDel));
+        return;
+      }
+      const ref = e.target.closest("#refreshQueueRecs") || e.target.closest("#refreshQueueRecsEmpty");
+      if (ref) {
+        e.stopPropagation();
+        const icon = ref.querySelector(".material-symbols-outlined") || ref;
+        icon.classList.add("rotating");
+        loadQueueRecs(true);
+        return;
+      }
+      const addRec = e.target.closest("[data-rec-add]");
+      if (addRec) {
+        e.stopPropagation();
+        const idx = Number(addRec.dataset.recAdd);
+        const rec = state.queueRecs && state.queueRecs[idx];
+        if (rec) {
+          addToQueue(rec);
+          state.queueRecs.splice(idx, 1);
+          renderQueue();
+          toast(`Added "${rec.title}" to queue`);
+        }
+        return;
+      }
+      const playRec = e.target.closest("[data-rec-play]");
+      if (playRec) {
+        e.stopPropagation();
+        const idx = Number(playRec.dataset.recPlay);
+        const rec = state.queueRecs && state.queueRecs[idx];
+        if (rec) {
+          state.queueRecs.splice(idx, 1);
+          playNext(rec);
+          next(true);
+        }
         return;
       }
       const b = e.target.closest("[data-play]");

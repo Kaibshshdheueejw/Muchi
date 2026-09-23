@@ -6,7 +6,15 @@
 // tokens issued by the Render backend remain valid on the Worker and vice
 // versa — useful during the migration window and for rollback.
 
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export function safeCompare(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
 
 export function hmac(data, secret) {
   return createHmac("sha256", secret).update(data).digest("base64url");
@@ -19,9 +27,7 @@ export function sessionToken(sid, secret) {
 
 /**
  * Validates a token and returns the sid, or null.
- * Mirrors server.js sessionFromToken() — NOTE: the server.js version also
- * checks the in-memory Map + TTL; on the Worker the D1 lookup (db.js) does
- * the TTL check, so this returns the sid only.
+ * Uses timingSafeEqual to prevent side-channel timing attacks.
  */
 export function sidFromToken(token, secret) {
   if (!token || !secret) return null;
@@ -29,6 +35,7 @@ export function sidFromToken(token, secret) {
   if (dot <= 0) return null;
   const sid = token.slice(0, dot);
   const sig = token.slice(dot + 1);
-  if (hmac(sid, secret) !== sig) return null;
+  const expectedSig = hmac(sid, secret);
+  if (!safeCompare(sig, expectedSig)) return null;
   return sid;
 }

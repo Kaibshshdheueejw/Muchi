@@ -121,12 +121,27 @@ const env = {
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || "",
   GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI || "",
   MUCHI_SESSION_SECRET: process.env.MUCHI_SESSION_SECRET || "muchi-preview-session-secret-key-32chars!",
+  MUCHI_ADMIN_KEY: process.env.MUCHI_ADMIN_KEY || process.env.ADMIN_KEY || "",
+  ADMIN_EMAILS: process.env.ADMIN_EMAILS || "twiarimascord@gmail.com",
+  WEBHOOK_SECRET: process.env.WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET || "",
   MUCHI_GITHUB: process.env.MUCHI_GITHUB || "",
   MUCHI_GITHUB_REPO: process.env.MUCHI_GITHUB_REPO || "Kaibshshdheueejw/Muchi",
   MUCHI_PREVIEW_SEED: process.env.MUCHI_PREVIEW_SEED || "",
+  NODE_ENV: process.env.NODE_ENV || "production",
 };
 
 const app = express();
+app.disable("x-powered-by");
+
+// Global HTTP Security Headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  next();
+});
 
 // Serve static assets from public/ directory
 const publicDir = path.join(__dirname, "public");
@@ -189,7 +204,8 @@ app.use("/api", async (req, res) => {
   } catch (err) {
     console.error("API handler error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ error: String((err && err.message) || err || "Internal error") });
+      const isDev = process.env.NODE_ENV === "development";
+      res.status(500).json({ error: isDev ? String((err && err.message) || err) : "Internal server error" });
     }
   }
 });

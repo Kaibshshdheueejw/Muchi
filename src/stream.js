@@ -448,17 +448,23 @@ export async function handleImg(url) {
       buf.set(c, off);
       off += c.length;
     }
-    const ct = r.headers.get("content-type") || "image/jpeg";
+    // Block XSS / Content Sniffing: strictly restrict allowed content-types to safe raster images
+    const rawCt = (r.headers.get("content-type") || "image/jpeg").toLowerCase().split(";")[0].trim();
+    const safeImageTypes = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif", "image/x-icon"];
+    const ct = safeImageTypes.includes(rawCt) ? rawCt : "image/jpeg";
+
     return new Response(buf, {
       status: 200,
       headers: {
-        "Content-Type": ct.split(";")[0],
+        "Content-Type": ct,
         "Cache-Control": "public, max-age=86400",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
         ...corsHeaders(),
       },
     });
   } catch (e) {
-    return json(502, { error: e.message || "image error" });
+    return json(502, { error: "image fetch failed" });
   } finally {
     clearTimeout(timer);
   }

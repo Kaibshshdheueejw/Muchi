@@ -30,6 +30,8 @@ import {
 } from "./aggregate.js";
 import { handleStream, handleImg, handleAudiusStream, handleAudiusFile, handleDownload } from "./stream.js";
 import { maybeSweep } from "./db.js";
+import { handleAdmin } from "./admin.js";
+import { handleWebhook } from "./webhook.js";
 // PREVIEW-ONLY seed: active solely when env.MUCHI_PREVIEW_SEED is set (only
 // in the locally git-ignored .dev.vars). In production that env var is never
 // present, so this file and these handlers are inert.
@@ -62,14 +64,16 @@ export default {
         // sends only /api/* here; this fallback covers manual routing).
         response = await env.ASSETS.fetch(request);
       }
-      if (url.searchParams.get("debug") === "1" && response) {
+      const isDev = (env && env.NODE_ENV === "development") || (typeof process !== "undefined" && process.env.NODE_ENV === "development");
+      if (isDev && url.searchParams.get("debug") === "1" && response) {
         response = new Response(response.body, response);
         response.headers.set("x-muchi-ms", (performance.now() - t0).toFixed(1));
       }
       return response;
     } catch (err) {
-      console.error(err);
-      return json(500, { error: String((err && err.message) || err || "Server error") });
+      console.error("Worker internal error:", err);
+      const isDev = (env && env.NODE_ENV === "development") || (typeof process !== "undefined" && process.env.NODE_ENV === "development");
+      return json(500, { error: isDev ? String((err && err.message) || err) : "Internal server error" }, request);
     }
   },
 };
@@ -127,6 +131,8 @@ async function handleApi(request, env, url) {
   }
 
   if (p === "/api/health" || p === "/api/version") return await handleHealth(env);
+  if (p.startsWith("/api/admin")) return handleAdmin(request, env, url);
+  if (p === "/api/webhook" || p.startsWith("/api/webhooks")) return handleWebhook(request, env, url);
   if (p === "/api/auth/status") return handleAuthStatus(request, env);
   if (p === "/api/auth/google/url" || p === "/api/auth/youtube/url") return handleAuthUrl(request, env, url, p);
   if (p === "/api/auth/google/callback") return handleGoogleCallback(request, env, url);
@@ -144,6 +150,17 @@ async function handleApi(request, env, url) {
   if (p === "/api/search") return handleSearch(env, url);
   if (p === "/api/itunes/search" || p === "/api/apple/search" || p === "/api/itunes/proxy" || p === "/api/itunes") return handleItunesSearch(url);
   if (p === "/api/deezer/search" || p === "/api/deezer/proxy" || p === "/api/deezer") return handleDeezerProxy(url);
+  if (p === "/api/catalog/search" || p === "/api/catalog/proxy" || p === "/api/catalog") {
+    const prov = String(url.searchParams.get("provider") || url.searchParams.get("source") || "").toLowerCase();
+    const rawPath = String(url.searchParams.get("path") || "").toLowerCase();
+    if (prov === "deezer" || rawPath.includes("deezer") || rawPath.startsWith("/search") || rawPath.startsWith("/artist") || rawPath.startsWith("/album") || rawPath.startsWith("/track")) {
+      if (prov === "apple" || prov === "itunes" || rawPath.includes("itunes") || rawPath.includes("entity=")) {
+        return handleItunesSearch(url);
+      }
+      return handleDeezerProxy(url);
+    }
+    return handleItunesSearch(url);
+  }
   if (p === "/api/youtube/search") return handleYoutubeSearch(url);
   if (p === "/api/yt/playlist") return handleYtPlaylist(url);
   if (p === "/api/yt/stream") return handleYtStream(url);

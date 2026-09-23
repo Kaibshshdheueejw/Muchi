@@ -126,7 +126,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.1";
+  const APP_VERSION = "1.6.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -699,7 +699,8 @@
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const headers = Object.assign({}, (opts && opts.headers) || {}, authHeaders());
-      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal, credentials: "include" }, opts || {}, { headers }));
+      const creds = (API_BASE && IS_NATIVE) ? "omit" : "include";
+      const res = await fetch(API_BASE + path, Object.assign({ signal: ctrl.signal, credentials: creds }, opts || {}, { headers }));
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       if (cacheable && apiCacheIsUsable(data)) await apiCachePut(cacheKey, data).catch(() => {});
@@ -1160,7 +1161,9 @@
     if (Array.isArray(data.youtube) && data.youtube.length === 0) return false;
     if (Array.isArray(data.countryPlaylists) && data.countryPlaylists.length < 6) return false;
     if (Array.isArray(data.youtubeLocal) && data.youtubeLocal.length < 5) return false;
-    if (Array.isArray(data.apple) && data.apple.length === 0 && Array.isArray(data.deezer) && data.deezer.length === 0) return false;
+    if (Array.isArray(data.apple) && data.apple.length === 0) return false;
+    if (Array.isArray(data.deezer) && data.deezer.length === 0) return false;
+    if (Array.isArray(data.itunes) && data.itunes.length === 0) return false;
     if (Array.isArray(data.shelves)) {
       if (data.shelves.length === 0) return false;
       // A home payload whose every shelf is empty adds nothing.
@@ -1392,8 +1395,8 @@
       }
       return out;
     }
-    // Apple / iTunes: resolve via YouTube search or fallback to previewUrl
-    if ((out.source === "apple" || out.source === "itunes") && !out.videoId) {
+    // Apple / iTunes / Deezer: resolve via YouTube search or fallback to previewUrl
+    if ((out.source === "apple" || out.source === "itunes" || out.source === "deezer") && !out.videoId) {
       try {
         await resolveYouTubePlay(out);
       } catch {}
@@ -1819,7 +1822,7 @@
             <div class="dl-progress"><div class="dl-progress-bar" id="dlBar-${job.id}" style="width:${pct}%"></div></div>
             <div class="dl-stat" id="dlStat-${job.id}">${label}${job.total ? " · " + escapeHTML(fmtBytes(job.bytes)) + " / " + escapeHTML(fmtBytes(job.total)) : ""}</div>
           </div>
-          ${job.status === "downloading" || job.status === "saving" ? `<button class="icon-btn dl-cancel-btn" data-cancel-dl="${job.id}" title="Cancel"><span class="material-symbols-outlined">close</span></button>` : ""}
+          ${job.status === "downloading" || job.status === "saving" ? `<button class="icon-btn dl-cancel-btn" data-cancel-dl="${escapeAttr(job.id)}" title="Cancel"><span class="material-symbols-outlined">close</span></button>` : ""}
         </div>`;
     }).join("");
     return `<div class="set-card dl-card"><h3>Downloads</h3>${rows}</div>`;
@@ -2470,6 +2473,17 @@
     if (poYtPl) poYtPl.addEventListener("click", () => { hideModal(); ytAddToPlaylist(t); });
   }
 
+  window.handleImgErr = function(img) {
+    if (!img) return;
+    const src = img.getAttribute("src") || "";
+    if (src && !src.startsWith("data:") && !src.includes("/cover-default.jpg") && !src.includes("/api/img?url=")) {
+      img.onerror = function() { this.src = "/cover-default.jpg"; };
+      img.src = `${API_BASE}/api/img?url=${encodeURIComponent(src)}`;
+    } else {
+      img.src = "/cover-default.jpg";
+    }
+  };
+
   function artUrl(t) {
     return t && t.artwork ? t.artwork : "/cover-default.jpg";
   }
@@ -2482,7 +2496,7 @@
       <div class="card">
         <button type="button" class="card-hit" data-open-detail="${escapeAttr(t.id)}" title="Details">
           <div class="art">
-            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
             ${sourceBadge(t.source)}
             ${liked ? `<span class="liked-dot"><span class="material-symbols-outlined filled">favorite</span></span>` : ""}
           </div>
@@ -2493,14 +2507,14 @@
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
-      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
+      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes" || t.source === "deezer") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
       </div>`;
   }
 
   function rowHTML(t, i, extra = "") {
     return `
       <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
           <div class="t-sub">${escapeHTML(t.artist)}${t.source ? ` · ${t.source === "apple" ? "iTunes" : escapeHTML(t.source)}` : ""}</div>
@@ -2514,7 +2528,7 @@
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
         <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
           <div>
             <div class="t-title">${escapeHTML(t.title)}</div>
             <div class="t-sub">${escapeHTML(t.artist)}</div>
@@ -2629,69 +2643,29 @@
   // are read or played. Every track carries a playQuery that resolves
   // through MUCHI's existing playback pipeline for the FULL track.
   const DZ_BASE = "https://api.deezer.com";
-  function dzJsonp(path, params = {}, timeoutMs = 9000) {
-    return new Promise((resolve, reject) => {
-      const cbName = `__dz_cb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let urlStr = path.startsWith("http") ? path : `${DZ_BASE}${path}`;
-      const sep = urlStr.includes("?") ? "&" : "?";
-      const sp = new URLSearchParams(params);
-      sp.set("output", "jsonp");
-      sp.set("callback", cbName);
-      urlStr = `${urlStr}${sep}${sp.toString()}`;
 
-      const script = document.createElement("script");
-      script.src = urlStr;
-      script.async = true;
+  async function dzFetch(path, ms = 12000) {
+    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
+    let q = "";
+    try {
+      const u = new URL(path.startsWith("http") ? path : `https://api.deezer.com${cleanPath}`);
+      q = u.searchParams.get("q") || "";
+    } catch {}
 
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("deezer jsonp timeout"));
-      }, timeoutMs);
-
-      function cleanup() {
-        clearTimeout(timer);
-        try { delete window[cbName]; } catch {}
-        if (script.parentNode) script.parentNode.removeChild(script);
+    // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers & track blockers)
+    try {
+      const catRes = await api(`/api/catalog/proxy?provider=deezer&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      if (catRes && (Array.isArray(catRes.data) || Array.isArray(catRes.results) || Array.isArray(catRes.deezer) || catRes.id)) {
+        if (!catRes.data && (Array.isArray(catRes.results) || Array.isArray(catRes.deezer))) {
+          catRes.data = catRes.results || catRes.deezer;
+        }
+        return catRes;
       }
+    } catch {}
 
-      window[cbName] = (data) => {
-        cleanup();
-        resolve(data);
-      };
-      script.onerror = () => {
-        cleanup();
-        reject(new Error("deezer jsonp error"));
-      };
-      (document.head || document.documentElement).appendChild(script);
-    });
-  }
-
-  async function dzFetch(path, ms = 9000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
-    // 1. Direct fetch (native/CORS-enabled environments)
+    // 2. Secondary channel: First-party Worker proxy (/api/deezer/proxy)
     try {
-      const r = await fetch(DZ_BASE + path, { signal: ctrl.signal, headers: { Accept: "application/json" } });
-      if (r.ok) {
-        const j = await r.json();
-        if (j) return j;
-      }
-    } catch {
-      // Direct fetch failed (e.g. browser CORS)
-    } finally {
-      clearTimeout(t);
-    }
-    // 2. JSONP script tag
-    try {
-      const jRes = await dzJsonp(path, {}, ms);
-      if (jRes) return jRes;
-    } catch {
-      // JSONP failed (e.g. adblocker / restrictive CSP)
-    }
-    // 3. Worker proxy fallback (/api/deezer/proxy)
-    try {
-      const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : path;
-      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, ms);
+      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
       if (proxyRes && (Array.isArray(proxyRes.data) || Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer) || proxyRes.id)) {
         if (!proxyRes.data && (Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer))) {
           proxyRes.data = proxyRes.results || proxyRes.deezer;
@@ -2699,6 +2673,40 @@
         return proxyRes;
       }
     } catch {}
+
+    // 3. Tertiary channel: Neutral catalog query search
+    if (q) {
+      try {
+        const catSr = await api(`/api/catalog/search?provider=deezer&q=${encodeURIComponent(q)}&${glq()}`, Math.min(ms, 10000));
+        const list = (catSr && (catSr.deezer || catSr.data || catSr.results)) || [];
+        if (Array.isArray(list) && list.length) {
+          return { data: list };
+        }
+      } catch {}
+
+      try {
+        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, Math.min(ms, 10000));
+        if (sr && Array.isArray(sr.deezer) && sr.deezer.length) {
+          return { data: sr.deezer };
+        }
+      } catch {}
+    }
+
+    // 4. Direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
+    try {
+      const r = await fetch(DZ_BASE + cleanPath, { signal: ctrl.signal, headers: { Accept: "application/json" } });
+      if (r.ok) {
+        const j = await r.json();
+        if (j) return j;
+      }
+    } catch {
+      // Ignored: adblock or CORS prevented direct third-party fetch
+    } finally {
+      clearTimeout(t);
+    }
+
     throw new Error("deezer search request failed across all channels");
   }
   const dzFold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -2789,130 +2797,122 @@
     return { artist, popular: top, songs: all, albums };
   }
 
-  // ── iTunes Search (worldwide catalogue, CORS-open, no key) ─────────────
+  // ── iTunes Search (worldwide catalogue, first-party proxied, adblock-immune) ────
   const ITUNES_BASE = "https://itunes.apple.com";
-  function itJsonp(path, params = {}, timeoutMs = 9000) {
-    return new Promise((resolve, reject) => {
-      const cbName = `__it_cb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let urlStr = path.startsWith("http") ? path : `${ITUNES_BASE}${path}`;
-      const sep = urlStr.includes("?") ? "&" : "?";
-      const sp = new URLSearchParams(params);
-      sp.set("callback", cbName);
-      urlStr = `${urlStr}${sep}${sp.toString()}`;
 
-      const script = document.createElement("script");
-      script.src = urlStr;
-      script.async = true;
-
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("itunes jsonp timeout"));
-      }, timeoutMs);
-
-      function cleanup() {
-        clearTimeout(timer);
-        try { delete window[cbName]; } catch {}
-        if (script.parentNode) script.parentNode.removeChild(script);
-      }
-
-      window[cbName] = (data) => {
-        cleanup();
-        resolve(data);
-      };
-      script.onerror = () => {
-        cleanup();
-        reject(new Error("itunes jsonp error"));
-      };
-      (document.head || document.documentElement).appendChild(script);
-    });
+  function normalizeItunesItem(item) {
+    if (!item) return null;
+    const cleanId = String(item.trackId || item.id || item.collectionId || "").replace(/^apple:|^itunes:/, "");
+    const title = item.trackName || item.title || "Song";
+    const artist = item.artistName || item.artist || "Artist";
+    const album = item.collectionName || item.album || "";
+    const duration = Math.round((item.trackTimeMillis || 0) / 1000) || Number(item.duration) || 0;
+    const artwork = String(item.artworkUrl100 || item.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+    return {
+      ...item,
+      id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      source: "apple",
+      title,
+      artist,
+      album,
+      duration,
+      artwork,
+      previewUrl: item.previewUrl || "",
+      playQuery: `${title} ${artist} official audio`.trim(),
+      trackId: cleanId || item.trackId,
+      trackName: title,
+      artistName: artist,
+      collectionName: album,
+      trackTimeMillis: duration * 1000,
+      artworkUrl100: artwork,
+    };
   }
 
-  async function itFetch(path, ms = 9000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
-    // 1. Direct fetch without restrictive headers
+  async function itFetch(path, ms = 12000) {
+    const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
+
+    let term = "";
+    let country = (state.prefs && state.prefs.country) || "";
     try {
-      const r = await fetch(ITUNES_BASE + path, { signal: ctrl.signal });
-      if (r.ok) {
-        const j = await r.json();
-        if (j && Array.isArray(j.results)) {
-          j.results = j.results.map((item) => ({
-            ...item,
-            id: item.id || `apple:${item.trackId || item.collectionId || ""}`,
-            title: item.title || item.trackName || "Song",
-            artist: item.artist || item.artistName || "Artist",
-            album: item.album || item.collectionName || "",
-            duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
-            artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-            trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
-            trackName: item.trackName || item.title || "Song",
-            artistName: item.artistName || item.artist || "Artist",
-            collectionName: item.collectionName || item.album || "",
-            trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
-            artworkUrl100: item.artworkUrl100 || item.artwork || "",
-          }));
+      const u = new URL(path.startsWith("http") ? path : `https://itunes.apple.com${cleanPath}`);
+      term = u.searchParams.get("term") || u.searchParams.get("q") || "";
+      country = u.searchParams.get("country") || country;
+    } catch {}
+
+    // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers)
+    try {
+      const catRes = await api(`/api/catalog/proxy?provider=apple&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      const list = (catRes && (Array.isArray(catRes.results) ? catRes.results : (Array.isArray(catRes.apple) ? catRes.apple : catRes.itunes))) || [];
+      if (Array.isArray(list) && list.length) {
+        return {
+          results: list.map(normalizeItunesItem).filter(Boolean),
+        };
+      }
+    } catch {}
+
+    // 2. Secondary channel: Dedicated worker proxy (/api/itunes/proxy)
+    try {
+      const proxyRes = await api(`/api/itunes/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      const list = (proxyRes && (Array.isArray(proxyRes.results) ? proxyRes.results : (Array.isArray(proxyRes.apple) ? proxyRes.apple : proxyRes.itunes))) || [];
+      if (Array.isArray(list) && list.length) {
+        return {
+          results: list.map(normalizeItunesItem).filter(Boolean),
+        };
+      }
+    } catch {}
+
+    // 3. Tertiary channel: First-party search fallback (/api/catalog/search or /api/itunes/search)
+    if (term) {
+      try {
+        const catSr = await api(`/api/catalog/search?provider=apple&term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 10000));
+        const list = (catSr && (catSr.results || catSr.apple || catSr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
         }
-        return j;
-      }
-    } catch {
-      // Direct fetch failed (e.g. mobile WebView or browser CORS)
-    } finally {
-      clearTimeout(t);
-    }
-    // 2. Direct JSONP script tag
-    try {
-      const jRes = await itJsonp(path, {}, ms);
-      if (jRes && Array.isArray(jRes.results)) {
-        jRes.results = jRes.results.map((item) => ({
-          ...item,
-          id: item.id || `apple:${item.trackId || item.collectionId || ""}`,
-          title: item.title || item.trackName || "Song",
-          artist: item.artist || item.artistName || "Artist",
-          album: item.album || item.collectionName || "",
-          duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
-          artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-          trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
-          trackName: item.trackName || item.title || "Song",
-          artistName: item.artistName || item.artist || "Artist",
-          collectionName: item.collectionName || item.album || "",
-          trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
-          artworkUrl100: item.artworkUrl100 || item.artwork || "",
-        }));
-        return jRes;
-      }
-    } catch {
-      // JSONP failed - fall through
-    }
-    // 3. Backend proxy fallback (/api/itunes/search)
-    try {
-      const full = path.startsWith("http") ? path : `${ITUNES_BASE}${path}`;
-      const u = new URL(full);
-      const term = u.searchParams.get("term") || u.searchParams.get("q") || "";
-      const country = u.searchParams.get("country") || (state.prefs && state.prefs.country) || "";
-      if (term) {
-        const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, ms);
+      } catch {}
+
+      try {
+        const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 10000));
         const list = (pr && (pr.results || pr.apple || pr.itunes)) || [];
         if (Array.isArray(list) && list.length) {
           return {
-            results: list.map((item) => ({
-              ...item,
-              id: item.id || `apple:${item.trackId || ""}`,
-              title: item.title || item.trackName || "Song",
-              artist: item.artist || item.artistName || "Artist",
-              album: item.album || item.collectionName || "",
-              duration: Number(item.duration) || Math.round((item.trackTimeMillis || 0) / 1000) || 0,
-              artwork: item.artwork || String(item.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
-              trackId: item.trackId || (typeof item.id === "string" ? item.id.replace(/^apple:|^itunes:/, "") : item.id),
-              trackName: item.trackName || item.title || "Song",
-              artistName: item.artistName || item.artist || "Artist",
-              collectionName: item.collectionName || item.album || "",
-              trackTimeMillis: item.trackTimeMillis || (Number(item.duration || 0) * 1000),
-              artworkUrl100: item.artworkUrl100 || item.artwork || "",
-            })),
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+
+      try {
+        const sr = await api(`/api/search?source=apple&q=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&refresh=1&${glq()}`, Math.min(ms, 10000));
+        const list = (sr && (sr.apple || sr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+    }
+
+    // 4. Quaternary direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
+    try {
+      const r = await fetch(ITUNES_BASE + cleanPath, { signal: ctrl.signal });
+      if (r.ok) {
+        const j = await r.json();
+        if (j && Array.isArray(j.results)) {
+          return {
+            results: j.results.map(normalizeItunesItem).filter(Boolean),
           };
         }
       }
-    } catch {}
+    } catch {
+      // Ignored: adblock or CORS prevented direct third-party fetch
+    } finally {
+      clearTimeout(t);
+    }
+
     throw new Error("itunes search request failed across all channels");
   }
   async function itunesBrowserCatalog(name) {
@@ -3033,19 +3033,19 @@
       return dur <= 3600;
     }
     if (t.source === "audius" || t.source === "radio") return true;
-    if (dur > 1080) return false;
-    if (dur > 0 && dur < 25) return false;
-    const artist = String(t.artist || "").toLowerCase();
-    const title = String(t.title || "").toLowerCase();
+    if (dur > 1200) return false;
+    if (dur > 0 && dur < 20) return false;
+    if (t.artist && typeof t.artist === "string" && /\s*-\s*topic$/i.test(t.artist)) {
+      t.artist = t.artist.replace(/\s*-\s*topic$/i, "").trim();
+    }
+    const artist = String(t.artist || "").toLowerCase().trim();
+    const title = String(t.title || "").toLowerCase().trim();
     const text = `${title} ${artist}`;
-    if (/\b(gameplay|walkthrough|playthrough|let'?s play|gaming|fortnite|minecraft|roblox|gta|valorant|call of duty|apex legends|genshin|game review|movie review|film review|movie recap|trailer|teaser|official trailer|full movie|episode|season \d+|vlog|reaction|reacting to|unboxing|tech review|speedrun|stream highlight|news|breaking news|imran khan|nato|modi|biden|trump|putin|ukraine|parliament|election|documentary|tutorial|how to|webinar|ted talk|interview|standup|stand-up|comedy skit|#shorts?)\b/i.test(text)) {
+    if (/\b(gameplay|walkthrough|playthrough|let'?s play|gaming|fortnite|minecraft|roblox|gta\s*[5v]?|valorant|call of duty|apex legends|genshin|game review|movie review|film review|movie recap|trailer|teaser|official trailer|full movie|episode|season \d+|vlog|reaction|reacting to|unboxing|tech review|speedrun|stream highlight|news|breaking news|imran khan|nato|modi|biden|trump|putin|ukraine|parliament|election|documentary|tutorial|how to|webinar|ted talk|interview|standup|stand-up|comedy skit|#shorts?)\b/i.test(text)) {
       return false;
     }
-    if (/^(episode|podcast|clip|news|trailer|gaming|movie|various artists|various)$/i.test(artist.trim())) return false;
-    if (/\btopic\b/i.test(artist)) return false;
-    if (/\b(non[- ]?stop|full album|album mix|megamix|compilation|collection|dj set|live set|greatest hits|best of|billboard|top ?(?:10|20|40|50|100) ?(?:pop|english|hit|song|music|playlist)? ?songs?|hits ?(?:19\d\d|20\d\d|vol\.?\s*\d)|1 ?hour|one hour|hour mix|karaoke|instrumental|sped ?up|slowed|reverb|mashup|medley|mixtape|mix tape|playlist)\b/i.test(text)) return false;
-    if (/\b(?:mix|remix)\b\s*$/i.test(title)) return false;
-    if (/\b(?:mix|remix|hits|top)\b/i.test(artist)) return false;
+    if (/^(episode|podcast|clip|news|trailer|gaming|movie)$/i.test(artist)) return false;
+    if (/\b(non[- ]?stop|full album|album mix|megamix|compilation|dj set|live set|billboard|1 ?hour|one hour|hour mix|karaoke)\b/i.test(text)) return false;
     return true;
   }
 
@@ -3063,7 +3063,7 @@
 
   let isQueueRecsLoading = false;
   async function loadQueueRecs(force = false) {
-    const cur = current() || (state.recent && state.recent[0]);
+    const cur = current() || (state.recent && state.recent[0]) || (state.queue && state.queue[0]) || (state.liked && state.liked[0]);
     if (!cur || cur.source === "radio") {
       if (!cur) {
         state.queueRecs = [];
@@ -3079,6 +3079,7 @@
     isQueueRecsLoading = true;
     const refBtn = $("refreshQueueRecs");
     if (refBtn) refBtn.classList.add("rotating");
+    renderQueue();
     try {
       const skipSet = new Set();
       (state.queue || []).forEach((t) => {
@@ -3092,26 +3093,100 @@
         if (t.videoId) skipSet.add(t.videoId);
       });
       const extraSkip = Array.from(skipSet).slice(0, 25).join(",");
-      const tracks = await fetchRelated(cur, extraSkip);
+      let tracks = await fetchRelated(cur, extraSkip).catch(() => []);
       const filtered = [];
       const seenIds = new Set(skipSet);
-      for (const t of tracks || []) {
-        if (!t || !looksLikeSong(t)) continue;
+
+      const addTrack = (t) => {
+        if (!t || !looksLikeSong(t)) return false;
         const k = t.id || t.videoId;
-        if (!k || seenIds.has(k)) continue;
+        if (!k || seenIds.has(k)) return false;
+        // Skip identical title matching seed song
+        const cleanT = String(t.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+        const cleanCur = String(cur.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+        if (cleanT && cleanCur && cleanT === cleanCur) return false;
         seenIds.add(k);
         filtered.push(t);
+        return true;
+      };
+
+      for (const t of tracks || []) {
+        addTrack(t);
         if (filtered.length >= 15) break;
       }
+
+      // If related returned fewer than 6 songs, fetch artist catalog recommendations
+      if (filtered.length < 6 && cur.artist) {
+        const art = artistName(cur);
+        if (art && !/^(various artists|unknown)$/i.test(art)) {
+          try {
+            const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
+            const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
+            for (const t of artTracks) {
+              addTrack(t);
+              if (filtered.length >= 15) break;
+            }
+          } catch {}
+        }
+      }
+
+      // If still fewer than 6, supplement from iTunes / Apple Music catalog
+      if (filtered.length < 6) {
+        const art = artistName(cur);
+        const searchQ = art || cur.title || "";
+        if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
+          try {
+            const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
+            const itList = (itRes && itRes.results) || [];
+            for (const t of itList) {
+              addTrack(t);
+              if (filtered.length >= 15) break;
+            }
+          } catch {}
+          if (filtered.length < 6) {
+            try {
+              const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
+              const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
+              for (const t of dzList) {
+                const s = {
+                  id: `deezer:${t.id}`,
+                  source: "deezer",
+                  title: t.title || t.trackName || "Song",
+                  artist: (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist",
+                  album: (t.album && (t.album.title || t.album)) || t.collectionName || "",
+                  duration: Number(t.duration || 0),
+                  artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg",
+                  playQuery: `${t.title || ""} ${(t.artist && (t.artist.name || t.artist)) || ""} official audio`.trim(),
+                };
+                addTrack(s);
+                if (filtered.length >= 15) break;
+              }
+            } catch {}
+          }
+        }
+      }
+
+      // If still fewer than 6, pull from discovery / shelf
+      if (filtered.length < 6) {
+        try {
+          const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
+          const discTracks = (disc && disc.tracks) || [];
+          for (const t of discTracks) {
+            addTrack(t);
+            if (filtered.length >= 15) break;
+          }
+        } catch {}
+      }
+
       state.queueRecs = filtered;
       state._queueRecsSeed = seedKey;
-      renderQueue();
     } catch (err) {
       console.warn("loadQueueRecs failed:", err);
     } finally {
       isQueueRecsLoading = false;
       const refBtn = $("refreshQueueRecs");
       if (refBtn) refBtn.classList.remove("rotating");
+      renderQueue();
     }
   }
 
@@ -5143,7 +5218,7 @@
     }
     const dl = $("dlBtn");
     if (dl) {
-      const can = !!(t && (t.trackId || t.videoId));
+      const can = !!(t && (t.trackId || t.videoId || t.source === "apple" || t.source === "itunes" || t.source === "deezer"));
       const saved = !!(t && isSaved(t));
       dl.classList.toggle("on", saved);
       dl.classList.toggle("dim", !can);
@@ -5279,7 +5354,15 @@
                   <span class="material-symbols-outlined">add</span>
                 </button>
               </div>
-            `).join("") : `<p class="q-recs-empty">Tap refresh to get new song recommendations.</p>`)}
+            `).join("") : `
+              <div class="q-recs-empty-wrap">
+                <p class="q-recs-empty">Tap refresh to get new song recommendations.</p>
+                <button type="button" class="btn secondary sm" id="refreshQueueRecsEmpty" style="margin: 8px auto 0 auto; display: flex; align-items: center; gap: 6px;">
+                  <span class="material-symbols-outlined" style="font-size: 18px;">refresh</span>
+                  <span>Load Recommendations</span>
+                </button>
+              </div>
+            `)}
           </div>
         </div>
       `;
@@ -6459,6 +6542,17 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.2",
+      title: "Muchi 1.6.2",
+      notes: [
+        "Full protection of administrative routes with strict server-side RBAC permissions.",
+        "Verified Google Sign-In email authentication (email_verified validation) for security.",
+        "Cryptographic HMAC-SHA256 signature verification for webhooks with anti-replay protection.",
+        "Hardened image proxy against Cross-Site Scripting (XSS) and content type sniffing.",
+        "Isolated sensitive internal debugging output and credentials from production responses.",
+      ],
+    },
     {
       ver: "1.6.1",
       title: "Muchi 1.6.1",
@@ -8604,34 +8698,43 @@
       return;
     }
     providerFetchInFlight = true;
+    render();
     const itCountry = String((state.prefs && state.prefs.country) || "US");
     try {
-      const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=${src}&country=${encodeURIComponent(itCountry)}&${glq()}`);
-      if (data && ((Array.isArray(data[targetKey]) && data[targetKey].length > 0) || (src === "apple" && Array.isArray(data.itunes) && data.itunes.length > 0))) {
-        const songs = (data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || [])).filter(looksLikeSong);
-        state.search[targetKey] = songs;
-        if (src === "apple") state.search.itunes = songs;
-        if (Array.isArray(data.artists) && data.artists.length) {
-          const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
-          for (const a of data.artists) {
-            if (a && a.name && !seen.has(a.name.toLowerCase())) {
-              seen.add(a.name.toLowerCase());
-              state.search.artists.push(a);
+      // 1. Primary targeted backend search (with refresh=1 to bypass stale empty responses)
+      try {
+        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=${src}&country=${encodeURIComponent(itCountry)}&refresh=1&${glq()}`, 10000);
+        if (data && ((Array.isArray(data[targetKey]) && data[targetKey].length > 0) || (src === "apple" && Array.isArray(data.itunes) && data.itunes.length > 0))) {
+          const songs = (data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || [])).filter(looksLikeSong);
+          if (songs.length) {
+            state.search[targetKey] = songs;
+            if (src === "apple") state.search.itunes = songs;
+            if (Array.isArray(data.artists) && data.artists.length) {
+              const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
+              for (const a of data.artists) {
+                if (a && a.name && !seen.has(a.name.toLowerCase())) {
+                  seen.add(a.name.toLowerCase());
+                  state.search.artists.push(a);
+                }
+              }
             }
+            if (Array.isArray(data.playlists) && data.playlists.length) {
+              const seenP = new Set((state.search.playlists || []).map((p) => String(p.id || p.title)));
+              for (const p of data.playlists) {
+                if (p && !seenP.has(String(p.id || p.title))) {
+                  seenP.add(String(p.id || p.title));
+                  state.search.playlists.push(p);
+                }
+              }
+            }
+            render();
           }
         }
-        if (Array.isArray(data.playlists) && data.playlists.length) {
-          const seenP = new Set((state.search.playlists || []).map((p) => String(p.id || p.title)));
-          for (const p of data.playlists) {
-            if (p && !seenP.has(String(p.id || p.title))) {
-              seenP.add(String(p.id || p.title));
-              state.search.playlists.push(p);
-            }
-          }
-        }
-        render();
+      } catch (primaryErr) {
+        console.warn("Primary provider search failed, falling through to direct channels:", src, primaryErr);
       }
 
+      // 2. iTunes / Apple direct channel fallback
       if ((src === "apple" || src === "itunes") && (!state.search.itunes || !state.search.itunes.length || !state.search.apple || !state.search.apple.length)) {
         try {
           const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
@@ -8663,6 +8766,8 @@
           console.warn("iTunes fallback in ensureProviderResults failed:", itErr);
         }
       }
+
+      // 3. Deezer direct channel fallback
       if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length)) {
         try {
           const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
@@ -8689,7 +8794,9 @@
             }).filter(looksLikeSong);
             render();
           }
-        } catch {}
+        } catch (dzErr) {
+          console.warn("Deezer fallback in ensureProviderResults failed:", dzErr);
+        }
       }
       if (src === "youtube" && (!state.search.youtube || !state.search.youtube.length)) {
         try {
@@ -8762,7 +8869,7 @@
       state.search = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`);
       if (!state.search.apple || !state.search.apple.length) {
         try {
-          const itData = await api(`/api/search?q=${encodeURIComponent(q)}&source=apple&${glq()}`);
+          const itData = await api(`/api/search?q=${encodeURIComponent(q)}&source=apple&refresh=1&${glq()}`);
           if (itData && Array.isArray(itData.apple) && itData.apple.length) {
             state.search.apple = itData.apple;
             state.search.itunes = state.search.apple;
@@ -8808,7 +8915,7 @@
       }
       if (!state.search.deezer || !state.search.deezer.length) {
         try {
-          const dzData = await api(`/api/search?q=${encodeURIComponent(q)}&source=deezer&${glq()}`);
+          const dzData = await api(`/api/search?q=${encodeURIComponent(q)}&source=deezer&refresh=1&${glq()}`);
           if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length) {
             state.search.deezer = dzData.deezer;
             if (Array.isArray(dzData.artists) && dzData.artists.length) {
@@ -9933,10 +10040,11 @@
         removeQueued(Number(del.dataset.qDel));
         return;
       }
-      const ref = e.target.closest("#refreshQueueRecs");
+      const ref = e.target.closest("#refreshQueueRecs") || e.target.closest("#refreshQueueRecsEmpty");
       if (ref) {
         e.stopPropagation();
-        ref.classList.add("rotating");
+        const icon = ref.querySelector(".material-symbols-outlined") || ref;
+        icon.classList.add("rotating");
         loadQueueRecs(true);
         return;
       }

@@ -18,6 +18,7 @@ import { json, redirect, corsHeaders } from "./util.js";
 import { decodeIdToken } from "./parse.js";
 import { sidFromToken, sessionToken } from "./auth.js";
 import { getSession, putSession, deleteSession, putOAuthState, takeOAuthState } from "./db.js";
+import { getAdminEmails, isUserAdmin } from "./admin.js";
 
 // ── session lookup: Bearer token or muchi_sid cookie → D1 row ──
 export async function readSession(request, env) {
@@ -203,12 +204,19 @@ export async function handleAuthStatus(request, env) {
   const { on } = authConfig(env);
   const s = await readSession(request, env);
   const ytOn = !!(s && s.yt && s.yt.access);
+  const isAdmin = s ? isUserAdmin(s, env) : false;
   return json(200, {
     configured: on,
     signedIn: !!s,
-    profile: s ? { name: s.name, email: s.email, picture: s.picture } : null,
+    profile: s ? {
+      name: s.name,
+      email: s.email,
+      email_verified: !!s.email_verified,
+      role: isAdmin ? "admin" : (s.role || "user"),
+      picture: s.picture,
+    } : null,
     youtube: ytOn ? { connected: true, connectedAt: s.yt.at } : { connected: false },
-  });
+  }, request);
 }
 
 export async function handleAuthUrl(request, env, url, path) {
@@ -244,9 +252,42 @@ export async function handleGoogleCallback(request, env, url) {
   const errHome = platform === "native" ? "muchi://auth/error" : "/?auth=error";
   if (oauthErr || !st || st.exp < Date.now() || !code) return redirect(errHome);
   const tok = await googleExchange(code, env);
-  if (!tok) return redirect(errHome);
+  if (!tok) return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=exchange_failed");
   const id = decodeIdToken(tok.id_token);
-  if (!id || id.aud !== env.GOOGLE_CLIENT_ID) return redirect(errHome);
+  if (!id) return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=invalid_token");
+
+  // Verify token audience
+  if (env.GOOGLE_CLIENT_ID && id.aud !== env.GOOGLE_CLIENT_ID) {
+    console.error("Google OAuth aud mismatch:", id.aud);
+    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=aud_mismatch");
+  }
+
+  // Verify token issuer
+  const validIssuers = ["https://accounts.google.com", "accounts.google.com"];
+  if (id.iss && !validIssuers.includes(id.iss)) {
+    console.error("Google OAuth invalid issuer:", id.iss);
+    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=invalid_issuer");
+  }
+
+  // Verify expiration
+  if (typeof id.exp === "number" && id.exp * 1000 < Date.now()) {
+    console.error("Google OAuth token expired");
+    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=token_expired");
+  }
+
+  // Mandatory Email Verification: Require verified Google email
+  const email = String(id.email || "").trim().toLowerCase();
+  const isEmailVerified = id.email_verified === true || id.email_verified === "true";
+  if (!email || !isEmailVerified) {
+    console.warn("Google login rejected because email is unverified:", email);
+    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=email_not_verified");
+  }
+
+  // Resolve server-side role
+  const adminEmails = getAdminEmails(env);
+  const isAdmin = adminEmails.includes(email);
+  const role = isAdmin ? "admin" : "user";
+
   // The youtube step lands HERE too: both flows share the single registered
   // redirect URI (GOOGLE_REDIRECT_URI), so a youtube-scope authorization code
   // arrives at this callback. Attach the token to the EXISTING session instead
@@ -261,6 +302,7 @@ export async function handleGoogleCallback(request, env, url) {
       expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),
       at: Date.now(),
     };
+    if (isAdmin) s.role = "admin";
     await putSession(env, s);
     ytCache.delete(s.sid);
     const tokStr = encodeURIComponent(sessionToken(s.sid, env.MUCHI_SESSION_SECRET));
@@ -273,7 +315,9 @@ export async function handleGoogleCallback(request, env, url) {
     sid,
     at: Date.now(),
     name: String(id.name || id.email || "Google user"),
-    email: String(id.email || ""),
+    email,
+    email_verified: true,
+    role,
     picture: String(id.picture || ""),
     yt: tok.access_token ? {
       access: tok.access_token,

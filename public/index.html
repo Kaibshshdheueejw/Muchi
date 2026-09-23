@@ -148,7 +148,7 @@
       <div class="player-wash" id="playerWash"></div>
       <div class="now">
         <button class="cover-btn" id="openNow" title="Now playing">
-          <img id="coverArt" src="/cover-default.jpg" alt="" />
+          <img id="coverArt" src="/cover-default.jpg" alt="" onerror="if(window.handleImgErr)handleImgErr(this);else this.src='/cover-default.jpg'" />
           <span class="eq" id="eqBars" hidden><i></i><i></i><i></i></span>
         </button>
         <div class="meta">

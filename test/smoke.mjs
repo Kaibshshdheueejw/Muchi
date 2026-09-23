@@ -11,8 +11,10 @@
 // deployed Worker shows when providers fail, plus pure parsers against
 // realistic fixtures. Real-internet tests: docs/TESTING.md (PENDING).
 
-import { hmac, sessionToken, sidFromToken } from "../src/auth.js";
+import { hmac, sessionToken, sidFromToken, safeCompare } from "../src/auth.js";
 import { isPrivateIp } from "../src/ssrf.js";
+import { isUserAdmin, getAdminEmails, checkAdminAuth, handleAdmin } from "../src/admin.js";
+import { handleWebhook } from "../src/webhook.js";
 import {
   parseDuration, runsText, extractVideoId, parseMusicItem, parseVideoRenderer,
   isLikelyMusic, lastThumb, parseYtArtist, parseYtPlaylist, ytDurationToSec,
@@ -55,6 +57,79 @@ ok("sidFromToken rejects no secret", sidFromToken(token, "") === null);
 ok("sidFromToken rejects tampered sid", sidFromToken("x" + token.slice(1), SECRET) === null);
 const nodeStyle = nodeHmac("sha256", SECRET).update(sid).digest("base64url");
 ok("hmac matches server.js output", token.split(".")[1] === nodeStyle);
+
+// ── 1.5 Timing safe comparison & Security Hardening ───────────────────────
+ok("safeCompare matches equal", safeCompare("secret123", "secret123"));
+ok("safeCompare rejects unequal length", !safeCompare("secret", "secret123"));
+ok("safeCompare rejects mismatched content", !safeCompare("secret123", "secret999"));
+ok("safeCompare handles non-string safely", !safeCompare(null, "secret") && !safeCompare(undefined, undefined));
+
+// ── 1.6 Admin verification & RBAC permissions ──────────────────────────────
+const defaultAdmins = getAdminEmails({});
+ok("default admin email present", defaultAdmins.includes("twiarimascord@gmail.com"));
+const customAdmins = getAdminEmails({ ADMIN_EMAILS: "admin@example.com, user@test.com" });
+ok("custom admin emails parsed", customAdmins.includes("admin@example.com") && customAdmins.includes("twiarimascord@gmail.com"));
+
+const unverifiedSession = { email: "twiarimascord@gmail.com", email_verified: false, role: "admin" };
+ok("unverified email cannot be admin", !isUserAdmin(unverifiedSession, {}));
+
+const normalUserSession = { email: "normal@example.com", email_verified: true, role: "user" };
+ok("normal user is not admin", !isUserAdmin(normalUserSession, {}));
+
+const verifiedAdminSession = { email: "twiarimascord@gmail.com", email_verified: true, role: "admin" };
+ok("verified admin recognized", isUserAdmin(verifiedAdminSession, {}));
+
+// ── 1.7 Webhook signature verification ─────────────────────────────────────
+const hookSecret = "webhook-secret-999";
+const payloadStr = JSON.stringify({ event: "release", tag: "v1.6.2" });
+const validGhSig = "sha256=" + nodeHmac("sha256", hookSecret).update(payloadStr).digest("hex");
+const invalidSig = "sha256=0000000000000000000000000000000000000000000000000000000000000000";
+
+const reqValid = new Request("http://localhost/api/webhook", {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "x-hub-signature-256": validGhSig,
+    "x-github-event": "release",
+  },
+  body: payloadStr,
+});
+const resValid = await handleWebhook(reqValid, { WEBHOOK_SECRET: hookSecret }, new URL("http://localhost/api/webhook"));
+ok("valid webhook signature accepted", resValid.status === 200);
+
+const reqInvalid = new Request("http://localhost/api/webhook", {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "x-hub-signature-256": invalidSig,
+  },
+  body: payloadStr,
+});
+const resInvalid = await handleWebhook(reqInvalid, { WEBHOOK_SECRET: hookSecret }, new URL("http://localhost/api/webhook"));
+ok("forged webhook signature rejected 401", resInvalid.status === 401);
+
+const reqMissing = new Request("http://localhost/api/webhook", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: payloadStr,
+});
+const resMissing = await handleWebhook(reqMissing, { WEBHOOK_SECRET: hookSecret }, new URL("http://localhost/api/webhook"));
+ok("missing webhook signature rejected 401", resMissing.status === 401);
+
+// ── 1.8 Admin route security & information leak isolation ──────────────────
+const reqAdminNoAuth = new Request("http://localhost/api/admin/status", { method: "GET" });
+const resAdminNoAuth = await handleAdmin(reqAdminNoAuth, {}, new URL("http://localhost/api/admin/status"));
+ok("unauthorized admin route access blocked 401", resAdminNoAuth.status === 401);
+
+const adminApiKey = "admin-secret-key-super-secure";
+const reqAdminWithKey = new Request("http://localhost/api/admin/status", {
+  method: "GET",
+  headers: { "x-admin-key": adminApiKey },
+});
+const resAdminWithKey = await handleAdmin(reqAdminWithKey, { MUCHI_ADMIN_KEY: adminApiKey }, new URL("http://localhost/api/admin/status"));
+ok("admin route authorized with API key", resAdminWithKey.status === 200);
+const adminData = await resAdminWithKey.json();
+ok("admin route does not leak secrets", !adminData.system.sessionSecret && !adminData.system.adminKey);
 
 // ── 2. SSRF blocklist (server.js:315–360) ───────────────────────────────────
 ok("private: 127.0.0.1", isPrivateIp("127.0.0.1"));

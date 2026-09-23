@@ -126,7 +126,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.1";
+  const APP_VERSION = "1.6.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1395,8 +1395,8 @@
       }
       return out;
     }
-    // Apple / iTunes: resolve via YouTube search or fallback to previewUrl
-    if ((out.source === "apple" || out.source === "itunes") && !out.videoId) {
+    // Apple / iTunes / Deezer: resolve via YouTube search or fallback to previewUrl
+    if ((out.source === "apple" || out.source === "itunes" || out.source === "deezer") && !out.videoId) {
       try {
         await resolveYouTubePlay(out);
       } catch {}
@@ -1822,7 +1822,7 @@
             <div class="dl-progress"><div class="dl-progress-bar" id="dlBar-${job.id}" style="width:${pct}%"></div></div>
             <div class="dl-stat" id="dlStat-${job.id}">${label}${job.total ? " · " + escapeHTML(fmtBytes(job.bytes)) + " / " + escapeHTML(fmtBytes(job.total)) : ""}</div>
           </div>
-          ${job.status === "downloading" || job.status === "saving" ? `<button class="icon-btn dl-cancel-btn" data-cancel-dl="${job.id}" title="Cancel"><span class="material-symbols-outlined">close</span></button>` : ""}
+          ${job.status === "downloading" || job.status === "saving" ? `<button class="icon-btn dl-cancel-btn" data-cancel-dl="${escapeAttr(job.id)}" title="Cancel"><span class="material-symbols-outlined">close</span></button>` : ""}
         </div>`;
     }).join("");
     return `<div class="set-card dl-card"><h3>Downloads</h3>${rows}</div>`;
@@ -2473,6 +2473,17 @@
     if (poYtPl) poYtPl.addEventListener("click", () => { hideModal(); ytAddToPlaylist(t); });
   }
 
+  window.handleImgErr = function(img) {
+    if (!img) return;
+    const src = img.getAttribute("src") || "";
+    if (src && !src.startsWith("data:") && !src.includes("/cover-default.jpg") && !src.includes("/api/img?url=")) {
+      img.onerror = function() { this.src = "/cover-default.jpg"; };
+      img.src = `${API_BASE}/api/img?url=${encodeURIComponent(src)}`;
+    } else {
+      img.src = "/cover-default.jpg";
+    }
+  };
+
   function artUrl(t) {
     return t && t.artwork ? t.artwork : "/cover-default.jpg";
   }
@@ -2485,7 +2496,7 @@
       <div class="card">
         <button type="button" class="card-hit" data-open-detail="${escapeAttr(t.id)}" title="Details">
           <div class="art">
-            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+            <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
             ${sourceBadge(t.source)}
             ${liked ? `<span class="liked-dot"><span class="material-symbols-outlined filled">favorite</span></span>` : ""}
           </div>
@@ -2496,14 +2507,14 @@
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
-      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
+      ${(t.trackId || t.videoId || t.source === "apple" || t.source === "itunes" || t.source === "deezer") ? `<button type="button" class="card-dl ${saved ? "on" : ""}" data-dl="${escapeAttr(t.id)}" title="${saved ? "Saved offline" : "Save offline"}"><span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span></button>` : ""}
       </div>`;
   }
 
   function rowHTML(t, i, extra = "") {
     return `
       <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+        <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
           <div class="t-sub">${escapeHTML(t.artist)}${t.source ? ` · ${t.source === "apple" ? "iTunes" : escapeHTML(t.source)}` : ""}</div>
@@ -2517,7 +2528,7 @@
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
         <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
-          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+          <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
           <div>
             <div class="t-title">${escapeHTML(t.title)}</div>
             <div class="t-sub">${escapeHTML(t.artist)}</div>
@@ -2633,13 +2644,28 @@
   // through MUCHI's existing playback pipeline for the FULL track.
   const DZ_BASE = "https://api.deezer.com";
 
-  async function dzFetch(path, ms = 7000) {
+  async function dzFetch(path, ms = 12000) {
     const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
-
-    // 1. Primary channel: First-party Worker proxy (/api/deezer/proxy)
-    // Runs on the app's own origin — completely immune to ad blockers, tracker shields, and mobile WebView CORS policies.
+    let q = "";
     try {
-      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 6000));
+      const u = new URL(path.startsWith("http") ? path : `https://api.deezer.com${cleanPath}`);
+      q = u.searchParams.get("q") || "";
+    } catch {}
+
+    // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers & track blockers)
+    try {
+      const catRes = await api(`/api/catalog/proxy?provider=deezer&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      if (catRes && (Array.isArray(catRes.data) || Array.isArray(catRes.results) || Array.isArray(catRes.deezer) || catRes.id)) {
+        if (!catRes.data && (Array.isArray(catRes.results) || Array.isArray(catRes.deezer))) {
+          catRes.data = catRes.results || catRes.deezer;
+        }
+        return catRes;
+      }
+    } catch {}
+
+    // 2. Secondary channel: First-party Worker proxy (/api/deezer/proxy)
+    try {
+      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
       if (proxyRes && (Array.isArray(proxyRes.data) || Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer) || proxyRes.id)) {
         if (!proxyRes.data && (Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer))) {
           proxyRes.data = proxyRes.results || proxyRes.deezer;
@@ -2648,24 +2674,27 @@
       }
     } catch {}
 
-    // 2. Secondary channel: First-party search fallback (/api/search?source=deezer)
-    try {
-      let q = "";
+    // 3. Tertiary channel: Neutral catalog query search
+    if (q) {
       try {
-        const u = new URL(path.startsWith("http") ? path : `https://api.deezer.com${cleanPath}`);
-        q = u.searchParams.get("q") || "";
+        const catSr = await api(`/api/catalog/search?provider=deezer&q=${encodeURIComponent(q)}&${glq()}`, Math.min(ms, 10000));
+        const list = (catSr && (catSr.deezer || catSr.data || catSr.results)) || [];
+        if (Array.isArray(list) && list.length) {
+          return { data: list };
+        }
       } catch {}
-      if (q) {
-        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, Math.min(ms, 5000));
+
+      try {
+        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, Math.min(ms, 10000));
         if (sr && Array.isArray(sr.deezer) && sr.deezer.length) {
           return { data: sr.deezer };
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
-    // 3. Tertiary direct fetch fallback with short timeout (silently catch adblock / CORS rejections)
+    // 4. Direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 2500));
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
     try {
       const r = await fetch(DZ_BASE + cleanPath, { signal: ctrl.signal, headers: { Accept: "application/json" } });
       if (r.ok) {
@@ -2799,7 +2828,7 @@
     };
   }
 
-  async function itFetch(path, ms = 7000) {
+  async function itFetch(path, ms = 12000) {
     const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
 
     let term = "";
@@ -2810,10 +2839,20 @@
       country = u.searchParams.get("country") || country;
     } catch {}
 
-    // 1. Primary channel: First-party Worker proxy (/api/itunes/proxy)
-    // Runs on the app's own origin — completely immune to ad blockers, tracker shields, and mobile WebView CORS policies.
+    // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers)
     try {
-      const proxyRes = await api(`/api/itunes/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 6000));
+      const catRes = await api(`/api/catalog/proxy?provider=apple&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
+      const list = (catRes && (Array.isArray(catRes.results) ? catRes.results : (Array.isArray(catRes.apple) ? catRes.apple : catRes.itunes))) || [];
+      if (Array.isArray(list) && list.length) {
+        return {
+          results: list.map(normalizeItunesItem).filter(Boolean),
+        };
+      }
+    } catch {}
+
+    // 2. Secondary channel: Dedicated worker proxy (/api/itunes/proxy)
+    try {
+      const proxyRes = await api(`/api/itunes/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
       const list = (proxyRes && (Array.isArray(proxyRes.results) ? proxyRes.results : (Array.isArray(proxyRes.apple) ? proxyRes.apple : proxyRes.itunes))) || [];
       if (Array.isArray(list) && list.length) {
         return {
@@ -2822,10 +2861,20 @@
       }
     } catch {}
 
-    // 2. Secondary channel: First-party search fallback (/api/itunes/search or /api/search?source=apple)
+    // 3. Tertiary channel: First-party search fallback (/api/catalog/search or /api/itunes/search)
     if (term) {
       try {
-        const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 5000));
+        const catSr = await api(`/api/catalog/search?provider=apple&term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 10000));
+        const list = (catSr && (catSr.results || catSr.apple || catSr.itunes)) || [];
+        if (Array.isArray(list) && list.length) {
+          return {
+            results: list.map(normalizeItunesItem).filter(Boolean),
+          };
+        }
+      } catch {}
+
+      try {
+        const pr = await api(`/api/itunes/search?term=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&${glq()}`, Math.min(ms, 10000));
         const list = (pr && (pr.results || pr.apple || pr.itunes)) || [];
         if (Array.isArray(list) && list.length) {
           return {
@@ -2835,7 +2884,7 @@
       } catch {}
 
       try {
-        const sr = await api(`/api/search?source=apple&q=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&refresh=1&${glq()}`, Math.min(ms, 5000));
+        const sr = await api(`/api/search?source=apple&q=${encodeURIComponent(term)}&country=${encodeURIComponent(country)}&refresh=1&${glq()}`, Math.min(ms, 10000));
         const list = (sr && (sr.apple || sr.itunes)) || [];
         if (Array.isArray(list) && list.length) {
           return {
@@ -2845,9 +2894,9 @@
       } catch {}
     }
 
-    // 3. Tertiary direct fetch fallback with short timeout (silently catch adblock / CORS rejections)
+    // 4. Quaternary direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 2500));
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
     try {
       const r = await fetch(ITUNES_BASE + cleanPath, { signal: ctrl.signal });
       if (r.ok) {
@@ -5169,7 +5218,7 @@
     }
     const dl = $("dlBtn");
     if (dl) {
-      const can = !!(t && (t.trackId || t.videoId));
+      const can = !!(t && (t.trackId || t.videoId || t.source === "apple" || t.source === "itunes" || t.source === "deezer"));
       const saved = !!(t && isSaved(t));
       dl.classList.toggle("on", saved);
       dl.classList.toggle("dim", !can);
@@ -6493,6 +6542,17 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.2",
+      title: "Muchi 1.6.2",
+      notes: [
+        "Full protection of administrative routes with strict server-side RBAC permissions.",
+        "Verified Google Sign-In email authentication (email_verified validation) for security.",
+        "Cryptographic HMAC-SHA256 signature verification for webhooks with anti-replay protection.",
+        "Hardened image proxy against Cross-Site Scripting (XSS) and content type sniffing.",
+        "Isolated sensitive internal debugging output and credentials from production responses.",
+      ],
+    },
     {
       ver: "1.6.1",
       title: "Muchi 1.6.1",

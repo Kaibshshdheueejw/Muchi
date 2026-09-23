@@ -872,7 +872,7 @@ export async function handleItunesSearch(url) {
       }
       const targetUrl = `https://itunes.apple.com${cleanPath}`;
       const ctrl = new AbortController();
-      const tm = setTimeout(() => ctrl.abort(), 9000);
+      const tm = setTimeout(() => ctrl.abort(), 12000);
       try {
         const r = await fetch(targetUrl, {
           signal: ctrl.signal,
@@ -881,24 +881,26 @@ export async function handleItunesSearch(url) {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
           },
         });
-        if (!r.ok) return json(r.status, { error: `iTunes upstream ${r.status}` });
-        const data = await r.json();
-        const resp = json(200, data);
-        resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
-        return resp;
+        if (r.ok) {
+          const data = await r.json();
+          const resp = json(200, data);
+          resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+          return resp;
+        }
       } finally {
         clearTimeout(tm);
       }
     } catch (e) {
-      return json(502, { error: String(e.message || e) });
+      // Fall through to query fallback if possible
     }
   }
 
   // Mode 2: Query search
-  if (!q) return json(400, { error: "Missing query or path", results: [], apple: [], itunes: [] });
+  const queryTerm = q || (path ? (() => { try { return new URL(`https://itunes.apple.com${path.startsWith("/") ? path : `/${path}`}`).searchParams.get("term") || ""; } catch { return ""; } })() : "");
+  if (!queryTerm) return json(400, { error: "Missing query or path", results: [], apple: [], itunes: [] });
   const gl = regionCode(url.searchParams.get("gl") || url.searchParams.get("country"));
   try {
-    const res = await itunesSearch(q, { includeExtra: true, country: gl });
+    const res = await itunesSearch(queryTerm, { includeExtra: true, country: gl });
     const songs = strictSongs(res.songs || []);
     const r = json(200, {
       results: songs,
@@ -922,13 +924,13 @@ export async function handleDeezerProxy(url) {
   if (path) {
     try {
       const cleanPath = path.startsWith("/") ? path : `/${path}`;
-      const allowed = ["/search", "/artist/", "/album/", "/track/", "/chart", "/genre"];
+      const allowed = ["/search", "/artist", "/album", "/track", "/chart", "/genre"];
       if (!allowed.some((prefix) => cleanPath.startsWith(prefix))) {
         return json(400, { error: "Disallowed Deezer path" });
       }
       const targetUrl = `https://api.deezer.com${cleanPath}`;
       const ctrl = new AbortController();
-      const tm = setTimeout(() => ctrl.abort(), 9000);
+      const tm = setTimeout(() => ctrl.abort(), 12000);
       try {
         const r = await fetch(targetUrl, {
           signal: ctrl.signal,
@@ -938,23 +940,25 @@ export async function handleDeezerProxy(url) {
             "Accept-Language": "en-US,en;q=0.9",
           },
         });
-        if (!r.ok) return json(r.status, { error: `Deezer upstream ${r.status}` });
-        const data = await r.json();
-        const resp = json(200, data);
-        resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
-        return resp;
+        if (r.ok) {
+          const data = await r.json();
+          const resp = json(200, data);
+          resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+          return resp;
+        }
       } finally {
         clearTimeout(tm);
       }
     } catch (e) {
-      return json(502, { error: String(e.message || e) });
+      // Fall through to query fallback if possible
     }
   }
 
   // Mode 2: Search query fallback
-  if (q) {
+  const queryTerm = q || (path ? (() => { try { return new URL(`https://api.deezer.com${path.startsWith("/") ? path : `/${path}`}`).searchParams.get("q") || ""; } catch { return ""; } })() : "");
+  if (queryTerm) {
     try {
-      const dz = await deezerSearch(q, { limit: 50, includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      const dz = await deezerSearch(queryTerm, { limit: 50, includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
       const songs = strictSongs(dz.songs || []);
       const resp = json(200, {
         results: songs,
