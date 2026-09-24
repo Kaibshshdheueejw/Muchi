@@ -1998,6 +1998,29 @@ img { max-width: 100%; display: block; }
   padding: 4px 8px 4px 8px;
   align-items: center;
 }
+.lib-track-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.lib-track-actions .icon-btn.del-btn {
+  color: var(--md-sys-color-on-surface-variant);
+  opacity: 0.8;
+  transition: opacity 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.lib-track-actions .icon-btn.del-btn:hover {
+  opacity: 1;
+  color: #ff5252;
+  transform: scale(1.08);
+}
+.lib-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
 .lib-track-main {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr);

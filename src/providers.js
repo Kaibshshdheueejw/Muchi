@@ -120,23 +120,22 @@ export async function searchYouTube(query, gl, fast) {
     }
   };
   const errors = [];
-  const extra = { limit: fast ? 24 : 80, musicOnly: true, loose: false };
+  const extra = { limit: fast ? 30 : 60, musicOnly: true, loose: false };
   const jobs = fast
-    ? [youtubeMusicSearch(query, gl, 6000, extra)]
+    ? [youtubeMusicSearch(query, gl, 3000, { ...extra, params: YT_SONGS_PARAMS })]
     : [
-        youtubeMusicSearch(query, gl, 7000, { ...extra, params: YT_SONGS_PARAMS }),
-        youtubeMusicSearch(query, gl, 7000, extra),
-        youtubeWebSearch(query, gl, 6500, { limit: 40, musicOnly: true, loose: false }),
+        youtubeMusicSearch(query, gl, 3500, { ...extra, params: YT_SONGS_PARAMS }),
+        youtubeWebSearch(query, gl, 3200, { limit: 35, musicOnly: true, loose: false }),
       ];
   const settled = await Promise.allSettled(jobs);
   for (const s of settled) {
     if (s.status === "fulfilled") add(s.value);
     else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
   }
-  // If we still have fewer than 20 songs, search with official audio keyword
-  if (out.length < 20 && !fast) {
+  // If we have no songs or very few, try fallback query with a fast timeout
+  if (out.length < 5 && !fast) {
     try {
-      const webRes = await youtubeWebSearch(`${query} official audio`, gl, 6000, { limit: 30, musicOnly: true, loose: false });
+      const webRes = await youtubeWebSearch(`${query} official audio`, gl, 3000, { limit: 25, musicOnly: true, loose: false });
       add(webRes);
     } catch (e) {
       errors.push(String(e.message || e));

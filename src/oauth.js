@@ -17,7 +17,7 @@ import { APP_NAME, APP_VERSION, authConfig, SESSION_TTL_MS } from "./config.js";
 import { json, redirect, corsHeaders } from "./util.js";
 import { decodeIdToken } from "./parse.js";
 import { sidFromToken, sessionToken } from "./auth.js";
-import { getSession, putSession, deleteSession, putOAuthState, takeOAuthState } from "./db.js";
+import { getSession, putSession, deleteSession, putOAuthState, takeOAuthState, getUserLibrary, putUserLibrary } from "./db.js";
 import { getAdminEmails, isUserAdmin } from "./admin.js";
 
 // ── session lookup: Bearer token or muchi_sid cookie → D1 row ──
@@ -486,4 +486,74 @@ export async function handleYoutubeData(request, env, url, path) {
     }
     return json(502, { error: "YouTube API error" });
   }
+}
+
+// ── Persistent User Library (Liked songs, playlists, followed artists across devices & browser resets) ──
+export async function handleUserLibrary(request, env) {
+  const s = await readSession(request, env);
+  if (!s || !s.email) {
+    return json(401, { error: "Authentication required to sync library across devices" }, request);
+  }
+  const userId = String(s.email).toLowerCase().trim();
+
+  if (request.method === "GET") {
+    const lib = await getUserLibrary(env, userId);
+    return json(200, {
+      library: lib || { liked: [], playlists: [], following: [], taste: {} },
+      syncedAt: (lib && lib.updated_at) || 0,
+      user: { email: s.email, name: s.name },
+    }, request);
+  }
+
+  if (request.method === "POST" || request.method === "PUT") {
+    try {
+      const body = await request.json().catch(() => null);
+      if (!body || typeof body !== "object") {
+        return json(400, { error: "Invalid library data" }, request);
+      }
+
+      // Read existing to merge safely so user never loses items
+      const existing = (await getUserLibrary(env, userId)) || { liked: [], playlists: [], following: [], taste: {} };
+
+      const likedMap = new Map();
+      for (const t of (existing.liked || [])) {
+        if (t && t.id) likedMap.set(t.id, t);
+      }
+      for (const t of (body.liked || [])) {
+        if (t && t.id) likedMap.set(t.id, t);
+      }
+
+      const plMap = new Map();
+      for (const p of (existing.playlists || [])) {
+        const k = p && (p.id || p.name);
+        if (k) plMap.set(k, p);
+      }
+      for (const p of (body.playlists || [])) {
+        const k = p && (p.id || p.name);
+        if (k) plMap.set(k, p);
+      }
+
+      const followingSet = new Set([...(existing.following || []), ...(body.following || [])]);
+
+      const merged = {
+        liked: Array.from(likedMap.values()).slice(0, 2000),
+        playlists: Array.from(plMap.values()).slice(0, 200),
+        following: Array.from(followingSet).slice(0, 500),
+        taste: { ...(existing.taste || {}), ...(body.taste || {}) },
+        updated_at: Date.now(),
+      };
+
+      await putUserLibrary(env, userId, merged);
+
+      return json(200, {
+        ok: true,
+        library: merged,
+        syncedAt: merged.updated_at,
+      }, request);
+    } catch (err) {
+      return json(500, { error: "Failed to persist library" }, request);
+    }
+  }
+
+  return json(405, { error: "Method not allowed" }, request);
 }

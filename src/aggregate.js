@@ -125,7 +125,7 @@ export async function handleHome(env, url) {
   let globalPart = { shelves: [], globalPlaylists: [], audius: [], underground: [], radio: [], forYouPlaylists: [], viralPlaylists: [] };
   let localPart = { youtubeLocal: [], countryPlaylists: [] };
   try {
-    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:v7:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
+    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:v8:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
   } catch (e) {
     console.error("home english", e);
     globalPart.shelves = ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: s.query, tracks: [] }));
@@ -133,7 +133,7 @@ export async function handleHome(env, url) {
     globalPart.viralPlaylists = buildViralPlaylists([]);
   }
   try {
-    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v7:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
+    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v8:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
   } catch (e) {
     console.error("home local", e);
   }
@@ -237,13 +237,15 @@ async function buildGlobal(gl, localQ) {
 }
 
 async function buildLocal(gl, localQ) {
-  const [ytLocal, ytPl] = await Promise.allSettled([
-    searchYouTube(localQ, gl, false),
-    youtubeMusicSearch(`${localQ} playlist`, gl, 7000, { limit: 50 }),
+  const [ytLocal, ytPl, ytTrendingPl] = await Promise.allSettled([
+    searchYouTube(`${localQ} trending new songs`, gl, false),
+    youtubeMusicSearch(`${localQ} trending 2025 playlist`, gl, 7000, { limit: 50 }),
+    searchYouTube(`trending music playlist ${gl}`, gl, false),
   ]);
   const ytTracks = take(ytLocal);
   const plTracks = take(ytPl);
-  const countryPool = [...ytTracks, ...plTracks];
+  const trendTracks = take(ytTrendingPl);
+  const countryPool = [...ytTracks, ...plTracks, ...trendTracks];
 
   // Top songs in country: total of 25 songs
   const localTracks = [];
@@ -256,7 +258,7 @@ async function buildLocal(gl, localQ) {
   }
   if (localTracks.length < 25) {
     try {
-      const extra = await searchYouTube(`top 50 ${localQ} official music`, gl, false);
+      const extra = await searchYouTube(`top 50 new ${localQ} official music 2025 2026`, gl, false);
       for (const t of extra) {
         if (!t || !t.id || seenLocal.has(t.id)) continue;
         seenLocal.add(t.id);
@@ -274,6 +276,7 @@ async function buildLocal(gl, localQ) {
   const rawPlaylists = uniqPlaylists([
     ...playlistsOf(ytLocal.status === "fulfilled" ? ytLocal.value : []),
     ...playlistsOf(ytPl.status === "fulfilled" ? ytPl.value : []),
+    ...playlistsOf(ytTrendingPl.status === "fulfilled" ? ytTrendingPl.value : []),
   ]);
 
   const countryPlaylists = ensureMinPlaylists(
@@ -337,7 +340,7 @@ export async function handleSearch(env, url) {
   const source = (url.searchParams.get("source") || "all").toLowerCase();
 
   const cacheKey = `search:${source}:${q.toLowerCase()}:${gl}`;
-  const data = await cached(cacheKey, 60000, async () => {
+  const data = await cached(cacheKey, 180000, async () => {
     const result = { query: q, youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [] };
 
     if (source === "apple" || source === "itunes") {
@@ -393,13 +396,16 @@ export async function handleSearch(env, url) {
     }
 
     // source === "all": Run all providers concurrently in parallel
+    const fastWait = (promise, ms, fallback) =>
+      Promise.race([promise, new Promise((res) => setTimeout(() => res(fallback), ms))]);
+
     const allTasks = [
       ["youtube", searchYouTube(q, gl)],
       ["apple", itunesSearch(q, { includeExtra: true, country: gl })],
       ["deezer", deezerSearch(q, { limit: 50, includeExtra: true })],
       ["audius", audiusSearch(q)],
-      ["radio", radioSearch(q, 16, url.searchParams.get("quality"))],
-      ["audiusUsers", audiusUserSearch(q)],
+      ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2000, [])],
+      ["audiusUsers", fastWait(audiusUserSearch(q), 2000, [])],
     ];
     const settled = await Promise.allSettled(allTasks.map((t) => t[1]));
     settled.forEach((s, i) => {

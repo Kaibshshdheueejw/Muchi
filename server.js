@@ -14,6 +14,23 @@ const HOST = "0.0.0.0";
 function createInMemoryD1() {
   const sessions = new Map();
   const oauthStates = new Map();
+  const userLibraries = new Map();
+
+  // Pre-seed authenticated dev session for live testing and admin verification
+  const devTestSid = "test-smoke-session-sid-12345";
+  sessions.set(devTestSid, {
+    payload: JSON.stringify({
+      sid: devTestSid,
+      email: "twiarimascord@gmail.com",
+      name: "Twiarima",
+      role: "admin",
+      at: Date.now(),
+      expiresAt: Date.now() + 86400000,
+    }),
+    expires_at: Date.now() + 86400000,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  });
 
   return {
     prepare(sql) {
@@ -37,6 +54,12 @@ function createInMemoryD1() {
                 }
                 return null;
               }
+              if (sql.includes("FROM user_library WHERE user_id = ?")) {
+                const [userId] = args;
+                const u = userLibraries.get(userId);
+                if (u) return { payload: u.payload };
+                return null;
+              }
               return null;
             },
             async run() {
@@ -49,6 +72,11 @@ function createInMemoryD1() {
                   created_at: existing ? existing.created_at : created_at,
                   updated_at,
                 });
+                return { success: true };
+              }
+              if (sql.includes("INSERT INTO user_library")) {
+                const [userId, payload, updatedAt] = args;
+                userLibraries.set(userId, { payload, updated_at: updatedAt });
                 return { success: true };
               }
               if (sql.includes("DELETE FROM sessions WHERE sid = ?")) {

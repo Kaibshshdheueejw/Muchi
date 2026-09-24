@@ -85,6 +85,42 @@ export async function takeOAuthState(env, state) {
   }
 }
 
+// ── user_library (persistent liked songs, playlists, follows) ──────────────
+
+export async function getUserLibrary(env, userId) {
+  if (!userId || !env.DB) return null;
+  try {
+    const row = await env.DB.prepare(
+      "SELECT payload FROM user_library WHERE user_id = ?"
+    )
+      .bind(userId)
+      .first();
+    if (!row || !row.payload) return null;
+    return JSON.parse(row.payload);
+  } catch (err) {
+    console.error("getUserLibrary failed:", err);
+    return null;
+  }
+}
+
+export async function putUserLibrary(env, userId, libraryObj) {
+  if (!userId || !env.DB) return;
+  try {
+    const payload = JSON.stringify(libraryObj);
+    await env.DB.prepare(
+      `INSERT INTO user_library (user_id, payload, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         payload = excluded.payload,
+         updated_at = excluded.updated_at`
+    )
+      .bind(userId, payload, now())
+      .run();
+  } catch (err) {
+    console.error("putUserLibrary failed:", err);
+  }
+}
+
 /**
  * Opportunistic expiry sweep — called at most ~1 in 100 requests so the free
  * write budget (100k rows/day) is untouched even at hundreds of users.

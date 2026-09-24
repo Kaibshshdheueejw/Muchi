@@ -205,6 +205,11 @@ export async function handleDownload(request, url) {
   const streamUrl = url.searchParams.get("streamUrl") || "";
   const query = url.searchParams.get("query") || url.searchParams.get("q") || "";
   const name = sanitizeForFilename(url.searchParams.get("name") || "");
+
+  if (!videoId && !trackId && !streamUrl && !query) {
+    return json(400, { error: "Missing videoId or trackId" });
+  }
+
   let src = "";
   let mime = url.searchParams.get("mime") || (trackId ? "audio/mpeg" : "audio/mp4");
 

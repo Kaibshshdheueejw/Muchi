@@ -126,7 +126,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.2";
+  const APP_VERSION = "1.6.3";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -553,6 +553,112 @@
     }
   }
   hydrateLibrary();
+
+  let syncLibraryTimeout = null;
+  function scheduleUserLibraryPush() {
+    if (!state.auth || !state.auth.signedIn) return;
+    clearTimeout(syncLibraryTimeout);
+    syncLibraryTimeout = setTimeout(() => {
+      pushUserLibrary();
+    }, 1500);
+  }
+
+  async function pushUserLibrary() {
+    if (!state.auth || !state.auth.signedIn) return;
+    try {
+      await api("/api/user/library", 10000, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          liked: (state.liked || []).slice(0, 1500),
+          playlists: (state.playlists || []).slice(0, 150),
+          following: (state.following || []).slice(0, 400),
+        }),
+      });
+    } catch {}
+  }
+
+  let isSyncingLibrary = false;
+  async function syncUserLibrary(forcePull) {
+    if (!state.auth || !state.auth.signedIn || isSyncingLibrary) return;
+    isSyncingLibrary = true;
+    try {
+      const res = await api("/api/user/library", 10000);
+      if (res && res.library) {
+        const remote = res.library;
+        let modified = false;
+
+        // 1. Liked songs merge
+        if (Array.isArray(remote.liked) && remote.liked.length > 0) {
+          const likedMap = new Map();
+          for (const t of remote.liked) {
+            if (t && t.id) likedMap.set(t.id, t);
+          }
+          for (const t of state.liked) {
+            if (t && t.id && !likedMap.has(t.id)) {
+              likedMap.set(t.id, t);
+              modified = true;
+            }
+          }
+          state.liked = Array.from(likedMap.values());
+          save("aura.liked", state.liked);
+        } else if (state.liked.length > 0) {
+          modified = true;
+        }
+
+        // 2. Playlists merge
+        if (Array.isArray(remote.playlists) && remote.playlists.length > 0) {
+          const plMap = new Map();
+          for (const p of remote.playlists) {
+            if (p && (p.id || p.name)) plMap.set(p.id || p.name, p);
+          }
+          for (const p of state.playlists) {
+            const key = p && (p.id || p.name);
+            if (key && !plMap.has(key)) {
+              plMap.set(key, p);
+              modified = true;
+            }
+          }
+          state.playlists = Array.from(plMap.values());
+          save("aura.playlists", state.playlists);
+          renderPlaylistsNav();
+        } else if (state.playlists.length > 0) {
+          modified = true;
+        }
+
+        // 3. Following merge
+        if (Array.isArray(remote.following) && remote.following.length > 0) {
+          const followMap = new Map();
+          for (const f of remote.following) {
+            if (f && (f.key || f.name)) followMap.set(f.key || f.name, f);
+          }
+          for (const f of state.following) {
+            const k = f && (f.key || f.name);
+            if (k && !followMap.has(k)) {
+              followMap.set(k, f);
+              modified = true;
+            }
+          }
+          state.following = Array.from(followMap.values());
+          save("aura.following", state.following);
+        } else if (state.following.length > 0) {
+          modified = true;
+        }
+
+        if (modified) {
+          scheduleUserLibraryPush();
+        }
+        if (state.view === "library") render();
+      }
+    } catch {} finally {
+      isSyncingLibrary = false;
+    }
+  }
+
+  function savePlaylists() {
+    save("aura.playlists", state.playlists);
+    scheduleUserLibraryPush();
+  }
   if (!state.prefs.hqV) {
     state.prefs.quality = "high";
     state.prefs.hqV = 1;
@@ -688,7 +794,7 @@
     // (which exists precisely to bypass caches).
     const cacheable =
       method === "GET" &&
-      !/\/api\/(auth|youtube|health|version|geo|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download)\b/.test(path) &&
+      !/\/api\/(auth|youtube|health|version|geo|stream|img|radio\/click|audius\/file|audius\/stream|yt\/stream|download|user)\b/.test(path) &&
       !/[?&]refresh=1\b/.test(path);
     const cacheKey = cacheable ? `${API_CACHE_V}:${path}` : "";
     if (cacheable) {
@@ -767,6 +873,7 @@
     if (was) state.liked = state.liked.filter((t) => trackKey(t) !== trackKey(track));
     else state.liked.unshift(track);
     save("aura.liked", state.liked);
+    scheduleUserLibraryPush();
     const btn = $("likeBtn");
     if (btn) {
       btn.classList.toggle("pop", !was);
@@ -882,7 +989,7 @@
     const p = state.playlists[index];
     if (!p || !track) return;
     p.tracks = p.tracks.filter((t) => t.id !== track.id);
-    save("aura.playlists", state.playlists);
+    savePlaylists();
     toast(`Removed from ${p.name}`, true, "success");
     if (state.view === "library") render();
   }
@@ -914,7 +1021,10 @@
     const k = artistKey(t);
     return !!k && state.following.some((f) => f.key === k);
   }
-  function saveFollowing() { save("aura.following", state.following); }
+  function saveFollowing() {
+    save("aura.following", state.following);
+    scheduleUserLibraryPush();
+  }
 
   function toggleFollow(track) {
     if (!track || track.source === "radio") {
@@ -4947,6 +5057,7 @@
           setAuthToken(t);
           refreshAuth(true).then(() => {
             toast("Signed in with Google");
+            syncUserLibrary(true);
             if (state.view === "settings" || state.view === "library") render();
           });
         }
@@ -4955,6 +5066,7 @@
         if (t) setAuthToken(t);
         refreshAuth(true).then(() => {
           toast("YouTube connected");
+          syncUserLibrary(true);
           if (state.view === "settings" || state.view === "library") render();
         });
       } else if (pathname === "auth/error" || pathname === "youtube/error") {
@@ -4987,6 +5099,9 @@
     }
     if (touched && state.auth && !state.auth.signedIn) {
       toast("Sign-in didn't stick — your server may have restarted. Please try again.");
+    }
+    if (state.auth && state.auth.signedIn) {
+      syncUserLibrary();
     }
     if (state.view === "settings" || state.view === "library") render();
   }
@@ -5494,7 +5609,7 @@
       if (!p) { closeCrop(); return; }
       if (cover) p.cover = data;
       else p.banner = data;
-      save("aura.playlists", state.playlists);
+      savePlaylists();
       closeCrop();
       toast(cover ? "Cover saved" : "Banner saved", true, "success");
       if (state.view === "library") render();
@@ -6543,6 +6658,16 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.6.3",
+      title: "Muchi 1.6.3",
+      notes: [
+        "Cloud Library Sync: liked songs, playlists, and followed artists securely sync across desktop, web, and mobile devices when signed in.",
+        "Proactive Queue Autoplay: intelligent queue extension smoothly streams related tracks as playback reaches the queue end.",
+        "2025/2026 Chart Refresh: up-to-date regional hit lists across India, US, UK, Canada, Australia, Japan, South Korea, Germany, and more.",
+        "Optimized caching layers: refreshed home and localized catalog caching for near-instant cold loads.",
+      ],
+    },
+    {
       ver: "1.6.2",
       title: "Muchi 1.6.2",
       notes: [
@@ -7148,6 +7273,10 @@
           <div><strong>YouTube</strong><p>Authorize MUCHI to read your liked videos and playlists.</p></div>
           <button type="button" class="chip-btn" id="gYtConnect">Connect</button>
         </div>`}
+        <div class="set-row">
+          <div><strong>Cloud Library Sync</strong><p>Your liked tracks, playlists, and follows sync automatically.</p></div>
+          <button type="button" class="chip-btn" id="syncLibraryBtn">Sync now</button>
+        </div>
         <div class="set-row">
           <div><strong>Sign out</strong><p>Removes your Google session and YouTube data from this device.</p></div>
           <button type="button" class="chip-btn" id="gSignOut">Sign out</button>
@@ -7872,6 +8001,16 @@
     if (gYtDisconnect) gYtDisconnect.addEventListener("click", disconnectYouTube);
     const gSignOut = viewEl.querySelector("#gSignOut");
     if (gSignOut) gSignOut.addEventListener("click", signOutGoogle);
+    const syncLibBtn = viewEl.querySelector("#syncLibraryBtn");
+    if (syncLibBtn) {
+      syncLibBtn.addEventListener("click", async () => {
+        syncLibBtn.disabled = true;
+        toast("Syncing library with cloud…");
+        await syncUserLibrary(true);
+        syncLibBtn.disabled = false;
+        toast("Library synchronized");
+      });
+    }
     const gYtRefresh = viewEl.querySelector("#gYtRefresh");
     if (gYtRefresh) gYtRefresh.addEventListener("click", () => {
       state.ytLiked = null;
@@ -7942,7 +8081,7 @@
           return;
         }
         p.tracks.push(track);
-        save("aura.playlists", state.playlists);
+        savePlaylists();
         plRecs.tracks = plRecs.tracks.filter((t) => t.id !== track.id);
         toast(`Added to ${p.name}`, true, "success");
         render();
@@ -8314,7 +8453,7 @@
     viewEl.querySelectorAll("[data-del-pl]").forEach((el) => {
       el.addEventListener("click", () => {
         state.playlists.splice(Number(el.dataset.delPl), 1);
-        save("aura.playlists", state.playlists);
+        savePlaylists();
         state.activePlaylist = null;
         render();
       });
@@ -8836,22 +8975,109 @@
     }
   }
 
+  const searchMemCache = new Map();
+  function getSearchCache(key) {
+    if (!searchMemCache.has(key)) return null;
+    const item = searchMemCache.get(key);
+    if (Date.now() - item.time > 180000) {
+      searchMemCache.delete(key);
+      return null;
+    }
+    return item.data;
+  }
+  function setSearchCache(key, data) {
+    if (searchMemCache.size > 80) {
+      const first = searchMemCache.keys().next().value;
+      searchMemCache.delete(first);
+    }
+    searchMemCache.set(key, { data, time: Date.now() });
+  }
+
+  function findLocalSearchMatches(q) {
+    const qLower = String(q || "").trim().toLowerCase();
+    if (!qLower) return [];
+    const pool = [
+      ...(state.liked || []),
+      ...(state.recents || []),
+      ...(state.downloads || []),
+    ];
+    const seen = new Set();
+    const hits = [];
+    for (const t of pool) {
+      if (!t || !t.id || seen.has(t.id)) continue;
+      const text = `${t.title || ""} ${t.artist || ""} ${t.album || ""}`.toLowerCase();
+      if (text.includes(qLower)) {
+        seen.add(t.id);
+        hits.push(t);
+        if (hits.length >= 10) break;
+      }
+    }
+    return hits;
+  }
+
+  async function backgroundEnrichSearch(qStr, qKey) {
+    if (!state.search || state.search.query !== qStr) return;
+    let updated = false;
+    const tasks = [];
+
+    if (!state.search.apple || !state.search.apple.length) {
+      tasks.push(
+        api(`/api/search?q=${encodeURIComponent(qStr)}&source=apple&refresh=1&${glq()}`, 4000)
+          .then((itData) => {
+            if (itData && Array.isArray(itData.apple) && itData.apple.length && state.search && state.search.query === qStr) {
+              state.search.apple = itData.apple.filter(looksLikeSong);
+              state.search.itunes = state.search.apple;
+              if (Array.isArray(itData.artists)) state.search.artists = (state.search.artists || []).concat(itData.artists);
+              if (Array.isArray(itData.playlists)) state.search.playlists = (state.search.playlists || []).concat(itData.playlists);
+              updated = true;
+            }
+          })
+          .catch(() => {})
+      );
+    }
+
+    if (!state.search.deezer || !state.search.deezer.length) {
+      tasks.push(
+        api(`/api/search?q=${encodeURIComponent(qStr)}&source=deezer&refresh=1&${glq()}`, 4000)
+          .then((dzData) => {
+            if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length && state.search && state.search.query === qStr) {
+              state.search.deezer = dzData.deezer.filter(looksLikeSong);
+              if (Array.isArray(dzData.artists)) state.search.artists = (state.search.artists || []).concat(dzData.artists);
+              if (Array.isArray(dzData.playlists)) state.search.playlists = (state.search.playlists || []).concat(dzData.playlists);
+              updated = true;
+            }
+          })
+          .catch(() => {})
+      );
+    }
+
+    if (tasks.length) {
+      await Promise.allSettled(tasks);
+      if (updated && state.search && state.search.query === qStr) {
+        setSearchCache(qKey, state.search);
+        softRender();
+      }
+    }
+  }
+
   async function runSearch(q) {
-    state.query = q;
+    const qTrim = String(q || "").trim();
+    if (!qTrim) return;
+    const qKey = `${qTrim.toLowerCase()}:${glq()}`;
+
+    state.query = qTrim;
     state.view = "search";
     state.artistPage = null;
-    state.search = null;
-    $("searchInput").value = q;
-    render();
+    $("searchInput").value = qTrim;
 
     if (state.offlineMode || state.isNetworkOffline) {
-      const qLower = String(q || "").trim().toLowerCase();
+      const qLower = qTrim.toLowerCase();
       const matchedDls = (state.downloads || []).filter((t) => {
         const text = `${t && t.title || ""} ${t && t.artist || ""} ${t && t.album || ""}`.toLowerCase();
         return text.includes(qLower);
       });
       state.search = {
-        query: q,
+        query: qTrim,
         youtube: [],
         apple: matchedDls.filter((d) => d.source === "apple"),
         deezer: matchedDls.filter((d) => d.source === "deezer"),
@@ -8865,166 +9091,60 @@
       return;
     }
 
+    // Check instant memory cache
+    const cachedSearch = getSearchCache(qKey);
+    if (cachedSearch) {
+      state.search = cachedSearch;
+      render();
+      return;
+    }
+
+    // Pre-populate with matching local library items so user never stares at a blank screen
+    const localMatches = findLocalSearchMatches(qTrim);
+    if (localMatches.length > 0) {
+      state.search = {
+        query: qTrim,
+        youtube: localMatches.filter((t) => t.source === "youtube" || !t.source),
+        apple: localMatches.filter((t) => t.source === "apple"),
+        deezer: localMatches.filter((t) => t.source === "deezer"),
+        audius: localMatches.filter((t) => t.source === "audius"),
+        radio: [],
+        artists: [],
+        playlists: [],
+        offline: localMatches,
+        _isInstant: true,
+      };
+      render();
+    } else {
+      state.search = null;
+      render();
+    }
+
     try {
-      state.search = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`);
-      if (!state.search.apple || !state.search.apple.length) {
-        try {
-          const itData = await api(`/api/search?q=${encodeURIComponent(q)}&source=apple&refresh=1&${glq()}`);
-          if (itData && Array.isArray(itData.apple) && itData.apple.length) {
-            state.search.apple = itData.apple;
-            state.search.itunes = state.search.apple;
-            if (Array.isArray(itData.artists) && itData.artists.length) {
-              state.search.artists = (state.search.artists || []).concat(itData.artists);
-            }
-            if (Array.isArray(itData.playlists) && itData.playlists.length) {
-              state.search.playlists = (state.search.playlists || []).concat(itData.playlists);
-            }
-          }
-        } catch {}
-      }
-      if (!state.search.apple || !state.search.apple.length) {
-        try {
-          const itCountry = String((state.prefs && state.prefs.country) || "US");
-          const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
-          const rows = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
-          if (rows.length) {
-            state.search.apple = rows.map((t) => {
-              const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
-              const title = t.trackName || t.title || "Song";
-              const artist = t.artistName || t.artist || "Artist";
-              const album = t.collectionName || t.album || "";
-              const duration = Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
-              const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
-              return {
-                id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                source: "apple",
-                title,
-                artist,
-                album,
-                duration,
-                artwork,
-                previewUrl: t.previewUrl || "",
-                playQuery: `${title} ${artist} official audio`.trim(),
-              };
-            }).filter(looksLikeSong);
-            state.search.itunes = state.search.apple;
-          }
-        } catch (itErr) {
-          console.warn("itunes direct search fallback", itErr);
-        }
-      }
-      if (!state.search.deezer || !state.search.deezer.length) {
-        try {
-          const dzData = await api(`/api/search?q=${encodeURIComponent(q)}&source=deezer&refresh=1&${glq()}`);
-          if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length) {
-            state.search.deezer = dzData.deezer;
-            if (Array.isArray(dzData.artists) && dzData.artists.length) {
-              state.search.artists = (state.search.artists || []).concat(dzData.artists);
-            }
-            if (Array.isArray(dzData.playlists) && dzData.playlists.length) {
-              state.search.playlists = (state.search.playlists || []).concat(dzData.playlists);
-            }
-          }
-        } catch {}
-      }
-      if (!state.search.deezer || !state.search.deezer.length) {
-        try {
-          const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
-          const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
-          if (rows.length) {
-            state.search.deezer = rows.map((t) => {
-              const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
-              const title = t.title || t.trackName || "Song";
-              const artist = (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist";
-              const album = (t.album && (t.album.title || t.album)) || t.collectionName || "";
-              const duration = Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0;
-              const artwork = (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg";
-              return {
-                id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                source: "deezer",
-                title,
-                artist,
-                album,
-                duration,
-                artwork,
-                previewUrl: t.preview || t.previewUrl || "",
-                playQuery: `${title} ${artist} official audio`.trim(),
-              };
-            }).filter(looksLikeSong);
-          }
-        } catch (dzErr) {
-          console.warn("deezer direct search fallback", dzErr);
-        }
-      }
-      if (!state.search.youtube || !state.search.youtube.length) {
-        try {
-          const ytData = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`);
-          if (ytData && Array.isArray(ytData.youtube) && ytData.youtube.length) {
-            state.search.youtube = ytData.youtube;
-          }
-        } catch {}
-      }
-      if (!state.search.youtube || !state.search.youtube.length || !state.search.youtube.some((t) => t && t.videoId)) {
-        try {
-          const ytRaw = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`);
-          if (ytRaw && Array.isArray(ytRaw.tracks) && ytRaw.tracks.length) {
-            state.search.youtube = ytRaw.tracks.filter((t) => t && t.videoId);
-          }
-        } catch {}
-      }
-      state.search.itunes = (state.search.itunes && state.search.itunes.length) ? state.search.itunes : (state.search.apple || []);
-      state.search.apple = (state.search.apple && state.search.apple.length) ? state.search.apple : (state.search.itunes || []);
-      if (!state.search.audius || !state.search.audius.length) {
-        try {
-          const adData = await api(`/api/search?q=${encodeURIComponent(q)}&source=audius&${glq()}`);
-          if (adData && Array.isArray(adData.audius) && adData.audius.length) {
-            state.search.audius = adData.audius;
-          }
-        } catch {}
-      }
-      if (!state.search.audius || !state.search.audius.length) {
-        try {
-          const r = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=muchi`, { mode: "cors" });
-          if (r.ok) {
-            const j = await r.json();
-            if (j && Array.isArray(j.data) && j.data.length) {
-              state.search.audius = j.data.map((t) => ({
-                id: `audius:${t.id}`,
-                trackId: String(t.id),
-                source: "audius",
-                title: t.title || "Track",
-                artist: (t.user && (t.user.name || t.user.handle)) || "Artist",
-                duration: t.duration || 0,
-                artwork: (t.artwork && (t.artwork["480x480"] || t.artwork["150x150"])) || "/cover-default.jpg",
-                streamUrl: `${API_BASE}/api/audius/file/${encodeURIComponent(t.id)}`,
-              })).filter(looksLikeSong);
-            }
-          }
-        } catch {}
-      }
-      if (state.search && Array.isArray(state.search.youtube)) {
-        state.search.youtube = state.search.youtube.filter(looksLikeSong);
-      }
-      if (state.search && Array.isArray(state.search.apple)) {
-        state.search.apple = state.search.apple.filter(looksLikeSong);
-        state.search.itunes = state.search.apple;
-      }
-      if (state.search && Array.isArray(state.search.deezer)) {
-        state.search.deezer = state.search.deezer.filter(looksLikeSong);
-      }
-      if (state.search && Array.isArray(state.search.audius)) {
-        state.search.audius = state.search.audius.filter(looksLikeSong);
+      const data = await api(`/api/search?q=${encodeURIComponent(qTrim)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`, 9000);
+      if (data && typeof data === "object") {
+        if (Array.isArray(data.youtube)) data.youtube = data.youtube.filter(looksLikeSong);
+        if (Array.isArray(data.apple)) data.apple = data.apple.filter(looksLikeSong);
+        data.itunes = data.apple;
+        if (Array.isArray(data.deezer)) data.deezer = data.deezer.filter(looksLikeSong);
+        if (Array.isArray(data.audius)) data.audius = data.audius.filter(looksLikeSong);
+        state.search = data;
+        setSearchCache(qKey, data);
+        render(); // Immediately render results without waiting for secondary fallbacks
+
+        backgroundEnrichSearch(qTrim, qKey);
+        return;
       }
     } catch (e) {
       toast("Search failed. Checking local library…");
-      const qLower = String(q || "").trim().toLowerCase();
+      const qLower = qTrim.toLowerCase();
       const matchedDls = (state.downloads || []).filter((t) => {
         const text = `${t && t.title || ""} ${t && t.artist || ""}`.toLowerCase();
         return text.includes(qLower);
       });
       state.search = { youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [], offline: matchedDls };
+      render();
     }
-    render();
   }
 
   async function openSearchPlaylist(playlistId, fallbackQ) {
@@ -9712,7 +9832,7 @@
           p.name = name;
           p.cover = draft.cover || "";
           p.banner = draft.banner || "";
-          save("aura.playlists", state.playlists);
+          savePlaylists();
           state.plDraft = null;
           renderPlaylistsNav();
           if (state.view === "library") render();
@@ -9725,7 +9845,7 @@
           state.pendingAdd = null;
         }
         state.playlists.push(created);
-        save("aura.playlists", state.playlists);
+        savePlaylists();
         state.plDraft = null;
         renderPlaylistsNav();
         state.view = "library";
@@ -9773,7 +9893,7 @@
         const p = state.playlists[Number(b.dataset.add)];
         if (!p) return;
         if (!p.tracks.some((t) => t.id === track.id)) p.tracks.push(track);
-        save("aura.playlists", state.playlists);
+        savePlaylists();
         const ico = b.querySelector(".material-symbols-outlined");
         if (ico) ico.textContent = "check";
         b.classList.add("ok");
@@ -9841,8 +9961,20 @@
         showEl($("scrim"), open || state.showQueue);
       };
     }
+    let searchLiveTimer = null;
+    $("searchInput").addEventListener("input", (e) => {
+      const val = (e.target.value || "").trim();
+      clearTimeout(searchLiveTimer);
+      if (!val) return;
+      searchLiveTimer = setTimeout(() => {
+        if (state.view === "search" && val.length >= 2 && val !== state.query) {
+          runSearch(val);
+        }
+      }, 350);
+    });
     $("searchInput").addEventListener("keydown", (e) => {
       if ((e.key === "Enter" || e.key === "search") && e.target.value.trim()) {
+        clearTimeout(searchLiveTimer);
         runSearch(e.target.value.trim());
         // On phones, dismiss the on-screen keyboard once the search runs —
         // results stay visible, and tapping the bar refocuses (and reopens

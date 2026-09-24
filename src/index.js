@@ -21,7 +21,7 @@ import { corsHeaders, json } from "./util.js";
 import { handleHealth, handleMoods, handleGeo } from "./direct.js";
 import {
   handleAuthStatus, handleAuthUrl, handleGoogleCallback, handleYoutubeCallback,
-  handleSignout, handleYoutubeDisconnect, handleYoutubeData,
+  handleSignout, handleYoutubeDisconnect, handleYoutubeData, handleUserLibrary,
 } from "./oauth.js";
 import {
   handleHome, handleShelf, handleSearch, handleYoutubeSearch, handleYtPlaylist,
@@ -134,6 +134,7 @@ async function handleApi(request, env, url) {
   if (p.startsWith("/api/admin")) return handleAdmin(request, env, url);
   if (p === "/api/webhook" || p.startsWith("/api/webhooks")) return handleWebhook(request, env, url);
   if (p === "/api/auth/status") return handleAuthStatus(request, env);
+  if (p === "/api/user/library" || p === "/api/user/sync") return handleUserLibrary(request, env);
   if (p === "/api/auth/google/url" || p === "/api/auth/youtube/url") return handleAuthUrl(request, env, url, p);
   if (p === "/api/auth/google/callback") return handleGoogleCallback(request, env, url);
   if (p === "/api/auth/youtube/callback") return handleYoutubeCallback(request, env, url);
