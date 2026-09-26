@@ -135,7 +135,11 @@ export async function searchYouTube(query, gl, fast) {
   // If we have no songs or very few, try fallback query with a fast timeout
   if (out.length < 5 && !fast) {
     try {
-      const webRes = await youtubeWebSearch(`${query} official audio`, gl, 3000, { limit: 25, musicOnly: true, loose: false });
+      const hasOfficial = /\bofficial\s+audio\b/i.test(query);
+      const fallbackQ = hasOfficial
+        ? query.replace(/\b(?:official\s+audio|official\s+video|official)\b/gi, "").replace(/\s*[\[(][^)\]]*[)\]]/g, "").replace(/\s+/g, " ").trim()
+        : `${query} official audio`;
+      const webRes = await youtubeWebSearch(fallbackQ || query, gl, 3000, { limit: 25, musicOnly: false, loose: true });
       add(webRes);
     } catch (e) {
       errors.push(String(e.message || e));
@@ -335,6 +339,11 @@ const INNERTUBE_PROFILES = [
     tag: "ANDROID-20.10",
     ua: "com.google.android.youtube/20.10.44 (Linux; U; Android 14) gzip",
     client: { clientName: "ANDROID", clientVersion: "20.10.44", androidSdkVersion: 34, hl: "en", gl: "US" },
+  },
+  {
+    tag: "ANDROID_VR-1.60",
+    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
   },
   {
     tag: "IOS-19.09",

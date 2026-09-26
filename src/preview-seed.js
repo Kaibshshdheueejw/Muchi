@@ -534,14 +534,25 @@ export function previewShelf(id, q, gl) {
 
 // ── /api/search + /api/youtube/search ────────────────────────────────────
 function matchTracks(q) {
-  const needle = String(q || "").toLowerCase().trim();
-  if (!needle) return allTracks().slice(0, 24);
+  const rawNeedle = String(q || "").toLowerCase().trim();
+  if (!rawNeedle) return allTracks().slice(0, 24);
+  const needle = rawNeedle
+    .replace(/\b(official|audio|video|lyrics|lyric|music|hd|hq|remastered|version)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim() || rawNeedle;
   const wantedTag = ["pop", "hiphop", "rnb", "rock", "dance", "indie"].find((t) => needle.includes(t)) || "";
-  return allTracks().filter((t) => {
+  const words = needle.split(/\s+/).filter(Boolean);
+  const exact = allTracks().filter((t) => {
     const hay = `${t.title} ${t.artist} ${t._tag}`.toLowerCase();
     if (wantedTag && t._tag === wantedTag) return true;
-    return needle.split(/\s+/).every((w) => hay.includes(w));
+    return words.length > 0 && words.every((w) => hay.includes(w));
   }).slice(0, 24);
+  if (exact.length) return exact;
+  const partial = allTracks().filter((t) => {
+    const hay = `${t.title} ${t.artist} ${t._tag}`.toLowerCase();
+    return words.some((w) => w.length >= 2 && hay.includes(w));
+  }).slice(0, 24);
+  return partial.length ? partial : allTracks().slice(0, 12);
 }
 
 export function previewSearch(q) {
@@ -556,6 +567,7 @@ export function previewSearch(q) {
     ...t,
     id: `apple:preview:${i}:${t.id || i}`,
     source: "apple",
+    streamUrl: t.streamUrl || t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
     previewUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
     playQuery: `${t.title || ""} ${t.artist || ""} official audio`.trim(),
   }));
@@ -563,6 +575,7 @@ export function previewSearch(q) {
     ...t,
     id: `deezer:preview:${i}:${t.id || i}`,
     source: "deezer",
+    streamUrl: t.streamUrl || t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
     previewUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
     playQuery: `${t.title || ""} ${t.artist || ""} official audio`.trim(),
   }));

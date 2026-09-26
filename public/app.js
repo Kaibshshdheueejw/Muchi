@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.8";
+  const APP_VERSION = "1.6.9";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -3732,7 +3732,7 @@
   function tickCrossfade(d, p) {
     const fade = Number(state.prefs.crossfade || 0);
     const t = current();
-    if (!fade || !t || t.source === "youtube" || t.source === "radio") return;
+    if (npActive || !fade || !t || t.source === "youtube" || t.source === "radio") return;
     if (!d || d < fade + 1.5) return;
     const left = d - p;
     if (left <= fade && left > 0) {
@@ -3770,12 +3770,15 @@
   function pauseForSleep() {
     if (state.sleep.timer) clearTimeout(state.sleep.timer);
     state.sleep = { mode: "off", until: 0, timer: null };
+    setWantPlay(false);
     state.playing = false;
+    showEl($("eqBars"), false);
     audio.pause();
     nativePausePlayback();
     if (state.yt && state.yt.pauseVideo) {
       try { state.yt.pauseVideo(); } catch {}
     }
+    updateMediaSession();
     updateWakeLock();
     renderChrome();
     toast("Sleep timer — paused");
@@ -3857,10 +3860,12 @@
     const t = current();
     const saved = !!(t && isSaved(t));
     hookSound();
-    // Same gate as the library cards: a real download needs an Audius
-    // trackId or a YouTube videoId — Apple *preview* streamUrls are 30 s
-    // clips and must never be offered as "downloads".
-    const canDl = !!t && t.source !== "radio" && !!(t.videoId || t.trackId || saved);
+    const canDl = !!t && t.source !== "radio" && !!(t.videoId || t.trackId || t.source === "youtube" || t.source === "apple" || t.source === "itunes" || t.source === "deezer" || saved);
+    const canFollow = !!(t && t.source !== "radio");
+    const followingNow = !!(canFollow && isFollowing(t));
+    const canVideo = !!(t && t.source !== "radio" && t.source !== "audius");
+    const curStyle = ["pill", "island", "wave", "bar"].includes(state.prefs.playerStyle) ? state.prefs.playerStyle : "pill";
+    const curSpeed = Number(state.prefs.speed || 1) || 1;
     const ytChip = ytConnected() && t && t.videoId
       ? `<div class="po-row"><div><strong>YouTube</strong><p>Add the current song to your account.</p></div>
           <div class="po-yt-actions">
@@ -3874,10 +3879,6 @@
       body: `
         <div class="set-card">
           <div class="po-row">
-            <div><strong>Sleep timer</strong><p>${escapeHTML(sleepStatusLabel())}</p></div>
-            <button type="button" class="chip-btn" id="poSleep">Choose…</button>
-          </div>
-          <div class="po-row">
             <div><strong>${saved ? "Saved offline" : "Download song"}</strong><p>${
               saved ? "Already on this device — it plays without internet."
               : canDl ? "Keep this track on the device (real audio file with cover art)."
@@ -3886,6 +3887,36 @@
             ${canDl
               ? `<button type="button" class="chip-btn" id="poDl">${saved ? "✓ Saved" : "Download"}</button>`
               : ""}
+          </div>
+          ${t && t.source !== "radio" ? `
+          <div class="po-row">
+            <div><strong>Playlist &amp; Artist</strong><p>${escapeHTML(artistName(t) || t.artist || "Artist")}</p></div>
+            <div class="po-yt-actions">
+              <button type="button" class="chip-btn" id="poAddPl">+ Playlist</button>
+              ${canFollow ? `<button type="button" class="chip-btn" id="poFollow">${followingNow ? "✓ Following" : "Follow"}</button>` : ""}
+              <button type="button" class="chip-btn" id="poDetails">Details</button>
+            </div>
+          </div>` : ""}
+          ${canVideo ? `
+          <div class="po-row">
+            <div><strong>Video player</strong><p>${state.showVideo ? "Showing official video pane." : "Watch the official video while listening."}</p></div>
+            <button type="button" class="chip-btn" id="poVideo">${state.showVideo ? "Hide video" : "Watch video"}</button>
+          </div>` : ""}
+          <div class="po-row">
+            <div><strong>Sleep timer</strong><p>${escapeHTML(sleepStatusLabel())}</p></div>
+            <button type="button" class="chip-btn" id="poSleep">Choose…</button>
+          </div>
+          <div class="po-row">
+            <div><strong>Playback speed</strong><p>Current speed: ${curSpeed}×</p></div>
+            <div class="po-yt-actions">
+              ${[0.75, 1, 1.25, 1.5].map((sp) => `<button type="button" class="chip ${curSpeed === sp ? "active" : ""}" data-po-speed="${sp}">${sp}×</button>`).join("")}
+            </div>
+          </div>
+          <div class="po-row">
+            <div><strong>Player style</strong><p>Switch the docked player bar look.</p></div>
+            <div class="po-yt-actions">
+              ${[["pill", "Pill"], ["island", "Island"], ["wave", "Wave"], ["bar", "Bar"]].map(([id, lbl]) => `<button type="button" class="chip ${curStyle === id ? "active" : ""}" data-po-style="${id}">${lbl}</button>`).join("")}
+            </div>
           </div>
         </div>
         ${ytChip}`,
@@ -3896,6 +3927,37 @@
     $("poSleep").addEventListener("click", () => { hideModal(); openSleepTimerSheet(); });
     const poDl = $("poDl");
     if (poDl) poDl.addEventListener("click", () => { hideModal(); downloadTrack(t); });
+    const poAddPl = $("poAddPl");
+    if (poAddPl) poAddPl.addEventListener("click", () => { hideModal(); addToPlaylist(t); });
+    const poFollow = $("poFollow");
+    if (poFollow) poFollow.addEventListener("click", () => { hideModal(); toggleFollow(t); });
+    const poDetails = $("poDetails");
+    if (poDetails) poDetails.addEventListener("click", () => { hideModal(); openTrackDetail(t); });
+    const poVideo = $("poVideo");
+    if (poVideo) poVideo.addEventListener("click", () => {
+      hideModal();
+      const vBtn = $("videoBtn");
+      if (vBtn && typeof vBtn.onclick === "function") vBtn.onclick();
+    });
+    $("modalCard").querySelectorAll("[data-po-speed]").forEach((b) => {
+      b.addEventListener("click", () => {
+        state.prefs.speed = Number(b.dataset.poSpeed || 1);
+        savePrefs();
+        applyPlaybackPrefs();
+        hideModal();
+        toast(`Speed ${state.prefs.speed}×`);
+      });
+    });
+    $("modalCard").querySelectorAll("[data-po-style]").forEach((b) => {
+      b.addEventListener("click", () => {
+        state.prefs.playerStyle = b.dataset.poStyle;
+        savePrefs();
+        applyUi();
+        drawSeekWave();
+        renderChrome();
+        hideModal();
+      });
+    });
     const poYtLike = $("poYtLike");
     if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
     const poYtPl = $("poYtPl");
@@ -3932,7 +3994,7 @@
           <h3>${escapeHTML(t.title)}</h3>
           <p>${escapeHTML(t.artist)}</p>
         </button>
-        <button type="button" class="play-fab" data-play="${escapeAttr(t.id)}" title="Play">
+        <button type="button" class="play-fab" data-play="${escapeAttr(t.id)}" data-source="${escapeAttr(t.source || "")}" data-title="${escapeAttr(t.title || "")}" data-artist="${escapeAttr(t.artist || "")}" title="Play">
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
@@ -3942,7 +4004,7 @@
 
   function rowHTML(t, i, extra = "") {
     return `
-      <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}">
+      <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}" data-source="${escapeAttr(t.source || "")}" data-title="${escapeAttr(t.title || "")}" data-artist="${escapeAttr(t.artist || "")}">
         <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
@@ -3957,7 +4019,7 @@
     const isDl = Boolean(opt.isDownload || opt.where === "downloads" || state.activePlaylist === "downloads" || (state.view === "library" && state.libFilter === "downloaded") || isSaved(t));
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
-        <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
+        <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}" data-source="${escapeAttr(t.source || "")}" data-title="${escapeAttr(t.title || "")}" data-artist="${escapeAttr(t.artist || "")}">
           <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
           <div>
             <div class="t-title">${escapeHTML(t.title)}</div>
@@ -3986,6 +4048,9 @@
     const h = state.home;
     if (!h) return [];
     const shelves = (h.shelves || []).flatMap((s) => s.tracks || []);
+    const plTracks = []
+      .concat(h.globalPlaylists || [], h.countryPlaylists || [], h.forYouPlaylists || [], h.viralPlaylists || [])
+      .flatMap((p) => (p && p.tracks) || []);
     return [].concat(
       shelves,
       h.youtubeCharts || [],
@@ -3994,12 +4059,13 @@
       h.audius || [],
       h.underground || [],
       h.radio || [],
+      plTracks,
       state.forYou || [],
       state.recents || []
     );
   }
 
-  function findTrack(id) {
+  function findTrack(id, fallbackMeta = null) {
     try {
       const pools = [
         state.queue,
@@ -4010,18 +4076,35 @@
         state.downloads,
         homeTrackPool(),
         (state.catalogPlaylist && state.catalogPlaylist.tracks) || [],
+        (state.discovery && state.discovery.tracks) || [],
+        state.queueRecs || [],
         state.search ? [].concat(
           state.search.youtube || [],
           state.search.deezer || [],
           state.search.apple || [],
+          state.search.itunes || [],
           state.search.audius || [],
-          state.search.radio || []
+          state.search.radio || [],
+          state.search.offline || []
         ) : [],
+        (state.artistPage && state.artistPage.popular) || [],
         (state.artistPage && state.artistPage.songs) || [],
       ];
       for (const arr of pools) {
         const hit = (arr || []).find((t) => t && t.id === id);
         if (hit) return hit;
+      }
+      if (fallbackMeta && fallbackMeta.title) {
+        const wantT = String(fallbackMeta.title || "").toLowerCase().trim();
+        const wantA = String(fallbackMeta.artist || "").toLowerCase().trim();
+        for (const arr of pools) {
+          const hit = (arr || []).find((t) =>
+            t &&
+            String(t.title || "").toLowerCase().trim() === wantT &&
+            (!wantA || String(t.artist || "").toLowerCase().trim() === wantA)
+          );
+          if (hit) return hit;
+        }
       }
     } catch {}
     return null;
@@ -4030,7 +4113,8 @@
   function playFromList(list, index) {
     hapticFeedback("light");
     const next = list && list[index];
-    const same = !!(next && current() && current().id === next.id);
+    const cur = current();
+    const same = !!(next && cur && cur.id === next.id);
     let src = Array.isArray(list) ? list.slice() : [];
     let idx = Number.isInteger(index) ? index : 0;
     // Queue hygiene: keep mixes/compilations/podcasts out of the queue so it
@@ -4056,10 +4140,18 @@
     state.index = idx;
     state.playerReady = true;
     if (same) {
-      if (!state.playing) togglePlay();
-      renderQueue();
-      syncPlayerVisibility();
-      return;
+      const hasResolvedMedia = Boolean(
+        cur.videoId || cur.streamUrl || cur.url || cur.source === "audius" || cur.source === "radio"
+      );
+      const ytState = (state.yt && typeof state.yt.getPlayerState === "function") ? state.yt.getPlayerState() : -1;
+      const ytActivelyLoaded = Boolean(cur.videoId && !cur._playingViaAudio && (ytState === 1 || ytState === 2 || ytState === 3));
+      const audioActivelyLoaded = Boolean((cur._playingViaAudio || !cur.videoId) && audio.src && audio.networkState !== HTMLMediaElement.NETWORK_EMPTY && !audio.error);
+      if (hasResolvedMedia && (ytActivelyLoaded || audioActivelyLoaded || npActive)) {
+        if (!state.playing) togglePlay();
+        renderQueue();
+        syncPlayerVisibility();
+        return;
+      }
     }
     playCurrent(true);
     renderQueue();
@@ -4097,18 +4189,23 @@
       fallbackArt ||
       "/cover-default.jpg"
     ).trim();
+    const slug = `${title.toLowerCase().replace(/[^a-z0-9]/g, "")}_${artist.toLowerCase().replace(/[^a-z0-9]/g, "")}` || "track";
+    const preview = String(t.preview || t.previewUrl || "").trim();
+    const inferredVideoId = t.videoId || (/^yt:/i.test(String(t.id || "")) && /^[A-Za-z0-9_-]{11}$/.test(cleanId) ? cleanId : "");
     return {
-      id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      rawId: cleanId,
+      id: cleanId ? `deezer:${cleanId}` : `deezer:${slug}`,
+      rawId: cleanId || slug,
       source: "deezer",
       title,
       artist,
       album,
       duration,
       artwork,
-      previewUrl: t.preview || t.previewUrl || "",
+      streamUrl: t.streamUrl || "",
+      previewUrl: preview,
+      preview,
       playQuery: t.playQuery || `${title} ${artist} official audio`.trim(),
-      videoId: t.videoId || "",
+      videoId: inferredVideoId,
     };
   }
 
@@ -4262,21 +4359,7 @@
     const artist = { name: a.name || name, artwork: a.picture_medium || "" };
     const dzSong = (t, srcArt) => {
       if (!t || (!t.title && !t.trackName)) return null;
-      const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
-      const title = t.title || t.trackName || "Song";
-      const artName = (t.artist && (t.artist.name || t.artist)) || t.artistName || artist.name;
-      const albName = (t.album && (t.album.title || t.album)) || t.collectionName || "";
-      const art = (t.album && (t.album.cover_medium || t.album.cover_big)) || t.artwork || srcArt || "";
-      return {
-        id: `deezer:${cleanId}`,
-        source: "deezer",
-        title,
-        artist: artName,
-        album: albName,
-        duration: Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0,
-        artwork: art,
-        playQuery: `${title} ${artName} official audio`.trim(),
-      };
+      return normalizeClientDeezerTrack(t, artist.name, srcArt || artist.artwork);
     };
     // 1) Most popular tracks
     const top = [];
@@ -4881,26 +4964,103 @@
     setTimeout(() => next(true), 600);
   }
 
-  // In-memory resolution cache: playQuery -> {videoId, artwork, duration}.
+  // In-memory resolution cache: playQuery -> {videoId, candidates, artwork, duration, streamUrl}.
   const ytResolveCache = new Map();
   const YT_RESOLVE_CACHE_MAX = 500;
-  function ytResolveStore(q, videoId, artwork, duration) {
+  function ytResolveStore(q, videoId, artwork, duration, candidates = [], streamUrl = "") {
     if (ytResolveCache.size >= YT_RESOLVE_CACHE_MAX) {
       const first = ytResolveCache.keys().next().value;
       if (first !== undefined) ytResolveCache.delete(first);
     }
-    ytResolveCache.set(q, { videoId: videoId || "", artwork: artwork || "", duration: duration || 0 });
+    ytResolveCache.set(q, {
+      videoId: videoId || "",
+      candidates: Array.isArray(candidates) ? candidates.slice(0, 10) : [],
+      artwork: artwork || "",
+      duration: duration || 0,
+      streamUrl: streamUrl || "",
+    });
   }
+
+  function buildTrackPlayQueries(t) {
+    const rawTitle = String((t && t.title) || "").trim();
+    const rawArtist = String((t && t.artist) || "").replace(/^(unknown artist|various artists|artist|youtube)$/i, "").trim();
+    const cleanTitle = rawTitle
+      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|with|remaster|live|radio edit|explicit|clean|version|deluxe|bonus|soundtrack|from\s)[^)\]]*[)\]]/gi, "")
+      .replace(/\s+-\s+.*?(?:remaster|version|edit|live|mono|stereo|deluxe).*$/i, "")
+      .trim() || rawTitle;
+    const bareTitle = rawTitle.replace(/\s*[\[(][^)\]]*[)\]]/g, "").trim() || cleanTitle;
+    const primaryArtist = rawArtist.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\swith\s|\/)\s*/i)[0].trim() || rawArtist;
+    const list = [
+      String(t && t.playQuery || "").trim(),
+      `${rawTitle} ${rawArtist} official audio`.trim(),
+      `${cleanTitle} ${primaryArtist} official audio`.trim(),
+      `${bareTitle} ${primaryArtist}`.trim(),
+      cleanTitle,
+    ].filter(Boolean);
+    return [...new Set(list)];
+  }
+
+  async function resolveFallbackStreamUrl(t, skipYtStream = false) {
+    if (!t) return "";
+    if (!skipYtStream && t.streamUrl) return t.streamUrl;
+    if (!skipYtStream && t.videoId) {
+      try {
+        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}`, 6000);
+        if (sData && sData.url) {
+          t.streamUrl = sData.url;
+          if (sData.duration && !t.duration) t.duration = Number(sData.duration);
+          return t.streamUrl;
+        }
+      } catch {}
+    }
+    if (t.source === "deezer" || t.origSource === "deezer" || String(t.id || "").startsWith("deezer:")) {
+      const cleanId = String(t.rawId || t.id || "").replace(/^deezer:/, "").trim();
+      if (/^\d+$/.test(cleanId)) {
+        try {
+          const tr = await dzFetch(`/track/${cleanId}`, 4500);
+          const freshPrev = tr && (tr.preview || (tr.data && tr.data[0] && tr.data[0].preview));
+          if (freshPrev) {
+            t.previewUrl = freshPrev;
+            t.preview = freshPrev;
+            t.streamUrl = freshPrev;
+            return freshPrev;
+          }
+        } catch {}
+      }
+    }
+    if (t.previewUrl || t.preview) {
+      t.streamUrl = t.previewUrl || t.preview;
+      return t.streamUrl;
+    }
+    const q = `${t.title || ""} ${t.artist || ""}`.trim();
+    if (q) {
+      try {
+        const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=5`);
+        const rows = (itRes && (itRes.results || itRes.apple || itRes.itunes)) || [];
+        const hit = rows.find((r) => r && r.previewUrl);
+        if (hit && hit.previewUrl) {
+          t.previewUrl = hit.previewUrl;
+          t.streamUrl = hit.previewUrl;
+          return hit.previewUrl;
+        }
+      } catch {}
+    }
+    return "";
+  }
+
   async function resolveYouTubePlay(t) {
     if (!t) return t;
     if (t.videoId) return t;
-    const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
+    const queries = buildTrackPlayQueries(t);
+    const q = queries[0] || "";
     if (!q) throw new Error("No playable version");
 
     // Instant path: already resolved this exact query this session.
     const cachedHit = ytResolveCache.get(q);
-    if (cachedHit && cachedHit.videoId) {
-      t.videoId = cachedHit.videoId;
+    if (cachedHit && (cachedHit.videoId || cachedHit.streamUrl)) {
+      if (cachedHit.videoId) t.videoId = cachedHit.videoId;
+      if (cachedHit.candidates && cachedHit.candidates.length) t._ytCandidates = cachedHit.candidates.slice();
+      if (cachedHit.streamUrl && !t.streamUrl) t.streamUrl = cachedHit.streamUrl;
       if (!t.origSource) t.origSource = t.source;
       if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
       if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
@@ -4909,24 +5069,111 @@
     }
 
     let rows = [];
+    // 1. Primary: /api/youtube/search with primary query (9s timeout so server 2-stage search never gets cut off)
     try {
-      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 6000);
-      rows = (data && data.tracks) || (data && data.results) || data || [];
-    } catch {
+      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 9000);
+      rows = (data && data.tracks) || (data && data.results) || (Array.isArray(data) ? data : []);
+    } catch {}
+
+    // 2. Secondary: if empty and we have a cleaner stripped query (e.g. without Deezer (feat...) / [Remastered] clutter)
+    if ((!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) && queries[2] && queries[2] !== q) {
       try {
-        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`, 6000);
-        rows = (data && data.youtube) || [];
+        const data2 = await api(`/api/youtube/search?q=${encodeURIComponent(queries[2])}&${glq()}`, 8000);
+        rows = (data2 && data2.tracks) || (data2 && data2.results) || (Array.isArray(data2) ? data2 : []);
       } catch {}
     }
-    const hit = (Array.isArray(rows) ? rows : []).find((x) => x && x.videoId);
-    if (!hit) throw new Error("No playable version");
-    t.videoId = hit.videoId;
-    if (!t.origSource) t.origSource = t.source;
-    if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
-    if (hit.duration && !t.duration) t.duration = hit.duration;
-    if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
-    ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0);
-    return t;
+
+    // 3. Tertiary: /api/search?source=youtube
+    if (!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) {
+      const qFallback = queries[3] || queries[2] || q;
+      try {
+        const data3 = await api(`/api/search?q=${encodeURIComponent(qFallback)}&source=youtube&${glq()}`, 8000);
+        rows = (data3 && data3.youtube) || (data3 && data3.tracks) || [];
+      } catch {}
+    }
+
+    // 4. Browser-direct Piped search fallback if server YouTube search was blocked/empty
+    if (!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) {
+      const qPiped = queries[3] || q;
+      try {
+        const pData = await pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=music_songs`).catch(() =>
+          pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=all`)
+        );
+        const pItems = (pData && (pData.items || pData)) || [];
+        rows = pItems
+          .map((it) => {
+            const vid = (it && it.url && (it.url.split("v=")[1] || it.url.replace("/watch?v=", "")).split("&")[0]) || (it && it.videoId) || "";
+            if (!vid) return null;
+            return {
+              videoId: vid,
+              title: it.title || t.title,
+              artist: it.uploaderName || it.uploader || t.artist,
+              duration: Number(it.duration || 0),
+              artwork: it.thumbnail || ytThumb(vid),
+            };
+          })
+          .filter(Boolean);
+      } catch {}
+    }
+
+    const validRows = (Array.isArray(rows) ? rows : []).filter((x) => x && (x.videoId || x.streamUrl));
+    const blockedSet = t._blockedVideoIds instanceof Set ? t._blockedVideoIds : new Set();
+    const candidates = validRows.map((x) => x.videoId).filter((vid) => vid && !blockedSet.has(vid));
+    if (candidates.length) {
+      t._ytCandidates = [...new Set(candidates)];
+    }
+
+    const hit = validRows.find((x) => x.videoId && !blockedSet.has(x.videoId)) || validRows[0];
+    if (hit && hit.videoId) {
+      t.videoId = hit.videoId;
+      if (!t.origSource) t.origSource = t.source;
+      if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
+      if (hit.duration && !t.duration) t.duration = hit.duration;
+      if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
+      ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0, t._ytCandidates || [], t.streamUrl || "");
+      return t;
+    }
+
+    if (hit && hit.streamUrl) {
+      t.streamUrl = hit.streamUrl;
+      if (!t.origSource) t.origSource = t.source;
+      if (hit.duration && !t.duration) t.duration = hit.duration;
+      if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
+      ytResolveStore(q, "", t.artwork, hit.duration || 0, [], t.streamUrl);
+      return t;
+    }
+
+    // 5. Direct audio fallback (fresh Deezer track preview / iTunes preview) so a clicked Deezer song ALWAYS plays
+    const fallbackUrl = await resolveFallbackStreamUrl(t);
+    if (fallbackUrl) {
+      t.streamUrl = fallbackUrl;
+      ytResolveStore(q, "", t.artwork, t.duration || 0, [], fallbackUrl);
+      return t;
+    }
+
+    throw new Error("No playable version");
+  }
+
+  async function playFallbackAudioForTrack(t, skipYtStream = false) {
+    if (!t) return false;
+    try {
+      const url = await resolveFallbackStreamUrl(t, skipYtStream);
+      if (!url) return false;
+      t.streamUrl = url;
+      t._playingViaAudio = true;
+      await playAudio(t);
+      failSkip = 0;
+      state.playing = true;
+      setWantPlay(true);
+      showEl($("eqBars"), true);
+      updateMediaSession();
+      updateWakeLock();
+      startTimer();
+      renderChrome();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async function playCurrent(reset) {
@@ -4942,6 +5189,22 @@
       _resumeTrackId = null;
     }
     const gen = ++playGen;
+    t._playingViaAudio = false;
+    state._xfading = false;
+    state.playing = true;
+    setWantPlay(true);
+    if (reset) {
+      npPos = 0;
+      npPosAt = 0;
+      const seekEl = $("seek");
+      if (seekEl && !isSeekingUi) {
+        seekCur = 0;
+        seekTgt = 0;
+        seekEl.value = 0;
+      }
+      if ($("curTime")) $("curTime").textContent = "0:00";
+      if ($("durTime")) $("durTime").textContent = t.source === "radio" ? "LIVE" : fmt(t.duration || 0);
+    }
     pushRecent(t);
     // Listening shifts the taste profile — reorder "Made for you" so it adapts
     // as the user keeps playing songs.
@@ -4953,10 +5216,20 @@
       (typeof navigator !== "undefined" && navigator.onLine === false)
     );
 
+    // Pre-warm the YouTube IFrame player synchronously on the user click
+    // gesture BEFORE awaiting network resolution (resolveYouTubePlay) so mobile
+    // & desktop browsers don't block autoplay after the async resolve finishes.
+    // On native Android/iOS shells using MuchiAudio background playback, skip
+    // pre-warming the iframe so it doesn't compete with native audio.
+    const useNativeAudioPipe = IS_NATIVE && !!nativePlayer() && state.prefs.ytAudio !== false && !state.showVideo;
+    if (!isNetworkOff && !useNativeAudioPipe && !state.yt && typeof YT !== "undefined" && YT.Player) {
+      try { ensureYT(t.videoId || ""); } catch {}
+    }
+
     if (!isNetworkOff) {
       loadLyrics(t);
       loadQueueRecs();
-      const hasQueueFollowers = Array.isArray(state.queue) && (state.queueIdx + 1 < state.queue.length);
+      const hasQueueFollowers = Array.isArray(state.queue) && (state.index + 1 < state.queue.length);
       if (!hasQueueFollowers && t.source !== "radio") {
         fillRelatedQueue(t);
       }
@@ -4973,6 +5246,7 @@
       // Never attempt to load YouTube iframe or remote stream over internet!
       if (hasOfflinePlayback || isNetworkOff) {
         if (hasOfflinePlayback) {
+          t._playingViaAudio = true;
           await playAudio(t);
           if (gen !== playGen) return;
           failSkip = 0;
@@ -4981,9 +5255,14 @@
           showEl($("eqBars"), true);
           updateMediaSession();
           updateWakeLock();
+          renderChrome();
+          updateProgress();
           if (state.view === "now" && gen === playGen) render();
           return;
         } else {
+          state.playing = false;
+          setWantPlay(false);
+          renderChrome();
           toast(`"${t.title}" is not available offline`);
           skipFailed("Song not downloaded for offline playback");
           return;
@@ -4997,11 +5276,19 @@
         !t.videoId && !t.streamUrl && !t.url &&
         t.source !== "audius" && t.source !== "radio";
       if (needsResolve) {
-        await resolveYouTubePlay(t);
+        renderBufferState(true);
+        try {
+          await resolveYouTubePlay(t);
+        } finally {
+          if (gen === playGen) {
+            renderBufferState(false);
+            renderChrome();
+          }
+        }
       }
       if (gen !== playGen) return;
 
-      if (t.videoId) {
+      if (t.videoId && !t._playingViaAudio) {
         // On native shells, play YouTube as a background audio stream when
         // possible so the OS media notification + lock-screen controls work
         // and music keeps playing with the screen off. Falls back to the
@@ -5011,11 +5298,20 @@
         if (usedNative) {
           // resolved + handed to native player; nothing more to do here
         } else {
-          await playYouTube(t, reset);
+          try {
+            await playYouTube(t, reset);
+          } catch (ytErr) {
+            if (gen !== playGen) return;
+            const okFallback = await playFallbackAudioForTrack(t);
+            if (!okFallback) throw ytErr;
+          }
         }
       }
-      else if (t.source === "youtube") throw new Error("No video");
-      else await playAudio(t);
+      else if (t.source === "youtube" && !t.streamUrl && !t.url) throw new Error("No video");
+      else {
+        t._playingViaAudio = true;
+        await playAudio(t);
+      }
 
       if (gen !== playGen) return;
       failSkip = 0;
@@ -5024,16 +5320,29 @@
       showEl($("eqBars"), true);
       updateMediaSession();
       updateWakeLock();
+      renderChrome();
+      updateProgress();
     } catch (err) {
       if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) {
         return;
       }
       console.error(err);
+      // Try direct/preview audio fallback before giving up on a metadata track
+      if (gen === playGen && (t.source === "deezer" || t.source === "apple" || t.source === "itunes" || t.previewUrl || t.preview)) {
+        try {
+          const okAudio = await playFallbackAudioForTrack(t);
+          if (okAudio) {
+            if (state.view === "now" && gen === playGen) render();
+            return;
+          }
+        } catch {}
+      }
       // Last-chance offline fallback if network failed unexpectedly (e.g. data turned off)
       try {
         const fallbackBlob = await getOfflineAudioBlob(t);
         if (fallbackBlob) {
           const fallbackUrl = URL.createObjectURL(fallbackBlob);
+          t._playingViaAudio = true;
           await playAudioWeb(fallbackUrl);
           if (gen !== playGen) return;
           failSkip = 0;
@@ -5066,11 +5375,15 @@
         if (data.duration) dur = Number(data.duration);
       }
     } catch { url = ""; }
+    if (!url) {
+      url = await resolveFallbackStreamUrl(t, true);
+    }
     if (!url) return false;
     t.streamUrl = url;
     t.duration = dur;
+    t._playingViaAudio = true;
     await playAudio(t);
-    return !!nativePlayer() && npActive;
+    return (!!nativePlayer() && npActive) || !audio.paused;
   }
 
   function stopOthers(keep) {
@@ -5133,7 +5446,7 @@
     if (offlineBlob) {
       url = URL.createObjectURL(offlineBlob);
     } else if (!isNetworkOff) {
-      url = t.streamUrl || "";
+      url = t.streamUrl || t.url || "";
     }
 
     if (!url && t.source === "audius" && t.trackId) {
@@ -5172,13 +5485,16 @@
     if (!url && !isNetworkOff) {
       if (t.videoId) {
         try {
-          const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}`, 6000);
+          const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(artistName(t) || t.artist || "")}`, 6000);
           if (sData && sData.url) {
             url = sData.url;
             t.streamUrl = url;
             if (sData.duration && !t.duration) t.duration = Number(sData.duration);
           }
         } catch {}
+      }
+      if (!url) {
+        url = await resolveFallbackStreamUrl(t);
       }
     }
     if (!url) {
@@ -5304,6 +5620,8 @@
         }
       },
       onStateChange: (e) => {
+        const curTrack = current();
+        if (npActive || (curTrack && curTrack._playingViaAudio)) return;
         const st = e && e.data;
         if (st === YT.PlayerState.PLAYING) {
           ytSwitching = false;
@@ -5348,6 +5666,8 @@
         }
       },
       onError: (e) => {
+        const curTrack = current();
+        if (npActive || (curTrack && curTrack._playingViaAudio)) return;
         onYouTubeError(e && e.data);
       },
     };
@@ -5357,7 +5677,7 @@
     if (typeof YT === "undefined" || !YT.Player) return null;
     const host = $("ytPlayer");
     if (!host) return null;
-    const isCapacitorOrLocal = !location.origin || location.origin === "null" || location.origin.startsWith("file:") || location.origin.startsWith("capacitor:");
+    const isCapacitorOrLocal = IS_NATIVE || !location.origin || location.origin === "null" || /^(file:|capacitor:|https?:\/\/localhost)/i.test(location.origin);
     const ytOrigin = isCapacitorOrLocal ? "https://www.youtube.com" : location.origin;
     const opts = {
       width: "360",
@@ -5435,25 +5755,56 @@
       recoverYouTubeAlt(cur);
       return;
     }
-    if (ytRetry < 3) {
+    if (ytRetry < 2) {
       ytRetry += 1;
       setTimeout(() => retryYouTube(want, ytToken), 220 * ytRetry);
+    } else {
+      recoverYouTubeAlt(cur);
     }
   }
 
   async function recoverYouTubeAlt(t) {
-    if (!t) return;
-    const blocked = String(t.videoId || "");
-    const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
-    if (!q) return;
-    try {
-      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 12000);
-      const hit = (data.tracks || []).find((x) => x && x.videoId && x.videoId !== blocked);
-      if (!hit || current() !== t) return;
-      t.videoId = hit.videoId;
-      ytRetry = 0;
-      await playYouTube(t);
-    } catch {}
+    if (!t || current() !== t) return;
+    if (!(t._blockedVideoIds instanceof Set)) t._blockedVideoIds = new Set();
+    if (t.videoId) t._blockedVideoIds.add(String(t.videoId));
+
+    // 1. Try already-fetched candidate videoIds first (zero network wait, no ping-pong loop)
+    if (Array.isArray(t._ytCandidates) && t._blockedVideoIds.size <= 3) {
+      const nextCand = t._ytCandidates.find((vid) => vid && !t._blockedVideoIds.has(String(vid)));
+      if (nextCand && current() === t) {
+        t.videoId = nextCand;
+        ytRetry = 0;
+        try {
+          await playYouTube(t);
+          return;
+        } catch {}
+      }
+    }
+
+    // 2. Search for an embeddable lyric/audio upload if we haven't exhausted attempts
+    if (t._blockedVideoIds.size <= 3) {
+      const queries = buildTrackPlayQueries(t);
+      const baseQ = queries[3] || queries[2] || `${t.title || ""} ${t.artist || ""}`.trim();
+      const altQ = `${baseQ} lyrics audio`.trim();
+      if (altQ) {
+        try {
+          const data = await api(`/api/youtube/search?q=${encodeURIComponent(altQ)}&${glq()}`, 8000);
+          const rows = (data && data.tracks) || (data && data.results) || [];
+          const hit = rows.find((x) => x && x.videoId && !t._blockedVideoIds.has(String(x.videoId)));
+          if (hit && current() === t) {
+            t.videoId = hit.videoId;
+            ytRetry = 0;
+            await playYouTube(t);
+            return;
+          }
+        } catch {}
+      }
+    }
+
+    // 3. Fallback to direct audio stream (<audio>) so blocked YouTube embeds never break Deezer/catalog playback
+    if (current() === t) {
+      await playFallbackAudioForTrack(t);
+    }
   }
 
   function retryYouTube(id, token) {
@@ -5489,9 +5840,30 @@
     applyYtQuality();
   }
 
+  let ytWatchdogTimer = 0;
+  function scheduleYtWatchdog(t, id, token) {
+    if (ytWatchdogTimer) clearTimeout(ytWatchdogTimer);
+    ytWatchdogTimer = setTimeout(() => {
+      if (token !== ytToken || current() !== t || !wantPlay || t._playingViaAudio) return;
+      const st = (state.yt && typeof state.yt.getPlayerState === "function") ? state.yt.getPlayerState() : -1;
+      // If YouTube iframe is stuck in UNSTARTED (-1) or CUED (5) after async resolution:
+      if (st === -1 || st === 5) {
+        try { if (state.yt && state.yt.playVideo) state.yt.playVideo(); } catch {}
+        ytWatchdogTimer = setTimeout(() => {
+          if (token !== ytToken || current() !== t || !wantPlay || t._playingViaAudio) return;
+          const st2 = (state.yt && typeof state.yt.getPlayerState === "function") ? state.yt.getPlayerState() : -1;
+          if (st2 === -1 || st2 === 5) {
+            playFallbackAudioForTrack(t);
+          }
+        }, 1800);
+      }
+    }, 3200);
+  }
+
   async function playYouTube(t) {
     if (!t || !t.videoId) throw new Error("No video");
     const id = String(t.videoId);
+    t._playingViaAudio = false;
     ytToken += 1;
     const token = ytToken;
     ytWanted = id;
@@ -5506,10 +5878,12 @@
       if (ytPlayingId() === id) {
         try { state.yt.playVideo(); } catch {}
         startTimer();
+        scheduleYtWatchdog(t, id, token);
         return;
       }
       kickYouTube(id);
       startTimer();
+      scheduleYtWatchdog(t, id, token);
       return;
     }
     const player = await ensureYT(id);
@@ -5517,6 +5891,7 @@
     if (!player) throw new Error("YouTube player missing");
     kickYouTube(id);
     startTimer();
+    scheduleYtWatchdog(t, id, token);
   }
 
   function setQueueOpen(open) {
@@ -5559,7 +5934,13 @@
       else testPlay();
       return;
     }
-    const isYt = (t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getPlayerState === "function";
+    // If the current track is an unresolved catalog track (e.g. Deezer/iTunes) that hasn't loaded a stream yet, resolve & play it
+    if (!t.videoId && !t.streamUrl && !t.url && t.source !== "audius" && t.source !== "radio") {
+      setWantPlay(true);
+      playCurrent(true);
+      return;
+    }
+    const isYt = (t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.getPlayerState === "function";
     if (isYt) {
       const s = state.yt.getPlayerState();
       if (s === 1 || s === 3) {
@@ -5576,7 +5957,7 @@
         return;
       }
     } else if (npActive && nativePlayer()) {
-      if (npPlaying) {
+      if (state.playing) {
         setWantPlay(false);
         nativePausePlayback();
         state.playing = false;
@@ -5585,6 +5966,14 @@
         nativeResumePlayback();
         state.playing = true;
       }
+    } else if (IS_NATIVE && nativePlayer() && !npActive && (t._playingViaAudio || !audio.src)) {
+      if (npPos > 0) {
+        _pendingSeek = npPos;
+        _pendingSeekApplied = false;
+      }
+      setWantPlay(true);
+      playCurrent(false);
+      return;
     } else if (audio.paused) {
       if (!audio.src || audio.networkState === HTMLMediaElement.NETWORK_EMPTY) {
         setWantPlay(true);
@@ -5657,8 +6046,16 @@
   function position() {
     const t = current();
     if (!t) return 0;
-    if (npActive) return npPos || 0;
-    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getCurrentTime === "function") {
+    if (npActive) {
+      if (state.playing && npPlaying && npPosAt > 0 && Date.now() >= npSeekGuardUntil) {
+        const elapsed = Math.max(0, Math.min(1.5, (performance.now() - npPosAt) / 1000));
+        const est = (npPos || 0) + elapsed;
+        const d = npDur || t.duration || 0;
+        return d > 0 ? Math.min(d, est) : est;
+      }
+      return npPos || 0;
+    }
+    if ((t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.getCurrentTime === "function") {
       return state.yt.getCurrentTime() || 0;
     }
     return audio.currentTime || 0;
@@ -5669,7 +6066,7 @@
     if (!t) return 0;
     if (t.source === "radio") return 0;
     if (npActive) return npDur || t.duration || 0;
-    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getDuration === "function") {
+    if ((t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.getDuration === "function") {
       return state.yt.getDuration() || t.duration || 0;
     }
     return audio.duration && isFinite(audio.duration) ? audio.duration : t.duration || 0;
@@ -5680,7 +6077,7 @@
     if (!t || t.source === "radio") return;
     const at = Math.max(0, Number(sec) || 0);
     if (npActive && nativeSeekTo(at)) { updateProgress(); return; }
-    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.seekTo === "function") {
+    if ((t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.seekTo === "function") {
       state.yt.seekTo(at, true);
     } else {
       audio.currentTime = at;
@@ -5690,22 +6087,24 @@
 
   let waveRaf = 0;
   let waveLast = 0;
+  let isSeekingUi = false;
   function cheapPhone() {
     return !!(window.matchMedia && (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 980px)").matches));
   }
   function restartWaveLoop() {
-    if (cheapPhone() || !state.playing || waveRaf || document.hidden || state.view !== "now") return;
+    if (!state.playing || waveRaf || document.hidden) return;
+    const interval = cheapPhone() ? 140 : 80;
     const loop = (now) => {
       if (!state.playing) {
         waveRaf = 0;
         drawSeekWave();
         return;
       }
-      if (document.hidden || state.view !== "now") {
+      if (document.hidden) {
         waveRaf = 0;
         return;
       }
-      if (!waveLast || now - waveLast > 80) {
+      if (!waveLast || now - waveLast > interval) {
         drawSeekWave();
         waveLast = now;
       }
@@ -5716,12 +6115,8 @@
   function startTimer() {
     stopTimer();
     const cheap = cheapPhone();
-    state.timer = setInterval(updateProgress, cheap ? 1500 : 500);
-    if (!cheap) {
-      restartWaveLoop();
-    } else {
-      drawSeekWave();
-    }
+    state.timer = setInterval(updateProgress, cheap ? 350 : 250);
+    restartWaveLoop();
     updateProgress();
     renderChrome();
   }
@@ -5752,7 +6147,7 @@
       const nextT = state.queue[state.index + 1];
       if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
         nextT._resolving = true;
-        api(`/api/yt/stream?v=${encodeURIComponent(nextT.videoId)}`, 8000).then((res) => {
+        api(`/api/yt/stream?v=${encodeURIComponent(nextT.videoId)}&title=${encodeURIComponent(nextT.title || "")}&artist=${encodeURIComponent(nextT.artist || "")}`, 8000).then((res) => {
           if (res && res.url) {
             nextT.streamUrl = res.url;
             if (!nextT._prefetched) {
@@ -5774,12 +6169,15 @@
     }
 
     if (document.hidden && cheapPhone()) return;
-    $("curTime").textContent = fmt(p);
-    $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
     const seek = $("seek");
+    const activeScrub = Boolean(isSeekingUi || (seek && seek.matches(":active")));
+    if (!activeScrub) {
+      $("curTime").textContent = fmt(p);
+    }
+    $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
     if (seek) {
-      const tv = d ? Math.round((p / d) * 1000) : 0;
-      if (seek.matches(":active")) {
+      const tv = d ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+      if (activeScrub) {
         seekCur = -1; seekTgt = -1;
         if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
       } else if (prefersReducedMotion()) {
@@ -5790,7 +6188,7 @@
         if (!seekRaf) seekRaf = requestAnimationFrame(seekTick);
       }
     }
-    if (!cheapPhone()) drawSeekWave();
+    drawSeekWave();
     highlightLyric(p);
   }
   let msPosTick = 0;
@@ -5798,7 +6196,7 @@
   let seekCur = -1, seekTgt = -1, seekRaf = 0;
   function seekTick() {
     const seek = $("seek");
-    if (!seek || seek.matches(":active") || seekTgt < 0) { seekRaf = 0; return; }
+    if (!seek || isSeekingUi || seek.matches(":active") || seekTgt < 0) { seekRaf = 0; return; }
     const diff = seekTgt - seekCur;
     if (Math.abs(diff) < 0.25) {
       seek.value = seekTgt;
@@ -6017,7 +6415,11 @@
   let npActive = false;   // native player is the current audio sink
   let npPlaying = false;  // last known native playback state
   let npPos = 0;          // last known position (s)
+  let npPosAt = 0;        // performance.now() timestamp of last npPos update
   let npDur = 0;          // last known duration (s)
+  let npSeenPlaying = false; // true once ExoPlayer/AVPlayer has transitioned to playing for the current track
+  let npCmdUntil = 0;     // guard window after JS play/pause/resume command so stale progress ticks don't flip UI
+  let npSeekGuardUntil = 0; // guard window after JS seek command so stale pre-seek ticks don't snap slider back
   let npPermAsked = false; // one-time native notification permission ask
   function nativeEnsureNotifyPermission() {
     const NP = nativePlayer();
@@ -6069,8 +6471,12 @@
     nativeEnsureNotifyPermission();
     npActive = true;
     npPlaying = true;
+    npSeenPlaying = false;
     npPos = 0;
+    npPosAt = performance.now();
     npDur = Number(durationSec) || 0;
+    npCmdUntil = Date.now() + 4500;
+    npSeekGuardUntil = 0;
     NP.play({
       url: String(url),
       title: String(title || "Muchi"),
@@ -6088,12 +6494,16 @@
     const NP = nativePlayer();
     if (!NP || !npActive) return;
     npPlaying = false;
+    npPosAt = 0;
+    npCmdUntil = Date.now() + 1500;
     NP.pause().catch(() => {});
   }
   function nativeResumePlayback() {
     const NP = nativePlayer();
     if (!NP || !npActive) return;
     npPlaying = true;
+    npPosAt = performance.now();
+    npCmdUntil = Date.now() + 1500;
     NP.resume().catch(() => {});
   }
   function nativeStopPlayback() {
@@ -6101,13 +6511,17 @@
     if (!NP || !npActive) return;
     npActive = false;
     npPlaying = false;
+    npSeenPlaying = false;
     npPos = 0;
+    npPosAt = 0;
     NP.stop().catch(() => {});
   }
   function nativeSeekTo(sec) {
     const NP = nativePlayer();
     if (!NP || !npActive) return false;
     npPos = Math.max(0, Number(sec) || 0);
+    npPosAt = performance.now();
+    npSeekGuardUntil = Date.now() + 1400;
     NP.seekTo({ position: Math.round(npPos * 1000) }).catch(() => {});
     return true;
   }
@@ -6120,30 +6534,68 @@
   // reliable enough to be the real sink for every track.
   function nativeHandleControls(action) {
     if (!action) return;
-    const msg = action.message || action;
-    if (msg === "music-controls-play") { setWantPlay(true); if (!state.playing) togglePlay(); }
-    else if (msg === "music-controls-pause" || msg === "music-controls-destroy") { setWantPlay(false); if (state.playing) togglePlay(); }
-    else if (msg === "music-controls-next") next(true);
-    else if (msg === "music-controls-previous") prev();
-    else if (msg === "music-controls-toggle-play-pause") togglePlay();
-    else if (msg === "music-controls-seek-to" || msg === "music-controls-skip-to") {
-      const sec = Number(action.position != null ? action.position : action.seekTo);
-      if (isFinite(sec)) seekTo(sec);
-    } else if (msg === "music-controls-headset-unplugged") {
+    const msg = action.message || action.action || action;
+    if (msg === "music-controls-play" || msg === "play") {
+      npPlaying = true;
+      npSeenPlaying = true;
+      npPosAt = performance.now();
+      npCmdUntil = Date.now() + 1200;
+      setWantPlay(true);
+      state.playing = true;
+      showEl($("eqBars"), true);
+      if (!state.timer) startTimer();
+      updateMediaSession();
+      renderChrome();
+    } else if (msg === "music-controls-pause" || msg === "pause" || msg === "music-controls-headset-unplugged") {
+      npPlaying = false;
+      npPosAt = 0;
+      npCmdUntil = Date.now() + 1200;
       setWantPlay(false);
-      if (state.playing) togglePlay();
-    } else if (msg === "play") { setWantPlay(true); if (!state.playing) togglePlay(); }
-    else if (msg === "pause") { setWantPlay(false); if (state.playing) togglePlay(); }
-    else if (msg === "next") next(true);
-    else if (msg === "previous") prev();
-    else if (msg === "seek") {
-      const sec = Number(action.position != null ? action.position : action.seekTo);
-      if (isFinite(sec)) seekTo(sec);
+      state.playing = false;
+      showEl($("eqBars"), false);
+      updateMediaSession();
+      renderChrome();
+    } else if (msg === "music-controls-destroy" || msg === "stop") {
+      npActive = false;
+      npPlaying = false;
+      npSeenPlaying = false;
+      npPosAt = 0;
+      setWantPlay(false);
+      state.playing = false;
+      showEl($("eqBars"), false);
+      stopTimer();
+      updateMediaSession();
+      renderChrome();
+    } else if (msg === "music-controls-next" || msg === "next") {
+      next(true);
+    } else if (msg === "music-controls-previous" || msg === "previous" || msg === "prev") {
+      prev();
+    } else if (msg === "music-controls-toggle-play-pause") {
+      togglePlay();
+    } else if (msg === "music-controls-seek-to" || msg === "music-controls-skip-to" || msg === "seek") {
+      const raw = Number(action.position != null ? action.position : action.seekTo);
+      if (isFinite(raw)) {
+        const sec = raw > 10000 ? raw / 1000 : raw;
+        seekTo(sec);
+      }
     } else if (msg === "ended") {
       next(true);
     } else if (msg === "error") {
-      if (npActive) { npActive = false; }
-      if (state.playing && current()) skipFailed("Playback error");
+      if (npActive) { npActive = false; npPlaying = false; npSeenPlaying = false; }
+      const cur = current();
+      if (state.playing && cur) {
+        if (!cur._nativeFallbackTried) {
+          cur._nativeFallbackTried = true;
+          cur.streamUrl = "";
+          playFallbackAudioForTrack(cur, true).then((ok) => {
+            if (!ok && current() === cur) skipFailed("Playback error");
+          }).catch(() => {
+            if (current() === cur) skipFailed("Playback error");
+          });
+          return;
+        }
+        skipFailed("Playback error");
+      }
     }
   }
   function nativeNotifySaved(title) {
@@ -6219,10 +6671,44 @@
         // Notification.requestPermission duplicate that fired alongside it.
         NP.addListener("muchiControls", (e) => nativeHandleControls(e || {}));
         NP.addListener("muchiProgress", (e) => {
+          if (!npActive) return;
           const v = e || {};
-          npPos = (Number(v.positionMs) || 0) / 1000;
-          npDur = (Number(v.durationMs) || 0) / 1000;
-          npPlaying = !!v.playing;
+          const now = Date.now();
+          const rawPos = v.positionMs != null ? (Number(v.positionMs) || 0) / 1000 : (Number(v.position) || 0);
+          const rawDur = v.durationMs != null ? (Number(v.durationMs) || 0) / 1000 : (Number(v.duration) || 0);
+          if (now >= npSeekGuardUntil || Math.abs(rawPos - npPos) <= 2) {
+            npPos = Math.max(0, rawPos);
+            npPosAt = performance.now();
+          }
+          if (rawDur > 0) {
+            npDur = rawDur;
+            const cur = current();
+            if (cur && !cur.duration) cur.duration = Math.round(rawDur);
+          }
+          const isPl = !!v.playing;
+          if (isPl) {
+            npSeenPlaying = true;
+            npPlaying = true;
+            renderBufferState(false);
+            if (!state.playing && now >= npCmdUntil) {
+              state.playing = true;
+              setWantPlay(true);
+              showEl($("eqBars"), true);
+              if (!state.timer) startTimer();
+              renderChrome();
+            }
+          } else {
+            if (now >= npCmdUntil && npSeenPlaying) {
+              npPlaying = false;
+              npPosAt = 0;
+              if (state.playing) {
+                state.playing = false;
+                setWantPlay(false);
+                showEl($("eqBars"), false);
+                renderChrome();
+              }
+            }
+          }
           if (state.playing) updateProgress();
         });
       } catch {}
@@ -6846,7 +7332,9 @@
     }
 
     // 3. Spotify-style Recommended Section
-    const recs = (state.queueRecs || []).filter((t) => !state.queue.some((q) => q && t && (q.id === t.id || (q.videoId && q.videoId === t.videoId))));
+    const recs = (state.queueRecs || [])
+      .map((t, origIdx) => ({ t, origIdx }))
+      .filter(({ t }) => t && !state.queue.some((q) => q && (q.id === t.id || (q.videoId && q.videoId === t.videoId))));
     if (cur || recs.length || isQueueRecsLoading) {
       out += `
         <div class="q-recs-wrap">
@@ -6865,14 +7353,14 @@
                 <div class="spinner"></div>
                 <span>Finding matching songs…</span>
               </div>
-            ` : (recs.length ? recs.map((t, idx) => `
-              <div class="q-rec-row" data-rec-idx="${idx}">
+            ` : (recs.length ? recs.map(({ t, origIdx }) => `
+              <div class="q-rec-row" data-rec-idx="${origIdx}">
                 <img src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.jpg'"/>
-                <button type="button" class="q-main q-rec-play" data-rec-play="${idx}" title="Play song">
+                <button type="button" class="q-main q-rec-play" data-rec-play="${origIdx}" title="Play song">
                   <div class="t-title">${escapeHTML(t.title)}</div>
                   <div class="t-sub">${escapeHTML(t.artist)}</div>
                 </button>
-                <button type="button" class="icon-btn q-add-rec" data-rec-add="${idx}" title="Add to queue">
+                <button type="button" class="icon-btn q-add-rec" data-rec-add="${origIdx}" title="Add to queue">
                   <span class="material-symbols-outlined">add</span>
                 </button>
               </div>
@@ -8397,6 +8885,16 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.9",
+      title: "Muchi 1.6.9",
+      notes: [
+        "Fixed UI Player Interface across the native app and mobile web: restored full track title/artist visibility, responsive player bar layout, frosted glass blur, and all 4 player styles (Pill, Island, Wave, Solid Bar).",
+        "Synchronized native player progress, seek bar scrubbing, play/pause state, live wave animation, and video player switching without touching background playback or notifications.",
+        "Added full Web-to-App feature parity in Player Options and Now Playing header (Download offline, Follow artist, Watch video, Sleep timer, Playback speed, Player style, Song details, and Share).",
+        "Fixed Deezer song playback when clicking tracks across Search, Artist profiles, Popular lists, and Homepage shelves without affecting Deezer song catalog loading.",
+      ],
+    },
     {
       ver: "1.6.8",
       title: "Muchi 1.6.8",
@@ -9925,6 +10423,9 @@
         <div class="empty"><h3>Nothing playing</h3><p>Play a song, then tap lyrics.</p></div>`;
     }
     const art = artUrl(t);
+    const saved = isSaved(t);
+    const followingNow = t.source !== "radio" && isFollowing(t);
+    const canVideo = t.source !== "radio" && t.source !== "audius";
     return `
       <div class="ly-screen">
         <div class="ly-bg" style="background-image:url('${escapeAttr(art)}')"></div>
@@ -9934,10 +10435,26 @@
           </button>
           <div class="ly-meta">
             <img src="${escapeAttr(art)}" alt="" onerror="this.src='/cover-default.jpg'"/>
-            <div>
+            <div style="min-width:0;flex:1">
               <strong>${escapeHTML(t.title)}</strong>
               <button type="button" class="artist-link-now" id="nowArtist">${escapeHTML(artistName(t) || t.artist)}</button>
             </div>
+          </div>
+          <div class="ly-head-actions">
+            ${t.source !== "radio" ? `
+            <button class="icon-btn ${saved ? "on" : ""}" id="nowDlBtn" type="button" title="${saved ? "Saved offline" : "Download song"}">
+              <span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span>
+            </button>
+            <button class="icon-btn ${followingNow ? "on" : ""}" id="nowFollowBtn" type="button" title="${followingNow ? "Following artist" : "Follow artist"}">
+              <span class="material-symbols-outlined">${followingNow ? "how_to_reg" : "person_add"}</span>
+            </button>` : ""}
+            ${canVideo ? `
+            <button class="icon-btn ${state.showVideo ? "on" : ""}" id="nowVideoBtn" type="button" title="Watch video">
+              <span class="material-symbols-outlined">smart_display</span>
+            </button>` : ""}
+            <button class="icon-btn" id="nowOptsBtn" type="button" title="Player options">
+              <span class="material-symbols-outlined">tune</span>
+            </button>
           </div>
         </div>
         <div class="ly-scroll" id="lyScroll">${lyricsBodyHTML()}</div>
@@ -10062,6 +10579,12 @@
         if (ev.target.closest("[data-del-dl], [data-dl], [data-more]")) return;
         const id = el.dataset.play;
         const idx = Number(el.dataset.idx);
+        const fallbackMeta = {
+          title: el.dataset.title || (el.querySelector(".t-title, h3") ? el.querySelector(".t-title, h3").textContent : ""),
+          artist: el.dataset.artist || (el.querySelector(".t-sub, p") ? String(el.querySelector(".t-sub, p").textContent || "").split("·")[0].trim() : ""),
+          source: el.dataset.source || "",
+          artwork: el.querySelector("img") ? el.querySelector("img").getAttribute("src") || "" : "",
+        };
         const fromSearch = state.view === "search";
         let list = [];
         if (state.view === "library" && state.activePlaylist === "liked") list = state.liked;
@@ -10072,11 +10595,14 @@
         else if (state.view === "library" && state.activePlaylist === "catalog") list = (state.catalogPlaylist && state.catalogPlaylist.tracks) || [];
         else if (state.view === "library" && typeof state.activePlaylist === "number") list = state.playlists[state.activePlaylist].tracks;
         else if (state.view === "settings") list = state.downloads;
-        else if (fromSearch && state.artistPage) list = state.artistPage.songs || [];
+        else if (fromSearch && state.artistPage) list = [].concat(
+          (state.artistPage && state.artistPage.popular) || [],
+          (state.artistPage && state.artistPage.songs) || []
+        );
         else if (fromSearch && state.filter === "history") list = state.recents;
         else if (fromSearch && (state.filter === "songs" || state.filter === "all")) list = [].concat(
           (state.search && state.search.youtube) || [],
-          (state.search && state.search.apple) || [],
+          (state.search && ((state.search.apple && state.search.apple.length) ? state.search.apple : state.search.itunes)) || [],
           (state.search && state.search.deezer) || [],
           (state.search && state.search.audius) || [],
           (state.search && state.search.radio) || [],
@@ -10086,7 +10612,7 @@
           (state.search && state.search.deezer) || []
         );
         else if (fromSearch && state.filter === "itunes") list = [].concat(
-          (state.search && state.search.apple) || []
+          (state.search && ((state.search.apple && state.search.apple.length) ? state.search.apple : state.search.itunes)) || []
         );
         else if (fromSearch && state.filter === "youtube") list = [].concat(
           (state.search && state.search.youtube) || []
@@ -10096,7 +10622,7 @@
         );
         else if (fromSearch) list = [].concat(
           (state.search && state.search.youtube) || [],
-          (state.search && state.search.apple) || [],
+          (state.search && ((state.search.apple && state.search.apple.length) ? state.search.apple : state.search.itunes)) || [],
           (state.search && state.search.deezer) || [],
           (state.search && state.search.audius) || [],
           (state.search && state.search.radio) || [],
@@ -10107,15 +10633,29 @@
         else if (state.view === "home") list = homeTrackPool();
         else if (state.view === "library") list = [].concat(state.liked, state.recents, state.downloads);
         else list = state.queue;
-        const i = Number.isInteger(idx) && list[idx] && list[idx].id === id ? idx : list.findIndex((t) => t.id === id);
-        const track = i >= 0 ? list[i] : findTrack(id);
+        list = (list || []).filter(Boolean);
+        const i = Number.isInteger(idx) && list[idx] && list[idx].id === id ? idx : list.findIndex((t) => t && t.id === id);
+        let track = i >= 0 ? list[i] : findTrack(id, fallbackMeta);
+        if (!track && fallbackMeta.title) {
+          track = {
+            id: id || `deezer:${Date.now()}`,
+            rawId: String(id || "").replace(/^(deezer:|apple:|itunes:|yt:)/, ""),
+            source: fallbackMeta.source || (String(id || "").startsWith("deezer:") ? "deezer" : "youtube"),
+            title: fallbackMeta.title,
+            artist: fallbackMeta.artist || "Artist",
+            album: "",
+            duration: 180,
+            artwork: fallbackMeta.artwork || "/cover-default.jpg",
+            playQuery: `${fallbackMeta.title} ${fallbackMeta.artist || ""} official audio`.trim(),
+          };
+        }
         if (!track) return;
         if (fromSearch && !state.artistPage && state.filter !== "history" && track.source !== "radio") {
           playFromList([track], 0);
           fillRelatedQueue(track);
           return;
         }
-        if (i >= 0) playFromList(list.filter(Boolean), i);
+        if (i >= 0) playFromList(list, i);
         else playFromList([track, ...state.queue], 0);
       });
     });
@@ -10211,6 +10751,34 @@
     }
     const nowArtist = viewEl.querySelector("#nowArtist");
     if (nowArtist) nowArtist.addEventListener("click", () => openArtistFromTrack(current()));
+    const nowDlBtn = viewEl.querySelector("#nowDlBtn");
+    if (nowDlBtn) {
+      nowDlBtn.addEventListener("click", () => {
+        const cur = current();
+        if (cur) downloadTrack(cur);
+      });
+    }
+    const nowFollowBtn = viewEl.querySelector("#nowFollowBtn");
+    if (nowFollowBtn) {
+      nowFollowBtn.addEventListener("click", () => {
+        const cur = current();
+        if (cur) {
+          toggleFollow(cur);
+          render();
+        }
+      });
+    }
+    const nowVideoBtn = viewEl.querySelector("#nowVideoBtn");
+    if (nowVideoBtn) {
+      nowVideoBtn.addEventListener("click", () => {
+        if ($("videoBtn")) $("videoBtn").click();
+        render();
+      });
+    }
+    const nowOptsBtn = viewEl.querySelector("#nowOptsBtn");
+    if (nowOptsBtn) {
+      nowOptsBtn.addEventListener("click", () => openPlayerOptions());
+    }
     viewEl.querySelectorAll("[data-ytpl]").forEach((el) => {
       el.addEventListener("click", () => openCatalogPlaylist({
         playlistId: el.dataset.ytpl,
@@ -13065,13 +13633,41 @@
       const q = $("ctxQueue"); if (q) q.onclick = () => { hideModal(); addToQueue(track); };
       const f = $("ctxFollow"); if (f) f.onclick = () => { hideModal(); toggleFollow(track); };
     });
-    $("seek").addEventListener("input", (e) => {
-      const d = duration();
-      if (d) seekTo((Number(e.target.value) / 1000) * d);
-    });
-    $("seek").addEventListener("change", () => {
-      hapticFeedback("selection");
-    });
+    const seekEl = $("seek");
+    if (seekEl) {
+      const beginSeekScrub = () => {
+        isSeekingUi = true;
+        seekCur = -1;
+        seekTgt = -1;
+        if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
+      };
+      const commitSeekScrub = () => {
+        if (!isSeekingUi) return;
+        isSeekingUi = false;
+        const d = duration();
+        if (d) seekTo((Number(seekEl.value) / 1000) * d);
+      };
+      seekEl.addEventListener("pointerdown", beginSeekScrub);
+      seekEl.addEventListener("touchstart", beginSeekScrub, { passive: true });
+      seekEl.addEventListener("mousedown", beginSeekScrub);
+      seekEl.addEventListener("input", (e) => {
+        isSeekingUi = true;
+        const d = duration();
+        if (d) {
+          const previewSec = (Number(e.target.value) / 1000) * d;
+          if ($("curTime")) $("curTime").textContent = fmt(previewSec);
+          if (!IS_NATIVE && !npActive) seekTo(previewSec);
+        }
+        drawSeekWave();
+      });
+      seekEl.addEventListener("change", () => {
+        hapticFeedback("selection");
+        commitSeekScrub();
+      });
+      seekEl.addEventListener("pointerup", commitSeekScrub);
+      seekEl.addEventListener("touchend", commitSeekScrub);
+      seekEl.addEventListener("pointercancel", () => { isSeekingUi = false; });
+    }
     $("volume").addEventListener("input", (e) => setVolume(Number(e.target.value)));
     $("queueBtn").onclick = () => {
       if (state.showQueue) requestBack();
@@ -13084,11 +13680,40 @@
       else setQueueOpen(false);
     };
     $("scrim").onclick = () => closeOverlays();
-    $("videoBtn").onclick = () => {
-      state.showVideo = !state.showVideo;
-      showEl($("ytWrap"), state.showVideo);
+    const closeVideoPane = () => {
+      if (!state.showVideo) return;
+      state.showVideo = false;
+      showEl($("ytWrap"), false);
+      const t = current();
+      if (t && t.videoId && !t._playingViaAudio && IS_NATIVE && nativePlayer() && state.prefs.ytAudio !== false) {
+        const pos = position();
+        if (pos > 1) { _pendingSeek = pos; _pendingSeekApplied = false; }
+        playYtWithAudio(t, false).catch(() => {});
+      }
     };
-    $("closeVideo").onclick = () => { state.showVideo = false; showEl($("ytWrap"), false); };
+    $("videoBtn").onclick = async () => {
+      const t = current();
+      if (!t) { toast("Play a song first"); return; }
+      if (t.source === "radio" || t.source === "audius") {
+        toast("No video available for this track");
+        return;
+      }
+      if (state.showVideo) {
+        closeVideoPane();
+        return;
+      }
+      state.showVideo = true;
+      showEl($("ytWrap"), true);
+      if (!t.videoId) {
+        try { await resolveYouTubePlay(t); } catch {}
+      }
+      if (t.videoId && (t._playingViaAudio || npActive || !state.yt)) {
+        const pos = position();
+        if (pos > 1) ytSeekReset = Math.floor(pos);
+        try { await playYouTube(t); } catch {}
+      }
+    };
+    $("closeVideo").onclick = () => closeVideoPane();
     $("lyricsBtn").onclick = () => {
       if (!current()) { toast("Play a song first"); return; }
       if (state.view === "now") requestBack();
@@ -13206,7 +13831,14 @@
         if (rec) {
           state.queueRecs.splice(idx, 1);
           playNext(rec);
-          next(true);
+          const newIdx = state.queue.indexOf(rec);
+          if (newIdx >= 0) {
+            state.index = newIdx;
+            playCurrent(true);
+            renderQueue();
+          } else {
+            next(true);
+          }
         }
         return;
       }
@@ -13257,7 +13889,7 @@
     audio.addEventListener("canplay", checkBufferResume);
     audio.addEventListener("canplaythrough", checkBufferResume);
     audio.addEventListener("pause", () => {
-      if (current() && current().source === "youtube") return;
+      if (current() && current().source === "youtube" && !current()._playingViaAudio) return;
       if (audio.ended) return;
       if (wantPlay && state.prefs.bgPlay !== false && document.hidden) {
         audio.play().catch(() => {});
@@ -13278,7 +13910,7 @@
       if (audio.error && audio.error.code === 1) return; // MEDIA_ERR_ABORTED
       const cur = current();
       if (!cur) return;
-      if (cur.source === "youtube" || cur.videoId || npActive) return;
+      if (((cur.source === "youtube" || cur.videoId) && !cur._playingViaAudio) || npActive) return;
       skipFailed("Stream failed");
     });
 

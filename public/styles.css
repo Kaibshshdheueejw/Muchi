@@ -2858,6 +2858,21 @@ html[data-theme="light"] .ly-head #nowBack {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex: 1 1 auto;
+}
+.ly-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.ly-head-actions .icon-btn {
+  width: 36px;
+  height: 36px;
+}
+.ly-head-actions .icon-btn.on {
+  color: var(--song-primary);
 }
 .ly-meta img {
   width: 42px;
@@ -4542,16 +4557,27 @@ html[data-theme="light"][data-ui="glass"] .mood {
   }
 }
 
-/* v65 phone: kill GPU heat */
+/* v65 phone: keep per-card list scrolling cheap while preserving frosted chrome & artwork wash */
 @media (max-width: 980px), (pointer: coarse) {
-  html[data-ui="glass"] *,
-  html[data-ui="glass"] *::before,
-  html[data-ui="glass"] *::after,
-  .player, .dock-nav, .card, .set-card, .panel, .modal-card,
-  .queue-panel, .search-wrap, .ly-screen, .lib-hero {
+  .card, .set-card, .panel, .lib-row, .track-row, .mood, .search-wrap, .lib-hero {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
-    filter: none !important;
+  }
+  .player,
+  html[data-ui="glass"] .player {
+    backdrop-filter: blur(24px) saturate(165%) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(165%) !important;
+  }
+  .dock-nav,
+  html[data-ui="glass"] .dock-nav {
+    backdrop-filter: blur(24px) saturate(165%) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(165%) !important;
+  }
+  .player-wash {
+    filter: blur(24px) saturate(1.4) !important;
+  }
+  .ly-bg {
+    filter: blur(36px) saturate(1.35) !important;
   }
 }
 
@@ -4947,12 +4973,12 @@ html[data-theme="light"] .sk {
    polished native music-app scale on real phone screens/densities.
    ═══════════════════════════════════════════════════════════════════ */
 html[data-native="1"] {
-  --icon: 26px;
-  --player: 118px;
+  --icon: 24px;
+  --player: 126px;
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
 /* Respect the user's icon-size setting; only lift the dock when needed */
-html[data-native="1"][data-icons="small"] { --icon: 22px; --dock: 60px; }
+html[data-native="1"][data-icons="small"] { --icon: 20px; --dock: 60px; }
 html[data-native="1"]:not([data-icons]),
 html[data-native="1"][data-icons="default"] { --dock: 66px; }
 html[data-native="1"][data-icons="medium"] { --dock: 72px; }
@@ -4986,17 +5012,37 @@ html[data-native="1"] .nav-ico {
   height: calc(12px + var(--icon));
 }
 
-/* ── Player bar: bigger artwork + controls, still compact ── */
+/* ── Player bar: balanced artwork + controls so track title & artist never clip on phones ── */
 html[data-native="1"] .player {
   padding: 8px 12px 10px;
   border-radius: 24px;
+  gap: 2px 8px;
 }
-html[data-native="1"] .cover-btn { width: 56px; height: 56px; border-radius: 14px; }
-html[data-native="1"] .fab { width: 52px; height: 52px; border-radius: 14px; }
-html[data-native="1"] .player .icon-btn,
+html[data-native="1"] .cover-btn { width: 46px; height: 46px; border-radius: 12px; }
+html[data-native="1"] .fab { width: 44px; height: 44px; border-radius: 14px; }
 html[data-native="1"] .icon-btn {
-  width: 46px;
-  height: 46px;
+  width: 42px;
+  height: 42px;
+}
+html[data-native="1"] .player .icon-btn {
+  width: 38px;
+  height: 38px;
+}
+html[data-native="1"] .player .like-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+html[data-native="1"] .player .ctrl-row {
+  gap: 6px;
+}
+html[data-native="1"] .player .seek-row {
+  width: 100%;
+  margin-top: 2px;
+}
+html[data-native="1"] .player .seek-box,
+html[data-native="1"] .player .seek-box input[type="range"] {
+  height: 22px;
 }
 html[data-native="1"] .icon-btn .material-symbols-outlined {
   font-size: var(--icon);

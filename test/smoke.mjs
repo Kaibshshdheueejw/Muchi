@@ -699,7 +699,11 @@ await (async () => {
 
   const appJs = readFileSync("public/app.js", "utf8");
   const stylesCss = readFileSync("public/styles.css", "utf8");
-  ok("version: APP_VERSION is 1.6.8", APP_VERSION === "1.6.8" && appJs.includes('const APP_VERSION = "1.6.8"'));
+  const streamJs = readFileSync("src/stream.js", "utf8");
+  ok("version: APP_VERSION is 1.6.9", APP_VERSION === "1.6.9" && appJs.includes('const APP_VERSION = "1.6.9"'));
+  ok("native playback: playYtWithAudio sets _playingViaAudio = true and forwards track metadata to /api/yt/stream", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || \"\")}&artist=${encodeURIComponent(t.artist || \"\")}"));
+  ok("native playback: /api/stream handles c=ANDROID_VR User-Agent and auto-falls back when googlevideo returns 403/502", streamJs.includes("/c=ANDROID_VR/i.test(src)") && streamJs.includes("if (primaryRes.status < 400) return primaryRes;"));
+  ok("deezer playback: findTrack searches Deezer pools and resolveFallbackStreamUrl supports fresh Deezer/iTunes preview streams", appJs.includes("resolveFallbackStreamUrl(t, skipYtStream = false)") && appJs.includes("state.search.deezer") && appJs.includes("findTrack(id, fallbackMeta)"));
   ok("ui modes: Settings UI supports material, glass, winter, christmas, and autumn", appJs.includes('const VALID_UI_MODES = ["material", "glass", "winter", "christmas", "autumn"]') && appJs.includes('card("winter", "Winter UI"') && appJs.includes('card("christmas", "Christmas UI"') && appJs.includes('card("autumn", "Autumn UI"'));
   ok("hero scenes: homepage Still up? bar renders scoped winter, christmas, and autumn scenes behind text", appJs.includes("homeHeroSceneHTML()") && appJs.includes('class="hero-scene hero-scene-winter"') && appJs.includes('class="winter-forest-svg"') && appJs.includes('class="hero-scene hero-scene-christmas"') && appJs.includes('class="xmas-sleigh-svg"') && appJs.includes('class="hero-scene hero-scene-autumn"') && appJs.includes('class="autumn-forest-svg"') && appJs.includes('class="autumn-leaves"') && appJs.includes('class="home-hero-copy"'));
   ok("styles: app-wide winter, christmas & autumn UI overhaul, mood color preservation, and mobile optimizations present in styles.css", stylesCss.includes('html[data-ui="winter"]') && stylesCss.includes('html[data-ui="christmas"]') && stylesCss.includes('html[data-ui="autumn"]') && stylesCss.includes('html[data-ui="autumn"] .mood') && stylesCss.includes("@keyframes santaNightSkyFlight") && stylesCss.includes("@keyframes alaskaSnowLoopFront") && stylesCss.includes("@keyframes autumnLeafDrift"));
@@ -935,14 +939,38 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=101");
+  const appJsRes = await fetch(BASE + "/app.js?v=102");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=101");
+  const stylesRes = await fetch(BASE + "/styles.css?v=102");
+  const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=101 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=101 served 200", stylesRes.status === 200);
-  ok("client web: sw.js cache matches v101", swText.includes("muchi-shell-v101") && swText.includes("/app.js?v=101"));
+  ok("client web: app.js?v=102 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=102 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v102", swText.includes("muchi-shell-v102") && swText.includes("/app.js?v=102") && swText.includes("/styles.css?v=102"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
+
+  // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────
+  ok("player UI: syncTopbar updates document.body.dataset.view", appJsText.includes("document.body.dataset.view = state.view;"));
+  ok("player UI: render maps 'now' view to renderNow", appJsText.includes("now: renderNow"));
+  ok("player UI: renderNow contains quick action header buttons (download, follow, video, options)",
+    appJsText.includes("ly-head-actions") &&
+    appJsText.includes('id="nowDlBtn"') &&
+    appJsText.includes('id="nowFollowBtn"') &&
+    appJsText.includes('id="nowVideoBtn"') &&
+    appJsText.includes('id="nowOptsBtn"')
+  );
+  ok("player UI: seek scrub touch/pointer handlers wired", appJsText.includes("beginSeekScrub") && appJsText.includes("commitSeekScrub"));
+  ok("player UI: CSS native player Type looks high-specificity rules present",
+    stylesText.includes('html[data-native="1"][data-player="pill"] .player') &&
+    stylesText.includes('html[data-native="1"][data-player="island"] .player') &&
+    stylesText.includes('html[data-native="1"][data-player="wave"] .player') &&
+    stylesText.includes('html[data-native="1"][data-player="bar"] .player')
+  );
+  ok("player UI: CSS native player bar proportions & backdrop blur preserved",
+    stylesText.includes('html[data-native="1"] .player .icon-btn') &&
+    stylesText.includes('html[data-native="1"] .player .like-btn') &&
+    stylesText.includes('html[data-ui="glass"] .player')
+  );
 
   // Multi-provider live search via Cloudflare Worker
   const dzSearch = await get("/api/search?q=adele&source=deezer&refresh=1");

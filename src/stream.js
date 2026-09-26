@@ -41,7 +41,9 @@ async function pipeUrl(request, src, accept, overrideMime) {
   }
 
   const isYt = /googlevideo\.com|youtube\.com/i.test(src);
-  const isAudius = /audius|cidstream|open-audio-validator/i.test(src) || overrideMime === "audio/mpeg";
+  const isDeezerCdn = /dzcdn\.net|deezer\.com/i.test(src);
+  const isAppleCdn = /mzstatic\.com|apple\.com|itunes\.com/i.test(src);
+  const isAudius = /audius|cidstream|open-audio-validator/i.test(src) || overrideMime === "audio/mpeg" || isDeezerCdn;
   const isRadio = /radio/i.test(src) || request.headers.get("icy-metadata") === "1";
 
   const headers = {
@@ -49,7 +51,9 @@ async function pipeUrl(request, src, accept, overrideMime) {
   };
 
   if (isYt) {
-    if (/c=ANDROID/i.test(src)) {
+    if (/c=ANDROID_VR/i.test(src)) {
+      headers["User-Agent"] = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+    } else if (/c=ANDROID/i.test(src)) {
       if (/cver=20\.10/i.test(src)) {
         headers["User-Agent"] = "com.google.android.youtube/20.10.44 (Linux; U; Android 14) gzip";
       } else {
@@ -62,9 +66,12 @@ async function pipeUrl(request, src, accept, overrideMime) {
       headers["User-Agent"] = (clientUa && !clientUa.includes("Cloudflare-Workers") && !clientUa.includes("node-fetch"))
         ? clientUa
         : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+      headers.Origin = "https://www.youtube.com";
+      headers.Referer = "https://www.youtube.com/";
     }
-    headers.Origin = "https://www.youtube.com";
-    headers.Referer = "https://www.youtube.com/";
+  } else if (isDeezerCdn || isAppleCdn) {
+    headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    if (isDeezerCdn) headers.Referer = "https://www.deezer.com/";
   } else {
     headers["User-Agent"] = `${APP_NAME}/${APP_VERSION}`;
     if (isRadio) headers["Icy-MetaData"] = "1";
@@ -165,7 +172,50 @@ async function pipeUrl(request, src, accept, overrideMime) {
 
 /** /api/stream?url=… */
 export async function handleStream(request, url) {
-  return pipeUrl(request, url.searchParams.get("url") || "", PROXY_ACCEPT);
+  const targetUrl = url.searchParams.get("url") || "";
+  const primaryRes = await pipeUrl(request, targetUrl, PROXY_ACCEPT);
+  if (primaryRes.status < 400) return primaryRes;
+
+  // If upstream (e.g. IP-bound googlevideo URL) failed with 403/502 on native Android/iOS,
+  // transparently resolve and pipe a working audio stream using track metadata params.
+  const title = (url.searchParams.get("title") || "").trim();
+  const artist = (url.searchParams.get("artist") || "").trim();
+  const q = `${title} ${artist}`.trim();
+  if (q) {
+    try {
+      const audHits = await audiusSearch(q);
+      if (Array.isArray(audHits) && audHits.length) {
+        const audId = String(audHits[0].trackId || audHits[0].id || "").replace(/^audius:/, "");
+        if (audId) {
+          const audUrl = await audiusStreamUrl(audId);
+          if (audUrl) {
+            const rAud = await pipeUrl(request, audUrl, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
+            if (rAud.status < 400) return rAud;
+          }
+        }
+      }
+    } catch {}
+    try {
+      const dzRes = await deezerSearch(q, { limit: 10, includeExtra: false });
+      const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
+      const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
+      if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
+        const rDz = await pipeUrl(request, dzHit.previewUrl || dzHit.preview, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
+        if (rDz.status < 400) return rDz;
+      }
+    } catch {}
+    try {
+      const itRes = await itunesSearch(q, { includeExtra: false });
+      const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
+      const itHit = itList.find((x) => x && x.previewUrl);
+      if (itHit && itHit.previewUrl) {
+        const rIt = await pipeUrl(request, itHit.previewUrl, "audio/mp4, audio/*;q=0.9, */*;q=0.8", "audio/mp4");
+        if (rIt.status < 400) return rIt;
+      }
+    } catch {}
+  }
+
+  return primaryRes;
 }
 
 /** /api/audius/file/{trackId} — resolve stream URL then pass through. */

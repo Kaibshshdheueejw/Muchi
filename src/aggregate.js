@@ -11,7 +11,7 @@ import { json, cached, kvCached, fetchJSON, isEnglishTrack } from "./util.js";
 import {
   searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
   itunesSearch,
-  audiusSearch, audiusTrending, audiusUnderground, audiusUserSearch, audiusUserTracks,
+  audiusSearch, audiusStreamUrl, audiusTrending, audiusUnderground, audiusUserSearch, audiusUserTracks,
   radioSearch, radioBrowser, lyricsFor, resolveShelfPlaylist,
 } from "./providers.js";
 import {
@@ -673,12 +673,19 @@ export async function handleYtPlaylist(url) {
 
 export async function handleYtStream(url) {
   const id = url.searchParams.get("v") || url.searchParams.get("id") || url.searchParams.get("videoId") || "";
+  const title = (url.searchParams.get("title") || "").trim();
+  const artist = (url.searchParams.get("artist") || "").trim();
   if (!id) return json(400, { error: "Missing videoId" });
+
+  const metaExtra =
+    `&v=${encodeURIComponent(id)}` +
+    (title ? `&title=${encodeURIComponent(title)}` : "") +
+    (artist ? `&artist=${encodeURIComponent(artist)}` : "");
 
   try {
     const stream = await cached(`ytstream:${id}`, 15 * 60 * 1000, () => youtubeAudioStream(id));
     if (stream && stream.url) {
-      const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}`;
+      const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}${metaExtra}`;
       return json(200, {
         url: proxied,
         format: stream.format || "",
@@ -689,6 +696,62 @@ export async function handleYtStream(url) {
       });
     }
   } catch {}
+
+  // Cross-provider audio fallback for native Android/iOS playback when YouTube edge extraction is gated
+  const searchQuery = `${title} ${artist}`.trim();
+  if (searchQuery) {
+    try {
+      const audHits = await audiusSearch(searchQuery);
+      if (Array.isArray(audHits) && audHits.length) {
+        const topAud = audHits[0];
+        const audId = String(topAud.trackId || topAud.id || "").replace(/^audius:/, "");
+        if (audId) {
+          const audUrl = await audiusStreamUrl(audId);
+          if (audUrl) {
+            return json(200, {
+              url: `/api/stream?url=${encodeURIComponent(audUrl)}${metaExtra}`,
+              format: "mp3",
+              mimeType: "audio/mpeg",
+              quality: "320k",
+              duration: Number(topAud.duration) || 0,
+              source: "audius",
+            });
+          }
+        }
+      }
+    } catch {}
+    try {
+      const dzRes = await deezerSearch(searchQuery, { limit: 10, includeExtra: false });
+      const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
+      const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
+      if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
+        const dzUrl = dzHit.previewUrl || dzHit.preview;
+        return json(200, {
+          url: `/api/stream?url=${encodeURIComponent(dzUrl)}${metaExtra}`,
+          format: "mp3",
+          mimeType: "audio/mpeg",
+          quality: "128k",
+          duration: Number(dzHit.duration) || 30,
+          source: "deezer",
+        });
+      }
+    } catch {}
+    try {
+      const itRes = await itunesSearch(searchQuery, { includeExtra: false });
+      const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
+      const itHit = itList.find((x) => x && x.previewUrl);
+      if (itHit && itHit.previewUrl) {
+        return json(200, {
+          url: `/api/stream?url=${encodeURIComponent(itHit.previewUrl)}${metaExtra}`,
+          format: "m4a",
+          mimeType: "audio/mp4",
+          quality: "256k",
+          duration: Number(itHit.duration) || 30,
+          source: "apple",
+        });
+      }
+    } catch {}
+  }
 
   return json(200, { url: "", error: "No direct audio stream available" });
 }
