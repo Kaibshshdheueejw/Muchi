@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.7";
+  const APP_VERSION = "1.6.8";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -937,8 +937,12 @@
     watchSystemTheme();
     applyUi();
   }
+  const VALID_UI_MODES = ["material", "glass", "winter", "christmas", "autumn"];
+  function normalizeUiMode(v) {
+    return VALID_UI_MODES.includes(v) ? v : "glass";
+  }
   function applyUi() {
-    const ui = state.prefs.ui === "material" ? "material" : "glass";
+    const ui = normalizeUiMode(state.prefs.ui);
     document.documentElement.dataset.ui = ui;
     const ps = state.prefs.playerStyle;
     document.documentElement.dataset.player = ["pill", "island", "wave", "bar"].includes(ps) ? ps : "pill";
@@ -964,7 +968,14 @@
     syncPlayerVisibility();
   }
   function uiLabel() {
-    return state.prefs.ui === "material" ? "Material 3" : "Glass UI";
+    const map = {
+      material: "Material 3",
+      glass: "Glass UI",
+      winter: "Winter UI",
+      christmas: "Christmas UI",
+      autumn: "Autumn UI",
+    };
+    return map[normalizeUiMode(state.prefs.ui)] || "Glass UI";
   }
   function themeLabel() {
     if (state.prefs.theme === "custom") return customTheme().name || "Custom";
@@ -7115,7 +7126,8 @@
       ${homeBarHTML()}
       <div class="hero home-hero">
         <div class="hero-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
-        <div>
+        ${homeHeroSceneHTML()}
+        <div class="home-hero-copy">
           <span class="hero-brand-kicker">Muchi</span>
           <h1>${greeting()}</h1>
           ${liveNote ? `<p>${escapeHTML(liveNote.replace(/^\s*·\s*/, ""))}</p>` : ""}
@@ -8386,6 +8398,16 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.6.8",
+      title: "Muchi 1.6.8",
+      notes: [
+        "New Winter UI, Christmas UI & Autumn UI app-wide themes in Settings → UI alongside Material 3 and Glass UI.",
+        "Custom Alaskan Snowfall & Outdoor Pine Forest animation inside the homepage greeting bar for Winter UI.",
+        "Custom Santa Claus & Reindeer Night-Sky Flight loop animation inside the homepage greeting bar for Christmas UI.",
+        "Custom Golden Maple Forest & Falling Autumn Leaves loop animation inside the homepage greeting bar for Autumn UI, plus mobile GPU optimizations.",
+      ],
+    },
+    {
       ver: "1.6.7",
       title: "Muchi 1.6.7",
       notes: [
@@ -8960,8 +8982,241 @@
       </div>`;
   }
 
+  function homeHeroSceneHTML() {
+    return `
+      <div class="hero-scene hero-scene-winter" aria-hidden="true">
+        <div class="winter-aurora"></div>
+        <div class="winter-snow-layer layer-back"></div>
+        <div class="winter-snow-layer layer-mid"></div>
+        <svg class="winter-forest-svg" viewBox="0 0 800 180" preserveAspectRatio="xMidYMax slice">
+          <defs>
+            <linearGradient id="alaskaRidge" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="#081629" stop-opacity="0.9"/>
+            </linearGradient>
+            <linearGradient id="alaskaTreeBack" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#1e3a5f"/>
+              <stop offset="100%" stop-color="#091526"/>
+            </linearGradient>
+            <linearGradient id="alaskaTreeFront" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#132e4a"/>
+              <stop offset="100%" stop-color="#050e1a"/>
+            </linearGradient>
+          </defs>
+          <!-- Distant Alaskan mountain peaks -->
+          <path d="M0,180 L0,118 L95,64 L185,122 L290,52 L410,126 L535,48 L660,116 L745,70 L800,108 L800,180 Z" fill="url(#alaskaRidge)" opacity="0.55"/>
+          <path d="M95,64 L122,82 L98,78 L76,84 Z M290,52 L322,76 L292,70 L264,77 Z M535,48 L568,75 L536,68 L504,76 Z M745,70 L768,88 L744,83 L724,89 Z" fill="#e0f2fe" opacity="0.45"/>
+          <!-- Mid-ground outdoor Alaskan spruce forest -->
+          <g fill="url(#alaskaTreeBack)" opacity="0.82">
+            <polygon points="48,96 26,142 38,142 18,174 78,174 58,142 70,142"/>
+            <polygon points="124,104 104,146 114,146 96,176 152,176 134,146 144,146"/>
+            <polygon points="236,90 212,138 224,138 202,175 270,175 248,138 260,138"/>
+            <polygon points="356,102 336,144 346,144 328,176 384,176 366,144 376,144"/>
+            <polygon points="468,86 442,136 456,136 432,175 504,175 480,136 494,136"/>
+            <polygon points="592,94 568,140 580,140 558,175 626,175 604,140 616,140"/>
+            <polygon points="706,82 680,134 694,134 668,176 744,176 718,134 732,134"/>
+          </g>
+          <!-- Foreground snow-laden outdoor pine trees -->
+          <g fill="url(#alaskaTreeFront)">
+            <!-- Left tall spruce -->
+            <polygon points="86,62 60,108 74,108 48,146 66,146 40,180 132,180 106,146 124,146 98,108 112,108"/>
+            <!-- Mid-left pine -->
+            <polygon points="182,84 160,124 172,124 150,156 164,156 144,180 220,180 200,156 214,156 192,124 204,124"/>
+            <!-- Center-right tall Alaskan spruce -->
+            <polygon points="524,54 494,104 510,104 482,144 500,144 472,180 576,180 548,144 566,144 538,104 554,104"/>
+            <!-- Right pine cluster -->
+            <polygon points="648,70 622,114 636,114 610,150 626,150 602,180 694,180 670,150 686,150 660,114 674,114"/>
+            <polygon points="756,58 728,106 742,106 716,146 732,146 706,180 804,180 780,146 796,146 770,106 784,106"/>
+          </g>
+          <!-- Snow caps on pine boughs -->
+          <g fill="#e0f7ff" opacity="0.72">
+            <polygon points="86,62 72,86 86,82 100,86"/>
+            <polygon points="182,84 170,104 182,100 194,104"/>
+            <polygon points="524,54 508,82 524,77 540,82"/>
+            <polygon points="648,70 634,94 648,90 662,94"/>
+            <polygon points="756,58 740,84 756,79 772,84"/>
+          </g>
+          <!-- Snowy Alaskan ground drift -->
+          <path d="M0,168 Q140,154 290,166 T590,162 T800,166 L800,180 L0,180 Z" fill="#bae6fd" opacity="0.28"/>
+        </svg>
+        <div class="winter-snow-layer layer-front"></div>
+        <div class="winter-flakes">
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+        </div>
+      </div>
+      <div class="hero-scene hero-scene-christmas" aria-hidden="true">
+        <div class="xmas-stars">
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="xmas-moon"></div>
+        <!-- Santa Claus riding reindeer up in the sky at night (loop optimized) -->
+        <div class="xmas-santa-track">
+          <div class="xmas-santa-bob">
+            <svg class="xmas-sleigh-svg" viewBox="0 0 420 110" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="magicTrail" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stop-color="#fde68a" stop-opacity="0"/>
+                  <stop offset="60%" stop-color="#fbbf24" stop-opacity="0.55"/>
+                  <stop offset="100%" stop-color="#fef08a" stop-opacity="0.95"/>
+                </linearGradient>
+                <linearGradient id="sleighBody" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#f43f5e"/>
+                  <stop offset="100%" stop-color="#9f1239"/>
+                </linearGradient>
+              </defs>
+              <!-- Golden Stardust Flight Trail -->
+              <path d="M4,86 Q56,82 106,68" stroke="url(#magicTrail)" stroke-width="3" stroke-linecap="round" stroke-dasharray="2 6"/>
+              <circle cx="28" cy="83" r="1.8" fill="#fef08a" opacity="0.7"/>
+              <circle cx="58" cy="79" r="2.2" fill="#fde047" opacity="0.85"/>
+              <circle cx="84" cy="73" r="1.6" fill="#fef9c3" opacity="0.9"/>
+              <!-- Sleigh Golden Runners -->
+              <path d="M92,76 L166,76 C178,76 184,68 180,60" stroke="#fbbf24" stroke-width="2.6" stroke-linecap="round"/>
+              <path d="M108,66 L108,76 M148,66 L148,76" stroke="#fbbf24" stroke-width="2.2"/>
+              <!-- Toy Sack in Back -->
+              <ellipse cx="112" cy="50" rx="13" ry="11" fill="#b45309"/>
+              <path d="M102,45 Q112,38 122,45" stroke="#fcd34d" stroke-width="1.6" fill="none"/>
+              <!-- Sleigh Crimson Body & Gold Trim -->
+              <path d="M96,52 Q98,68 114,68 L156,68 Q168,68 173,54 L160,54 Q154,58 140,58 L114,52 Z" fill="url(#sleighBody)" stroke="#fbbf24" stroke-width="1.5"/>
+              <!-- Santa Claus in Sleigh -->
+              <circle cx="136" cy="41" r="6.5" fill="#fde68a"/>
+              <!-- Santa Beard -->
+              <path d="M133,43 Q138,51 144,44 Q141,40 133,43 Z" fill="#ffffff"/>
+              <!-- Santa Coat -->
+              <path d="M125,58 Q128,45 141,46 L147,58 Z" fill="#e11d48"/>
+              <!-- Santa Red Hat & White Pom-Pom -->
+              <path d="M129,38 Q135,27 143,36 Z" fill="#e11d48"/>
+              <rect x="128" y="36.5" width="14" height="3" rx="1.5" fill="#ffffff"/>
+              <circle cx="127" cy="31" r="2.6" fill="#ffffff"/>
+              <!-- Golden Reins from Santa to Reindeer Team -->
+              <path d="M146,49 Q205,54 252,45 Q302,42 356,37" stroke="#fcd34d" stroke-width="1.3" stroke-dasharray="3 2" opacity="0.9"/>
+              <!-- Reindeer 1 (Closest to sleigh) -->
+              <g class="reindeer-unit r-1">
+                <ellipse cx="218" cy="52" rx="14" ry="6.5" transform="rotate(-8 218 52)" fill="#d97706"/>
+                <path d="M227,48 L234,37 L241,39 L233,51 Z" fill="#d97706"/>
+                <ellipse cx="239" cy="37" rx="5.5" ry="3.2" transform="rotate(-10 239 37)" fill="#f59e0b"/>
+                <!-- Antlers -->
+                <path d="M235,34 L232,25 M235,29 L229,28 M238,34 L237,24 M237,28 L242,26" stroke="#fde68a" stroke-width="1.5" stroke-linecap="round"/>
+                <!-- Galloping Legs -->
+                <path d="M208,56 L196,66 M213,57 L204,68 M227,54 L239,62 M231,52 L244,58" stroke="#b45309" stroke-width="2" stroke-linecap="round"/>
+                <circle cx="204" cy="51" r="2.2" fill="#fef3c7"/>
+              </g>
+              <!-- Reindeer 2 (Middle) -->
+              <g class="reindeer-unit r-2">
+                <ellipse cx="284" cy="44" rx="14" ry="6.5" transform="rotate(-10 284 44)" fill="#d97706"/>
+                <path d="M293,40 L300,29 L307,31 L299,43 Z" fill="#d97706"/>
+                <ellipse cx="305" cy="29" rx="5.5" ry="3.2" transform="rotate(-12 305 29)" fill="#f59e0b"/>
+                <!-- Antlers -->
+                <path d="M301,26 L298,17 M301,21 L295,20 M304,26 L303,16 M303,20 L308,18" stroke="#fde68a" stroke-width="1.5" stroke-linecap="round"/>
+                <!-- Galloping Legs -->
+                <path d="M274,48 L262,58 M279,49 L270,60 M293,46 L306,53 M297,44 L311,49" stroke="#b45309" stroke-width="2" stroke-linecap="round"/>
+                <circle cx="270" cy="43" r="2.2" fill="#fef3c7"/>
+              </g>
+              <!-- Reindeer 3 (Rudolph Leading in Front!) -->
+              <g class="reindeer-unit r-3">
+                <ellipse cx="350" cy="35" rx="14.5" ry="6.5" transform="rotate(-12 350 35)" fill="#f59e0b"/>
+                <path d="M359,31 L367,19 L374,21 L365,34 Z" fill="#f59e0b"/>
+                <ellipse cx="372" cy="20" rx="5.8" ry="3.3" transform="rotate(-14 372 20)" fill="#fbbf24"/>
+                <!-- Antlers -->
+                <path d="M368,17 L365,8 M368,12 L362,11 M371,17 L370,7 M370,11 L375,9" stroke="#fef08a" stroke-width="1.6" stroke-linecap="round"/>
+                <!-- Galloping Legs -->
+                <path d="M340,39 L327,49 M345,40 L335,51 M359,37 L373,44 M363,35 L378,39" stroke="#d97706" stroke-width="2.1" stroke-linecap="round"/>
+                <circle cx="336" cy="34" r="2.2" fill="#fef3c7"/>
+                <!-- Rudolph's Glowing Red Nose -->
+                <circle cx="379" cy="19" r="5" fill="#ff1e42" opacity="0.42"/>
+                <circle cx="379" cy="19" r="2.5" fill="#ff2a55"/>
+              </g>
+            </svg>
+          </div>
+        </div>
+        <!-- Snowy Night Horizon & Festive Trees -->
+        <svg class="xmas-horizon-svg" viewBox="0 0 800 180" preserveAspectRatio="xMidYMax slice">
+          <path d="M0,180 L0,148 Q180,132 380,150 T800,140 L800,180 Z" fill="#17132b" opacity="0.88"/>
+          <g fill="#0f2922" opacity="0.92">
+            <polygon points="56,112 36,150 46,150 28,178 84,178 66,150 76,150"/>
+            <polygon points="132,124 116,154 124,154 110,178 154,178 140,154 148,154"/>
+            <polygon points="628,110 606,148 618,148 598,178 658,178 638,148 650,148"/>
+            <polygon points="718,98 694,142 706,142 684,178 752,178 730,142 742,142"/>
+          </g>
+          <!-- Warm golden lights on horizon trees -->
+          <g fill="#fbbf24">
+            <circle cx="56" cy="128" r="1.8"/><circle cx="49" cy="144" r="1.6"/><circle cx="63" cy="154" r="1.8"/>
+            <circle cx="628" cy="126" r="1.8"/><circle cx="620" cy="144" r="1.7"/><circle cx="636" cy="156" r="1.8"/>
+            <circle cx="718" cy="116" r="2"/><circle cx="709" cy="136" r="1.8"/><circle cx="727" cy="148" r="1.9"/>
+          </g>
+          <path d="M0,168 Q220,156 450,168 T800,162 L800,180 L0,180 Z" fill="#fde68a" opacity="0.16"/>
+        </svg>
+        <div class="xmas-snow-layer"></div>
+      </div>
+      <div class="hero-scene hero-scene-autumn" aria-hidden="true">
+        <div class="autumn-sun-glow"></div>
+        <div class="autumn-breeze-layer"></div>
+        <!-- Outdoor Maple & Oak Autumn Forest Horizon -->
+        <svg class="autumn-forest-svg" viewBox="0 0 800 180" preserveAspectRatio="xMidYMax slice">
+          <defs>
+            <linearGradient id="autumnHill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#9a3412" stop-opacity="0.45"/>
+              <stop offset="100%" stop-color="#271006" stop-opacity="0.92"/>
+            </linearGradient>
+            <linearGradient id="mapleGold" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#fbbf24"/>
+              <stop offset="100%" stop-color="#b45309"/>
+            </linearGradient>
+            <linearGradient id="mapleCrimson" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#f97316"/>
+              <stop offset="100%" stop-color="#991b1b"/>
+            </linearGradient>
+          </defs>
+          <!-- Distant harvest hills -->
+          <path d="M0,180 L0,126 Q140,84 310,124 T620,106 T800,122 L800,180 Z" fill="url(#autumnHill)"/>
+          <!-- Outdoor Maple & Oak Tree Canopies (Back Layer) -->
+          <g opacity="0.78">
+            <circle cx="54" cy="118" r="28" fill="url(#mapleCrimson)"/>
+            <circle cx="78" cy="124" r="22" fill="url(#mapleGold)"/>
+            <circle cx="164" cy="128" r="24" fill="url(#mapleGold)"/>
+            <circle cx="486" cy="122" r="26" fill="url(#mapleCrimson)"/>
+            <circle cx="618" cy="110" r="30" fill="url(#mapleGold)"/>
+            <circle cx="648" cy="118" r="24" fill="url(#mapleCrimson)"/>
+            <circle cx="742" cy="106" r="32" fill="url(#mapleCrimson)"/>
+            <circle cx="768" cy="116" r="25" fill="url(#mapleGold)"/>
+          </g>
+          <!-- Tree Trunks & Branches -->
+          <g stroke="#3b190b" stroke-linecap="round" fill="none">
+            <path d="M64,180 L64,116 M64,136 L48,120 M64,130 L78,118" stroke-width="4.5"/>
+            <path d="M164,180 L164,126 M164,144 L152,130 M164,140 L176,128" stroke-width="3.6"/>
+            <path d="M486,180 L486,122 M486,142 L472,126 M486,136 L500,124" stroke-width="3.8"/>
+            <path d="M630,180 L630,108 M630,132 L612,114 M630,126 L648,112" stroke-width="4.8"/>
+            <path d="M752,180 L752,104 M752,128 L734,108 M752,122 L770,110" stroke-width="5"/>
+          </g>
+          <!-- Foreground Golden & Crimson Maple Foliage Clusters -->
+          <g opacity="0.9">
+            <circle cx="42" cy="134" r="18" fill="#ea580c"/>
+            <circle cx="94" cy="138" r="16" fill="#f59e0b"/>
+            <circle cx="588" cy="134" r="20" fill="#dc2626"/>
+            <circle cx="668" cy="130" r="21" fill="#f59e0b"/>
+            <circle cx="716" cy="126" r="22" fill="#ea580c"/>
+          </g>
+          <!-- Leaf-strewn woodland ground -->
+          <path d="M0,166 Q190,152 410,166 T800,158 L800,180 L0,180 Z" fill="#431407" opacity="0.9"/>
+          <path d="M0,172 Q220,160 460,172 T800,166 L800,180 L0,180 Z" fill="#f59e0b" opacity="0.22"/>
+        </svg>
+        <!-- Tumbling & drifting autumn maple leaves loop -->
+        <div class="autumn-leaves">
+          <i class="leaf-crimson"></i>
+          <i class="leaf-gold"></i>
+          <i class="leaf-amber"></i>
+          <i class="leaf-crimson"></i>
+          <i class="leaf-gold"></i>
+          <i class="leaf-amber"></i>
+          <i class="leaf-crimson"></i>
+          <i class="leaf-gold"></i>
+          <i class="leaf-amber"></i>
+          <i class="leaf-gold"></i>
+        </div>
+      </div>`;
+  }
+
   function renderUiPage() {
-    const ui = state.prefs.ui === "material" ? "material" : "glass";
+    const ui = normalizeUiMode(state.prefs.ui);
     const card = (id, name, blurb, extra) => `
       <button type="button" class="ui-pick ${ui === id ? "on" : ""}" data-set-ui="${id}">
         <div class="ui-pick-preview ${id}">${extra}</div>
@@ -8998,6 +9253,9 @@
           <div class="ui-pick-list">
             ${card("material", "Material 3", "Default — filled cards, You-style player.", `<i></i><i></i><i></i>`)}
             ${card("glass", "Glass UI", "iPhone frosted glass — blur, thin borders, floating bars.", `<i></i><i></i><i></i>`)}
+            ${card("winter", "Winter UI", "Alaskan frost — icy crystal glass, aurora & outdoor pine snowfall hero.", `<i></i><i></i><i></i>`)}
+            ${card("christmas", "Christmas UI", "Festive holiday — warm gold & crimson glass, Santa & reindeer night sky hero.", `<i></i><i></i><i></i>`)}
+            ${card("autumn", "Autumn UI", "Golden harvest — warm amber glass, maple forest & drifting autumn leaves hero.", `<i></i><i></i><i></i>`)}
           </div>
         </div>
       </div>`;
@@ -9483,7 +9741,7 @@
         <div class="set-card">
           <h3>Look</h3>
           <button type="button" class="set-row set-go" id="openUi">
-            <div><strong>UI</strong><p>${escapeHTML(uiLabel())} — Material 3 or iPhone glass.</p></div>
+            <div><strong>UI</strong><p>${escapeHTML(uiLabel())} — Material 3, Glass, Winter, Christmas or Autumn.</p></div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openAppearance">
@@ -9522,10 +9780,6 @@
           <button type="button" class="set-row set-go" id="openFollowing">
             <div><strong>Following & Alerts</strong><p>${state.following.length} followed · get notified when artists drop new music.</p></div>
             <span class="material-symbols-outlined">chevron_right</span>
-          </button>
-          <button type="button" class="set-row set-go" id="openTasteSetup">
-            <div><strong>Music Taste & Setup</strong><p>Choose your favorite song varieties, moods, and artists to personalize Home.</p></div>
-            <span class="material-symbols-outlined">tune</span>
           </button>
         </div>
         <div class="set-card">
@@ -10486,7 +10740,7 @@
     });
     viewEl.querySelectorAll("[data-set-ui]").forEach((el) => {
       el.addEventListener("click", () => {
-        state.prefs.ui = el.dataset.setUi === "material" ? "material" : "glass";
+        state.prefs.ui = normalizeUiMode(el.dataset.setUi);
         savePrefs();
         applyUi();
         render();
@@ -13538,8 +13792,8 @@
     }
   }
 
-  function openTasteOnboarding(force = false) {
-    if (!force && localStorage.getItem("aura.onboarded")) return;
+  function openTasteOnboarding() {
+    if (localStorage.getItem("aura.onboarded") || state.prefs.onboarded) return;
     const existing = document.getElementById("tasteOnboardingOverlay");
     if (existing) existing.remove();
 
@@ -13599,7 +13853,7 @@
         saveFollowing({ replaceFollowing: true });
       }
       savePrefs();
-      scheduleUserLibraryPush();
+      pushUserLibrary({ replaceFollowing: Boolean(saveSelections) });
       overlay.remove();
       if (saveSelections && (selectedGenres.size || selectedMoods.size || selectedEras.size || selectedStyles.size || selectedArtists.size)) {
         toast("Homepage personalized for your taste!", true, "success");
