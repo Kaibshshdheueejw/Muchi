@@ -190,6 +190,29 @@ export async function handleHome(env, url) {
   });
 }
 
+function weaveCatalogTracks(baseTracks = [], itunesTracks = [], deezerTracks = [], max = 25) {
+  const result = [];
+  const seen = new Set();
+  const pushT = (t) => {
+    if (!t) return;
+    const k = `${t.title || ""}|${t.artist || ""}`.toLowerCase().trim();
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    result.push(t);
+  };
+  const base = Array.isArray(baseTracks) ? baseTracks : [];
+  const it = Array.isArray(itunesTracks) ? itunesTracks : [];
+  const dz = Array.isArray(deezerTracks) ? deezerTracks : [];
+  const maxLen = Math.max(base.length, it.length, dz.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (base[i]) pushT(base[i]);
+    if (it[i]) pushT(it[i]);
+    if (dz[i]) pushT(dz[i]);
+    if (result.length >= max) break;
+  }
+  return result;
+}
+
 async function buildGlobal(gl, localQ) {
   const prime = ENGLISH_SHELVES.slice(0, 2);
   const jobs = prime.map((s) => searchYouTube(s.query, "US", true));
@@ -199,13 +222,17 @@ async function buildGlobal(gl, localQ) {
     audiusTrending(),
     audiusUnderground(),
     radioSearch("hits", 16),
+    itunesSearch("top hits", { includeExtra: false, country: gl || "US" }).catch(() => ({ songs: [] })),
+    deezerSearch("top hits", { limit: 40, includeExtra: false }).catch(() => ({ songs: [] })),
   ]);
+  const itExtra = extra[jobs.length + 4] && extra[jobs.length + 4].status === "fulfilled" ? (extra[jobs.length + 4].value.songs || []) : [];
+  const dzExtra = extra[jobs.length + 5] && extra[jobs.length + 5].status === "fulfilled" ? (extra[jobs.length + 5].value.songs || []) : [];
   const filled = prime.map((s, i) => take(extra[i]).slice(0, 18));
   const shelves = ENGLISH_SHELVES.map((s, i) => ({
     id: s.id,
     title: s.title,
     query: s.query,
-    tracks: i < filled.length ? filled[i] : [],
+    tracks: weaveCatalogTracks(i < filled.length ? filled[i] : [], itExtra.slice(i * 6), dzExtra.slice(i * 6), 25),
   }));
   const globalPlaylists = ensureMinPlaylists(
     uniqPlaylists([
@@ -213,20 +240,29 @@ async function buildGlobal(gl, localQ) {
       ...playlistsOf(extra[1].status === "fulfilled" ? extra[1].value : []),
       ...playlistsOf(extra[2].status === "fulfilled" ? extra[2].value : []),
     ]).slice(0, 16),
-    [].concat(...filled),
+    weaveCatalogTracks([].concat(...filled), itExtra, dzExtra, 100),
     DAILY_MIX_TITLES,
     8,
-  );
+  ).map((p, pIdx) => ({
+    ...p,
+    tracks: weaveCatalogTracks(p.tracks || [], itExtra.slice(pIdx * 3), dzExtra.slice(pIdx * 3), 20),
+  }));
   const audius = take(extra[jobs.length + 1]).slice(0, 18);
   const underground = take(extra[jobs.length + 2]).slice(0, 12);
   const radio = take(extra[jobs.length + 3]).slice(0, 12);
   const fyRes = await Promise.allSettled(FY_QUERIES.map((f) => resolveShelfPlaylist(f.query, "US")));
-  const forYouPlaylists = buildForYouPlaylists(fyRes);
+  const forYouPlaylists = buildForYouPlaylists(fyRes).map((p, idx) => ({
+    ...p,
+    tracks: weaveCatalogTracks(p.tracks || [], itExtra.slice(idx * 3), dzExtra.slice(idx * 3), 20),
+  }));
   // Viral / "trending worldwide" shelf — resolved the same way as "Made for
   // you" so it auto-refreshes with the per-day home build (KV-cached above),
   // and each card ships its own 20 tracks for an instant, fully-populated row.
   const viralRes = await Promise.allSettled(VIRAL_QUERIES.map((f) => resolveShelfPlaylist(f.query, "US")));
-  const viralPlaylists = buildViralPlaylists(viralRes);
+  const viralPlaylists = buildViralPlaylists(viralRes).map((p, idx) => ({
+    ...p,
+    tracks: weaveCatalogTracks(p.tracks || [], itExtra.slice(idx * 3), dzExtra.slice(idx * 3), 20),
+  }));
   const total =
     shelves.reduce((n, s) => n + (s.tracks || []).length, 0) +
     globalPlaylists.length + audius.length + underground.length + radio.length +
@@ -237,11 +273,15 @@ async function buildGlobal(gl, localQ) {
 }
 
 async function buildLocal(gl, localQ) {
-  const [ytLocal, ytPl, ytTrendingPl] = await Promise.allSettled([
+  const [ytLocal, ytPl, ytTrendingPl, itLocalR, dzLocalR] = await Promise.allSettled([
     searchYouTube(`${localQ} trending new songs`, gl, false),
     youtubeMusicSearch(`${localQ} trending 2025 playlist`, gl, 7000, { limit: 50 }),
     searchYouTube(`trending music playlist ${gl}`, gl, false),
+    itunesSearch(localQ || "top hits", { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
+    deezerSearch(localQ || "top hits", { limit: 40, includeExtra: false }).catch(() => ({ songs: [] })),
   ]);
+  const itLocalSongs = itLocalR.status === "fulfilled" ? (itLocalR.value.songs || []) : [];
+  const dzLocalSongs = dzLocalR.status === "fulfilled" ? (dzLocalR.value.songs || []) : [];
   const ytTracks = take(ytLocal);
   const plTracks = take(ytPl);
   const trendTracks = take(ytTrendingPl);
@@ -273,6 +313,8 @@ async function buildLocal(gl, localQ) {
     padIdx++;
   }
 
+  const mixedLocal = weaveCatalogTracks(localTracks, itLocalSongs, dzLocalSongs, 25);
+
   const rawPlaylists = uniqPlaylists([
     ...playlistsOf(ytLocal.status === "fulfilled" ? ytLocal.value : []),
     ...playlistsOf(ytPl.status === "fulfilled" ? ytPl.value : []),
@@ -281,13 +323,16 @@ async function buildLocal(gl, localQ) {
 
   const countryPlaylists = ensureMinPlaylists(
     rawPlaylists,
-    countryPool.length ? countryPool : localTracks,
+    countryPool.length ? weaveCatalogTracks(countryPool, itLocalSongs, dzLocalSongs, 100) : mixedLocal,
     COUNTRY_DM_TITLES,
     12,
-  );
+  ).map((p, idx) => ({
+    ...p,
+    tracks: weaveCatalogTracks(p.tracks || [], itLocalSongs.slice(idx * 3), dzLocalSongs.slice(idx * 3), 20),
+  }));
 
   return {
-    youtubeLocal: localTracks.slice(0, 25),
+    youtubeLocal: mixedLocal.slice(0, 25),
     countryPlaylists: countryPlaylists.slice(0, 12),
   };
 }
@@ -401,8 +446,8 @@ export async function handleSearch(env, url) {
 
     const allTasks = [
       ["youtube", searchYouTube(q, gl)],
-      ["apple", itunesSearch(q, { includeExtra: true, country: gl })],
-      ["deezer", deezerSearch(q, { limit: 50, includeExtra: true })],
+      ["apple", fastWait(itunesSearch(q, { includeExtra: true, country: gl }), 3200, { songs: [], artists: [], playlists: [] })],
+      ["deezer", fastWait(deezerSearch(q, { limit: 50, includeExtra: true }), 3200, { songs: [], artists: [], playlists: [] })],
       ["audius", audiusSearch(q)],
       ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2000, [])],
       ["audiusUsers", fastWait(audiusUserSearch(q), 2000, [])],
@@ -531,6 +576,15 @@ export async function handleArtist(url) {
       let artistName = name || q;
       let artwork = "";
       let albums = [];
+      const foldName = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+      const targetFold = foldName(artistName);
+      const matchesTargetArtist = (cand) => {
+        const cf = foldName(cand);
+        if (!cf || !targetFold) return false;
+        if (cf === targetFold) return true;
+        if (targetFold.length >= 3 && (cf.includes(targetFold) || targetFold.includes(cf))) return true;
+        return false;
+      };
       // ── Three sources IN PARALLEL (was serial — that's what made the
       //    profile take 15-25s and time out on the client) ─────────────
       // Apple: lookup by id + iTunes search (songs + albums).
@@ -544,7 +598,9 @@ export async function handleArtist(url) {
             const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=album&limit=25`);
             const rows = (look && look.results) || [];
             const self = rows.find((r) => r.wrapperType === "artist") || {};
-            nm = self.artistName || "";
+            if (self.artistName && (!targetFold || matchesTargetArtist(self.artistName))) {
+              nm = self.artistName;
+            }
             for (const al of rows) {
               if (al.wrapperType !== "collection" && al.collectionType !== "Album") continue;
               if (!art && al.artworkUrl100) art = String(al.artworkUrl100).replace("100x100bb", "600x600bb");
@@ -552,10 +608,10 @@ export async function handleArtist(url) {
                 id: `album:${al.collectionId}`,
                 kind: "playlist",
                 title: al.collectionName || "Album",
-                artist: al.artistName || nm,
+                artist: al.artistName || nm || artistName,
                 artwork: String(al.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
                 source: "apple",
-                query: `${al.collectionName || ""} ${al.artistName || nm}`.trim(),
+                query: `${al.collectionName || ""} ${al.artistName || nm || artistName}`.trim(),
               });
             }
           } catch {}
@@ -567,11 +623,11 @@ export async function handleArtist(url) {
                 id: `apple:${t.trackId}`,
                 source: "apple",
                 title: t.trackName || "Song",
-                artist: t.artistName || nm,
+                artist: t.artistName || nm || artistName,
                 album: t.collectionName || "",
                 duration: Math.round((t.trackTimeMillis || 0) / 1000),
                 artwork: String(t.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
-                playQuery: `${t.trackName || ""} ${t.artistName || nm} official audio`.trim(),
+                playQuery: `${t.trackName || ""} ${t.artistName || nm || artistName} official audio`.trim(),
               });
             }
           } catch {}
@@ -579,10 +635,12 @@ export async function handleArtist(url) {
         if (!songs.length && (q || name)) {
           try {
             const pack = await itunesSearch(q || name);
-            if (!art && pack.artists[0]) art = pack.artists[0].artwork;
-            if (!nm && pack.artists[0]) nm = pack.artists[0].name;
-            songs = pack.songs || [];
-            if (!alb.length) alb = pack.playlists || [];
+            const matchedArt = (pack.artists || []).find((a) => foldName(a.name) === targetFold)
+              || (pack.artists || []).find((a) => matchesTargetArtist(a.name));
+            if (!art && matchedArt) art = matchedArt.artwork;
+            if (!nm && matchedArt) nm = matchedArt.name;
+            songs = (pack.songs || []).filter((t) => matchesTargetArtist(t.artist));
+            if (!alb.length) alb = (pack.playlists || []).filter((p) => matchesTargetArtist(p.artist));
           } catch {}
         }
         return { art, alb, songs, nm };
@@ -592,7 +650,8 @@ export async function handleArtist(url) {
       const ytJob = (async () => {
         try {
           const rows = await raceTimeout(searchYouTube(`${q || name} official audio`, gl, true), 9000, []);
-          return Array.isArray(rows) ? rows.slice(0, 16) : [];
+          const list = Array.isArray(rows) ? rows : [];
+          return list.filter((t) => matchesTargetArtist(t.artist) || foldName(t.title).includes(targetFold)).slice(0, 16);
         } catch {
           return [];
         }
@@ -609,15 +668,15 @@ export async function handleArtist(url) {
       })();
       const [ap, ytRows, dz] = await Promise.all([appleJob, ytJob, dzJob]);
       artwork = ap.art || "";
-      if (ap.nm && ap.nm.toLowerCase() !== (artistName || "").toLowerCase()) artistName = ap.nm;
+      if (ap.nm && matchesTargetArtist(ap.nm)) artistName = ap.nm;
       albums = ap.alb;
       const normKey = (t) => `${String(t.title || "").toLowerCase()}|${String(t.artist || "").toLowerCase()}`;
       const haveYt = new Set(ytRows.map((t) => normKey(t)));
       const appleRest = ap.songs.filter((t) => !haveYt.has(normKey(t)));
       let songs = [...ytRows, ...appleRest];
-      if (dz) {
+      if (dz && (!dz.artist.name || matchesTargetArtist(dz.artist.name))) {
         if (!artwork && dz.artist.artwork) artwork = dz.artist.artwork;
-        if (dz.artist.name) artistName = dz.artist.name; // Deezer canonical name
+        if (dz.artist.name && matchesTargetArtist(dz.artist.name)) artistName = dz.artist.name;
         const seenAlb = new Set(albums.map((al) => String(al.title || "").toLowerCase()));
         for (const al of dz.albums) {
           if (seenAlb.has(String(al.title || "").toLowerCase())) continue;

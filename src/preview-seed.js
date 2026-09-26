@@ -424,13 +424,41 @@ function playlistTracks(q) {
   return moodTracks(["pop"], 20);
 }
 
+function withMixedSources(tracks) {
+  return (tracks || []).map((t, idx) => {
+    const mod = idx % 3;
+    if (mod === 1) {
+      return {
+        ...t,
+        id: `apple:preview:${t.id || idx}`,
+        source: "apple",
+        previewUrl: t.previewUrl || t.streamUrl || `/api/preview/audio?dur=${t.duration || 30}`,
+        playQuery: `${t.title || ""} ${t.artist || ""} official audio`.trim(),
+      };
+    }
+    if (mod === 2) {
+      return {
+        ...t,
+        id: `deezer:preview:${t.id || idx}`,
+        source: "deezer",
+        previewUrl: t.previewUrl || t.streamUrl || `/api/preview/audio?dur=${t.duration || 30}`,
+        playQuery: `${t.title || ""} ${t.artist || ""} official audio`.trim(),
+      };
+    }
+    return {
+      ...t,
+      source: "youtube",
+    };
+  });
+}
+
 // ── /api/home ───────────────────────────────────────────────────────────
 export function previewHome(gl, taste) {
   const shelves = SHELVES.map((s) => ({
     id: s.id,
     title: s.title,
     query: s.tags.join(" "),
-    tracks: tracksForShelf(s.id),
+    tracks: withMixedSources(tracksForShelf(s.id)),
   }));
   const moods = (FY_MOODS.filter((m) => !m.tags.includes("trending"))).map((m, i) => ({
     id: m.tags[0],
@@ -445,7 +473,11 @@ export function previewHome(gl, taste) {
   // Each card gets its own DISJOINT 20-song pool from fyMoodPools(), so the 10
   // playlists never share a song and each is a genuinely different mood.
   const pools = fyMoodPools(20);
-  let cards = FY_MOODS.map((m, i) => fyPlaylistFrom(m, pools[i]));
+  let cards = FY_MOODS.map((m, i) => {
+    const card = fyPlaylistFrom(m, pools[i]);
+    card.tracks = withMixedSources(card.tracks);
+    return card;
+  });
   if (taste && (taste.genres || []).length) {
     const g = taste.genres.map((x) => (Array.isArray(x) ? x[0] : x)).filter(Boolean);
     const key = new Set(g.map((x) => String(x).toLowerCase()));
@@ -455,21 +487,30 @@ export function previewHome(gl, taste) {
       return bm - am;
     });
   }
+  const mixedPool = withMixedSources(allTracks());
   return {
     country: gl || "IN",
     day: new Date().toISOString().slice(0, 10),
     localQuery: "popular songs",
     moods,
     shelves,
-    youtubeCharts: allTracks().slice(0, 25),
-    youtubeIndia: allTracks().slice(0, 25),
-    youtubeLocal: [...allTracks(), ...allTracks()].slice(0, 25),
-    countryPlaylists: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1].map((i) => shelfPlaylistCard(cards[i], FY_MOODS[i])),
-    globalPlaylists: [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2].map((i) => shelfPlaylistCard(cards[i], FY_MOODS[i])),
+    youtubeCharts: mixedPool.slice(0, 25),
+    youtubeIndia: mixedPool.slice(0, 25),
+    youtubeLocal: [...mixedPool, ...mixedPool].slice(0, 25),
+    countryPlaylists: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1].map((i) => {
+      const sc = shelfPlaylistCard(cards[i], FY_MOODS[i]);
+      sc.tracks = withMixedSources(sc.tracks);
+      return sc;
+    }),
+    globalPlaylists: [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2].map((i) => {
+      const sc = shelfPlaylistCard(cards[i], FY_MOODS[i]);
+      sc.tracks = withMixedSources(sc.tracks);
+      return sc;
+    }),
     // 10 curated "Made for you" cards, each with its first song's art + 20 songs.
     forYouPlaylists: cards,
     audius: [],
-    underground: allTracks().slice(0, 8),
+    underground: mixedPool.slice(0, 8),
     radio: [],
   };
 }

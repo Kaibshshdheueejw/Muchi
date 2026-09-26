@@ -175,6 +175,13 @@ app.use((req, res, next) => {
 const publicDir = path.join(__dirname, "public");
 app.use(express.static(publicDir));
 
+app.get(["/privacy", "/privacy.html"], (req, res) => {
+  res.sendFile(path.join(publicDir, "privacy.html"));
+});
+app.get(["/terms", "/terms.html"], (req, res) => {
+  res.sendFile(path.join(publicDir, "terms.html"));
+});
+
 // Route all /api requests to the Worker fetch handler
 app.use("/api", async (req, res) => {
   try {

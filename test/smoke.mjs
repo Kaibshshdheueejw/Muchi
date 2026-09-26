@@ -583,6 +583,94 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
   ok("meta: webm passes through untagged", Buffer.from(passthrough).equals(Buffer.from(webm)));
 }
 
+// ── 5c. Google OAuth Branding Verification & Site Verification ─────────────
+(() => {
+  const indexHtml = readFileSync("public/index.html", "utf8");
+  const manifest = JSON.parse(readFileSync("public/manifest.json", "utf8") || "{}");
+  const metadata = JSON.parse(readFileSync("metadata.json", "utf8") || "{}");
+  const appJs = readFileSync("public/app.js", "utf8");
+
+  // 1. Google site verification meta tag
+  const siteVerifRegex = /<meta\s+name=["']google-site-verification["']\s+content=["']K3tyeWx1iy8F1NaPmGRwbM1AQiwsztVv5Dgq49nnv8c["']\s*\/?>/i;
+  ok("google: site verification meta present in public/index.html", siteVerifRegex.test(indexHtml));
+
+  // 2. Exact match of app name in <title> (OAuth consent screen exact title requirement)
+  const titleMatch = indexHtml.match(/<title>([^<]+)<\/title>/i);
+  const titleText = titleMatch ? titleMatch[1].trim() : "";
+  ok("google: index.html title exactly matches OAuth app name 'Muchi'", titleText === "Muchi");
+
+  // 3. Application name metadata
+  const appNameMeta = /<meta\s+name=["']application-name["']\s+content=["']Muchi["']\s*\/?>/i;
+  ok("google: application-name meta is 'Muchi'", appNameMeta.test(indexHtml));
+
+  // 4. OpenGraph branding consistency
+  const ogTitle = /<meta\s+property=["']og:title["']\s+content=["']Muchi["']\s*\/?>/i;
+  const ogSiteName = /<meta\s+property=["']og:site_name["']\s+content=["']Muchi["']\s*\/?>/i;
+  ok("google: OpenGraph branding matches 'Muchi'", ogTitle.test(indexHtml) && ogSiteName.test(indexHtml));
+
+  // 5. Manifest & metadata.json consistency
+  ok("google: manifest.json name is 'Muchi'", manifest.name === "Muchi" && manifest.short_name === "Muchi");
+  ok("google: metadata.json name is 'Muchi'", metadata.name === "Muchi");
+
+  // 6. Homepage branding visible in UI (sidebar & home bar & hero)
+  ok("google: index.html brand markup contains 'Muchi'", indexHtml.includes("<strong>Muchi</strong>"));
+  ok("google: app.js homeBarHTML contains Muchi brand title", appJs.includes('class="home-brand-title">Muchi</span>'));
+  ok("google: app.js hero contains Muchi brand kicker", appJs.includes('class="hero-brand-kicker">Muchi</span>'));
+
+  // 7. Terms of Service & Privacy Policy pages and homepage links
+  const termsHtml = readFileSync("public/terms.html", "utf8");
+  const privacyHtml = readFileSync("public/privacy.html", "utf8");
+  ok("google: public/terms.html exists and contains Muchi Terms of Service", termsHtml.includes("<title>Muchi Terms of Service</title>") && termsHtml.includes("Muchi Terms of Service"));
+  ok("google: public/privacy.html exists and contains Muchi Privacy Policy", privacyHtml.includes("<title>Muchi Privacy Policy</title>") && privacyHtml.includes("Muchi Privacy Policy"));
+  ok("google: index.html links to /privacy.html and /terms.html", indexHtml.includes('href="/privacy.html"') && indexHtml.includes('href="/terms.html"'));
+  ok("google: app.js links to /privacy.html and /terms.html", appJs.includes('href="/privacy.html"') && appJs.includes('href="/terms.html"'));
+})();
+
+// ── 5d. Settings Features (Taste Profile Removed, Following & Data Sections, App Icons)
+(() => {
+  const appJs = readFileSync("public/app.js", "utf8");
+
+  // 1. Taste profile removed from settings
+  const settingsMatch = appJs.match(/function renderSettings\(\)\s*\{([\s\S]*?)(?:function\s+\w+|\Z)/);
+  const settingsBody = settingsMatch ? settingsMatch[1] : "";
+  ok("settings: 'Taste profile' bar is completely removed", !settingsBody.includes("Taste profile") && !settingsBody.includes("taste-grid"));
+
+  // 2. Dedicated Following section & release alerts
+  ok("settings: Following has dedicated opener #openFollowing", settingsBody.includes('id="openFollowing"'));
+  ok("settings: renderFollowingPage is defined", appJs.includes("function renderFollowingPage()"));
+  ok("settings: Following page provides release notifications toggle", appJs.includes('data-pref="notifyFollows"'));
+  ok("settings: Following page provides manual check button", appJs.includes('id="checkNewReleasesBtn"'));
+  ok("settings: Following page provides direct artist follow input", appJs.includes('id="newFollowArtistInput"'));
+  ok("settings: checkFollowReleases notifies user on new songs", appJs.includes("Notification") && appJs.includes("checkFollowReleases"));
+
+  // 3. Dedicated Data section
+  ok("settings: Data has dedicated opener #openData", settingsBody.includes('id="openData"'));
+  ok("settings: renderDataPage is defined", appJs.includes("function renderDataPage()"));
+  ok("settings: Data page provides storage measurement", appJs.includes("id=\"cacheHint\""));
+  ok("settings: Data page provides library backup export/import", appJs.includes('id="exportDataBtn"') && appJs.includes('id="importDataBtn"'));
+
+  // 4. App Icon customization (25 icons, anime, gaming, copyright-free, unique opening animations, floating profile menu)
+  const stylesCss = readFileSync("public/styles.css", "utf8");
+  const iconsMatch = appJs.match(/const APP_ICONS\s*=\s*(\[[\s\S]*?\]);/);
+  ok("settings: APP_ICONS list exists", !!iconsMatch);
+  let iconCount = 0;
+  if (iconsMatch) {
+    const raw = iconsMatch[1];
+    iconCount = (raw.match(/id:\s*"[^"]+"/g) || []).length;
+  }
+  ok("settings: APP_ICONS contains all 25 styles", iconCount === 25);
+  ok("settings: APP_ICONS includes anime styles", appJs.includes('category: "anime"') && appJs.includes('anime_cyber') && appJs.includes('anime_kawaii') && appJs.includes('anime_sakura') && appJs.includes('anime_ninja'));
+  ok("settings: APP_ICONS includes gaming styles and removes 'discord' copyright word", appJs.includes('blurple_gamer') && appJs.includes('gem_booster') && !/discord/i.test(appJs));
+  ok("settings: renderAppIconPage is defined", appJs.includes("function renderAppIconPage()"));
+  ok("settings: App Icon opener #openAppIcon is in settings", settingsBody.includes('id="openAppIcon"'));
+  ok("settings: setAppIcon updates state, saves prefs and calls applyAppIcon", appJs.includes("function setAppIcon(") && appJs.includes("applyAppIcon();"));
+  ok("settings: applyAppIcon updates #sidebarBrandIcon and #homeBrandIcon", appJs.includes("#sidebarBrandIcon") && appJs.includes("#homeBrandIcon"));
+  ok("ui: profile menu is wrapped in .home-bar-profile-wrap and positioned absolute to hover over hero bar", appJs.includes('class="home-bar-profile-wrap"') && stylesCss.includes(".home-bar-profile-wrap") && /\.profile-menu\s*\{[\s\S]*?position:\s*absolute/i.test(stylesCss));
+  ok("splash: all 25 unique opening animations and startup trigger exist", appJs.includes("function getOpeningAnimationHtml(") && appJs.includes("function playAppOpeningAnimation(") && appJs.includes("fx-sakura-petal") && appJs.includes("fx-ninja-slash") && appJs.includes("playAppOpeningAnimation();"));
+  ok("splash: opening animation shows only app name 'Muchi' without extra icon name/subtitle text", appJs.includes('<h1 class="splash-title">Muchi</h1>') && !appJs.includes('class="splash-kicker"') && !appJs.includes('class="splash-sub"'));
+  ok("icon: getAppIconSvg renders pure logo mark without 'MUCHI' text inside the icon", !appJs.includes(">MUCHI</text>"));
+})();
+
 // ── 6. Live worker checks (only when WRANGLER_DEV_URL is set) ───────────────
 const BASE = process.env.WRANGLER_DEV_URL;
 if (BASE) {

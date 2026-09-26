@@ -57,16 +57,21 @@ export async function deezerArtist(name) {
   const q = encodeURIComponent(raw);
   const j = await dzFetch(`/search/artist?q=${q}&limit=10`);
   const rows = (j && j.data) || [];
-  let pick = rows.find((r) => fold(r.name) === want);
+  const exact = rows.filter((r) => r && fold(r.name) === want);
+  let pick = exact.length
+    ? exact.sort((a, b) => (Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0))[0]
+    : null;
   if (!pick) {
-    const cands = rows.filter((r) => fold(r.name).startsWith(want));
-    if (cands.length) pick = cands.sort((a, b) => fold(a.name).length - fold(b.name).length)[0];
+    const cands = rows.filter((r) => r && fold(r.name).startsWith(want));
+    if (cands.length) {
+      pick = cands.sort((a, b) => (fold(a.name).length - fold(b.name).length) || ((Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0)))[0];
+    }
   }
   if (!pick || !pick.id) return null;
   return {
     id: String(pick.id),
     name: clean(pick.name) || name,
-    artwork: clean(pick.picture_medium) || "",
+    artwork: clean(pick.picture_big || pick.picture_medium) || "",
   };
 }
 
@@ -113,7 +118,7 @@ export async function deezerAlbums(artistId, artistName, { maxAlbums = 300 } = {
 /* Track list of one album (metadata only — never the preview URLs). */
 export async function deezerAlbumTracks(albumId, artistName) {
   const j = await dzFetch(`/album/${albumId}`);
-  const al = (j && j.data) || {};
+  const al = (j && j.tracks) ? j : ((j && j.data) || {});
   const rows = (al.tracks && al.tracks.data) || [];
   const out = [];
   for (const t of rows) {
@@ -200,6 +205,8 @@ export async function deezerSearch(query, { limit = 50, includeExtra = true } = 
   const q = clean(query).slice(0, 80);
   if (!q) return { songs: [], artists: [], playlists: [] };
   const enc = encodeURIComponent(q);
+  const fold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  const want = fold(q);
 
   const calls = [
     dzFetch(`/search?q=${enc}&limit=${limit}`, 8000),
@@ -219,6 +226,34 @@ export async function deezerSearch(query, { limit = 50, includeExtra = true } = 
   const seenArt = new Set();
   const seenAlb = new Set();
 
+  // 1. Add dedicated artist search results FIRST, sorted by exact match + fan count
+  if (artistsR && artistsR.status === "fulfilled" && artistsR.value && Array.isArray(artistsR.value.data)) {
+    const rawArtists = artistsR.value.data.filter((a) => a && a.id && a.name).slice();
+    rawArtists.sort((a, b) => {
+      const na = fold(a.name);
+      const nb = fold(b.name);
+      const aExact = na === want ? 2 : (na.startsWith(want) ? 1 : 0);
+      const bExact = nb === want ? 2 : (nb.startsWith(want) ? 1 : 0);
+      if (bExact !== aExact) return bExact - aExact;
+      return (Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0);
+    });
+    for (const a of rawArtists) {
+      const k = clean(a.name).toLowerCase();
+      if (!seenArt.has(k)) {
+        seenArt.add(k);
+        artists.push({
+          id: `artist:deezer:${a.id}`,
+          kind: "artist",
+          name: clean(a.name),
+          artwork: clean(a.picture_big || a.picture_medium) || "/cover-default.jpg",
+          source: "deezer",
+          query: clean(a.name),
+        });
+      }
+    }
+  }
+
+  // 2. Process track results and add any remaining artists
   if (tracksR && tracksR.status === "fulfilled" && tracksR.value && Array.isArray(tracksR.value.data)) {
     for (const t of tracksR.value.data) {
       if (!t || !t.id || !t.title) continue;
@@ -245,7 +280,7 @@ export async function deezerSearch(query, { limit = 50, includeExtra = true } = 
             id: `artist:deezer:${t.artist.id || k}`,
             kind: "artist",
             name: clean(t.artist.name),
-            artwork: clean(t.artist.picture_medium || t.artist.picture_big) || "/cover-default.jpg",
+            artwork: clean(t.artist.picture_big || t.artist.picture_medium) || "/cover-default.jpg",
             source: "deezer",
             query: clean(t.artist.name),
           });
@@ -266,24 +301,6 @@ export async function deezerSearch(query, { limit = 50, includeExtra = true } = 
             recordType: "Album",
           });
         }
-      }
-    }
-  }
-
-  if (artistsR && artistsR.status === "fulfilled" && artistsR.value && Array.isArray(artistsR.value.data)) {
-    for (const a of artistsR.value.data) {
-      if (!a || !a.id || !a.name) continue;
-      const k = clean(a.name).toLowerCase();
-      if (!seenArt.has(k)) {
-        seenArt.add(k);
-        artists.push({
-          id: `artist:deezer:${a.id}`,
-          kind: "artist",
-          name: clean(a.name),
-          artwork: clean(a.picture_medium || a.picture_big) || "/cover-default.jpg",
-          source: "deezer",
-          query: clean(a.name),
-        });
       }
     }
   }

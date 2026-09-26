@@ -2,3 +2,5 @@
 # build time). The Node server maps /favicon.ico -> /logo.png.
 
 /favicon.ico /logo.png 302
+/privacy /privacy.html 200
+/terms /terms.html 200
