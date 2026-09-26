@@ -32,6 +32,7 @@ import { handleStream, handleImg, handleAudiusStream, handleAudiusFile, handleDo
 import { maybeSweep } from "./db.js";
 import { handleAdmin } from "./admin.js";
 import { handleWebhook } from "./webhook.js";
+import { PRIVACY_HTML, TERMS_HTML } from "./legal.js";
 // PREVIEW-ONLY seed: active solely when env.MUCHI_PREVIEW_SEED is set (only
 // in the locally git-ignored .dev.vars). In production that env var is never
 // present, so this file and these handlers are inert.
@@ -48,6 +49,29 @@ export default {
       const url = new URL(request.url);
       if (request.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: corsHeaders(request) });
+      }
+      const cleanPath = url.pathname.replace(/\/+$/, "") || "/";
+      if (cleanPath === "/privacy" || cleanPath === "/privacy.html") {
+        return new Response(request.method === "HEAD" ? null : PRIVACY_HTML, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "public, max-age=3600",
+            "Access-Control-Allow-Origin": "*",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      }
+      if (cleanPath === "/terms" || cleanPath === "/terms.html") {
+        return new Response(request.method === "HEAD" ? null : TERMS_HTML, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "public, max-age=3600",
+            "Access-Control-Allow-Origin": "*",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
       }
       let response;
       if (url.pathname.startsWith("/api/")) {

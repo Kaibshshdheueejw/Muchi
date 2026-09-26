@@ -95,3 +95,22 @@ jobs:
           name: muchi-android-aab-${{ steps.keystore.outputs.signed }}
           path: android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: warn
+
+      - name: Publish APK to GitHub Release (main branch)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          TAG="v${VER}"
+          APK_SRC=$(ls android/app/build/outputs/apk/release/*.apk | head -n 1)
+          if [ -n "$APK_SRC" ] && [ -f "$APK_SRC" ]; then
+            cp "$APK_SRC" Muchi.apk
+            cp "$APK_SRC" "Muchi-${VER}.apk"
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" Muchi.apk "Muchi-${VER}.apk" --clobber
+            else
+              gh release create "$TAG" Muchi.apk "Muchi-${VER}.apk" --title "Muchi ${TAG}" --notes "Automated release build for Muchi ${TAG}."
+            fi
+          fi
+

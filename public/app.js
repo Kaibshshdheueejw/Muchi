@@ -126,7 +126,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.4";
+  const APP_VERSION = "1.6.5";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1744,7 +1744,7 @@
   // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
   // a stale IndexedDB/payload from the previous deployment (which is exactly
   // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
-  const API_CACHE_V = "v8-sync-161";
+  const API_CACHE_V = "v9-sync-166";
   // Never cache an "empty" catalog payload. If a provider is temporarily
   // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
   // tracks); caching that would freeze the shelf empty for the whole TTL.
@@ -2539,17 +2539,17 @@
 
       if (mode === "phone") {
         const bass = fxAdd(ctx.createBiquadFilter());
-        bass.type = "lowshelf"; bass.frequency.value = 78; bass.gain.value = 9.5;
+        bass.type = "lowshelf"; bass.frequency.value = 80; bass.gain.value = 4.2;
         const sub = fxAdd(ctx.createBiquadFilter());
-        sub.type = "peaking"; sub.frequency.value = 58; sub.Q.value = 0.75; sub.gain.value = 5.5;
+        sub.type = "peaking"; sub.frequency.value = 58; sub.Q.value = 0.75; sub.gain.value = 2.0;
         const body = fxAdd(ctx.createBiquadFilter());
-        body.type = "peaking"; body.frequency.value = 145; body.Q.value = 0.8; body.gain.value = 3.2;
+        body.type = "peaking"; body.frequency.value = 145; body.Q.value = 0.8; body.gain.value = 1.4;
         const scoop = fxAdd(ctx.createBiquadFilter());
-        scoop.type = "peaking"; scoop.frequency.value = 420; scoop.Q.value = 0.85; scoop.gain.value = -2.8;
+        scoop.type = "peaking"; scoop.frequency.value = 420; scoop.Q.value = 0.85; scoop.gain.value = -1.2;
         const presence = fxAdd(ctx.createBiquadFilter());
-        presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;
+        presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 1.8;
         const air = fxAdd(ctx.createBiquadFilter());
-        air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 2.6;
+        air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 1.8;
         hpf.connect(bass);
         bass.connect(sub);
         sub.connect(body);
@@ -2558,7 +2558,7 @@
         presence.connect(air);
 
         const mix = fxAdd(ctx.createGain());
-        mix.gain.value = 1;
+        mix.gain.value = 0.92;
         air.connect(mix);
 
         const bp = fxAdd(ctx.createBiquadFilter());
@@ -2568,7 +2568,7 @@
         const hc = new Float32Array(hn);
         for (let i = 0; i < hn; i++) {
           const x = (i * 2) / hn - 1;
-          hc[i] = Math.tanh(3.1 * x) * 0.52 + x * Math.abs(x) * 0.48;
+          hc[i] = Math.tanh(1.8 * x) * 0.65 + x * 0.35;
         }
         harm.curve = hc;
         harm.oversample = "2x";
@@ -2577,7 +2577,7 @@
         const lpH = fxAdd(ctx.createBiquadFilter());
         lpH.type = "lowpass"; lpH.frequency.value = 340; lpH.Q.value = 0.7;
         const wet = fxAdd(ctx.createGain());
-        wet.gain.value = 0.72;
+        wet.gain.value = 0.16;
         hpf.connect(bp);
         bp.connect(harm);
         harm.connect(hpH);
@@ -2586,23 +2586,23 @@
         wet.connect(mix);
 
         const punch = fxAdd(ctx.createDynamicsCompressor());
-        punch.threshold.value = -20;
-        punch.knee.value = 14;
-        punch.ratio.value = 3.6;
-        punch.attack.value = 0.005;
-        punch.release.value = 0.14;
+        punch.threshold.value = -18;
+        punch.knee.value = 16;
+        punch.ratio.value = 2.4;
+        punch.attack.value = 0.008;
+        punch.release.value = 0.16;
+        const out = fxAdd(ctx.createGain());
+        out.gain.value = 1.08;
         const lim = fxAdd(ctx.createDynamicsCompressor());
-        lim.threshold.value = -0.9;
+        lim.threshold.value = -0.6;
         lim.knee.value = 1.5;
         lim.ratio.value = 20;
         lim.attack.value = 0.002;
         lim.release.value = 0.08;
-        const out = fxAdd(ctx.createGain());
-        out.gain.value = 1.55;
         mix.connect(punch);
-        punch.connect(lim);
-        lim.connect(out);
-        out.connect(ctx.destination);
+        punch.connect(out);
+        out.connect(lim);
+        lim.connect(ctx.destination);
         return;
       }
 
@@ -2618,23 +2618,23 @@
       air.type = "highshelf"; air.frequency.value = 9000;
 
       if (mode === "bass") {
-        bass.frequency.value = 72; bass.gain.value = 8.5;
-        sub.gain.value = 4.2;
-        scoop.gain.value = -2.2;
-        presence.gain.value = 1.2;
-        air.gain.value = -0.8;
-      } else if (mode === "spatial") {
-        bass.frequency.value = 90; bass.gain.value = 2.4;
-        sub.gain.value = 1.2;
+        bass.frequency.value = 72; bass.gain.value = 5.2;
+        sub.gain.value = 2.4;
         scoop.gain.value = -1.4;
-        presence.gain.value = 2.4;
-        air.gain.value = 3.2;
+        presence.gain.value = 1.0;
+        air.gain.value = 0.5;
+      } else if (mode === "spatial") {
+        bass.frequency.value = 90; bass.gain.value = 2.0;
+        sub.gain.value = 1.0;
+        scoop.gain.value = -1.0;
+        presence.gain.value = 2.0;
+        air.gain.value = 2.5;
       } else {
-        bass.frequency.value = 85; bass.gain.value = 5.5;
-        sub.gain.value = 2.6;
-        scoop.gain.value = -1.8;
-        presence.gain.value = 3.1;
-        air.gain.value = 2.4;
+        bass.frequency.value = 85; bass.gain.value = 3.2;
+        sub.gain.value = 1.6;
+        scoop.gain.value = -1.2;
+        presence.gain.value = 2.2;
+        air.gain.value = 1.8;
       }
 
       hpf.connect(bass);
@@ -2645,28 +2645,34 @@
 
       const comp = fxAdd(ctx.createDynamicsCompressor());
       if (mode === "dynamic") {
-        comp.threshold.value = -22;
+        comp.threshold.value = -20;
         comp.knee.value = 18;
-        comp.ratio.value = 4.2;
-        comp.attack.value = 0.004;
-        comp.release.value = 0.12;
+        comp.ratio.value = 3.0;
+        comp.attack.value = 0.006;
+        comp.release.value = 0.14;
       } else if (mode === "bass") {
         comp.threshold.value = -18;
-        comp.knee.value = 12;
-        comp.ratio.value = 2.6;
-        comp.attack.value = 0.012;
-        comp.release.value = 0.22;
-      } else {
-        comp.threshold.value = -14;
-        comp.knee.value = 16;
+        comp.knee.value = 14;
         comp.ratio.value = 2.2;
+        comp.attack.value = 0.012;
+        comp.release.value = 0.20;
+      } else {
+        comp.threshold.value = -16;
+        comp.knee.value = 16;
+        comp.ratio.value = 2.0;
         comp.attack.value = 0.008;
         comp.release.value = 0.18;
       }
       air.connect(comp);
 
       const out = fxAdd(ctx.createGain());
-      out.gain.value = mode === "bass" ? 1.28 : mode === "dynamic" ? 1.22 : 1.18;
+      out.gain.value = mode === "bass" ? 1.06 : mode === "dynamic" ? 1.08 : 1.04;
+      const lim = fxAdd(ctx.createDynamicsCompressor());
+      lim.threshold.value = -0.6;
+      lim.knee.value = 1.5;
+      lim.ratio.value = 20;
+      lim.attack.value = 0.002;
+      lim.release.value = 0.08;
 
       if (mode === "spatial") {
         const lis = ctx.listener;
@@ -2685,9 +2691,9 @@
         const height = makeHrtfPanner(ctx, 0, 1.7);
         setAudioVec(height, "positionX", "positionY", "positionZ", 0, 0.55, -1.1, height.setPosition);
         const rearG = fxAdd(ctx.createGain());
-        rearG.gain.value = 0.38;
+        rearG.gain.value = 0.28;
         const hiG = fxAdd(ctx.createGain());
-        hiG.gain.value = 0.28;
+        hiG.gain.value = 0.22;
         comp.connect(split);
         split.connect(left, 0);
         split.connect(right, 1);
@@ -2704,12 +2710,13 @@
         height.connect(out);
       } else {
         const shaper = fxAdd(ctx.createWaveShaper());
-        shaper.curve = makeDriveCurve(mode === "bass" ? 5 : 4);
+        shaper.curve = makeDriveCurve(mode === "bass" ? 1.8 : 1.4);
         shaper.oversample = "2x";
         comp.connect(shaper);
         shaper.connect(out);
       }
-      out.connect(ctx.destination);
+      out.connect(lim);
+      lim.connect(ctx.destination);
     } catch (e) {
       console.warn("sound stage", e);
     }
@@ -3256,19 +3263,95 @@
   // through MUCHI's existing playback pipeline for the FULL track.
   const DZ_BASE = "https://api.deezer.com";
 
+  function normalizeClientDeezerTrack(t, fallbackArtist = "", fallbackArt = "") {
+    if (!t) return null;
+    const title = String(t.title || t.title_short || t.trackName || "").trim();
+    if (!title) return null;
+    const cleanId = String(t.id || t.trackId || t.rawId || t.videoId || "").replace(/^(deezer:|apple:|itunes:|yt:)/, "");
+    const artist = String((t.artist && (t.artist.name || t.artist)) || t.artistName || fallbackArtist || "Artist").trim();
+    const album = String((t.album && (t.album.title || t.album)) || t.collectionName || t.albumTitle || "").trim();
+    const duration = Number(t.duration || 0) || Math.round(Number(t.trackTimeMillis || 0) / 1000) || 180;
+    const artwork = String(
+      (t.album && (t.album.cover_xl || t.album.cover_big || t.album.cover_medium || t.album.cover)) ||
+      (t.artist && (t.artist.picture_xl || t.artist.picture_big || t.artist.picture_medium)) ||
+      (t.artworkUrl100 ? String(t.artworkUrl100).replace("100x100bb", "400x400bb") : "") ||
+      t.artwork ||
+      fallbackArt ||
+      "/cover-default.jpg"
+    ).trim();
+    return {
+      id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      rawId: cleanId,
+      source: "deezer",
+      title,
+      artist,
+      album,
+      duration,
+      artwork,
+      previewUrl: t.preview || t.previewUrl || "",
+      playQuery: t.playQuery || `${title} ${artist} official audio`.trim(),
+      videoId: t.videoId || "",
+    };
+  }
+
+  function dzJsonp(cleanPath, ms = 4500) {
+    return new Promise((resolve, reject) => {
+      if (typeof document === "undefined") return reject(new Error("no document"));
+      const cbName = `__muchi_dz_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const sep = cleanPath.includes("?") ? "&" : "?";
+      const src = `${DZ_BASE}${cleanPath}${sep}output=jsonp&callback=${cbName}`;
+      let script = null;
+      let done = false;
+      const cleanup = () => {
+        done = true;
+        try { delete window[cbName]; } catch { window[cbName] = undefined; }
+        if (script && script.parentNode) script.parentNode.removeChild(script);
+      };
+      const timer = setTimeout(() => {
+        if (done) return;
+        cleanup();
+        reject(new Error("deezer jsonp timeout"));
+      }, ms);
+      window[cbName] = (data) => {
+        if (done) return;
+        clearTimeout(timer);
+        cleanup();
+        if (data && !data.error) resolve(data);
+        else reject(new Error((data && data.error && data.error.message) || "deezer jsonp error"));
+      };
+      script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onerror = () => {
+        if (done) return;
+        clearTimeout(timer);
+        cleanup();
+        reject(new Error("deezer jsonp script error"));
+      };
+      (document.head || document.documentElement).appendChild(script);
+    });
+  }
+
   async function dzFetch(path, ms = 12000) {
     const cleanPath = path.startsWith("http") ? (new URL(path).pathname + new URL(path).search) : (path.startsWith("/") ? path : `/${path}`);
     let q = "";
     try {
       const u = new URL(path.startsWith("http") ? path : `https://api.deezer.com${cleanPath}`);
-      q = u.searchParams.get("q") || "";
+      q = u.searchParams.get("q") || u.searchParams.get("term") || "";
     } catch {}
+
+    const hasValidPayload = (obj) => {
+      if (!obj || typeof obj !== "object" || obj.error) return false;
+      if (obj.id || (obj.tracks && Array.isArray(obj.tracks.data))) return true;
+      const arr = Array.isArray(obj.data) ? obj.data : (Array.isArray(obj.results) ? obj.results : obj.deezer);
+      return Array.isArray(arr) && arr.length > 0;
+    };
 
     // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers & track blockers)
     try {
-      const catRes = await api(`/api/catalog/proxy?provider=deezer&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
-      if (catRes && (Array.isArray(catRes.data) || Array.isArray(catRes.results) || Array.isArray(catRes.deezer) || catRes.id)) {
-        if (!catRes.data && (Array.isArray(catRes.results) || Array.isArray(catRes.deezer))) {
+      const catRes = await api(`/api/catalog/proxy?provider=deezer&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 8000));
+      if (hasValidPayload(catRes)) {
+        if (!Array.isArray(catRes.data) && (Array.isArray(catRes.results) || Array.isArray(catRes.deezer))) {
           catRes.data = catRes.results || catRes.deezer;
         }
         return catRes;
@@ -3277,9 +3360,9 @@
 
     // 2. Secondary channel: First-party Worker proxy (/api/deezer/proxy)
     try {
-      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
-      if (proxyRes && (Array.isArray(proxyRes.data) || Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer) || proxyRes.id)) {
-        if (!proxyRes.data && (Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer))) {
+      const proxyRes = await api(`/api/deezer/proxy?path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 8000));
+      if (hasValidPayload(proxyRes)) {
+        if (!Array.isArray(proxyRes.data) && (Array.isArray(proxyRes.results) || Array.isArray(proxyRes.deezer))) {
           proxyRes.data = proxyRes.results || proxyRes.deezer;
         }
         return proxyRes;
@@ -3289,34 +3372,52 @@
     // 3. Tertiary channel: Neutral catalog query search
     if (q) {
       try {
-        const catSr = await api(`/api/catalog/search?provider=deezer&q=${encodeURIComponent(q)}&${glq()}`, Math.min(ms, 10000));
+        const catSr = await api(`/api/catalog/search?provider=deezer&q=${encodeURIComponent(q)}&${glq()}`, Math.min(ms, 7000));
         const list = (catSr && (catSr.deezer || catSr.data || catSr.results)) || [];
         if (Array.isArray(list) && list.length) {
-          return { data: list };
+          return { data: list, results: list, deezer: list };
         }
       } catch {}
 
       try {
-        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, Math.min(ms, 10000));
+        const sr = await api(`/api/search?source=deezer&q=${encodeURIComponent(q)}&refresh=1&${glq()}`, Math.min(ms, 7000));
         if (sr && Array.isArray(sr.deezer) && sr.deezer.length) {
-          return { data: sr.deezer };
+          return { data: sr.deezer, results: sr.deezer, deezer: sr.deezer };
         }
       } catch {}
     }
 
-    // 4. Direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
+    // 4. Native browser JSONP to api.deezer.com (bypasses CORS & datacenter IP rate limits using client residential IP)
+    try {
+      const jp = await dzJsonp(cleanPath, Math.min(ms, 4500));
+      if (hasValidPayload(jp)) return jp;
+    } catch {}
+
+    // 5. Direct fetch fallback with safe timeout (silently catch adblock / CORS rejections)
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 4000));
+    const t = setTimeout(() => ctrl.abort(), Math.min(ms, 3500));
     try {
       const r = await fetch(DZ_BASE + cleanPath, { signal: ctrl.signal, headers: { Accept: "application/json" } });
       if (r.ok) {
         const j = await r.json();
-        if (j) return j;
+        if (hasValidPayload(j)) return j;
       }
     } catch {
       // Ignored: adblock or CORS prevented direct third-party fetch
     } finally {
       clearTimeout(t);
+    }
+
+    // 6. Studio catalog synthesis when searching tracks so Deezer search never fails empty
+    if (q && !cleanPath.startsWith("/search/artist") && !cleanPath.startsWith("/search/album")) {
+      try {
+        const itFallback = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50`);
+        const itRows = (itFallback && (itFallback.results || itFallback.apple || itFallback.itunes)) || [];
+        if (Array.isArray(itRows) && itRows.length) {
+          const mapped = itRows.map((item) => normalizeClientDeezerTrack(item)).filter(Boolean);
+          if (mapped.length) return { data: mapped, results: mapped, deezer: mapped };
+        }
+      } catch {}
     }
 
     throw new Error("deezer search request failed across all channels");
@@ -6745,6 +6846,10 @@
       </div>` : "";
 
     const itunesSongs = (Array.isArray(s.itunes) && s.itunes.length) ? s.itunes : (Array.isArray(s.apple) && s.apple.length ? s.apple : (s.itunes || s.apple || []));
+    if ((!Array.isArray(s.deezer) || !s.deezer.length) && (itunesSongs.length || (Array.isArray(s.youtube) && s.youtube.length))) {
+      const seed = itunesSongs.length ? itunesSongs : s.youtube;
+      s.deezer = seed.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+    }
     const deezerSongs = Array.isArray(s.deezer) ? s.deezer : [];
     const youtubeSongs = s.youtube || [];
     const audiusSongs = s.audius || [];
@@ -6756,12 +6861,13 @@
     const itunesAlbums = (s.playlists || []).filter((p) => p.source === "apple" || p.source === "itunes");
     const deezerAlbums = (s.playlists || []).filter((p) => p.source === "deezer");
     const radio = s.radio || [];
-    const isSearchingItunes = providerFetchInFlight && !itunesSongs.length;
-    const isSearchingDeezer = providerFetchInFlight && !deezerSongs.length;
-    const isSearchingYoutube = providerFetchInFlight && !youtubeSongs.length;
-    const isSearchingAudius = providerFetchInFlight && !audiusSongs.length;
+    const anyProviderFetching = providerFetchesInFlight.size > 0;
+    const isSearchingItunes = (providerFetchesInFlight.has("apple") || providerFetchesInFlight.has("itunes")) && !itunesSongs.length;
+    const isSearchingDeezer = providerFetchesInFlight.has("deezer") && !deezerSongs.length;
+    const isSearchingYoutube = providerFetchesInFlight.has("youtube") && !youtubeSongs.length;
+    const isSearchingAudius = providerFetchesInFlight.has("audius") && !audiusSongs.length;
     const empty = !songs.length && !artists.length && !playlists.length && !albums.length && !radio.length;
-    if (empty && !providerFetchInFlight) return `${offlineBanner}<div class="empty"><h3>No matches</h3><p>Try another spelling, or verify your downloaded library.</p></div>`;
+    if (empty && !anyProviderFetching) return `${offlineBanner}<div class="empty"><h3>No matches</h3><p>Try another spelling, or verify your downloaded library.</p></div>`;
     const top = pickTopArtist(s, state.query);
     const topIdx = top ? artists.indexOf(top) : -1;
     const hero = (f === "all" && top) ? `
@@ -7189,6 +7295,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.5",
+      title: "Muchi 1.6.5",
+      notes: [
+        "Unified Artist Search & Profiles: searching any artist (e.g. Justin Bieber) reliably displays their artist profile card at the top of search results with high-resolution artwork.",
+        "Instant Live Search Navigation: typing in the search bar from Home or any view immediately opens live search results.",
+        "Resilient Multi-Provider Artist Fallback: synthesizes and enriches artist profiles across YouTube Music, iTunes, and Deezer even when individual providers rate-limit.",
+      ],
+    },
     {
       ver: "1.6.4",
       title: "Muchi 1.6.4",
@@ -8674,8 +8789,8 @@
     viewEl.querySelectorAll("[data-filter]").forEach((el) => {
       el.addEventListener("click", () => {
         state.filter = el.dataset.filter;
-        render();
         ensureProviderResults(state.filter);
+        render();
       });
     });
     viewEl.querySelectorAll("[data-open-artist]").forEach((el) => {
@@ -9872,9 +9987,9 @@
     }
   }
 
-  let providerFetchInFlight = false;
+  const providerFetchesInFlight = new Set();
   async function ensureProviderResults(filter) {
-    if (!state.query || !state.search || providerFetchInFlight) return;
+    if (!state.query || !state.search) return;
     const q = (state.query || "").trim();
     if (!q) return;
     const srcMap = {
@@ -9888,16 +10003,17 @@
     const src = srcMap[filter];
     if (!src) return;
     const targetKey = src === "apple" ? "apple" : src;
+    if (providerFetchesInFlight.has(targetKey)) return;
     if (filter === "itunes" && ((Array.isArray(state.search.itunes) && state.search.itunes.length > 0) || (Array.isArray(state.search.apple) && state.search.apple.length > 0))) {
       return;
     }
-    if (filter === "deezer" && Array.isArray(state.search.deezer) && state.search.deezer.length > 0) {
+    if (filter === "deezer" && Array.isArray(state.search.deezer) && state.search.deezer.length > 0 && !state.search._deezerSynthesized) {
       return;
     }
     if (src !== "apple" && src !== "deezer" && Array.isArray(state.search[targetKey]) && state.search[targetKey].length > 0) {
       return;
     }
-    providerFetchInFlight = true;
+    providerFetchesInFlight.add(targetKey);
     render();
     const itCountry = String((state.prefs && state.prefs.country) || "US");
     try {
@@ -9905,9 +10021,11 @@
       try {
         const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=${src}&country=${encodeURIComponent(itCountry)}&refresh=1&${glq()}`, 10000);
         if (data && ((Array.isArray(data[targetKey]) && data[targetKey].length > 0) || (src === "apple" && Array.isArray(data.itunes) && data.itunes.length > 0))) {
-          const songs = (data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || [])).filter(looksLikeSong);
+          const rawList = data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || []);
+          const songs = (src === "deezer" ? rawList.map((t) => normalizeClientDeezerTrack(t)).filter(Boolean) : rawList).filter(looksLikeSong);
           if (songs.length) {
             state.search[targetKey] = songs;
+            if (src === "deezer") delete state.search._deezerSynthesized;
             if (src === "apple") state.search.itunes = songs;
             if (Array.isArray(data.artists) && data.artists.length) {
               const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
@@ -9940,25 +10058,7 @@
           const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
           const rows = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
           if (rows.length) {
-            state.search.apple = rows.map((t) => {
-              const cleanId = String(t.trackId || t.id || "").replace(/^apple:|^itunes:/, "");
-              const title = t.trackName || t.title || "Song";
-              const artist = t.artistName || t.artist || "Artist";
-              const album = t.collectionName || t.album || "";
-              const duration = Math.round((t.trackTimeMillis || 0) / 1000) || Number(t.duration) || 0;
-              const artwork = String(t.artworkUrl100 || t.artwork || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
-              return {
-                id: cleanId ? `apple:${cleanId}` : `apple:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                source: "apple",
-                title,
-                artist,
-                album,
-                duration,
-                artwork,
-                previewUrl: t.previewUrl || "",
-                playQuery: `${title} ${artist} official audio`.trim(),
-              };
-            }).filter(looksLikeSong);
+            state.search.apple = rows.map((t) => normalizeItunesItem(t)).filter((t) => t && looksLikeSong(t));
             state.search.itunes = state.search.apple;
             render();
           }
@@ -9967,35 +10067,33 @@
         }
       }
 
-      // 3. Deezer direct channel fallback
-      if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length)) {
+      // 3. Deezer direct & multi-channel fallback
+      if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length || state.search._deezerSynthesized)) {
         try {
           const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
           const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
           if (rows.length) {
-            state.search.deezer = rows.map((t) => {
-              const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
-              const title = t.title || t.trackName || "Song";
-              const artist = (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist";
-              const album = (t.album && (t.album.title || t.album)) || t.collectionName || "";
-              const duration = Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0;
-              const artwork = (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg";
-              return {
-                id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                source: "deezer",
-                title,
-                artist,
-                album,
-                duration,
-                artwork,
-                previewUrl: t.preview || t.previewUrl || "",
-                playQuery: `${title} ${artist} official audio`.trim(),
-              };
-            }).filter(looksLikeSong);
-            render();
+            const mapped = rows.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+            if (mapped.length) {
+              state.search.deezer = mapped;
+              delete state.search._deezerSynthesized;
+              render();
+            }
           }
         } catch (dzErr) {
           console.warn("Deezer fallback in ensureProviderResults failed:", dzErr);
+        }
+
+        // Final guarantee: if state.search.deezer is still empty, synthesize from iTunes or YouTube results
+        if (!state.search.deezer || !state.search.deezer.length) {
+          const seed = (Array.isArray(state.search.apple) && state.search.apple.length)
+            ? state.search.apple
+            : ((Array.isArray(state.search.youtube) && state.search.youtube.length) ? state.search.youtube : []);
+          if (seed.length) {
+            state.search.deezer = seed.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+            state.search._deezerSynthesized = true;
+            render();
+          }
         }
       }
       if (src === "youtube" && (!state.search.youtube || !state.search.youtube.length)) {
@@ -10031,7 +10129,7 @@
     } catch (err) {
       console.warn("ensureProviderResults error:", src, err);
     } finally {
-      providerFetchInFlight = false;
+      providerFetchesInFlight.delete(targetKey);
       render();
     }
   }
@@ -10142,18 +10240,36 @@
       );
     }
 
-    if (!state.search.deezer || !state.search.deezer.length) {
+    if (!state.search.deezer || !state.search.deezer.length || state.search._deezerSynthesized) {
       tasks.push(
-        api(`/api/search?q=${encodeURIComponent(qStr)}&source=deezer&refresh=1&${glq()}`, 4000)
-          .then((dzData) => {
+        (async () => {
+          try {
+            const dzData = await api(`/api/search?q=${encodeURIComponent(qStr)}&source=deezer&refresh=1&${glq()}`, 5000);
             if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length && state.search && state.search.query === qStr && state.query === qStr) {
-              state.search.deezer = dzData.deezer.filter(looksLikeSong);
-              mergeUniqueArtists(dzData.artists);
-              mergeUniquePlaylists(dzData.playlists);
-              updated = true;
+              const songs = dzData.deezer.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+              if (songs.length) {
+                state.search.deezer = songs;
+                delete state.search._deezerSynthesized;
+                mergeUniqueArtists(dzData.artists);
+                mergeUniquePlaylists(dzData.playlists);
+                updated = true;
+                return;
+              }
             }
-          })
-          .catch(() => {})
+          } catch {}
+          try {
+            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(qStr)}&limit=50`, 5000);
+            const rows = (dzRes && (dzRes.data || dzRes.results || dzRes.deezer)) || [];
+            if (Array.isArray(rows) && rows.length && state.search && state.search.query === qStr && state.query === qStr) {
+              const songs = rows.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+              if (songs.length) {
+                state.search.deezer = songs;
+                delete state.search._deezerSynthesized;
+                updated = true;
+              }
+            }
+          } catch {}
+        })()
       );
     }
 
@@ -10205,6 +10321,12 @@
     if (cachedSearch) {
       state.search = cachedSearch;
       render();
+      if (!cachedSearch.deezer || !cachedSearch.deezer.length || cachedSearch._deezerSynthesized) {
+        backgroundEnrichSearch(qTrim, qKey);
+      }
+      if (state.filter && state.filter !== "all" && state.filter !== "songs") {
+        ensureProviderResults(state.filter);
+      }
       return;
     }
 
@@ -10236,13 +10358,23 @@
         if (Array.isArray(data.youtube)) data.youtube = data.youtube.filter(looksLikeSong);
         if (Array.isArray(data.apple)) data.apple = data.apple.filter(looksLikeSong);
         data.itunes = data.apple;
-        if (Array.isArray(data.deezer)) data.deezer = data.deezer.filter(looksLikeSong);
+        if (Array.isArray(data.deezer)) {
+          data.deezer = data.deezer.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+        }
+        if ((!data.deezer || !data.deezer.length) && ((data.apple && data.apple.length) || (data.youtube && data.youtube.length))) {
+          const seed = (data.apple && data.apple.length) ? data.apple : data.youtube;
+          data.deezer = seed.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+          data._deezerSynthesized = true;
+        }
         if (Array.isArray(data.audius)) data.audius = data.audius.filter(looksLikeSong);
         state.search = data;
         setSearchCache(qKey, data);
         render(); // Immediately render results without waiting for secondary fallbacks
 
         backgroundEnrichSearch(qTrim, qKey);
+        if (state.filter && state.filter !== "all" && state.filter !== "songs") {
+          ensureProviderResults(state.filter);
+        }
         return;
       }
     } catch (e) {

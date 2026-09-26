@@ -126,7 +126,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.3";
+  const APP_VERSION = "1.6.5";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -291,6 +291,493 @@
     { id: "ink", name: "Ink", blurb: "Deep navy", group: "color", surface: "#070b16", a: "#93c5fd", b: "#818cf8" },
     { id: "peach", name: "Peach", blurb: "Soft fruit", group: "color", surface: "#1c1210", a: "#fdba74", b: "#fda4af" },
   ];
+
+  const APP_ICONS = [
+    { id: "default", title: "Classic Muchi", category: "classic", bg: "#081612", discA: "#baffe6", discB: "#12c48c", ink: "#06241c", accent: "#34d399", desc: "Original mint emerald signature" },
+    { id: "anime_cyber", title: "Cyber Anime", category: "anime", bg: "#0d0221", discA: "#ff007f", discB: "#00f0ff", ink: "#0f051d", accent: "#ff007f", desc: "Cyberpunk Tokyo neon glow" },
+    { id: "anime_kawaii", title: "Kawaii Mochi", category: "anime", bg: "#2a1526", discA: "#ffcbf2", discB: "#f72585", ink: "#ffffff", accent: "#ff70a6", desc: "Pastel strawberry sparkle" },
+    { id: "anime_mecha", title: "Mecha Unit-01", category: "anime", bg: "#120826", discA: "#7000ff", discB: "#39ff14", ink: "#0a0314", accent: "#39ff14", desc: "Purple armor with bio-green" },
+    { id: "anime_sakura", title: "Sakura Blossom", category: "anime", bg: "#1f1018", discA: "#ffe5ec", discB: "#fb7185", ink: "#3c0919", accent: "#fb7185", desc: "Spring cherry blossom pink" },
+    { id: "anime_shonen", title: "Shonen Flame", category: "anime", bg: "#1a0800", discA: "#ffe600", discB: "#ff3d00", ink: "#260600", accent: "#ff9100", desc: "Blazing golden fighting aura" },
+    { id: "anime_ninja", title: "Shadow Ninja", category: "anime", bg: "#05070e", discA: "#e63946", discB: "#1d3557", ink: "#ffffff", accent: "#e63946", desc: "Stealth dark with crimson focus" },
+    { id: "anime_chibi", title: "Chibi Sparkle", category: "anime", bg: "#19082a", discA: "#f1c0e8", discB: "#a3c4f3", ink: "#3c1361", accent: "#cfbaf0", desc: "Magic girl star wand pastel" },
+    { id: "blurple_gamer", title: "Blurple Gamer", category: "gaming", bg: "#1e1f22", discA: "#7289da", discB: "#5865f2", ink: "#ffffff", accent: "#5865f2", desc: "Classic voice chat gaming aesthetic" },
+    { id: "gem_booster", title: "Gem Booster", category: "gaming", bg: "#23153c", discA: "#f47fff", discB: "#be185d", ink: "#ffffff", accent: "#f47fff", desc: "Iridescent jewel booster glow" },
+    { id: "matrix_terminal", title: "Matrix Console", category: "gaming", bg: "#001100", discA: "#80ff72", discB: "#008f11", ink: "#000000", accent: "#00ff66", desc: "Terminal digital stream" },
+    { id: "pixel_arcade", title: "8-Bit Arcade", category: "gaming", bg: "#181425", discA: "#fbb954", discB: "#cd683d", ink: "#261b36", accent: "#e43b44", desc: "Nostalgic chiptune cartridge" },
+    { id: "solar_flare", title: "Solar Flare", category: "vibrant", bg: "#1c0d02", discA: "#ffea79", discB: "#ff6b00", ink: "#2b0d00", accent: "#ff8c00", desc: "Blinding solar prominence" },
+    { id: "vaporwave", title: "Vaporwave 1984", category: "vibrant", bg: "#10061e", discA: "#f72585", discB: "#4cc9f0", ink: "#0e021a", accent: "#7209b7", desc: "Synth-pop twilight aesthetic" },
+    { id: "synthwave", title: "Synthwave Sunset", category: "vibrant", bg: "#180527", discA: "#ff4b91", discB: "#6c00ff", ink: "#ffffff", accent: "#ff4b91", desc: "80s outrun palm skyline" },
+    { id: "cosmic_nebula", title: "Cosmic Nebula", category: "vibrant", bg: "#090919", discA: "#b5179e", discB: "#480ca8", ink: "#ffffff", accent: "#4cc9f0", desc: "Deep space interstellar cloud" },
+    { id: "ruby_crimson", title: "Crimson Ruby", category: "vibrant", bg: "#1a0006", discA: "#ff4d6d", discB: "#a4133c", ink: "#ffffff", accent: "#ff4d6d", desc: "Precious gemstone scarlet" },
+    { id: "emerald_jade", title: "Imperial Jade", category: "classic", bg: "#021c14", discA: "#52b788", discB: "#1b4332", ink: "#ffffff", accent: "#74c69d", desc: "Lush ancient rainforest green" },
+    { id: "holographic", title: "Holo Prism", category: "vibrant", bg: "#121420", discA: "#e0aaff", discB: "#7b2cbf", ink: "#ffffff", accent: "#c77dff", desc: "Reflective iridescent crystal" },
+    { id: "y2k_chrome", title: "Y2K Liquid Chrome", category: "vibrant", bg: "#171a21", discA: "#e2e8f0", discB: "#64748b", ink: "#0f172a", accent: "#94a3b8", desc: "Millennium metallic mercury" },
+    { id: "midnight_stealth", title: "Obsidian Stealth", category: "minimal", bg: "#000000", discA: "#334155", discB: "#0f172a", ink: "#f8fafc", accent: "#94a3b8", desc: "Ultra-dark OLED monochrome" },
+    { id: "sunset_lofi", title: "Lofi Twilight", category: "vibrant", bg: "#1e1022", discA: "#fca311", discB: "#e63946", ink: "#14213d", accent: "#fca311", desc: "Rooftop study beats warmth" },
+    { id: "ocean_abyss", title: "Abyssal Deep", category: "classic", bg: "#030e1e", discA: "#48cae4", discB: "#0077b6", ink: "#03045e", accent: "#00b4d8", desc: "Bioluminescent ocean trench" },
+    { id: "citrus_burst", title: "Citrus Punch", category: "vibrant", bg: "#1a1600", discA: "#cbf3f0", discB: "#ff9f1c", ink: "#2ec4b6", accent: "#ffbf69", desc: "Electric yuzu and blood orange" },
+    { id: "royal_amethyst", title: "Royal Amethyst", category: "minimal", bg: "#14041e", discA: "#d8b4e2", discB: "#5a189a", ink: "#ffffff", accent: "#e0aaff", desc: "Deep imperial velvet violet" },
+  ];
+
+  function normalizeAppIconId(id) {
+    const found = APP_ICONS.some((i) => i.id === id);
+    return found ? id : "default";
+  }
+
+  function getIconThemeMotifSvg(id, accent, discA, discB, ink) {
+    switch (id) {
+      case "anime_sakura":
+        return `
+          <g opacity="0.9">
+            <path d="M20 22 C24 16 30 20 25 26 C20 28 16 25 20 22 Z" fill="#ffcbf2">
+              <animateTransform attributeName="transform" type="translate" values="0,0; 6,14; 0,0" dur="3.6s" repeatCount="indefinite"/>
+            </path>
+            <path d="M78 24 C82 18 88 22 83 28 C78 30 74 27 78 24 Z" fill="#fb7185">
+              <animateTransform attributeName="transform" type="translate" values="0,0; -8,16; 0,0" dur="4.2s" repeatCount="indefinite"/>
+            </path>
+            <path d="M24 74 C28 68 34 72 29 78 C24 80 20 77 24 74 Z" fill="#ffe5ec">
+              <animateTransform attributeName="transform" type="translate" values="0,0; 8,-10; 0,0" dur="3.8s" repeatCount="indefinite"/>
+            </path>
+          </g>`;
+      case "anime_ninja":
+        return `
+          <g>
+            <g transform="translate(76,22)">
+              <polygon points="0,-10 3,-3 10,0 3,3 0,10 -3,3 -10,0 -3,-3" fill="${accent}">
+                <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="2.8s" repeatCount="indefinite"/>
+              </polygon>
+            </g>
+            <line x1="16" y1="78" x2="84" y2="18" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" opacity="0.75">
+              <animate attributeName="opacity" values="0.2;0.9;0.2" dur="2.2s" repeatCount="indefinite"/>
+            </line>
+          </g>`;
+      case "anime_cyber":
+        return `
+          <g stroke="${discB}" stroke-width="1.6" fill="none" opacity="0.8">
+            <path d="M12 30 H24 L30 24" />
+            <path d="M88 70 H76 L70 76" stroke="${discA}" />
+            <rect x="10" y="10" width="80" height="80" rx="18" stroke="${discB}" stroke-dasharray="14 8" opacity="0.45">
+              <animate attributeName="stroke-dashoffset" from="0" to="44" dur="3s" repeatCount="indefinite"/>
+            </rect>
+          </g>`;
+      case "anime_kawaii":
+        return `
+          <g fill="#ffffff">
+            <polygon points="22,16 24,21 29,23 24,25 22,30 20,25 15,23 20,21">
+              <animate attributeName="opacity" values="0.3;1;0.3" dur="2s" repeatCount="indefinite"/>
+            </polygon>
+            <polygon points="78,20 79.5,24 83.5,25.5 79.5,27 78,31 76.5,27 72.5,25.5 76.5,24">
+              <animate attributeName="opacity" values="1;0.3;1" dur="2.4s" repeatCount="indefinite"/>
+            </polygon>
+          </g>`;
+      case "anime_mecha":
+        return `
+          <polygon points="50,8 86,28 86,72 50,92 14,72 14,28" fill="none" stroke="${accent}" stroke-width="2" opacity="0.7">
+            <animate attributeName="opacity" values="0.35;0.9;0.35" dur="2.4s" repeatCount="indefinite"/>
+          </polygon>`;
+      case "anime_shonen":
+        return `
+          <circle cx="50" cy="50" r="39" fill="none" stroke="${discA}" stroke-width="2.5" stroke-dasharray="6 6" opacity="0.8">
+            <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="4s" repeatCount="indefinite"/>
+          </circle>`;
+      case "anime_chibi":
+        return `
+          <g fill="${accent}">
+            <circle cx="20" cy="26" r="3"><animate attributeName="r" values="2;4.2;2" dur="2.2s" repeatCount="indefinite"/></circle>
+            <circle cx="80" cy="26" r="3"><animate attributeName="r" values="4;2;4" dur="2.2s" repeatCount="indefinite"/></circle>
+          </g>`;
+      case "blurple_gamer":
+        return `
+          <circle cx="50" cy="50" r="38" fill="none" stroke="#ffffff" stroke-width="1.8" opacity="0.45">
+            <animate attributeName="r" values="34;42;34" dur="2.6s" repeatCount="indefinite"/>
+            <animate attributeName="opacity" values="0.6;0.1;0.6" dur="2.6s" repeatCount="indefinite"/>
+          </circle>`;
+      case "gem_booster":
+        return `
+          <polygon points="50,10 90,50 50,90 10,50" fill="none" stroke="#ffffff" stroke-width="1.8" opacity="0.55">
+            <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="6s" repeatCount="indefinite"/>
+          </polygon>`;
+      case "matrix_terminal":
+        return `
+          <g fill="${accent}" font-family="monospace" font-size="8" font-weight="700" opacity="0.75">
+            <text x="14" y="22">01</text>
+            <text x="76" y="22">10</text>
+            <text x="14" y="84">11</text>
+            <text x="76" y="84">01</text>
+          </g>`;
+      case "pixel_arcade":
+        return `
+          <g fill="${accent}">
+            <rect x="14" y="14" width="6" height="6"><animate attributeName="opacity" values="1;0.2;1" dur="1.4s" repeatCount="indefinite"/></rect>
+            <rect x="80" y="14" width="6" height="6"><animate attributeName="opacity" values="0.2;1;0.2" dur="1.4s" repeatCount="indefinite"/></rect>
+            <rect x="14" y="80" width="6" height="6"><animate attributeName="opacity" values="0.2;1;0.2" dur="1.4s" repeatCount="indefinite"/></rect>
+            <rect x="80" y="80" width="6" height="6"><animate attributeName="opacity" values="1;0.2;1" dur="1.4s" repeatCount="indefinite"/></rect>
+          </g>`;
+      case "solar_flare":
+        return `
+          <circle cx="50" cy="50" r="39" fill="none" stroke="${discA}" stroke-width="2.2" stroke-dasharray="4 8" opacity="0.85">
+            <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="5s" repeatCount="indefinite"/>
+          </circle>`;
+      case "vaporwave":
+        return `
+          <g stroke="${discB}" stroke-width="1.5" opacity="0.7">
+            <line x1="12" y1="78" x2="88" y2="78"><animate attributeName="opacity" values="0.3;0.9;0.3" dur="2.2s" repeatCount="indefinite"/></line>
+            <line x1="18" y1="84" x2="82" y2="84"/>
+          </g>`;
+      case "synthwave":
+        return `
+          <path d="M14 68 Q50 56 86 68" fill="none" stroke="${accent}" stroke-width="2" opacity="0.75">
+            <animate attributeName="opacity" values="0.35;0.95;0.35" dur="2.5s" repeatCount="indefinite"/>
+          </path>`;
+      case "cosmic_nebula":
+        return `
+          <g fill="#ffffff">
+            <circle cx="20" cy="22" r="1.8"><animate attributeName="opacity" values="0.2;1;0.2" dur="1.8s" repeatCount="indefinite"/></circle>
+            <circle cx="82" cy="26" r="2.2"><animate attributeName="opacity" values="1;0.2;1" dur="2.1s" repeatCount="indefinite"/></circle>
+            <circle cx="18" cy="78" r="1.6"><animate attributeName="opacity" values="0.4;1;0.4" dur="2.5s" repeatCount="indefinite"/></circle>
+          </g>`;
+      case "ruby_crimson":
+        return `
+          <polygon points="50,10 90,50 50,90 10,50" fill="none" stroke="${accent}" stroke-width="1.6" opacity="0.65">
+            <animate attributeName="opacity" values="0.3;0.85;0.3" dur="2.2s" repeatCount="indefinite"/>
+          </polygon>`;
+      case "emerald_jade":
+        return `
+          <circle cx="50" cy="50" r="38" fill="none" stroke="${accent}" stroke-width="1.8" opacity="0.6">
+            <animate attributeName="r" values="35;41;35" dur="3s" repeatCount="indefinite"/>
+          </circle>`;
+      case "holographic":
+        return `
+          <ellipse cx="50" cy="50" rx="40" ry="24" fill="none" stroke="${accent}" stroke-width="1.6" opacity="0.65">
+            <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="5.5s" repeatCount="indefinite"/>
+          </ellipse>`;
+      case "y2k_chrome":
+        return `
+          <g stroke="#ffffff" stroke-width="1.6" opacity="0.75">
+            <line x1="22" y1="14" x2="22" y2="26"/><line x1="16" y1="20" x2="28" y2="20"/>
+            <line x1="78" y1="74" x2="78" y2="86"/><line x1="72" y1="80" x2="84" y2="80"/>
+          </g>`;
+      case "midnight_stealth":
+        return `
+          <rect x="12" y="12" width="76" height="76" rx="18" fill="none" stroke="${accent}" stroke-width="1.4" opacity="0.5">
+            <animate attributeName="opacity" values="0.2;0.65;0.2" dur="2.8s" repeatCount="indefinite"/>
+          </rect>`;
+      case "sunset_lofi":
+        return `
+          <circle cx="50" cy="50" r="37" fill="none" stroke="${accent}" stroke-width="1.5" stroke-dasharray="10 6" opacity="0.7">
+            <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="8s" repeatCount="indefinite"/>
+          </circle>`;
+      case "ocean_abyss":
+        return `
+          <circle cx="50" cy="50" r="36" fill="none" stroke="${accent}" stroke-width="1.8" opacity="0.55">
+            <animate attributeName="r" values="33;42;33" dur="2.8s" repeatCount="indefinite"/>
+            <animate attributeName="opacity" values="0.7;0.15;0.7" dur="2.8s" repeatCount="indefinite"/>
+          </circle>`;
+      case "citrus_burst":
+        return `
+          <circle cx="50" cy="50" r="38" fill="none" stroke="${accent}" stroke-width="2" stroke-dasharray="3 7" opacity="0.8">
+            <animateTransform attributeName="transform" type="rotate" from="360 50 50" to="0 50 50" dur="6s" repeatCount="indefinite"/>
+          </circle>`;
+      case "royal_amethyst":
+        return `
+          <polygon points="34,14 42,22 50,12 58,22 66,14 64,24 36,24" fill="${accent}" opacity="0.8">
+            <animate attributeName="opacity" values="0.45;0.95;0.45" dur="2.4s" repeatCount="indefinite"/>
+          </polygon>`;
+      case "default":
+      default:
+        return `
+          <circle cx="50" cy="50" r="38" fill="none" stroke="${accent}" stroke-width="1.5" opacity="0.4">
+            <animate attributeName="r" values="35;40;35" dur="3.2s" repeatCount="indefinite"/>
+          </circle>`;
+    }
+  }
+
+  function getAppIconSvg(iconId, size = 64) {
+    const rawId = normalizeAppIconId(iconId);
+    const icon = APP_ICONS.find((i) => i.id === rawId) || APP_ICONS[0];
+    const { id, bg, discA, discB, ink, accent } = icon;
+    const motif = getIconThemeMotifSvg(id, accent, discA, discB, ink);
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${size}" height="${size}">
+      <defs>
+        <linearGradient id="ic_disc_${id}" x1="20%" y1="15%" x2="80%" y2="85%">
+          <stop offset="0%" stop-color="${discA}"/>
+          <stop offset="100%" stop-color="${discB}"/>
+        </linearGradient>
+        <radialGradient id="ic_glow_${id}" cx="40%" cy="35%" r="60%">
+          <stop offset="0%" stop-color="${accent}" stop-opacity="0.45"/>
+          <stop offset="100%" stop-color="${bg}" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <rect width="100" height="100" rx="23" fill="${bg}"/>
+      <circle cx="50" cy="50" r="44" fill="url(#ic_glow_${id})"/>
+      ${motif}
+      <circle cx="50" cy="50" r="32" fill="url(#ic_disc_${id})"/>
+      <ellipse cx="41" cy="29" rx="13" ry="5" fill="#ffffff" opacity="0.28"/>
+      <path d="M 33.5 64.5 L 33.5 35.5 L 50 56.5 L 66.5 35.5 L 66.5 64.5" fill="none" stroke="${ink}" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="50" cy="66" r="4.3" fill="${ink}"/>
+    </svg>`;
+  }
+
+  function getAppIconDataUri(iconId) {
+    const rawId = normalizeAppIconId(iconId);
+    if (rawId === "default") return "/logo.png?v=53";
+    const svg = getAppIconSvg(rawId, 128);
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  }
+
+  function activeAppIconUrl() {
+    const iconId = normalizeAppIconId(state.prefs && state.prefs.appIcon);
+    return getAppIconDataUri(iconId);
+  }
+
+  function appIconLabel() {
+    const curId = normalizeAppIconId(state.prefs && state.prefs.appIcon);
+    const cur = APP_ICONS.find((i) => i.id === curId) || APP_ICONS[0];
+    return cur.title;
+  }
+
+  function applyAppIcon() {
+    const url = activeAppIconUrl();
+    const imgs = document.querySelectorAll(".brand img, .home-brand img, #sidebarBrandIcon, #homeBrandIcon");
+    imgs.forEach((el) => {
+      el.src = url;
+    });
+    const iconLink = document.querySelector('link[rel="icon"]');
+    if (iconLink) iconLink.href = url;
+    const shortcutLink = document.querySelector('link[rel="shortcut icon"]');
+    if (shortcutLink) shortcutLink.href = url;
+    const appleLink = document.querySelector('link[rel="apple-touch-icon"]');
+    if (appleLink) appleLink.href = url;
+  }
+
+  function setAppIcon(id) {
+    const norm = normalizeAppIconId(id);
+    const ic = APP_ICONS.find((x) => x.id === norm) || APP_ICONS[0];
+    state.prefs.appIcon = ic.id;
+    savePrefs();
+    applyAppIcon();
+    toast(`App icon changed to "${ic.title}"`, true, "success");
+    playAppOpeningAnimation(ic.id, true);
+    render();
+  }
+
+  function getOpeningAnimationHtml(icon) {
+    const id = (icon && icon.id) || "default";
+    const bg = (icon && icon.bg) || "#081612";
+    const iconSvg = renderAppIconPreview(icon, 76);
+
+    let fxMarkup = "";
+
+    switch (id) {
+      case "anime_sakura":
+        fxMarkup = `
+          <div class="fx-sakura-glow"></div>
+          ${Array.from({ length: 14 }).map((_, i) => `
+            <div class="fx-sakura-petal" style="--sx:${(i * 7.2)}vw;--drift:${((i % 2 === 0 ? 1 : -1) * (35 + (i * 7)))}px;animation-delay:${(i * 65)}ms"></div>
+          `).join("")}
+        `;
+        break;
+      case "anime_ninja":
+        fxMarkup = `
+          <div class="fx-ninja-slash"></div>
+          <svg class="fx-ninja-shuriken" viewBox="0 0 100 100">
+            <polygon points="50,0 60,35 95,50 60,65 50,100 40,65 5,50 40,35" fill="#e63946"/>
+            <circle cx="50" cy="50" r="14" fill="#05070e"/>
+          </svg>
+        `;
+        break;
+      case "anime_cyber":
+        fxMarkup = `
+          <div class="fx-cyber-grid"></div>
+          <div class="fx-cyber-scanline"></div>
+        `;
+        break;
+      case "anime_kawaii":
+        fxMarkup = `
+          ${["★", "✦", "♥", "✿", "★", "✦", "♥"].map((sym, i) => `
+            <div class="fx-mochi-star" style="--mx:${(i * 14 - 42)}px;--my:${((i % 3 - 1) * 35)}px;animation-delay:${(i * 90)}ms">${sym}</div>
+          `).join("")}
+        `;
+        break;
+      case "anime_mecha":
+        fxMarkup = `
+          <div class="fx-at-field"></div>
+          <div class="fx-at-field" style="animation-delay:180ms;border-color:#7000ff"></div>
+        `;
+        break;
+      case "anime_shonen":
+        fxMarkup = `
+          <div class="fx-shonen-flame"></div>
+        `;
+        break;
+      case "anime_chibi":
+        fxMarkup = `
+          ${Array.from({ length: 8 }).map((_, i) => `
+            <div class="fx-chibi-sparkle" style="--deg:${(i * 45)}deg;animation-delay:${(i * 60)}ms"></div>
+          `).join("")}
+        `;
+        break;
+      case "blurple_gamer":
+        fxMarkup = `
+          <div class="fx-blurple-ring"></div>
+          <div class="fx-blurple-ring" style="animation-delay:180ms"></div>
+        `;
+        break;
+      case "gem_booster":
+        fxMarkup = `
+          <div class="fx-booster-facet"></div>
+        `;
+        break;
+      case "matrix_terminal":
+        fxMarkup = `
+          ${Array.from({ length: 6 }).map((_, i) => `
+            <div class="fx-matrix-col" style="left:${(12 + i * 16)}vw;animation-delay:${(i * 110)}ms">010110<br/>101001<br/>MUCHI<br/>110010<br/>001101</div>
+          `).join("")}
+        `;
+        break;
+      case "pixel_arcade":
+        fxMarkup = `
+          <div class="fx-arcade-coin"></div>
+        `;
+        break;
+      case "solar_flare":
+        fxMarkup = `
+          <div class="fx-solar-burst"></div>
+        `;
+        break;
+      case "vaporwave":
+        fxMarkup = `
+          <div class="fx-vwave-grid"></div>
+        `;
+        break;
+      case "synthwave":
+        fxMarkup = `
+          <div class="fx-synth-sun"></div>
+        `;
+        break;
+      case "cosmic_nebula":
+        fxMarkup = `
+          <div class="fx-nebula-swirl"></div>
+        `;
+        break;
+      case "ruby_crimson":
+        fxMarkup = `
+          <div class="fx-ruby-spark"></div>
+        `;
+        break;
+      case "emerald_jade":
+        fxMarkup = `
+          <div class="fx-jade-ripple"></div>
+          <div class="fx-jade-ripple" style="animation-delay:190ms"></div>
+        `;
+        break;
+      case "holographic":
+        fxMarkup = `
+          <div class="fx-holo-prism"></div>
+        `;
+        break;
+      case "y2k_chrome":
+        fxMarkup = `
+          <div class="fx-chrome-drop"></div>
+        `;
+        break;
+      case "midnight_stealth":
+        fxMarkup = `
+          <div class="fx-stealth-laser"></div>
+        `;
+        break;
+      case "sunset_lofi":
+        fxMarkup = `
+          <div class="fx-lofi-vinyl"></div>
+        `;
+        break;
+      case "ocean_abyss":
+        fxMarkup = `
+          <div class="fx-abyss-sonar"></div>
+          <div class="fx-abyss-sonar" style="animation-delay:210ms"></div>
+        `;
+        break;
+      case "citrus_burst":
+        fxMarkup = `
+          <div class="fx-citrus-splash"></div>
+        `;
+        break;
+      case "royal_amethyst":
+        fxMarkup = `
+          <div class="fx-amethyst-crown"></div>
+        `;
+        break;
+      case "default":
+      default:
+        fxMarkup = `
+          <div class="fx-classic-ring"></div>
+          <div class="fx-classic-ring" style="animation-delay:180ms"></div>
+        `;
+        break;
+    }
+
+    return `
+      <div class="splash-fx-layer">${fxMarkup}</div>
+      <div class="splash-stage">
+        <div class="splash-icon-box" style="background:${bg}">
+          ${iconSvg}
+        </div>
+        <h1 class="splash-title">Muchi</h1>
+        <div class="splash-yt-bar" aria-hidden="true"><i style="background:${icon.accent || "#34d399"}"></i></div>
+      </div>
+    `;
+  }
+
+  let _splashTimeout = null;
+  let _splashFadeTimeout = null;
+
+  function playAppOpeningAnimation(customIconId, isPreview = false) {
+    const rawId = customIconId || (state.prefs && state.prefs.appIcon) || "default";
+    const iconId = normalizeAppIconId(rawId);
+    const icon = APP_ICONS.find((i) => i.id === iconId) || APP_ICONS[0];
+
+    let splash = document.getElementById("appSplashScreen");
+    if (!splash) {
+      splash = document.createElement("div");
+      splash.id = "appSplashScreen";
+      splash.className = "app-splash-screen";
+      document.body.prepend(splash);
+    }
+
+    if (_splashTimeout) clearTimeout(_splashTimeout);
+    if (_splashFadeTimeout) clearTimeout(_splashFadeTimeout);
+
+    splash.style.background = icon.bg || "#081612";
+    splash.innerHTML = getOpeningAnimationHtml(icon);
+    splash.classList.remove("fade-out");
+    splash.removeAttribute("hidden");
+    splash.style.display = "flex";
+
+    const closeSplash = () => {
+      if (_splashTimeout) clearTimeout(_splashTimeout);
+      if (_splashFadeTimeout) clearTimeout(_splashFadeTimeout);
+      splash.classList.add("fade-out");
+      setTimeout(() => {
+        splash.setAttribute("hidden", "true");
+        splash.style.display = "none";
+        splash.innerHTML = "";
+      }, 220);
+    };
+
+    splash.onclick = closeSplash;
+    splash.ontouchstart = closeSplash;
+
+    _splashFadeTimeout = setTimeout(() => {
+      splash.classList.add("fade-out");
+    }, 1100);
+
+    _splashTimeout = setTimeout(() => {
+      splash.setAttribute("hidden", "true");
+      splash.style.display = "none";
+      splash.innerHTML = "";
+    }, 1320);
+  }
   const THEME_IDS = THEMES.map((t) => t.id).concat("custom");
   const BASE_THEME_IDS = ["system", "light", "dark"];
   const SKIN_IDS = new Set(THEME_IDS.filter((id) => !BASE_THEME_IDS.includes(id)));
@@ -935,6 +1422,7 @@
     const liked = isLiked(track);
     const inLiked = where === "liked";
     const inPl = where === "playlist" && typeof state.activePlaylist === "number";
+    const inDl = where === "downloads" || isSaved(track);
     const canDl = !!(track && (track.trackId || track.videoId));
     showModal({
       title: track.title,
@@ -950,7 +1438,7 @@
               : sheetItem("like", "favorite", "Add to Liked Songs")}
           ${inPl ? sheetItem("rempl", "playlist_remove", "Remove from this playlist") : ""}
           ${track.source !== "radio" ? sheetItem("follow", isFollowing(track) ? "person_remove" : "person_add", isFollowing(track) ? "Unfollow artist" : "Follow artist") : ""}
-          ${canDl ? sheetItem("dl", "download", isSaved(track) ? "Saved offline" : "Save offline") : ""}
+          ${inDl ? sheetItem("deldl", "delete", "Delete download") : (canDl ? sheetItem("dl", "download", "Save offline") : "")}
           ${ytConnected() && track.videoId ? sheetItem("ytlike", "thumb_up", "Add to YouTube Liked") : ""}
           ${ytConnected() && track.videoId ? sheetItem("ytpl", "playlist_add", "Add to YouTube playlist") : ""}
           ${IS_NATIVE ? sheetItem("share", "share", "Share") : ""}
@@ -970,6 +1458,7 @@
         else if (act === "rempl") removeFromPlaylist(track, state.activePlaylist);
         else if (act === "follow") toggleFollow(track);
         else if (act === "dl") downloadTrack(track);
+        else if (act === "deldl") removeDownload(track.id);
         else if (act === "share") shareTrack(track);
         else if (act === "ytlike") ytToggleLike(track);
         else if (act === "ytpl") ytAddToPlaylist(track);
@@ -1874,13 +2363,18 @@
   }
 
   async function removeDownload(id) {
+    if (!id) return;
+    const target = (state.downloads || []).find((d) => d && (d.id === id || trackKey(d) === id || d.videoId === id || d.trackId === id)) || { id };
+    const targetId = target.id || id;
     // Native: delete the file on disk too.
     const ND = nativeDownloader();
-    try { if (ND && ND.removeDownload) await ND.removeDownload({ id }); } catch {}
-    await idbDel(id);
-    state.downloads = state.downloads.filter((d) => d.id !== id);
+    try { if (ND && ND.removeDownload) await ND.removeDownload({ id: targetId }); } catch {}
+    await idbDel(targetId).catch(() => {});
+    if (target.videoId) await idbDel(`yt:${target.videoId}`).catch(() => {});
+    if (target.trackId) await idbDel(`audius:${target.trackId}`).catch(() => {});
+    state.downloads = (state.downloads || []).filter((d) => d && d.id !== targetId && trackKey(d) !== targetId && d.id !== id);
     save("aura.downloads", state.downloads);
-    toast("Removed offline file", true, "success");
+    toast("Deleted downloaded song", true, "success");
     if (state.view === "settings" || state.view === "library") render();
   }
 
@@ -2634,7 +3128,8 @@
       </button>`;
   }
 
-  function libTrackHTML(t, i) {
+  function libTrackHTML(t, i, opt = {}) {
+    const isDl = Boolean(opt.isDownload || opt.where === "downloads" || state.activePlaylist === "downloads" || (state.view === "library" && state.libFilter === "downloaded") || isSaved(t));
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
         <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
@@ -2644,9 +3139,16 @@
             <div class="t-sub">${escapeHTML(t.artist)}</div>
           </div>
         </button>
-        <button type="button" class="icon-btn more-btn" data-more="${escapeAttr(t.id)}" data-idx="${i}" title="More">
-          <span class="material-symbols-outlined">more_vert</span>
-        </button>
+        <div class="lib-track-actions">
+          ${isDl ? `
+            <button type="button" class="icon-btn del-btn" data-del-dl="${escapeAttr(t.id)}" title="Delete download" aria-label="Delete downloaded song">
+              <span class="material-symbols-outlined">delete</span>
+            </button>
+          ` : ""}
+          <button type="button" class="icon-btn more-btn" data-more="${escapeAttr(t.id)}" data-idx="${i}" title="More" aria-label="More options">
+            <span class="material-symbols-outlined">more_vert</span>
+          </button>
+        </div>
       </div>`;
   }
 
@@ -2827,10 +3329,15 @@
     const sj = await dzFetch(`/search/artist?q=${encodeURIComponent(String(name).slice(0, 80))}&limit=10`);
     const rows = (sj && sj.data) || [];
 
-    let a = rows.find((r) => dzFold(r.name) === want);
+    const exact = rows.filter((r) => dzFold(r.name) === want);
+    let a = exact.length
+      ? exact.sort((x, y) => Number(y.nb_fan || 0) - Number(x.nb_fan || 0))[0]
+      : null;
     if (!a) {
       const cands = rows.filter((r) => dzFold(r.name).startsWith(want));
-      if (cands.length) a = cands.sort((x, y) => dzFold(x.name).length - dzFold(y.name).length)[0];
+      if (cands.length) {
+        a = cands.sort((x, y) => (dzFold(x.name).length - dzFold(y.name).length) || (Number(y.nb_fan || 0) - Number(x.nb_fan || 0)))[0];
+      }
     }
     if (!a || !a.id) return null;
     const artist = { name: a.name || name, artwork: a.picture_medium || "" };
@@ -2893,9 +3400,10 @@
       const chunk = expand.slice(i, i + 4);
       const res = await Promise.all(chunk.map((al) => dzFetch(`/album/${String(al.id).replace("deezer-album:", "")}`).catch(() => null)));
       for (const r of res) {
-        const rows2 = (r && r.data && r.data.tracks && r.data.tracks.data) || [];
+        const rows2 = (r && ((r.tracks && r.tracks.data) || (r.data && r.data.tracks && r.data.tracks.data) || (Array.isArray(r.data) ? r.data : null))) || [];
+        const albArt = (r && (r.cover_medium || (r.data && r.data.cover_medium))) || artist.artwork;
         for (const t of rows2) {
-          const s = dzSong(t, (r && r.data && r.data.cover_medium) || artist.artwork);
+          const s = dzSong(t, albArt);
           if (!s) continue;
           const k = dzFold(s.title) + "|" + dzFold(s.artist);
           if (seen.has(k)) continue;
@@ -3033,17 +3541,24 @@
     const rows = (ssj && ssj.results) || [];
     const related = rows.filter((t) => {
       const na = dzFold(t.artistName || t.artist || "");
-      return na && (na === want || na.includes(want) || want.includes(na));
+      if (!na) return false;
+      if (na === want) return true;
+      if (want.length >= 3 && (na.includes(want) || (na.length >= 3 && want.includes(na)))) return true;
+      return false;
     });
     if (!related.length) return null;
-    const freq = new Map();
-    for (const t of related.slice(0, 50)) {
-      const na = dzFold(t.artistName || t.artist || "");
-      freq.set(na, (freq.get(na) || 0) + 1);
+    const exactRows = related.filter((t) => dzFold(t.artistName || t.artist || "") === want);
+    let an = want;
+    if (!exactRows.length) {
+      const freq = new Map();
+      for (const t of related.slice(0, 50)) {
+        const na = dzFold(t.artistName || t.artist || "");
+        freq.set(na, (freq.get(na) || 0) + 1);
+      }
+      an = "";
+      let best = 0;
+      for (const [k, v] of freq) if (v > best || (v === best && k.length > an.length)) { an = k; best = v; }
     }
-    let an = "";
-    let best = 0;
-    for (const [k, v] of freq) if (v > best || (v === best && k.length > an.length)) { an = k; best = v; }
     const orig = related.find((t) => dzFold(t.artistName || t.artist || "") === an) || related[0];
     const artistName = orig.artistName || orig.artist || name;
     const art = String(orig.artworkUrl100 || orig.artwork || "").replace("100x100bb", "500x500bb");
@@ -3467,7 +3982,8 @@
     const cachedHit = ytResolveCache.get(q);
     if (cachedHit && cachedHit.videoId) {
       t.videoId = cachedHit.videoId;
-      t.source = "youtube";
+      if (!t.origSource) t.origSource = t.source;
+      if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
       if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
       if (cachedHit.duration && !t.duration) t.duration = cachedHit.duration;
       return t;
@@ -3492,7 +4008,8 @@
       throw new Error("No playable version found");
     }
     t.videoId = hit.videoId;
-    t.source = "youtube";
+    if (!t.origSource) t.origSource = t.source;
+    if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
     if (hit.duration && !t.duration) t.duration = hit.duration;
     if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
     ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0);
@@ -5637,24 +6154,30 @@
     const name = String(state.prefs.username || "").trim();
     return `
       <div class="home-bar">
-        <button type="button" class="avatar-btn" id="profileBtn" title="${escapeAttr(name || "Profile")}">${avatarInner()}</button>
-      </div>
-      ${state.showProfile ? `
-        <div class="profile-menu" id="profileMenu">
-          <div class="profile-head">
-            <button type="button" class="avatar-btn lg" id="pickAvatar" title="Change photo">${avatarInner()}</button>
-            <div class="profile-fields">
-              <label>Name
-                <input id="setUsername" type="text" maxlength="32" value="${escapeAttr(name)}" placeholder="Your name"/>
-              </label>
-              <p>Tap the photo to crop and save a picture.</p>
-            </div>
-          </div>
-          <button type="button" class="profile-link" id="gotoSettings">
-            <span class="material-symbols-outlined">settings</span>
-            Settings
-          </button>
-        </div>` : ""}`;
+        <div class="home-brand">
+          <img id="homeBrandIcon" src="${escapeAttr(activeAppIconUrl())}" alt="Muchi" width="28" height="28" />
+          <span class="home-brand-title">Muchi</span>
+        </div>
+        <div class="home-bar-profile-wrap">
+          <button type="button" class="avatar-btn" id="profileBtn" title="${escapeAttr(name || "Profile")}">${avatarInner()}</button>
+          ${state.showProfile ? `
+            <div class="profile-menu" id="profileMenu">
+              <div class="profile-head">
+                <button type="button" class="avatar-btn lg" id="pickAvatar" title="Change photo">${avatarInner()}</button>
+                <div class="profile-fields">
+                  <label>Name
+                    <input id="setUsername" type="text" maxlength="32" value="${escapeAttr(name)}" placeholder="Your name"/>
+                  </label>
+                  <p>Tap the photo to crop and save a picture.</p>
+                </div>
+              </div>
+              <button type="button" class="profile-link" id="gotoSettings">
+                <span class="material-symbols-outlined">settings</span>
+                Settings
+              </button>
+            </div>` : ""}
+        </div>
+      </div>`;
   }
 
   function renderHome() {
@@ -5664,6 +6187,7 @@
         ${homeBarHTML()}
         <div class="hero">
           <div>
+            <span class="hero-brand-kicker">Muchi</span>
             <h1>${greeting()}</h1>
             <p>Loading English hits and genres…</p>
           </div>
@@ -5694,6 +6218,7 @@
       <div class="hero home-hero">
         <div class="hero-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
         <div>
+          <span class="hero-brand-kicker">Muchi</span>
           <h1>${greeting()}</h1>
           <p>English hits · pop, hip-hop, rock, R&amp;B, dance · a little from ${escapeHTML(region)}${liveNote}</p>
         </div>
@@ -5728,6 +6253,9 @@
       ${section("Independent artists", h.audius, "audius")}
       ${section("Underground", h.underground, "underground")}
       ${section("Live radio", h.radio, "radio")}
+      <footer class="home-legal-footer" style="text-align:center;padding:20px 12px 12px;font-size:0.78rem;color:var(--md-sys-color-on-surface-variant,rgba(255,255,255,0.62))">
+        <span>Muchi</span> · <a href="/privacy.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Privacy Policy</a> · <a href="/terms.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Terms of Service</a>
+      </footer>
     `;
   }
 
@@ -6089,7 +6617,7 @@
   }
 
   function artistHitHTML(a, i) {
-    return `<button type="button" class="lib-row artist" data-open-artist="${i}">
+    return `<button type="button" class="lib-row artist" data-open-artist="${i}" data-artist-name="${escapeAttr(a.name || "")}" data-artist-id="${escapeAttr(a.id || "")}">
       <img class="round" src="${escapeAttr(a.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
       <div>
         <div class="t-title">${escapeHTML(a.name)}</div>
@@ -6115,12 +6643,13 @@
   function pickTopArtist(s, query) {
     const arts = (s && s.artists) || [];
     if (!arts.length) return null;
-    const q = String(query || "").trim().toLowerCase();
+    const q = dzFold(query || "");
     if (!q) return arts[0];
-    return arts.find((a) => String(a.name || "").toLowerCase() === q)
+    return arts.find((a) => dzFold(a.name) === q)
+      || arts.find((a) => dzFold(a.name).startsWith(q))
       || arts.find((a) => {
-        const n = String(a.name || "").toLowerCase();
-        return n.includes(q) || q.includes(n);
+        const n = dzFold(a.name);
+        return n.includes(q) || (n.length >= 4 && q.includes(n));
       })
       || arts[0];
   }
@@ -6236,7 +6765,7 @@
     const top = pickTopArtist(s, state.query);
     const topIdx = top ? artists.indexOf(top) : -1;
     const hero = (f === "all" && top) ? `
-      <button type="button" class="artist-hero" data-open-artist="${topIdx}">
+      <button type="button" class="artist-hero" data-open-artist="${topIdx >= 0 ? topIdx : 0}" data-artist-name="${escapeAttr(top.name || "")}" data-artist-id="${escapeAttr(top.id || "")}">
         <img class="round" src="${escapeAttr(top.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
         <div>
           <p class="lib-kicker">Artist</p>
@@ -6412,10 +6941,13 @@
               <h1>Downloads</h1>
               <p class="lib-stats">${trackStats(tracks)}</p>
               <p class="lib-note">Saved on this device for offline listening</p>
-              ${tracks.length ? `<button class="filled-btn" id="playDownloads" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+              <div class="lib-hero-actions">
+                ${tracks.length ? `<button class="filled-btn" id="playDownloads" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+                ${tracks.length ? `<button class="chip-btn" id="clearDownloads" type="button"><span class="material-symbols-outlined">delete_sweep</span> Delete all</button>` : ""}
+              </div>
             </div>
           </div>
-          <div class="list">${tracks.map((t, i) => libTrackHTML(t, i)).join("") || emptyLib()}</div>
+          <div class="list">${tracks.map((t, i) => libTrackHTML(t, i, { isDownload: true })).join("") || emptyLib()}</div>
         </div>`;
     }
     if (pl === "yt-liked") {
@@ -6546,7 +7078,7 @@
           <div class="t-sub">Artist</div>
         </div>
       </button>`).join("");
-    const dlRows = state.downloads.map((t, i) => rowHTML(t, i)).join("");
+    const dlRows = state.downloads.map((t, i) => libTrackHTML(t, i, { isDownload: true })).join("");
     const ytOn = !!(state.auth && state.auth.signedIn && state.auth.youtube && state.auth.youtube.connected);
     let ytRows = "";
     if (ytOn) {
@@ -6657,6 +7189,25 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.5",
+      title: "Muchi 1.6.5",
+      notes: [
+        "Unified Artist Search & Profiles: searching any artist (e.g. Justin Bieber) reliably displays their artist profile card at the top of search results with high-resolution artwork.",
+        "Instant Live Search Navigation: typing in the search bar from Home or any view immediately opens live search results.",
+        "Resilient Multi-Provider Artist Fallback: synthesizes and enriches artist profiles across YouTube Music, iTunes, and Deezer even when individual providers rate-limit.",
+      ],
+    },
+    {
+      ver: "1.6.4",
+      title: "Muchi 1.6.4",
+      notes: [
+        "Fixed search input race conditions: cleared queries reset cleanly without resurrecting old search terms or mixing up characters and spaces while typing.",
+        "High-speed iTunes search: optimized parallel queries and instant caching for rapid result delivery.",
+        "Unified Catalog on Homepage: iTunes and Deezer tracks are now integrated directly into homepage playlists, daily mixes, and top charts alongside YouTube music.",
+        "Streamlined multi-provider track playback with persistent source badges across all platforms.",
+      ],
+    },
     {
       ver: "1.6.3",
       title: "Muchi 1.6.3",
@@ -7186,6 +7737,13 @@
             <button class="chip-btn" id="resetCustom" type="button">Reset</button>
           </div>
         </div>
+        <div class="set-card">
+          <h3>App Icon</h3>
+          <button type="button" class="set-row set-go" id="openAppIconFromAppearance">
+            <div><strong>Customize App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
+            <span class="material-symbols-outlined">chevron_right</span>
+          </button>
+        </div>
       </div>`;
   }
 
@@ -7246,7 +7804,7 @@
       return `
         <div class="set-card">
           <h3>Account</h3>
-          <p class="set-hint">Sign in with Google to bring your YouTube likes and playlists into your Library.</p>
+          <p class="set-hint">Sign in with Google to bring your YouTube likes and playlists into your Library. By continuing, you agree to the <a href="/terms.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Terms of Service</a> and <a href="/privacy.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Privacy Policy</a>.</p>
           <button type="button" class="filled-btn" id="gSignInBtn" style="width:100%;justify-content:center">
             <span class="material-symbols-outlined filled">login</span> Continue with Google
           </button>
@@ -7430,19 +7988,272 @@
       </div>`;
   }
 
+  function renderAppIconPreview(icon, size = 58) {
+    if (icon.id === "default") {
+      return `<img src="/logo.png?v=53" alt="Classic Muchi" width="${size}" height="${size}" style="border-radius:14px;object-fit:cover;display:block" />`;
+    }
+    return getAppIconSvg(icon.id, size);
+  }
+
+  function renderAppIconPage() {
+    const curId = (state.prefs && state.prefs.appIcon) || "default";
+    const curIcon = APP_ICONS.find((i) => i.id === curId) || APP_ICONS[0];
+    const cat = state.appIconCat || "all";
+    const animeCount = APP_ICONS.filter((i) => i.category === "anime").length;
+    const gamingCount = APP_ICONS.filter((i) => i.category === "gaming").length;
+    const vibrantCount = APP_ICONS.filter((i) => i.category === "vibrant").length;
+    const classicCount = APP_ICONS.filter((i) => i.category === "classic" || i.category === "minimal").length;
+    const filtered = cat === "all" ? APP_ICONS : APP_ICONS.filter((i) => {
+      if (cat === "classic") return i.category === "classic" || i.category === "minimal";
+      return i.category === cat;
+    });
+
+    return `
+      ${settingsSubChrome("App Icon", "Customize your app icon with anime, gaming, and vibrant themes. Changes the in-app icon and browser tab instantly.")}
+      <div class="settings">
+        <div class="set-card">
+          <div class="app-icon-active-preview">
+            <div class="app-icon-preview lg" style="display:grid;place-items:center;background:${curIcon.bg}">
+              ${renderAppIconPreview(curIcon, 72)}
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <h3 style="margin:0">${escapeHTML(curIcon.title)}</h3>
+                <span class="active-badge-pill"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle;margin-right:2px">check</span>In use</span>
+              </div>
+              <p style="margin:4px 0 0;font-size:0.82rem;color:var(--md-sys-color-on-surface-variant)">${escapeHTML(curIcon.desc)}</p>
+              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+                <button type="button" class="chip-btn sm" id="previewSplashBtn">
+                  <span class="material-symbols-outlined" style="font-size:16px">play_arrow</span>
+                  Preview Opening Screen
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="set-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+            <div>
+              <h3 style="margin:0">Icon Styles</h3>
+              <p class="set-lead" style="margin:4px 0 0">Choose from ${APP_ICONS.length} handcrafted icons across anime, gaming, and vibrant themes.</p>
+            </div>
+          </div>
+          <div class="chip-row" style="margin:8px 0 14px;flex-wrap:wrap">
+            <button type="button" class="chip ${cat === "all" ? "active" : ""}" data-icon-cat="all">All (${APP_ICONS.length})</button>
+            <button type="button" class="chip ${cat === "anime" ? "active" : ""}" data-icon-cat="anime">Anime (${animeCount})</button>
+            <button type="button" class="chip ${cat === "gaming" ? "active" : ""}" data-icon-cat="gaming">Gaming & Arcade (${gamingCount})</button>
+            <button type="button" class="chip ${cat === "vibrant" ? "active" : ""}" data-icon-cat="vibrant">Vibrant & Neon (${vibrantCount})</button>
+            <button type="button" class="chip ${cat === "classic" ? "active" : ""}" data-icon-cat="classic">Classic & Minimal (${classicCount})</button>
+          </div>
+          <div class="app-icon-grid">
+            ${filtered.map((ic) => {
+              const isCur = ic.id === curId;
+              return `
+                <div class="app-icon-card ${isCur ? "active" : ""}" data-set-app-icon="${escapeAttr(ic.id)}" role="button" tabindex="0" title="${escapeAttr(ic.title + ' — ' + ic.desc)}">
+                  ${isCur ? `<span class="app-icon-badge"><span class="material-symbols-outlined" style="font-size:13px">check</span></span>` : ""}
+                  <div class="app-icon-preview" style="display:grid;place-items:center;background:${ic.bg}">
+                    ${renderAppIconPreview(ic, 58)}
+                  </div>
+                  <strong class="app-icon-title">${escapeHTML(ic.title)}</strong>
+                  <span class="app-icon-desc">${escapeHTML(ic.desc)}</span>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderFollowingPage() {
+    const p = state.prefs;
+    const perm = typeof Notification !== "undefined" ? Notification.permission : "unsupported";
+    const permBadge = perm === "granted"
+      ? `<span class="chip active" style="color:var(--md-sys-color-primary)"><span class="material-symbols-outlined" style="font-size:15px;margin-right:4px">check_circle</span>Granted</span>`
+      : perm === "denied"
+      ? `<span class="chip" style="color:#f87171"><span class="material-symbols-outlined" style="font-size:15px;margin-right:4px">block</span>Blocked</span>`
+      : `<button type="button" class="chip-btn sm" id="requestNotifyPermissionBtn"><span class="material-symbols-outlined" style="font-size:15px">notifications</span>Allow Alerts</button>`;
+
+    const popularSuggestions = [
+      "Taylor Swift", "The Weeknd", "Drake", "Billie Eilish",
+      "Coldplay", "Arijit Singh", "Dua Lipa", "Kendrick Lamar",
+      "Ed Sheeran", "Olivia Rodrigo", "Post Malone", "Ariana Grande"
+    ].filter((name) => !state.following.some((f) => f.name.toLowerCase() === name.toLowerCase()));
+
+    return `
+      ${settingsSubChrome("Following & Alerts", "Follow your favorite artists and get notified whenever they drop new music.")}
+      <div class="settings">
+        <div class="set-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+            <div>
+              <h3 style="margin:0">Release Notifications</h3>
+              <p class="set-lead" style="margin:4px 0 0">Get notified when any followed artist releases new songs.</p>
+            </div>
+            <div>${permBadge}</div>
+          </div>
+          <div class="set-row">
+            <div><strong>New-release notifications</strong><p>System notification when a followed artist releases a new track.</p></div>
+            <button class="switch ${p.notifyFollows ? "on" : ""}" data-pref="notifyFollows" type="button"><i></i></button>
+          </div>
+          <div class="set-row">
+            <div><strong>In-app release banners</strong><p>Show a toast notification inside Muchi when new tracks are detected.</p></div>
+            <button class="switch ${p.notifyInApp !== false ? "on" : ""}" data-pref="notifyInApp" type="button"><i></i></button>
+          </div>
+          <div class="set-row" style="padding-top:12px">
+            <div><strong>Check for new releases</strong><p>Scan all followed artists now for their latest tracks.</p></div>
+            <button class="chip-btn" id="checkNewReleasesBtn" type="button">
+              <span class="material-symbols-outlined">sync</span>
+              Check Now
+            </button>
+          </div>
+        </div>
+
+        <div class="set-card">
+          <h3>Follow an Artist</h3>
+          <p class="set-lead">Search for any artist to follow and start tracking their new releases.</p>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+            <div class="search-wrap" style="flex:1">
+              <span class="material-symbols-outlined">person_add</span>
+              <input id="newFollowArtistInput" type="text" placeholder="Type artist name (e.g. Taylor Swift, Coldplay)…" autocomplete="off" />
+            </div>
+            <button class="chip-btn" id="newFollowArtistBtn" type="button" style="white-space:nowrap">
+              Follow
+            </button>
+          </div>
+          ${popularSuggestions.length ? `
+            <div style="margin-top:14px">
+              <span style="font-size:0.78rem;color:var(--md-sys-color-on-surface-variant);font-weight:600;display:block;margin-bottom:8px">Quick Suggestions:</span>
+              <div class="chip-row" style="flex-wrap:wrap;gap:6px">
+                ${popularSuggestions.slice(0, 8).map((name) => `
+                  <button type="button" class="chip" data-quick-follow="${escapeAttr(name)}">
+                    <span class="material-symbols-outlined" style="font-size:14px;margin-right:2px">add</span>
+                    ${escapeHTML(name)}
+                  </button>
+                `).join("")}
+              </div>
+            </div>
+          ` : ""}
+        </div>
+
+        <div class="set-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <h3 style="margin:0">Followed Artists (${state.following.length})</h3>
+          </div>
+          <div class="list">
+            ${state.following.map((f) => `
+              <div class="track-row" style="align-items:center">
+                <img src="${escapeAttr(f.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
+                <div style="flex:1;min-width:0">
+                  <div class="t-title">${escapeHTML(f.name)}</div>
+                  <div class="t-sub">${escapeHTML(f.source || "Catalog")}${f.handle ? " · @" + escapeHTML(f.handle) : ""}</div>
+                </div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <button type="button" class="chip-btn sm" data-open-followed-artist="${escapeAttr(f.name)}" data-artist-name="${escapeAttr(f.name)}" title="View artist discography">View</button>
+                  <button type="button" class="chip-btn sm" data-unfollow="${escapeAttr(f.key)}">Unfollow</button>
+                </div>
+              </div>
+            `).join("") || "<p class='empty' style='padding:20px;text-align:center'>No followed artists yet. Follow an artist above or tap the person icon in Now Playing.</p>"}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderDataPage() {
+    const dls = state.downloads || [];
+    const recentsCount = (state.recents || []).length;
+    const likesCount = (state.likes || []).length;
+    const plCount = (state.playlists || []).length;
+
+    return `
+      ${settingsSubChrome("Data & Storage", "Storage usage, offline files, cache management, and library backups.")}
+      <div class="settings">
+        <div class="set-card">
+          <h3>Storage Usage</h3>
+          <p class="set-lead">Disk space used on this device for offline playback and cached audio streams.</p>
+          <div class="set-row">
+            <div><strong>Browser storage estimate</strong><p id="cacheHint">Measuring…</p></div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(110px, 1fr));gap:8px;margin-top:12px">
+            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
+              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${dls.length}</strong>
+              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Offline songs</span>
+            </div>
+            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
+              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${recentsCount}</strong>
+              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">History plays</span>
+            </div>
+            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
+              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${likesCount}</strong>
+              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Liked songs</span>
+            </div>
+            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
+              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${plCount}</strong>
+              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Mixes created</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="set-card">
+          <h3>Cache & Offline Data</h3>
+          <div class="set-row">
+            <div><strong>App shell & cache</strong><p>Cached web assets, search hits, and home feed. Likes and mixes stay safe.</p></div>
+            <button class="chip-btn" data-clear="sw" type="button">Clear Cache</button>
+          </div>
+          <div class="set-row">
+            <div><strong>Listening history</strong><p>Recently played tracks list (${recentsCount} songs).</p></div>
+            <button class="chip-btn" data-clear="recents" type="button">Clear History</button>
+          </div>
+          <div class="set-row">
+            <div><strong>Offline downloads</strong><p>Saved audio files on disk (${dls.length} songs).</p></div>
+            <button class="chip-btn" data-clear="dl" type="button">Delete Downloads</button>
+          </div>
+        </div>
+
+        <div class="set-card">
+          <h3>Backup & Restore</h3>
+          <p class="set-lead">Export your playlists, likes, followed artists, and preferences as a portable JSON backup.</p>
+          <div class="set-row">
+            <div><strong>Export library backup</strong><p>Download a snapshot of your playlists and liked music.</p></div>
+            <button class="chip-btn" id="exportDataBtn" type="button">
+              <span class="material-symbols-outlined">download</span>
+              Export Backup
+            </button>
+          </div>
+          <div class="set-row">
+            <div><strong>Import library backup</strong><p>Restore playlists and liked music from a backup file.</p></div>
+            <div>
+              <button class="chip-btn" id="importDataBtn" type="button">
+                <span class="material-symbols-outlined">upload</span>
+                Import Backup
+              </button>
+              <input type="file" id="importDataFile" accept=".json,application/json" style="display:none" />
+            </div>
+          </div>
+          <div class="set-row">
+            <div><strong>Reset settings</strong><p>Reset themes, player styling, and playback preferences to defaults.</p></div>
+            <button class="chip-btn" id="resetPrefsBtn" type="button">Reset Preferences</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   function renderSettings() {
     if (state.settingsPage === "appearance") return renderAppearance();
     if (state.settingsPage === "ui") return renderUiPage();
+    if (state.settingsPage === "appicon") return renderAppIconPage();
     if (state.settingsPage === "player") return renderPlayerPage();
     if (state.settingsPage === "playback") return renderPlaybackPage();
     if (state.settingsPage === "listening") return renderListeningPage();
+    if (state.settingsPage === "following") return renderFollowingPage();
+    if (state.settingsPage === "data") return renderDataPage();
     const p = state.prefs;
     const opts = COUNTRIES.map(([c, n]) => `<option value="${c}" ${p.country === c ? "selected" : ""}>${n}</option>`).join("");
     const dls = state.downloads || [];
-    const taste = tasteProfile();
     const gh = String(p.github || "").replace(/\/$/, "");
     const ghOk = /^https?:\/\/github\.com\/[\w.-]+\/[\w.-]+/i.test(gh);
-    const sleepVal = state.sleep.mode === "track" ? "track" : state.sleep.mode === "mins" ? "on" : "off";
     return `
       <div class="hero">
         <div>
@@ -7464,6 +8275,10 @@
           </button>
           <button type="button" class="set-row set-go" id="openAppearance">
             <div><strong>Appearance</strong><p>${escapeHTML(themeLabel())} — themes and a custom mix.</p></div>
+            <span class="material-symbols-outlined">chevron_right</span>
+          </button>
+          <button type="button" class="set-row set-go" id="openAppIcon">
+            <div><strong>App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openPlayer">
@@ -7490,6 +8305,13 @@
           </label>
         </div>
         <div class="set-card">
+          <h3>Artists & Alerts</h3>
+          <button type="button" class="set-row set-go" id="openFollowing">
+            <div><strong>Following & Alerts</strong><p>${state.following.length} followed · get notified when artists drop new music.</p></div>
+            <span class="material-symbols-outlined">chevron_right</span>
+          </button>
+        </div>
+        <div class="set-card">
           <h3>Offline Mode (Android & iOS)</h3>
           <div class="set-row">
             <div><strong>Offline Mode</strong><p>Force offline playback only using downloaded songs from IndexedDB cache.</p></div>
@@ -7513,30 +8335,11 @@
             </div>`).join("") || "<p class='empty' style='padding:16px'>Save a track from Now Playing.</p>"}</div>
         </div>
         <div class="set-card">
-          <h3>Taste profile</h3>
-          <div class="set-row">
-            <div><strong>${taste.plays} plays</strong><p>${taste.liked} liked · ${taste.following} following</p></div>
-          </div>
-          <div class="taste-grid">
-            ${taste.artists.slice(0, 6).map(([n, c]) => `<span class="taste-chip"><strong>${c}×</strong>${escapeHTML(n)}</span>`).join("") || "<p class='empty' style='padding:8px'>Play a few songs to build your profile.</p>"}
-          </div>
-          ${taste.genres.length ? `<div class="taste-grid">${taste.genres.map(([n, c]) => `<span class="taste-chip"><strong>${escapeHTML(n)}</strong>${c} tracks</span>`).join("")}</div>` : ""}
-        </div>
-        <div class="set-card">
-          <h3>Following</h3>
-          <div class="set-row">
-            <div><strong>New-release alerts</strong><p>Browser notification when a followed Audius artist drops a track.</p></div>
-            <button class="switch ${p.notifyFollows ? "on" : ""}" data-pref="notifyFollows" type="button"><i></i></button>
-          </div>
-          <div class="list">${state.following.map((f) => `
-            <div class="track-row">
-              <img src="${escapeAttr(f.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
-              <div>
-                <div class="t-title">${escapeHTML(f.name)}</div>
-                <div class="t-sub">${escapeHTML(f.source)}${f.handle ? " · @" + escapeHTML(f.handle) : ""}</div>
-              </div>
-              <button type="button" class="chip-btn" data-unfollow="${escapeAttr(f.key)}">Unfollow</button>
-            </div>`).join("") || "<p class='empty' style='padding:16px'>Tap the person icon on the player to follow the current artist.</p>"}</div>
+          <h3>Storage & Backups</h3>
+          <button type="button" class="set-row set-go" id="openData">
+            <div><strong>Data & Storage</strong><p>Manage offline downloads, cache, and backup your library.</p></div>
+            <span class="material-symbols-outlined">chevron_right</span>
+          </button>
         </div>
         <div class="set-card">
           <h3>About</h3>
@@ -7557,19 +8360,12 @@
               <button class="chip-btn" id="ghBug" type="button" ${ghOk ? "" : "disabled"}>Send feedback</button>
             </div>
           </div>
-        </div>
-        <div class="set-card">
-          <h3>Data</h3>
           <div class="set-row">
-            <div><strong>This device</strong><p id="cacheHint">Measuring…</p></div>
-          </div>
-          <div class="set-row">
-            <div><strong>Clear cache</strong><p>App shell and Home feed. Likes stay.</p></div>
-            <button class="chip-btn" data-clear="sw" type="button">Clear</button>
-          </div>
-          <div class="set-row">
-            <div><strong>Clear history</strong><p>Recently played.</p></div>
-            <button class="chip-btn" data-clear="recents" type="button">Clear</button>
+            <div><strong>Legal &amp; Privacy</strong><p>Read the Muchi Privacy Policy and Terms of Service.</p></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <a class="chip-btn" href="/privacy.html" target="_blank" rel="noopener" style="text-decoration:none">Privacy Policy</a>
+              <a class="chip-btn" href="/terms.html" target="_blank" rel="noopener" style="text-decoration:none">Terms of Service</a>
+            </div>
           </div>
         </div>
         <div class="dev-credit" aria-label="Developer">
@@ -7685,7 +8481,13 @@
     document.body.dataset.view = state.view;
     if (on) {
       const inp = $("searchInput");
-      if (inp && state.query && inp.value !== state.query) inp.value = state.query;
+      if (inp && document.activeElement !== inp) {
+        if (state.query && inp.value !== state.query) {
+          inp.value = state.query;
+        } else if (!state.query && inp.value) {
+          inp.value = "";
+        }
+      }
     }
   }
 
@@ -7721,6 +8523,8 @@
         let track = null;
         if (state.view === "library" && state.activePlaylist === "liked") {
           track = (state.liked[idx] && state.liked[idx].id === id) ? state.liked[idx] : state.liked.find((t) => t.id === id);
+        } else if (state.view === "library" && (state.activePlaylist === "downloads" || state.libFilter === "downloaded")) {
+          track = (state.downloads[idx] && state.downloads[idx].id === id) ? state.downloads[idx] : state.downloads.find((t) => t.id === id);
         } else if (state.view === "library" && state.activePlaylist === "catalog") {
           const rows = (state.catalogPlaylist && state.catalogPlaylist.tracks) || [];
           track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t.id === id);
@@ -7732,9 +8536,11 @@
         if (!track) { toast("Couldn't open options", true, "error"); return; }
         const where = state.view === "library" && state.activePlaylist === "liked"
           ? "liked"
-          : state.view === "library" && typeof state.activePlaylist === "number"
-            ? "playlist"
-            : "generic";
+          : state.view === "library" && (state.activePlaylist === "downloads" || state.libFilter === "downloaded")
+            ? "downloads"
+            : state.view === "library" && typeof state.activePlaylist === "number"
+              ? "playlist"
+              : "generic";
         openTrackMenu(track, where);
       });
     });
@@ -7882,10 +8688,23 @@
       });
     });
     viewEl.querySelectorAll("[data-open-artist]").forEach((el) => {
-      el.addEventListener("click", () => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
         const pool = (state.artistPage && state.artistPage.albums) ? null : ((state.search && state.search.artists) || []);
-        const a = pool && pool[Number(el.dataset.openArtist)];
-        if (a) openArtistProfile(a);
+        const explicitName = (el.dataset.artistName || "").trim();
+        const explicitId = (el.dataset.artistId || "").trim();
+        const rawIdx = (el.dataset.openArtist || "").trim();
+        let a = null;
+        if (pool && explicitName) {
+          a = pool.find((x) => x && String(x.name || "").toLowerCase() === explicitName.toLowerCase());
+        }
+        if (!a && pool && /^\d+$/.test(rawIdx)) {
+          a = pool[Number(rawIdx)];
+        }
+        if (!a && explicitName) {
+          a = { name: explicitName, id: explicitId, artwork: "", source: "apple", query: explicitName };
+        }
+        if (a && a.name) openArtistProfile(a);
       });
     });
     const artistBack = viewEl.querySelector("#artistBack");
@@ -8034,6 +8853,33 @@
     if (playLiked) playLiked.addEventListener("click", () => { if (state.liked[0]) playFromList(state.liked, 0); });
     const playDownloads = viewEl.querySelector("#playDownloads");
     if (playDownloads) playDownloads.addEventListener("click", () => { if (state.downloads && state.downloads[0]) playFromList(state.downloads, 0); });
+    const clearDownloads = viewEl.querySelector("#clearDownloads");
+    if (clearDownloads) {
+      clearDownloads.addEventListener("click", () => {
+        const count = (state.downloads || []).length;
+        if (!count) return;
+        showModal({
+          title: "Delete all downloads?",
+          body: `<p>This will remove all ${count} downloaded song${count === 1 ? "" : "s"} from this device.</p>`,
+          ok: "Delete all",
+          cancel: "Cancel",
+          danger: true,
+          onOk: async () => {
+            const ND = nativeDownloader();
+            for (const d of (state.downloads || [])) {
+              try { if (ND && ND.removeDownload && d) await ND.removeDownload({ id: d.id }); } catch {}
+              if (d && d.id) await idbDel(d.id).catch(() => {});
+              if (d && d.videoId) await idbDel(`yt:${d.videoId}`).catch(() => {});
+              if (d && d.trackId) await idbDel(`audius:${d.trackId}`).catch(() => {});
+            }
+            state.downloads = [];
+            save("aura.downloads", state.downloads);
+            toast(`Deleted ${count} download${count === 1 ? "" : "s"}`, true, "success");
+            render();
+          },
+        });
+      });
+    }
     const plBanner = viewEl.querySelector("#plBanner");
     if (plBanner && typeof state.activePlaylist === "number") {
       const cur = state.playlists[state.activePlaylist];
@@ -8171,6 +9017,220 @@
     if (openPlayback) openPlayback.addEventListener("click", () => { rememberScroll(); state.settingsPage = "playback"; navPush(); paintNav(false); });
     const openListening = viewEl.querySelector("#openListening");
     if (openListening) openListening.addEventListener("click", () => { rememberScroll(); state.settingsPage = "listening"; navPush(); paintNav(false); });
+    const openAppIcon = viewEl.querySelector("#openAppIcon");
+    if (openAppIcon) openAppIcon.addEventListener("click", () => { rememberScroll(); state.settingsPage = "appicon"; navPush(); paintNav(false); });
+    const openAppIconFromAppearance = viewEl.querySelector("#openAppIconFromAppearance");
+    if (openAppIconFromAppearance) openAppIconFromAppearance.addEventListener("click", () => { rememberScroll(); state.settingsPage = "appicon"; navPush(); paintNav(false); });
+    const openFollowing = viewEl.querySelector("#openFollowing");
+    if (openFollowing) openFollowing.addEventListener("click", () => { rememberScroll(); state.settingsPage = "following"; navPush(); paintNav(false); });
+    const openData = viewEl.querySelector("#openData");
+    if (openData) openData.addEventListener("click", () => { rememberScroll(); state.settingsPage = "data"; navPush(); paintNav(false); measureCache(); });
+
+    // App Icon page listeners
+    viewEl.querySelectorAll("[data-set-app-icon]").forEach((el) => {
+      el.addEventListener("click", () => {
+        setAppIcon(el.dataset.setAppIcon);
+      });
+    });
+    viewEl.querySelectorAll("[data-icon-cat]").forEach((el) => {
+      el.addEventListener("click", () => {
+        state.appIconCat = el.dataset.iconCat;
+        render();
+      });
+    });
+    const previewSplashBtn = viewEl.querySelector("#previewSplashBtn");
+    if (previewSplashBtn) {
+      previewSplashBtn.addEventListener("click", () => {
+        playAppOpeningAnimation(state.prefs && state.prefs.appIcon, true);
+      });
+    }
+
+    // Following & Alerts page listeners
+    const reqPermBtn = viewEl.querySelector("#requestNotifyPermissionBtn");
+    if (reqPermBtn) {
+      reqPermBtn.addEventListener("click", async () => {
+        if ("Notification" in window) {
+          try {
+            await Notification.requestPermission();
+            render();
+          } catch {}
+        }
+      });
+    }
+    const checkReleasesBtn = viewEl.querySelector("#checkNewReleasesBtn");
+    if (checkReleasesBtn) {
+      checkReleasesBtn.addEventListener("click", async () => {
+        checkReleasesBtn.disabled = true;
+        checkReleasesBtn.innerHTML = `<span class="material-symbols-outlined" style="animation:spin 1s linear infinite">sync</span> Checking…`;
+        try {
+          await checkFollowReleases(true);
+        } finally {
+          render();
+        }
+      });
+    }
+    const newFollowInput = viewEl.querySelector("#newFollowArtistInput");
+    const newFollowBtn = viewEl.querySelector("#newFollowArtistBtn");
+    const handleNewFollow = async () => {
+      const q = String(newFollowInput ? newFollowInput.value : "").trim();
+      if (!q) return;
+      newFollowInput.value = "";
+      toast(`Looking up "${q}"…`);
+      try {
+        const data = await api(`/api/artist?name=${encodeURIComponent(q)}&${glq()}`);
+        const art = data && data.artist ? data.artist : { name: q };
+        const key = (art.name || q).toLowerCase();
+        if (state.following.some((f) => f.key === key)) {
+          toast(`Already following ${art.name || q}`);
+          return;
+        }
+        state.following.unshift({
+          key,
+          name: art.name || q,
+          source: art.source || "catalog",
+          handle: art.handle || "",
+          artwork: art.artwork || (data && data.latest && artUrl(data.latest)) || "/cover-default.jpg",
+          lastId: data && data.latest && data.latest.id ? data.latest.id : "",
+          followedAt: Date.now(),
+        });
+        saveFollowing();
+        toast(`Following ${art.name || q}! You'll be notified on new releases.`, true, "success");
+        if (state.prefs.notifyFollows && "Notification" in window && Notification.permission === "default") {
+          Notification.requestPermission().catch(() => {});
+        }
+        render();
+      } catch {
+        const key = q.toLowerCase();
+        if (!state.following.some((f) => f.key === key)) {
+          state.following.unshift({
+            key,
+            name: q,
+            source: "catalog",
+            handle: "",
+            artwork: "/cover-default.jpg",
+            lastId: "",
+            followedAt: Date.now(),
+          });
+          saveFollowing();
+          toast(`Following ${q}! You'll be notified on new releases.`, true, "success");
+          render();
+        }
+      }
+    };
+    if (newFollowBtn) newFollowBtn.addEventListener("click", handleNewFollow);
+    if (newFollowInput) newFollowInput.addEventListener("keydown", (e) => { if (e.key === "Enter") handleNewFollow(); });
+
+    viewEl.querySelectorAll("[data-quick-follow]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const name = el.dataset.quickFollow;
+        if (newFollowInput) newFollowInput.value = name;
+        handleNewFollow();
+      });
+    });
+
+    viewEl.querySelectorAll("[data-open-followed-artist]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const name = (el.dataset.openFollowedArtist || el.dataset.artistName || "").trim();
+        if (!name) return;
+        const f = state.following.find((x) => x.name === name || x.key === name.toLowerCase());
+        openArtistProfile(f || { name });
+      });
+    });
+
+    // Data page listeners
+    const exportBtn = viewEl.querySelector("#exportDataBtn");
+    if (exportBtn) {
+      exportBtn.addEventListener("click", () => {
+        const payload = {
+          app: "Muchi",
+          version: APP_VERSION,
+          exportedAt: new Date().toISOString(),
+          playlists: state.playlists || [],
+          likes: state.likes || [],
+          following: state.following || [],
+          recents: (state.recents || []).slice(0, 50),
+          prefs: state.prefs || {},
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `muchi-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        toast("Library backup downloaded", true, "success");
+      });
+    }
+
+    const importBtn = viewEl.querySelector("#importDataBtn");
+    const importFileInput = viewEl.querySelector("#importDataFile");
+    if (importBtn && importFileInput) {
+      importBtn.addEventListener("click", () => importFileInput.click());
+      importFileInput.addEventListener("change", (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const data = JSON.parse(ev.target.result);
+            if (!data || typeof data !== "object") throw new Error("Invalid backup file");
+            if (Array.isArray(data.playlists)) {
+              state.playlists = data.playlists;
+              savePlaylists();
+            }
+            if (Array.isArray(data.likes)) {
+              state.likes = data.likes;
+              saveLikes();
+            }
+            if (Array.isArray(data.following)) {
+              state.following = data.following;
+              saveFollowing();
+            }
+            if (data.prefs && typeof data.prefs === "object") {
+              state.prefs = Object.assign({}, state.prefs, data.prefs);
+              savePrefs();
+              applyTheme();
+              applyUi();
+              applyAppIcon();
+            }
+            toast("Library backup restored!", true, "success");
+            render();
+          } catch {
+            toast("Failed to parse backup JSON file", true, "error");
+          }
+        };
+        reader.readAsText(file);
+      });
+    }
+
+    const resetPrefsBtn = viewEl.querySelector("#resetPrefsBtn");
+    if (resetPrefsBtn) {
+      resetPrefsBtn.addEventListener("click", () => {
+        if (!confirm("Reset all settings and themes to defaults?")) return;
+        state.prefs = {
+          theme: "system",
+          appearance: "system",
+          appIcon: "default",
+          playerStyle: "pill",
+          quality: "high",
+          autoplay: true,
+          normalize: true,
+          crossfade: 0,
+          speed: 1,
+          notifyFollows: true,
+          notifyInApp: true,
+        };
+        savePrefs();
+        applyTheme();
+        applyUi();
+        applyAppIcon();
+        toast("Settings reset to defaults", true, "success");
+        render();
+      });
+    }
 
     const toggleOfflineMode = viewEl.querySelector("#toggleOfflineMode");
     if (toggleOfflineMode) {
@@ -8699,13 +9759,23 @@
 
   async function openArtistProfile(artist) {
     if (!artist) return;
+    const rawName = String(artist.name || artist.query || "").trim();
+    if (!rawName || /^\d+$/.test(rawName)) return;
     const gen = ++artistGen;
     if (!state.artistPage) state.artistFrom = state.view;
     state.view = "search";
-    state.artistPage = { name: artist.name, artwork: artist.artwork, id: artist.id, source: artist.source, songs: [], albums: [], popular: [], playlists: [], loading: true };
+    state.artistPage = { name: rawName, artwork: artist.artwork, id: artist.id, source: artist.source, songs: [], albums: [], popular: [], playlists: [], loading: true };
     navPush();
     paintNav();
-    const q = artist.query || artist.name;
+    const q = artist.query || rawName;
+    const targetFold = dzFold(rawName);
+    const matchesRequestedArtist = (cand) => {
+      const cf = dzFold(cand);
+      if (!cf || !targetFold) return false;
+      if (cf === targetFold) return true;
+      if (targetFold.length >= 3 && (cf.includes(targetFold) || (cf.length >= 3 && targetFold.includes(cf)))) return true;
+      return false;
+    };
     const songs = [];
     const albums = [];
     let popular = [];
@@ -8747,7 +9817,7 @@
       const appleId = String(artist.id || "").startsWith("artist:apple:") ? String(artist.id).slice("artist:apple:".length) : "";
       data = await api(`/api/artist?q=${encodeURIComponent(q)}&id=${encodeURIComponent(appleId)}&${glq()}`, 30000);
     } catch {}
-    if (data && data.name) state.artistPage.name = data.name;
+    if (data && data.name && matchesRequestedArtist(data.name)) state.artistPage.name = data.name;
     if (data && data.artwork && !state.artistPage.artwork) state.artistPage.artwork = data.artwork;
     addSongs((data && data.songs) || []);
     addAlbums((data && data.albums) || []);
@@ -8775,10 +9845,10 @@
       addSongs(sr && sr.songs);
       addAlbums(dz && dz.albums);
       addAlbums(it && it.albums);
-      if (dz && dz.artist.name) state.artistPage.name = dz.artist.name;
-      else if (it && it.artist.name) state.artistPage.name = it.artist.name;
-      if (it && it.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = it.artist.artwork;
-      else if (dz && dz.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = dz.artist.artwork;
+      if (dz && dz.artist && dz.artist.name && matchesRequestedArtist(dz.artist.name)) state.artistPage.name = dz.artist.name;
+      else if (it && it.artist && it.artist.name && matchesRequestedArtist(it.artist.name)) state.artistPage.name = it.artist.name;
+      if (it && it.artist && it.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = it.artist.artwork;
+      else if (dz && dz.artist && dz.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = dz.artist.artwork;
       // Popular: Deezer's real popularity ranking when available,
       // otherwise the best-first merged list (worker rows first).
       if (dz && dz.popular && dz.popular.length) popular = dz.popular;
@@ -9016,19 +10086,64 @@
   }
 
   async function backgroundEnrichSearch(qStr, qKey) {
-    if (!state.search || state.search.query !== qStr) return;
+    if (!state.search || state.search.query !== qStr || state.query !== qStr) return;
     let updated = false;
     const tasks = [];
+    const mergeUniqueArtists = (incoming) => {
+      if (!Array.isArray(incoming) || !incoming.length) return;
+      const list = state.search.artists || [];
+      const seen = new Set(list.map((a) => dzFold(a && a.name)));
+      for (const a of incoming) {
+        const k = dzFold(a && a.name);
+        if (!k) continue;
+        if (!seen.has(k)) {
+          seen.add(k);
+          list.push(a);
+        } else {
+          const ex = list.find((x) => dzFold(x && x.name) === k);
+          if (ex && (!ex.artwork || ex.artwork === "/cover-default.jpg") && a.artwork && a.artwork !== "/cover-default.jpg") {
+            ex.artwork = a.artwork;
+          }
+        }
+      }
+      const wantQ = dzFold(qStr);
+      if (wantQ && list.length > 1) {
+        list.sort((a, b) => {
+          const na = dzFold(a && a.name);
+          const nb = dzFold(b && b.name);
+          const exA = na === wantQ ? 1 : 0;
+          const exB = nb === wantQ ? 1 : 0;
+          if (exA !== exB) return exB - exA;
+          const prA = na.startsWith(wantQ) ? 1 : 0;
+          const prB = nb.startsWith(wantQ) ? 1 : 0;
+          if (prA !== prB) return prB - prA;
+          return 0;
+        });
+      }
+      state.search.artists = list;
+    };
+    const mergeUniquePlaylists = (incoming) => {
+      if (!Array.isArray(incoming) || !incoming.length) return;
+      const list = state.search.playlists || [];
+      const seen = new Set(list.map((p) => String((p && (p.id || p.title)) || "").toLowerCase()));
+      for (const p of incoming) {
+        const k = String((p && (p.id || p.title)) || "").toLowerCase();
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        list.push(p);
+      }
+      state.search.playlists = list;
+    };
 
     if (!state.search.apple || !state.search.apple.length) {
       tasks.push(
         api(`/api/search?q=${encodeURIComponent(qStr)}&source=apple&refresh=1&${glq()}`, 4000)
           .then((itData) => {
-            if (itData && Array.isArray(itData.apple) && itData.apple.length && state.search && state.search.query === qStr) {
+            if (itData && Array.isArray(itData.apple) && itData.apple.length && state.search && state.search.query === qStr && state.query === qStr) {
               state.search.apple = itData.apple.filter(looksLikeSong);
               state.search.itunes = state.search.apple;
-              if (Array.isArray(itData.artists)) state.search.artists = (state.search.artists || []).concat(itData.artists);
-              if (Array.isArray(itData.playlists)) state.search.playlists = (state.search.playlists || []).concat(itData.playlists);
+              mergeUniqueArtists(itData.artists);
+              mergeUniquePlaylists(itData.playlists);
               updated = true;
             }
           })
@@ -9040,10 +10155,10 @@
       tasks.push(
         api(`/api/search?q=${encodeURIComponent(qStr)}&source=deezer&refresh=1&${glq()}`, 4000)
           .then((dzData) => {
-            if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length && state.search && state.search.query === qStr) {
+            if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length && state.search && state.search.query === qStr && state.query === qStr) {
               state.search.deezer = dzData.deezer.filter(looksLikeSong);
-              if (Array.isArray(dzData.artists)) state.search.artists = (state.search.artists || []).concat(dzData.artists);
-              if (Array.isArray(dzData.playlists)) state.search.playlists = (state.search.playlists || []).concat(dzData.playlists);
+              mergeUniqueArtists(dzData.artists);
+              mergeUniquePlaylists(dzData.playlists);
               updated = true;
             }
           })
@@ -9053,7 +10168,7 @@
 
     if (tasks.length) {
       await Promise.allSettled(tasks);
-      if (updated && state.search && state.search.query === qStr) {
+      if (updated && state.search && state.search.query === qStr && state.query === qStr) {
         setSearchCache(qKey, state.search);
         softRender();
       }
@@ -9068,7 +10183,10 @@
     state.query = qTrim;
     state.view = "search";
     state.artistPage = null;
-    $("searchInput").value = qTrim;
+    const sInput = $("searchInput");
+    if (sInput && (document.activeElement !== sInput || !sInput.value.trim())) {
+      sInput.value = qTrim;
+    }
 
     if (state.offlineMode || state.isNetworkOffline) {
       const qLower = qTrim.toLowerCase();
@@ -9122,6 +10240,7 @@
 
     try {
       const data = await api(`/api/search?q=${encodeURIComponent(qTrim)}&${glq()}&quality=${encodeURIComponent(resolvedQuality())}&codec=${encodeURIComponent(state.prefs.codec || "auto")}`, 9000);
+      if (state.query !== qTrim) return; // Discard stale response if user cleared or retyped
       if (data && typeof data === "object") {
         if (Array.isArray(data.youtube)) data.youtube = data.youtube.filter(looksLikeSong);
         if (Array.isArray(data.apple)) data.apple = data.apple.filter(looksLikeSong);
@@ -9136,6 +10255,7 @@
         return;
       }
     } catch (e) {
+      if (state.query !== qTrim) return;
       toast("Search failed. Checking local library…");
       const qLower = qTrim.toLowerCase();
       const matchedDls = (state.downloads || []).filter((t) => {
@@ -9677,21 +10797,35 @@
     } catch {}
   }
 
-  async function checkFollowReleases() {
-    if (!state.prefs.notifyFollows || !state.following.length) return;
+  async function checkFollowReleases(manual = false) {
+    if (!state.following.length) {
+      if (manual) toast("No artists followed yet");
+      return;
+    }
     let changed = false;
-    for (const f of state.following.slice(0, 6)) {
+    let newCount = 0;
+    const targets = state.following.slice(0, 30);
+    for (const f of targets) {
       try {
         const data = await api(`/api/artist?name=${encodeURIComponent(f.name)}&handle=${encodeURIComponent(f.handle || "")}&${glq()}`);
-        const latest = data.latest;
+        const latest = data && data.latest;
         if (latest && latest.id && latest.id !== f.lastId) {
           const first = !f.lastId;
           f.lastId = latest.id;
           changed = true;
           if (!first) {
-            if ("Notification" in window && Notification.permission === "granted") {
-              try { new Notification(`${f.name} released a track`, { body: latest.title, icon: artUrl(latest) }); } catch {}
-            } else toast(`${f.name}: ${latest.title}`);
+            newCount++;
+            if ("Notification" in window && Notification.permission === "granted" && state.prefs.notifyFollows) {
+              try {
+                new Notification(`${f.name} released a track`, {
+                  body: latest.title,
+                  icon: artUrl(latest) || f.artwork || "/logo.png?v=53",
+                });
+              } catch {}
+            }
+            if (state.prefs.notifyInApp !== false) {
+              toast(`New release from ${f.name}: "${latest.title}"`, true, "info");
+            }
           }
         } else if (latest && latest.id && !f.lastId) {
           f.lastId = latest.id;
@@ -9700,6 +10834,9 @@
       } catch {}
     }
     if (changed) saveFollowing();
+    if (manual) {
+      toast(newCount > 0 ? `Found ${newCount} new release(s)!` : `All ${state.following.length} followed artists are up to date`, true, "success");
+    }
   }
 
   async function loadRadio(q = "") {
@@ -9963,12 +11100,22 @@
     }
     let searchLiveTimer = null;
     $("searchInput").addEventListener("input", (e) => {
-      const val = (e.target.value || "").trim();
+      const raw = e.target.value || "";
+      const val = raw.trim();
       clearTimeout(searchLiveTimer);
-      if (!val) return;
+      if (!val) {
+        state.query = "";
+        if (state.view === "search") {
+          state.search = null;
+          render();
+        }
+        return;
+      }
       searchLiveTimer = setTimeout(() => {
-        if (state.view === "search" && val.length >= 2 && val !== state.query) {
-          runSearch(val);
+        const curInp = $("searchInput");
+        const curVal = curInp ? curInp.value.trim() : val;
+        if (state.view === "search" && curVal.length >= 2 && curVal !== state.query) {
+          runSearch(curVal);
         }
       }, 350);
     });
@@ -10495,6 +11642,8 @@
   })();
 
   applyTheme();
+  applyAppIcon();
+  playAppOpeningAnimation();
   const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
   if (conn && conn.addEventListener) {
     let lastQ = resolvedQuality();

@@ -1,4 +1,7 @@
-<!doctype html>
+// MUCHI — static legal pages served directly by the Worker with 200 OK
+// (zero redirects, instant response for Google OAuth Branding Verification).
+
+export const PRIVACY_HTML = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -128,4 +131,134 @@
   <footer><a href="/">Back to Muchi</a> · <a href="/terms.html">Terms of Service</a></footer>
 </main>
 </body>
-</html>
+</html>`;
+
+export const TERMS_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="index, follow">
+  <title>Muchi Terms of Service</title>
+  <meta name="description" content="Muchi Terms of Service for the Muchi music player and related services.">
+  <link rel="canonical" href="https://muchi.twiarimascord.workers.dev/terms.html">
+  <meta property="og:title" content="Muchi Terms of Service">
+  <meta property="og:description" content="Muchi Terms of Service for the Muchi music player and related services.">
+  <meta property="og:url" content="https://muchi.twiarimascord.workers.dev/terms.html">
+  <meta property="og:type" content="website">
+  <link rel="icon" type="image/png" href="/logo.png?v=53">
+  <style>
+    :root { color-scheme: dark; --bg:#101413; --panel:#18201f; --text:#edf7f3; --muted:#b5c6c1; --accent:#a7f3d0; --line:#34433f; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:radial-gradient(circle at 15% 0%,#1d3932 0,transparent 38%),var(--bg); color:var(--text); font:16px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; overflow-wrap:break-word; }
+    main { width:min(860px,calc(100% - 32px)); margin:0 auto; padding:48px 0 72px; }
+    header, section { background:#18201f; background:color-mix(in srgb,var(--panel) 94%,transparent); border:1px solid var(--line); border-radius:20px; padding:24px 26px; margin:16px 0; box-shadow:0 16px 45px rgba(0,0,0,.16); }
+    h1 { margin:0 0 6px; font-size:clamp(26px,5.5vw,42px); letter-spacing:-0.8px; line-height:1.2; }
+    h2 { margin:0 0 10px; font-size:20px; color:var(--accent); line-height:1.3; }
+    p, ul { margin:10px 0; } li { margin:6px 0; }
+    .date, .muted { color:var(--muted); }
+    a { color:var(--accent); } code { color:#ffe8a8; }
+    .notice { border-left:4px solid #f7d78e; background:#3a321c; padding:12px 14px; border-radius:10px; color:#fff4ca; }
+    footer { color:var(--muted); text-align:center; padding:18px 0; font-size:14px; }
+    @media (max-width: 600px) {
+      main { width:calc(100% - 24px); padding:24px 0 48px; }
+      header, section { padding:18px 16px; border-radius:16px; margin:12px 0; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Muchi Terms of Service</h1>
+    <p class="date">Last updated: September 25, 2026</p>
+    <p>These Terms of Service govern your use of the Muchi website, progressive web app, mobile application, and related services.</p>
+  </header>
+
+  <section>
+    <h2>1. Agreement</h2>
+    <p>By accessing or using Muchi, you agree to these Terms of Service and the <a href="/privacy.html">Muchi Privacy Policy</a>. If you do not agree, do not use Muchi.</p>
+  </section>
+
+  <section>
+    <h2>2. The service</h2>
+    <p>Muchi is a music discovery and playback application. Features may include search, music metadata, playback, lyrics, radio, local playlists, queue controls, downloads where supported, optional Google sign-in, optional YouTube connection, and Muchi Agent features.</p>
+    <p>Features and provider availability may vary by country, device, account, music provider, copyright restrictions, or provider API availability.</p>
+  </section>
+
+  <section>
+    <h2>3. Eligibility and accounts</h2>
+    <p>You must be old enough to use the service under the laws applicable to you. You are responsible for the accuracy of information you provide and for protecting access to your Google account and Muchi session.</p>
+    <p>Google sign-in identifies your Muchi account. You do not give Muchi your Google password. You may use Muchi without connecting YouTube, but some YouTube Library features require a separate authorization.</p>
+  </section>
+
+  <section>
+    <h2>4. Google and YouTube services</h2>
+    <p>Google and YouTube are third-party services. If you choose to connect YouTube, you authorize Muchi to use the requested YouTube permissions for the features shown to you. Muchi only performs likes, ratings, playlist additions, or other account actions after your request.</p>
+    <p>Your use of YouTube is also subject to Google's and YouTube's own terms, policies, and privacy practices. Muchi is not Google, YouTube, or a Google product and is not affiliated with Google or YouTube.</p>
+  </section>
+
+  <section>
+    <h2>5. Music and third-party content</h2>
+    <p>Music, artwork, lyrics, radio streams, metadata, and other content may be supplied by third-party providers. Muchi does not guarantee that any particular song, stream, lyric, artist, album, or provider result will remain available or accurate.</p>
+    <p>You are responsible for using third-party content lawfully and respecting the terms and rights of the applicable provider and rights holder.</p>
+  </section>
+
+  <section>
+    <h2>6. Muchi Agent and automated results</h2>
+    <p>Muchi Agent may use hosted artificial-intelligence services to answer questions, identify songs, search music, recommend tracks, and prepare actions. AI results can be incomplete, inaccurate, or out of date. Verify song identity, lyrics, availability, and recommendations before relying on them.</p>
+    <p>Muchi Agent does not give medical, legal, financial, safety, or other professional advice. Do not submit passwords, payment details, private keys, or sensitive personal information to the Agent.</p>
+    <p>Muchi will ask for confirmation before creating or changing a local playlist through an Agent action. You remain responsible for reviewing and confirming actions.</p>
+  </section>
+
+  <section>
+    <h2>7. Acceptable use</h2>
+    <p>You must not:</p>
+    <ul>
+      <li>Use Muchi to violate law, copyright, privacy, or the terms of a music provider.</li>
+      <li>Attempt to bypass authentication, rate limits, security controls, or provider restrictions.</li>
+      <li>Use Muchi to distribute malware, spam, abuse, harassment, or deceptive content.</li>
+      <li>Scrape, overload, reverse engineer, or interfere with Muchi or its infrastructure.</li>
+      <li>Use another person's Google or YouTube account without permission.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>8. Your content and feedback</h2>
+    <p>You retain rights to content you submit to Muchi. You grant Muchi only the limited permission needed to process that content to provide the feature you requested, such as handling a search query or Agent message.</p>
+    <p>If you send feedback or suggestions, you allow Muchi to use that feedback to improve the service without owing you compensation.</p>
+  </section>
+
+  <section>
+    <h2>9. Availability and changes</h2>
+    <p>Muchi is provided on an ongoing-development basis. We may add, remove, suspend, or change features, providers, APIs, or supported devices. We may temporarily suspend access for maintenance, security, legal, or abuse-prevention reasons.</p>
+  </section>
+
+  <section>
+    <h2>10. Disclaimers</h2>
+    <p>To the maximum extent permitted by law, Muchi is provided “as is” and “as available.” We do not promise uninterrupted operation, perfect search results, accurate lyrics, continuous provider access, compatibility with every device, or availability of any particular song or stream.</p>
+  </section>
+
+  <section>
+    <h2>11. Limitation of liability</h2>
+    <p>To the maximum extent permitted by law, <strong>Mochi</strong> and Muchi will not be liable for indirect, incidental, special, consequential, exemplary, or loss-of-data damages arising from or related to your use of Muchi or third-party services.</p>
+  </section>
+
+  <section>
+    <h2>12. Suspension and termination</h2>
+    <p>You may stop using Muchi at any time and may disconnect Google or YouTube access. We may suspend or terminate access when reasonably necessary to protect the service, users, providers, or comply with law.</p>
+  </section>
+
+  <section>
+    <h2>13. Changes to these terms</h2>
+    <p>We may update these Terms when the service or legal requirements change. The updated version will be posted at this URL with a new revision date. Continued use after an update means you accept the revised Terms.</p>
+  </section>
+
+  <section>
+    <h2>14. Contact</h2>
+    <p>Questions about these Terms can be sent to <a href="mailto:twiarimascord@gmail.com">twiarimascord@gmail.com</a>.</p>
+  </section>
+
+  <footer><a href="/">Back to Muchi</a> · <a href="/privacy.html">Privacy Policy</a></footer>
+</main>
+</body>
+</html>`;

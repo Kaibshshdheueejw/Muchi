@@ -7,12 +7,15 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // Register custom Capacitor plugins BEFORE super.onCreate so the
+        // Bridge initializes and exposes them to window.Capacitor.Plugins
+        // immediately on startup.
+        registerPlugin(MuchiAudioPlugin.class);
+        registerPlugin(MuchiDownloadPlugin.class);
         super.onCreate(savedInstanceState);
-        // Native background audio (Media3 foreground service) — picked up
-        // automatically by public/app.js (nativePlayer()).
-        getBridge().registerPlugin(MuchiAudioPlugin.class);
-        // Real offline downloads (files on disk) — picked up by the download
-        // bridge in public/app.js (downloadTrack / renderDlManager).
-        getBridge().registerPlugin(MuchiDownloadPlugin.class);
+        if (getBridge() != null) {
+            getBridge().registerPlugin(MuchiAudioPlugin.class);
+            getBridge().registerPlugin(MuchiDownloadPlugin.class);
+        }
     }
 }

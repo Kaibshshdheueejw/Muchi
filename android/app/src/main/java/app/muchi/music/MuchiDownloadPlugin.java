@@ -101,6 +101,26 @@ public class MuchiDownloadPlugin extends Plugin {
     private final Map<String, Future<?>> active = new ConcurrentHashMap<>();
     private final Map<String, String> uris = new ConcurrentHashMap<>();
     private final Map<String, PluginCall> calls = new ConcurrentHashMap<>();
+    private volatile Uri pendingInstallUri = null;
+
+    @Override
+    protected void handleOnResume() {
+        super.handleOnResume();
+        final Uri pending = pendingInstallUri;
+        if (pending != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (getContext().getPackageManager().canRequestPackageInstalls()) {
+                pendingInstallUri = null;
+                android.app.Activity act = getActivity();
+                if (act != null) {
+                    act.runOnUiThread(() -> {
+                        try {
+                            launchPackageInstaller(pending);
+                        } catch (Exception ignored) {}
+                    });
+                }
+            }
+        }
+    }
 
     @PluginMethod
     public void startDownload(PluginCall call) {
@@ -163,10 +183,10 @@ public class MuchiDownloadPlugin extends Plugin {
     }
 
     /* Item 6 — download the app's own update APK in-app (no browser redirect).
-       Writes to the public Downloads (Android 10+) or the app Downloads folder
-       (Android 9 and below) and returns {uri}; the web layer then fires
-       installUpdate() so the system Install sheet comes up directly (v1.5.4).
-       Also requests storage permission on < API 29. */
+       Writes to the app's external files/cache directory (for FileProvider
+       installation) AND copies to public Downloads/Muchi so the user also has
+       the APK visible in device storage, then launches the system package
+       installer directly. */
     @PluginMethod
     public void downloadUpdate(PluginCall call) {
         final String url = call.getString("url", "");
@@ -175,49 +195,49 @@ public class MuchiDownloadPlugin extends Plugin {
             call.reject("MuchiDownload: missing update url");
             return;
         }
-        if (Build.VERSION.SDK_INT < 29 && !"granted".equals(getPermissionState("storage"))) {
-            requestPermissionForAliases(new String[] { "storage" }, call, "storagePermissionCallback");
-            return;
-        }
         final String id = "update_" + System.currentTimeMillis();
         calls.put(id, call);
-        io.submit(() -> {
+        Future<?> f = io.submit(() -> {
             try {
-                Uri uri = downloadApk(id, url, version);
+                String cleanVer = (version == null || version.isEmpty()) ? "1.6.5" : version.replaceFirst("^[vV]", "");
+                String name = "Muchi-" + cleanVer + ".apk";
+                Uri uri = downloadApk(id, url, cleanVer, name);
                 uris.put(id, uri.toString());
+                uris.put("latest_update", uri.toString());
                 JSObject done = new JSObject();
                 done.put("id", id);
                 done.put("uri", uri.toString());
+                done.put("savedPath", "Downloads/Muchi/" + name);
                 notifyListeners("done", done);
                 call.resolve(done);
             } catch (Exception e) {
+                String msg = e.getMessage() == null ? "update download failed" : e.getMessage();
                 JSObject err = new JSObject();
                 err.put("id", id);
-                err.put("message", e.getMessage() == null ? "update download failed" : e.getMessage());
+                err.put("message", msg);
                 notifyListeners("error", err);
-                call.reject(err.toString(), e);
+                call.reject(msg, e);
             } finally {
                 active.remove(id);
                 calls.remove(id);
             }
         });
+        active.put(id, f);
     }
 
-    private Uri downloadApk(String id, String url, String version) throws IOException {
-        URL currentUrl = new URL(url);
-        HttpURLConnection con = null;
-        int code = 0;
+    private HttpURLConnection openFollowingRedirects(String urlStr, String version, String accept) throws IOException {
+        URL currentUrl = new URL(urlStr);
         for (int redirects = 0; redirects < 10; redirects++) {
-            con = (HttpURLConnection) currentUrl.openConnection();
+            HttpURLConnection con = (HttpURLConnection) currentUrl.openConnection();
             con.setConnectTimeout(25000);
             con.setReadTimeout(60000);
             con.setInstanceFollowRedirects(true);
-            con.setRequestProperty("User-Agent", "Muchi/" + (version == null || version.isEmpty() ? "1.5.6" : version));
-            con.setRequestProperty("Accept", "*/*");
-            code = con.getResponseCode();
-            if (code == HttpURLConnection.HTTP_MOVED_PERM || 
-                code == HttpURLConnection.HTTP_MOVED_TEMP || 
-                code == HttpURLConnection.HTTP_SEE_OTHER || 
+            con.setRequestProperty("User-Agent", "Muchi/" + (version == null || version.isEmpty() ? "1.6.5" : version));
+            con.setRequestProperty("Accept", accept);
+            int code = con.getResponseCode();
+            if (code == HttpURLConnection.HTTP_MOVED_PERM ||
+                code == HttpURLConnection.HTTP_MOVED_TEMP ||
+                code == HttpURLConnection.HTTP_SEE_OTHER ||
                 code == 307 || code == 308) {
                 String loc = con.getHeaderField("Location");
                 if (loc != null && !loc.isEmpty()) {
@@ -226,17 +246,66 @@ public class MuchiDownloadPlugin extends Plugin {
                     continue;
                 }
             }
-            break;
+            return con;
         }
-        if (con == null || code < 200 || code >= 300) {
-            if (con != null) con.disconnect();
-            throw new IOException("update download failed (" + code + ")");
-        }
+        throw new IOException("Too many redirects while downloading update");
+    }
+
+    private String resolveFallbackGithubApkUrl(String version) {
+        HttpURLConnection con = null;
         try {
-            String name = "Muchi-" + (version == null || version.isEmpty() ? "1.5.6" : version) + ".apk";
-            File cacheDir = getContext().getExternalCacheDir();
-            if (cacheDir == null) cacheDir = getContext().getCacheDir();
-            File updateDir = new File(cacheDir, "updates");
+            con = openFollowingRedirects("https://api.github.com/repos/Kaibshshdheueejw/Muchi/releases", version, "application/vnd.github+json");
+            if (con.getResponseCode() >= 200 && con.getResponseCode() < 300) {
+                try (InputStream in = con.getInputStream()) {
+                    byte[] buf = new byte[64 * 1024];
+                    StringBuilder sb = new StringBuilder();
+                    int n;
+                    while ((n = in.read(buf)) > 0 && sb.length() < 256 * 1024) {
+                        sb.append(new String(buf, 0, n, "UTF-8"));
+                    }
+                    String json = sb.toString();
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"", java.util.regex.Pattern.CASE_INSENSITIVE)
+                            .matcher(json);
+                    if (m.find()) {
+                        return m.group(1);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (con != null) con.disconnect();
+        }
+        return "";
+    }
+
+    private Uri downloadApk(String id, String url, String version, String name) throws IOException {
+        HttpURLConnection con = null;
+        try {
+            con = openFollowingRedirects(url, version, "application/vnd.android.package-archive,application/octet-stream,*/*");
+            int code = con.getResponseCode();
+            String ctype = con.getContentType() != null ? con.getContentType().toLowerCase() : "";
+            if (code < 200 || code >= 300 || ctype.contains("text/html") || ctype.contains("application/json")) {
+                con.disconnect();
+                con = null;
+                String altUrl = resolveFallbackGithubApkUrl(version);
+                if (!altUrl.isEmpty() && !altUrl.equals(url)) {
+                    con = openFollowingRedirects(altUrl, version, "application/vnd.android.package-archive,application/octet-stream,*/*");
+                    code = con.getResponseCode();
+                    ctype = con.getContentType() != null ? con.getContentType().toLowerCase() : "";
+                }
+            }
+            if (con == null || code < 200 || code >= 300) {
+                throw new IOException("Update package not found on server (HTTP " + code + "). Ensure the release APK is published.");
+            }
+            if (ctype.contains("text/html") || ctype.contains("application/json")) {
+                throw new IOException("Server returned webpage instead of APK package.");
+            }
+
+            File baseDir = getContext().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (baseDir == null) baseDir = getContext().getExternalCacheDir();
+            if (baseDir == null) baseDir = getContext().getCacheDir();
+            File updateDir = new File(baseDir, "updates");
             if (!updateDir.exists()) updateDir.mkdirs();
             File outFile = new File(updateDir, name);
             if (outFile.exists()) outFile.delete();
@@ -246,19 +315,51 @@ public class MuchiDownloadPlugin extends Plugin {
                 copyTracked(id, con, out, total);
             }
 
-            // Also copy to public Downloads folder so user has it in device storage
+            if (!outFile.exists() || outFile.length() < 100 * 1024) {
+                if (outFile.exists()) outFile.delete();
+                throw new IOException("Downloaded file is incomplete or invalid (<100 KB).");
+            }
+
+            // Also copy to public Downloads/Muchi folder so user can see it in their device's Files / Downloads app
             try {
                 if (Build.VERSION.SDK_INT >= 29) {
                     ContentResolver resolver = getContext().getContentResolver();
+                    try {
+                        resolver.delete(
+                                MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                                MediaStore.Downloads.DISPLAY_NAME + "=?",
+                                new String[] { name }
+                        );
+                    } catch (Exception ignored) {}
                     ContentValues values = new ContentValues();
                     values.put(MediaStore.Downloads.DISPLAY_NAME, name);
                     values.put(MediaStore.Downloads.MIME_TYPE, "application/vnd.android.package-archive");
                     values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Muchi");
-                    values.put(MediaStore.Downloads.IS_PENDING, 0);
+                    values.put(MediaStore.Downloads.IS_PENDING, 1);
                     Uri item = resolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
                     if (item != null) {
                         try (InputStream in = new FileInputStream(outFile);
                              OutputStream out = resolver.openOutputStream(item)) {
+                            if (out != null) {
+                                byte[] buf = new byte[64 * 1024];
+                                int n;
+                                while ((n = in.read(buf)) > 0) {
+                                    out.write(buf, 0, n);
+                                }
+                            }
+                        }
+                        ContentValues doneVals = new ContentValues();
+                        doneVals.put(MediaStore.Downloads.IS_PENDING, 0);
+                        resolver.update(item, doneVals, null, null);
+                    }
+                } else {
+                    File pubDl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    if (pubDl != null) {
+                        File muchiDl = new File(pubDl, "Muchi");
+                        if (!muchiDl.exists()) muchiDl.mkdirs();
+                        File pubFile = new File(muchiDl, name);
+                        try (InputStream in = new FileInputStream(outFile);
+                             OutputStream out = new FileOutputStream(pubFile)) {
                             byte[] buf = new byte[64 * 1024];
                             int n;
                             while ((n = in.read(buf)) > 0) {
@@ -272,7 +373,7 @@ public class MuchiDownloadPlugin extends Plugin {
             return FileProvider.getUriForFile(getContext(),
                     getContext().getPackageName() + ".fileprovider", outFile);
         } finally {
-            con.disconnect();
+            if (con != null) con.disconnect();
         }
     }
 
@@ -354,58 +455,91 @@ public class MuchiDownloadPlugin extends Plugin {
         call.resolve(o);
     }
 
+    private void launchPackageInstaller(Uri apkUri) {
+        Intent view = new Intent(Intent.ACTION_VIEW);
+        view.setDataAndType(apkUri, "application/vnd.android.package-archive");
+        view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        view.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
+        android.app.Activity act = getActivity();
+        if (act != null) {
+            act.startActivity(view);
+        } else {
+            getContext().startActivity(view);
+        }
+    }
+
     /**
-     * v1.5.5 — hand a freshly-downloaded update APK to the system package
-     * installer so the user lands on the real "Install" sheet instead of
-     * hunting for the file in a Downloads app.
+     * v1.6.5 — hand a freshly-downloaded update APK to the system package
+     * installer on the main UI thread so the user lands on the real "Install"
+     * sheet immediately, and auto-resume installation if they needed to grant
+     * "Install unknown apps" permission first.
      */
     @PluginMethod
     public void installUpdate(PluginCall call) {
         String uriStr = call.getString("uri", "");
         if (uriStr.isEmpty()) {
+            uriStr = uris.getOrDefault("latest_update", "");
+        }
+        if (uriStr == null || uriStr.isEmpty()) {
             call.reject("MuchiDownload: missing uri");
             return;
         }
-        try {
-            Uri apkUri = Uri.parse(uriStr);
-            if ("file".equals(apkUri.getScheme())) {
-                File f = new File(apkUri.getPath());
-                if (!f.exists()) throw new IOException("the downloaded file is gone");
-                apkUri = FileProvider.getUriForFile(getContext(),
-                        getContext().getPackageName() + ".fileprovider", f);
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                if (!getContext().getPackageManager().canRequestPackageInstalls()) {
-                    Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:" + getContext().getPackageName()));
-                    settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    getContext().startActivity(settings);
-                    call.reject("Allow “Install unknown apps” for Muchi in system settings, then tap Install again.");
-                    return;
-                }
-            }
-
-            Intent view = new Intent(Intent.ACTION_VIEW);
-            view.setDataAndType(apkUri, "application/vnd.android.package-archive");
-            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            getContext().startActivity(view);
-            call.resolve();
-        } catch (ActivityNotFoundException notAllowed) {
+        final String finalUriStr = uriStr;
+        android.app.Activity act = getActivity();
+        Runnable task = () -> {
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:" + getContext().getPackageName()));
-                    settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    getContext().startActivity(settings);
+                Uri apkUri = Uri.parse(finalUriStr);
+                if ("file".equals(apkUri.getScheme())) {
+                    File f = new File(apkUri.getPath());
+                    if (!f.exists()) throw new IOException("the downloaded APK file is missing");
+                    apkUri = FileProvider.getUriForFile(getContext(),
+                            getContext().getPackageName() + ".fileprovider", f);
                 }
-                call.reject("Allow “Install unknown apps” for Muchi in the settings screen, then tap Install again.");
-            } catch (Exception ignored) {
-                call.reject("Could not open the installer — enable “install unknown apps” for Muchi in system settings.");
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    if (!getContext().getPackageManager().canRequestPackageInstalls()) {
+                        pendingInstallUri = apkUri;
+                        Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + getContext().getPackageName()));
+                        settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        if (act != null) act.startActivity(settings);
+                        else getContext().startActivity(settings);
+                        JSObject res = new JSObject();
+                        res.put("needsPermission", true);
+                        res.put("uri", apkUri.toString());
+                        call.resolve(res);
+                        return;
+                    }
+                }
+
+                pendingInstallUri = null;
+                launchPackageInstaller(apkUri);
+                JSObject res = new JSObject();
+                res.put("installed", true);
+                res.put("uri", apkUri.toString());
+                call.resolve(res);
+            } catch (ActivityNotFoundException notAllowed) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + getContext().getPackageName()));
+                        settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        if (act != null) act.startActivity(settings);
+                        else getContext().startActivity(settings);
+                    }
+                    call.reject("Allow “Install unknown apps” for Muchi in settings, then tap Install.");
+                } catch (Exception ignored) {
+                    call.reject("Could not open the installer — enable “Install unknown apps” for Muchi in settings.");
+                }
+            } catch (Exception e) {
+                call.reject("install failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
             }
-        } catch (Exception e) {
-            call.reject("install failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+        };
+        if (act != null) {
+            act.runOnUiThread(task);
+        } else {
+            task.run();
         }
     }
 

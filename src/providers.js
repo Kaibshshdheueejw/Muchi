@@ -465,12 +465,18 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   const countryParam = country ? `&country=${encodeURIComponent(country)}` : "";
   const fetchItunes = async (url) => {
     try {
-      return await fetchJSON(url, {}, 3200);
+      return await fetchJSON(url, {}, 5000);
     } catch {
       const ctrl = new AbortController();
-      const tm = setTimeout(() => ctrl.abort(), 2500);
+      const tm = setTimeout(() => ctrl.abort(), 4500);
       try {
-        const r = await fetch(url, { signal: ctrl.signal });
+        const r = await fetch(url, {
+          signal: ctrl.signal,
+          headers: {
+            Accept: "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          },
+        });
         if (!r.ok) return null;
         return await r.json();
       } catch {
@@ -486,8 +492,14 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
       .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50`) : res),
   ];
   if (includeExtra) {
-    calls.push(fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=20${countryParam}`));
-    calls.push(fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25${countryParam}`));
+    calls.push(
+      fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=25${countryParam}`)
+        .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=25`) : res)
+    );
+    calls.push(
+      fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25${countryParam}`)
+        .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25`) : res)
+    );
   }
   const settled = await Promise.allSettled(calls);
   const songsR = settled[0];
@@ -503,21 +515,33 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   const foldArtist = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
   const wantQ = foldArtist(query);
 
+  const upsertArtist = (name, id, artwork) => {
+    const cleanName = String(name || "").trim();
+    const k = foldArtist(cleanName);
+    if (!k) return;
+    if (!seenArt.has(k)) {
+      seenArt.add(k);
+      artists.push({
+        id: `artist:apple:${id || cleanName}`,
+        kind: "artist",
+        name: cleanName,
+        artwork: artwork || "/cover-default.jpg",
+        source: "apple",
+        query: cleanName,
+      });
+    } else {
+      const existing = artists.find((x) => foldArtist(x.name) === k);
+      if (existing && (!existing.artwork || existing.artwork === "/cover-default.jpg") && artwork && artwork !== "/cover-default.jpg") {
+        existing.artwork = artwork;
+      }
+    }
+  };
+
   if (artistsR && artistsR.status === "fulfilled") {
     for (const a of (artistsR.value && artistsR.value.results) || []) {
       if (!a.artistName) continue;
-      const k = a.artistName.toLowerCase();
-      if (!seenArt.has(k)) {
-        seenArt.add(k);
-        artists.push({
-          id: `artist:apple:${a.artistId || a.artistName}`,
-          kind: "artist",
-          name: a.artistName,
-          artwork: a.artworkUrl100 || "/cover-default.jpg",
-          source: "apple",
-          query: a.artistName,
-        });
-      }
+      const art = a.artworkUrl100 ? String(a.artworkUrl100).replace("100x100bb", "400x400bb") : "/cover-default.jpg";
+      upsertArtist(a.artistName, a.artistId || a.artistName, art);
     }
   }
   if (songsR && songsR.status === "fulfilled") {
@@ -542,23 +566,7 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
         artworkUrl100: t.artworkUrl100 || "",
       });
       if (t.artistName) {
-        const k = t.artistName.toLowerCase();
-        if (!seenArt.has(k)) {
-          seenArt.add(k);
-          artists.push({
-            id: `artist:apple:${t.artistId || t.artistName}`,
-            kind: "artist",
-            name: t.artistName,
-            artwork: art400,
-            source: "apple",
-            query: t.artistName,
-          });
-        } else {
-          const existing = artists.find((x) => x.name.toLowerCase() === k);
-          if (existing && (!existing.artwork || existing.artwork === "/cover-default.jpg") && art400 !== "/cover-default.jpg") {
-            existing.artwork = art400;
-          }
-        }
+        upsertArtist(t.artistName, t.artistId || t.artistName, art400);
       }
       if (t.collectionId && t.collectionName && !seenAlb.has(String(t.collectionId))) {
         seenAlb.add(String(t.collectionId));
@@ -580,6 +588,7 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
       const fb = await fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&limit=30`, {}, 6000);
       for (const t of (fb && fb.results) || []) {
         if (!t.trackId || !t.trackName) continue;
+        const art400 = String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
         songs.push({
           id: `apple:${t.trackId}`,
           source: "apple",
@@ -587,7 +596,7 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
           artist: t.artistName || "Artist",
           album: t.collectionName || "",
           duration: Math.round((t.trackTimeMillis || 0) / 1000),
-          artwork: String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+          artwork: art400,
           previewUrl: t.previewUrl || "",
           playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
           trackId: t.trackId,
@@ -597,6 +606,9 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
           trackTimeMillis: t.trackTimeMillis || 0,
           artworkUrl100: t.artworkUrl100 || "",
         });
+        if (t.artistName) {
+          upsertArtist(t.artistName, t.artistId || t.artistName, art400);
+        }
       }
     } catch {}
   }
@@ -610,7 +622,10 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
       const prefA = na.startsWith(wantQ) ? 1 : 0;
       const prefB = nb.startsWith(wantQ) ? 1 : 0;
       if (prefA !== prefB) return prefB - prefA;
-      return 0;
+      const incA = (na.includes(wantQ) || (na.length >= 3 && wantQ.includes(na))) ? 1 : 0;
+      const incB = (nb.includes(wantQ) || (nb.length >= 3 && wantQ.includes(nb))) ? 1 : 0;
+      if (incA !== incB) return incB - incA;
+      return na.length - nb.length;
     });
   }
   if (albumsR && albumsR.status === "fulfilled") {
@@ -619,24 +634,30 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
       const k = String(al.collectionId);
       if (!seenAlb.has(k)) {
         seenAlb.add(k);
+        const art400 = String(al.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
         playlists.push({
           id: `album:${al.collectionId}`,
           kind: "playlist",
           title: al.collectionName || "Album",
           artist: al.artistName || "Apple Music",
-          artwork: String(al.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg",
+          artwork: art400,
           source: "apple",
           query: `${al.collectionName || ""} ${al.artistName || ""}`.trim(),
         });
+        if (al.artistName) {
+          upsertArtist(al.artistName, al.artistId || al.artistName, art400);
+        }
       }
     }
   }
   const res = { songs, artists, playlists };
-  if (itunesCache.size > 500) {
-    const firstKey = itunesCache.keys().next().value;
-    if (firstKey) itunesCache.delete(firstKey);
+  if (songs.length || artists.length) {
+    if (itunesCache.size > 500) {
+      const firstKey = itunesCache.keys().next().value;
+      if (firstKey) itunesCache.delete(firstKey);
+    }
+    itunesCache.set(cacheKey, { val: res, exp: Date.now() + ITUNES_CACHE_TTL });
   }
-  itunesCache.set(cacheKey, { val: res, exp: Date.now() + ITUNES_CACHE_TTL });
   return res;
 }
 

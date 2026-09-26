@@ -1,4 +1,5 @@
 # MUCHI — Workers Static Assets redirect rules (copied into public/ at package
 # build time). The Node server maps /favicon.ico -> /logo.png.
+# Note: /privacy, /privacy.html, /terms, /terms.html are served directly with 200 OK.
 
 /favicon.ico /logo.png 302

@@ -894,6 +894,44 @@ if (BASE) {
   // to /logo.png. Both are non-error outcomes; PASS 2 verifies the redirect
   // file exists in the ZIP.
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
+
+  // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
+  const appJsRes = await fetch(BASE + "/app.js?v=99");
+  const appJsText = await appJsRes.text();
+  const stylesRes = await fetch(BASE + "/styles.css?v=99");
+  const swText = await (await fetch(BASE + "/sw.js")).text();
+  ok("client web: app.js?v=99 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=99 served 200", stylesRes.status === 200);
+  ok("client web: sw.js cache matches v99", swText.includes("muchi-shell-v99") && swText.includes("/app.js?v=99"));
+  ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
+
+  // Multi-provider live search via Cloudflare Worker
+  const dzSearch = await get("/api/search?q=adele&source=deezer&refresh=1");
+  ok("worker e2e: /api/search?source=deezer returns 200 + tracks", dzSearch.status === 200 && Array.isArray(dzSearch.body.deezer) && dzSearch.body.deezer.length > 0);
+  ok("worker e2e: deezer track schema valid", dzSearch.body.deezer[0].source === "deezer" && String(dzSearch.body.deezer[0].id).startsWith("deezer:") && Boolean(dzSearch.body.deezer[0].title));
+
+  const apSearch = await get("/api/search?q=adele&source=apple&refresh=1");
+  ok("worker e2e: /api/search?source=apple returns 200 + tracks", apSearch.status === 200 && Array.isArray(apSearch.body.apple) && apSearch.body.apple.length > 0 && Array.isArray(apSearch.body.itunes) && apSearch.body.itunes.length > 0);
+
+  const catDzProxy = await get("/api/catalog/proxy?provider=deezer&path=" + encodeURIComponent("/search?q=adele&limit=10"));
+  const catDzRows = (catDzProxy.body && (catDzProxy.body.data || catDzProxy.body.results || catDzProxy.body.deezer)) || [];
+  ok("worker e2e: /api/catalog/proxy?provider=deezer returns tracks", catDzProxy.status === 200 && Array.isArray(catDzRows) && catDzRows.length > 0);
+
+  const catApProxy = await get("/api/catalog/proxy?provider=apple&path=" + encodeURIComponent("/search?term=adele&media=music&entity=song&limit=10"));
+  const catApRows = (catApProxy.body && (catApProxy.body.results || catApProxy.body.apple || catApProxy.body.itunes)) || [];
+  ok("worker e2e: /api/catalog/proxy?provider=apple returns tracks", catApProxy.status === 200 && Array.isArray(catApRows) && catApRows.length > 0);
+
+  const dzDirectProxy = await get("/api/deezer/proxy?path=" + encodeURIComponent("/search?q=coldplay&limit=10"));
+  const dzDirectRows = (dzDirectProxy.body && (dzDirectProxy.body.data || dzDirectProxy.body.results || dzDirectProxy.body.deezer)) || [];
+  ok("worker e2e: /api/deezer/proxy returns tracks", dzDirectProxy.status === 200 && Array.isArray(dzDirectRows) && dzDirectRows.length > 0);
+
+  const itDirectProxy = await get("/api/itunes/proxy?path=" + encodeURIComponent("/search?term=coldplay&media=music&entity=song&limit=10"));
+  const itDirectRows = (itDirectProxy.body && (itDirectProxy.body.results || itDirectProxy.body.apple || itDirectProxy.body.itunes)) || [];
+  ok("worker e2e: /api/itunes/proxy returns tracks", itDirectProxy.status === 200 && Array.isArray(itDirectRows) && itDirectRows.length > 0);
+
+  const catDzSearch = await get("/api/catalog/search?provider=deezer&q=rihanna");
+  const catDzSearchRows = (catDzSearch.body && (catDzSearch.body.deezer || catDzSearch.body.data || catDzSearch.body.results)) || [];
+  ok("worker e2e: /api/catalog/search?provider=deezer returns tracks", catDzSearch.status === 200 && Array.isArray(catDzSearchRows) && catDzSearchRows.length > 0);
 } else {
   console.log("SKIP  live worker checks (set WRANGLER_DEV_URL=http://127.0.0.1:8787 with `npm run dev`)");
 }

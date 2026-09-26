@@ -3,13 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+    <meta name="google-site-verification" content="K3tyeWx1iy8F1NaPmGRwbM1AQiwsztVv5Dgq49nnv8c" />
+    <meta name="application-name" content="Muchi" />
+    <meta name="apple-mobile-web-app-title" content="Muchi" />
+    <meta property="og:title" content="Muchi" />
+    <meta property="og:site_name" content="Muchi" />
     <meta name="theme-color" content="#101413" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Muchi" />
     <meta name="description" content="Muchi — Material You music player. YouTube official playback, Audius artists, live radio." />
-    <title>Muchi — Music</title>
+    <title>Muchi</title>
     <link rel="icon" type="image/png" href="/logo.png?v=53" />
     <link rel="shortcut icon" type="image/png" href="/logo.png?v=53" />
     <link rel="apple-touch-icon" href="/logo.png?v=53" />
@@ -19,7 +23,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,600;8..144,700&display=swap" rel="stylesheet" />
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400..600,0..1,0" rel="stylesheet" />
     <meta http-equiv="Cache-Control" content="no-store" />
-    <link rel="stylesheet" href="/styles.css?v=97" />
+    <link rel="stylesheet" href="/styles.css?v=98" />
     <style>
       /* Beat stale cached CSS: nothing overlayed may steal clicks */
       [hidden], #scrim, #queuePanel, #toast, #modal, #eqBars {
@@ -64,10 +68,11 @@
   </head>
   <body>
     <canvas id="sparkLayer" aria-hidden="true"></canvas>
+    <div id="appSplashScreen" class="app-splash-screen" hidden></div>
     <div id="app">
       <aside class="sidebar" id="sidebar">
         <div class="brand">
-          <img src="/logo.png?v=53" alt="" width="40" height="40" />
+          <img id="sidebarBrandIcon" src="/logo.png?v=53" alt="Muchi" width="40" height="40" />
           <div>
             <strong>Muchi</strong>
             <span>Material music</span>
@@ -100,7 +105,7 @@
           </div>
           <div id="playlistNav" class="playlist-nav"></div>
         </div>
-        <p class="legal">YouTube plays in Google’s official player. Independent tracks via Audius. Not affiliated with YouTube or Spotify.</p>
+        <p class="legal">YouTube plays in Google’s official player. Independent tracks via Audius. Not affiliated with YouTube or Spotify. <a href="/privacy.html" style="color:inherit;text-decoration:underline">Privacy Policy</a> · <a href="/terms.html" style="color:inherit;text-decoration:underline">Terms of Service</a></p>
       </aside>
 
       <main class="main">
@@ -276,6 +281,6 @@
 
     <script src="https://www.youtube.com/iframe_api"></script>
     <script src="/meta.js?v=1"></script>
-    <script src="/app.js?v=97"></script>
+    <script src="/app.js?v=98"></script>
   </body>
 </html>

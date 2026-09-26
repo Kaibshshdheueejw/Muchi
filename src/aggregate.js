@@ -18,7 +18,10 @@ import {
   regionCode, utcDay, LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES, VIRAL_QUERIES,
   moodsForCountry, playlistsOf, uniqPlaylists, buildForYouPlaylists, buildViralPlaylists,
 } from "./data.js";
-import { deezerCatalog, deezerSearch } from "./deezer.js";
+import {
+  dzFetch, normalizeDeezerTrack, deezerArtist, deezerAlbums,
+  deezerAlbumTracks, deezerTopTracks, deezerCatalog, deezerSearch,
+} from "./deezer.js";
 import { strictSongs } from "./parse.js";
 
 const take = (r) => {
@@ -383,9 +386,91 @@ export async function handleSearch(env, url) {
   if (!q) return json(400, { error: "Missing query" });
   const gl = regionCode(url.searchParams.get("gl"));
   const source = (url.searchParams.get("source") || "all").toLowerCase();
+  const refresh = url.searchParams.get("refresh") === "1";
 
-  const cacheKey = `search:${source}:${q.toLowerCase()}:${gl}`;
-  const data = await cached(cacheKey, 180000, async () => {
+  const fold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  const wantQ = fold(q);
+
+  const finalizeArtists = (artistsList, songsPool) => {
+    const out = [];
+    const seen = new Set();
+    const upsert = (a) => {
+      if (!a || !a.name) return;
+      const cleanName = String(a.name).replace(/\s*[|–—-]\s*topic$/i, "").trim();
+      const k = fold(cleanName);
+      if (!k || k === "youtube" || k === "various artists" || k === "unknown" || k === "artist") return;
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push({
+          id: a.id || `artist:${a.source || "youtube"}:${cleanName}`,
+          kind: "artist",
+          name: cleanName,
+          artwork: a.artwork || "/cover-default.jpg",
+          source: a.source || "youtube",
+          query: a.query || cleanName,
+        });
+      } else {
+        const ex = out.find((x) => fold(x.name) === k);
+        if (ex && (!ex.artwork || ex.artwork === "/cover-default.jpg") && a.artwork && a.artwork !== "/cover-default.jpg") {
+          ex.artwork = a.artwork;
+        }
+        if (ex && ex.source === "audius" && a.source && a.source !== "audius") {
+          ex.source = a.source;
+          if (a.id) ex.id = a.id;
+        }
+      }
+    };
+
+    for (const a of artistsList || []) upsert(a);
+
+    // Derive artists from matched songs so even if dedicated artist endpoints
+    // time out or rate-limit on the Worker edge, any artist with songs in
+    // Apple / Deezer / YouTube / Audius is always surfaced in result.artists.
+    for (const t of songsPool || []) {
+      if (!t || !t.artist) continue;
+      const rawArt = String(t.artist).replace(/\s*[|–—-]\s*topic$/i, "").trim();
+      if (!rawArt) continue;
+      const artParts = rawArt.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bx\b|\swith\s)\s*/i).map((s) => s.trim()).filter(Boolean);
+      const candidates = [rawArt, ...artParts];
+      for (const cand of candidates) {
+        const cf = fold(cand);
+        if (!cf || cf.length < 2) continue;
+        if (cf === wantQ || cf.startsWith(wantQ) || (wantQ.length >= 3 && (cf.includes(wantQ) || wantQ.includes(cf))) || out.length < 12) {
+          upsert({
+            id: `artist:${t.source || "youtube"}:${cand}`,
+            kind: "artist",
+            name: cand,
+            artwork: t.artwork || "/cover-default.jpg",
+            source: t.source || "youtube",
+            query: cand,
+          });
+        }
+      }
+    }
+
+    if (out.length > 1 && wantQ) {
+      const qWords = wantQ.split(/\s+/).filter((w) => w.length >= 2);
+      const scoreArtist = (a) => {
+        const na = fold(a.name);
+        const srcBonus = (a.source === "apple" || a.source === "deezer") ? 2 : (a.source === "youtube" ? 1 : 0);
+        if (na === wantQ) return 100 + srcBonus;
+        if (na.startsWith(wantQ)) return 80 + srcBonus;
+        if (wantQ.startsWith(na) && na.length >= 3) return 70 + srcBonus;
+        if (na.includes(wantQ)) return 60 + srcBonus;
+        if (qWords.length > 1 && qWords.every((w) => na.includes(w))) return 50 + srcBonus;
+        if (qWords.some((w) => na.includes(w))) return 25 + srcBonus;
+        return srcBonus;
+      };
+      out.sort((a, b) => {
+        const diff = scoreArtist(b) - scoreArtist(a);
+        if (diff !== 0) return diff;
+        return fold(a.name).length - fold(b.name).length;
+      });
+    }
+    return out.slice(0, 20);
+  };
+
+  const runBuild = async () => {
     const result = { query: q, youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [] };
 
     if (source === "apple" || source === "itunes") {
@@ -393,23 +478,25 @@ export async function handleSearch(env, url) {
       const songs = strictSongs(ap.songs || []);
       result.apple = songs;
       result.itunes = songs;
-      result.artists = (ap.artists || []).slice(0, 20);
+      result.artists = finalizeArtists(ap.artists || [], songs);
       result.playlists = (ap.playlists || []).slice(0, 20);
       return result;
     }
 
     if (source === "deezer") {
-      const dz = await deezerSearch(q, { limit: 50, includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
-      result.deezer = strictSongs(dz.songs || []);
-      result.artists = (dz.artists || []).slice(0, 20);
+      const dz = await deezerSearch(q, { limit: 50, includeExtra: true, country: gl }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      const songs = strictSongs(dz.songs || []);
+      result.deezer = songs;
+      result.artists = finalizeArtists(dz.artists || [], songs);
       result.playlists = (dz.playlists || []).slice(0, 20);
       return result;
     }
 
     if (source === "youtube") {
       const yt = await searchYouTube(q, gl).catch(() => []);
-      result.youtube = strictSongs(Array.isArray(yt) ? yt : []);
-      result.artists = (yt.artists || []).slice(0, 20);
+      const songs = strictSongs(Array.isArray(yt) ? yt : []);
+      result.youtube = songs;
+      result.artists = finalizeArtists(yt.artists || [], songs);
       result.playlists = (yt.playlists || []).slice(0, 20);
       return result;
     }
@@ -430,7 +517,7 @@ export async function handleSearch(env, url) {
           });
         }
       }
-      result.artists = artists.slice(0, 20);
+      result.artists = finalizeArtists(artists, result.audius);
       return result;
     }
 
@@ -446,11 +533,11 @@ export async function handleSearch(env, url) {
 
     const allTasks = [
       ["youtube", searchYouTube(q, gl)],
-      ["apple", fastWait(itunesSearch(q, { includeExtra: true, country: gl }), 3200, { songs: [], artists: [], playlists: [] })],
-      ["deezer", fastWait(deezerSearch(q, { limit: 50, includeExtra: true }), 3200, { songs: [], artists: [], playlists: [] })],
+      ["apple", fastWait(itunesSearch(q, { includeExtra: true, country: gl }), 5500, { songs: [], artists: [], playlists: [] })],
+      ["deezer", fastWait(deezerSearch(q, { limit: 50, includeExtra: true, country: gl }), 6500, { songs: [], artists: [], playlists: [] })],
       ["audius", audiusSearch(q)],
-      ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2000, [])],
-      ["audiusUsers", fastWait(audiusUserSearch(q), 2000, [])],
+      ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2500, [])],
+      ["audiusUsers", fastWait(audiusUserSearch(q), 2500, [])],
     ];
     const settled = await Promise.allSettled(allTasks.map((t) => t[1]));
     settled.forEach((s, i) => {
@@ -464,30 +551,23 @@ export async function handleSearch(env, url) {
     const dz = result.deezer && !Array.isArray(result.deezer) ? result.deezer : { songs: [], artists: [], playlists: [] };
     result.deezer = Array.isArray(result.deezer) ? result.deezer : (dz.songs || []);
 
-    const artists = [];
+    const rawArtists = [];
     const playlists = [];
-    const seenA = new Set();
     const seenP = new Set();
-    const pushA = (a) => {
-      const k = String((a && a.name) || "").toLowerCase();
-      if (!k || seenA.has(k)) return;
-      seenA.add(k);
-      artists.push(a);
-    };
     const pushP = (p) => {
       const k = String((p && (p.playlistId || p.id || p.title)) || "").toLowerCase();
       if (!k || seenP.has(k)) return;
       seenP.add(k);
       playlists.push(p);
     };
-    (apple.artists || []).forEach(pushA);
+    (apple.artists || []).forEach((a) => rawArtists.push(a));
     (apple.playlists || []).forEach(pushP);
-    (dz.artists || []).forEach(pushA);
+    (dz.artists || []).forEach((a) => rawArtists.push(a));
     (dz.playlists || []).forEach(pushP);
-    (yt.artists || []).forEach(pushA);
+    (yt.artists || []).forEach((a) => rawArtists.push(a));
     (yt.playlists || []).forEach(pushP);
     for (const u of result.audiusUsers || []) {
-      pushA({
+      rawArtists.push({
         id: `artist:audius:${u.id}`,
         kind: "artist",
         name: u.name,
@@ -497,17 +577,31 @@ export async function handleSearch(env, url) {
       });
     }
     delete result.audiusUsers;
-    result.artists = artists.slice(0, 20);
-    result.playlists = playlists.slice(0, 20);
     // STRICT "songs only": search shows single songs — no playlist videos,
     // Topic re-uploads, 2-hour mixes or non-music.
     if (Array.isArray(yt)) result.youtube = strictSongs(yt);
     result.apple = strictSongs(result.apple);
     result.itunes = result.apple;
     result.deezer = strictSongs(result.deezer);
+    if (!result.deezer.length && (result.apple.length || (result.youtube && result.youtube.length))) {
+      const seed = result.apple.length ? result.apple : result.youtube;
+      result.deezer = strictSongs(seed.map((t) => normalizeDeezerTrack(t)).filter(Boolean));
+    }
     result.audius = strictSongs(result.audius || []);
+
+    const allMatchedSongs = [
+      ...(result.apple || []),
+      ...(result.deezer || []),
+      ...(result.youtube || []),
+      ...(result.audius || []),
+    ];
+    result.artists = finalizeArtists(rawArtists, allMatchedSongs);
+    result.playlists = playlists.slice(0, 20);
     return result;
-  });
+  };
+
+  const cacheKey = `search:${source}:${q.toLowerCase()}:${gl}`;
+  const data = refresh ? await runBuild() : await cached(cacheKey, 180000, runBuild);
 
   const res = json(200, data);
   res.headers.set("Cache-Control", "public, max-age=60, s-maxage=120, stale-while-revalidate=300");
@@ -984,46 +1078,82 @@ export async function handleItunesSearch(url) {
 export async function handleDeezerProxy(url) {
   const path = url.searchParams.get("path") || "";
   const q = (url.searchParams.get("q") || url.searchParams.get("term") || url.searchParams.get("query") || "").trim();
+  const gl = regionCode(url.searchParams.get("gl") || url.searchParams.get("country"));
+
+  const cleanPath = path ? (path.startsWith("/") ? path : `/${path}`) : "";
+  let pathQuery = "";
+  if (cleanPath) {
+    try {
+      const u = new URL(`https://api.deezer.com${cleanPath}`);
+      pathQuery = (u.searchParams.get("q") || u.searchParams.get("term") || "").trim();
+    } catch {}
+  }
+  const queryTerm = q || pathQuery;
 
   // Mode 1: Proxy raw Deezer path (e.g. /search?q=..., /artist/..., /album/...)
-  if (path) {
+  if (cleanPath) {
+    const allowed = ["/search", "/artist", "/album", "/track", "/chart", "/genre"];
+    if (!allowed.some((prefix) => cleanPath.startsWith(prefix))) {
+      return json(400, { error: "Disallowed Deezer path" });
+    }
     try {
-      const cleanPath = path.startsWith("/") ? path : `/${path}`;
-      const allowed = ["/search", "/artist", "/album", "/track", "/chart", "/genre"];
-      if (!allowed.some((prefix) => cleanPath.startsWith(prefix))) {
-        return json(400, { error: "Disallowed Deezer path" });
+      const data = await dzFetch(cleanPath, 8000);
+      const isSearchPath = cleanPath.startsWith("/search");
+      const isArtistSearch = cleanPath.startsWith("/search/artist");
+      const isAlbumSearch = cleanPath.startsWith("/search/album");
+      const hasRows = data && Array.isArray(data.data) && data.data.length > 0;
+      const hasObject = data && !Array.isArray(data.data) && (data.id || (data.tracks && Array.isArray(data.tracks.data)));
+
+      if (hasObject) {
+        const resp = json(200, data);
+        resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+        return resp;
       }
-      const targetUrl = `https://api.deezer.com${cleanPath}`;
-      const ctrl = new AbortController();
-      const tm = setTimeout(() => ctrl.abort(), 12000);
-      try {
-        const r = await fetch(targetUrl, {
-          signal: ctrl.signal,
-          headers: {
-            Accept: "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-          },
-        });
-        if (r.ok) {
-          const data = await r.json();
+
+      if (hasRows) {
+        if (isSearchPath && !isArtistSearch && !isAlbumSearch) {
+          const songs = strictSongs(data.data.map((t) => normalizeDeezerTrack(t)).filter(Boolean));
+          if (songs.length > 0) {
+            const resp = json(200, {
+              ...data,
+              data: songs,
+              results: songs,
+              deezer: songs,
+            });
+            resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+            return resp;
+          }
+        } else {
           const resp = json(200, data);
           resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
           return resp;
         }
-      } finally {
-        clearTimeout(tm);
       }
-    } catch (e) {
-      // Fall through to query fallback if possible
+    } catch {
+      // Fall through to resilient search / catalog fallback below
+    }
+
+    // If cleanPath was /search/artist?q=... and upstream failed, synthesize from deezerSearch
+    if (cleanPath.startsWith("/search/artist") && queryTerm) {
+      try {
+        const dz = await deezerSearch(queryTerm, { limit: 25, includeExtra: true, country: gl });
+        const artistRows = (dz.artists || []).map((a) => ({
+          id: String(a.id || "").replace(/^artist:deezer:/, ""),
+          name: a.name,
+          picture_medium: a.artwork,
+          picture_big: a.artwork,
+          artwork: a.artwork,
+          nb_fan: 50000,
+        }));
+        return json(200, { data: artistRows, total: artistRows.length });
+      } catch {}
     }
   }
 
-  // Mode 2: Search query fallback
-  const queryTerm = q || (path ? (() => { try { return new URL(`https://api.deezer.com${path.startsWith("/") ? path : `/${path}`}`).searchParams.get("q") || ""; } catch { return ""; } })() : "");
+  // Mode 2: Resilient Deezer search (handles /api/deezer/search?q=... and fallback from /search?q=...)
   if (queryTerm) {
     try {
-      const dz = await deezerSearch(queryTerm, { limit: 50, includeExtra: true }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      const dz = await deezerSearch(queryTerm, { limit: 50, includeExtra: true, country: gl }).catch(() => ({ songs: [], artists: [], playlists: [] }));
       const songs = strictSongs(dz.songs || []);
       const resp = json(200, {
         results: songs,
@@ -1031,11 +1161,16 @@ export async function handleDeezerProxy(url) {
         deezer: songs,
         artists: dz.artists || [],
         playlists: dz.playlists || [],
+        total: songs.length,
       });
-      resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+      if (songs.length > 0) {
+        resp.headers.set("Cache-Control", "public, max-age=300, s-maxage=600");
+      } else {
+        resp.headers.set("Cache-Control", "no-store");
+      }
       return resp;
     } catch (e) {
-      return json(500, { error: String(e.message || e), results: [], data: [], deezer: [] });
+      return json(500, { error: String((e && e.message) || e), results: [], data: [], deezer: [] });
     }
   }
 

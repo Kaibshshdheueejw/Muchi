@@ -1423,14 +1423,42 @@ img { max-width: 100%; display: block; }
 
 .home-bar {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
   position: sticky;
   top: 0;
-  z-index: 8;
+  z-index: 50;
   margin: 0 0 4px;
   padding: 4px 0 8px;
   background: linear-gradient(var(--md-sys-color-surface) 70%, transparent);
+}
+.home-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  user-select: none;
+}
+.home-brand img {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: block;
+}
+.home-brand-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--md-sys-color-on-surface);
+}
+.hero-brand-kicker {
+  display: inline-block;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-primary, #64d2ff);
+  margin-bottom: 2px;
 }
 .avatar-btn {
   width: 36px;
@@ -1449,13 +1477,27 @@ img { max-width: 100%; display: block; }
 }
 .avatar-btn.lg { width: 64px; height: 64px; font-size: 24px; }
 .avatar-btn img { width: 100%; height: 100%; object-fit: cover; }
+.home-bar-profile-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
 .profile-menu {
-  margin: 0 0 16px auto;
-  width: min(340px, 100%);
+  position: absolute !important;
+  top: calc(100% + 8px) !important;
+  right: 0 !important;
+  width: min(340px, calc(100vw - 32px));
+  z-index: 200 !important;
+  margin: 0 !important;
   background: var(--md-sys-color-surface-container-high);
   border-radius: 22px;
   padding: 16px;
-  box-shadow: var(--md-elevation-3);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  animation: profileMenuPop 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes profileMenuPop {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .profile-head {
   display: flex;
@@ -1997,6 +2039,29 @@ img { max-width: 100%; display: block; }
   gap: 8px;
   padding: 4px 8px 4px 8px;
   align-items: center;
+}
+.lib-track-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.lib-track-actions .icon-btn.del-btn {
+  color: var(--md-sys-color-on-surface-variant);
+  opacity: 0.8;
+  transition: opacity 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.lib-track-actions .icon-btn.del-btn:hover {
+  opacity: 1;
+  color: #ff5252;
+  transform: scale(1.08);
+}
+.lib-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
 }
 .lib-track-main {
   display: grid;
@@ -5618,5 +5683,628 @@ html[data-native="1"][data-player="bar"] .cover-btn { border-radius: 10px; }
   pointer-events: none !important;
   will-change: transform;
   transform: translateZ(0);
+}
+
+/* ── App Icon Picker, Following, and Data Sections ──────────────────────── */
+.app-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.app-icon-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 8px;
+  border-radius: 18px;
+  background: var(--md-sys-color-surface-container, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--md-sys-color-outline-variant, rgba(255, 255, 255, 0.1));
+  cursor: pointer;
+  transition: transform 160ms var(--md-motion), border-color 160ms var(--md-motion), box-shadow 160ms var(--md-motion);
+  text-align: center;
+  position: relative;
+  user-select: none;
+}
+.app-icon-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--md-sys-color-primary, #64d2ff);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.app-icon-card.active {
+  border-color: var(--md-sys-color-primary, #64d2ff);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 12%, var(--md-sys-color-surface-container));
+  box-shadow: 0 0 0 2px var(--md-sys-color-primary, #64d2ff);
+}
+.app-icon-preview {
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  margin-bottom: 8px;
+  overflow: hidden;
+  display: block;
+}
+.app-icon-preview.lg {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+}
+.app-icon-active-preview {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+}
+.active-badge-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--md-sys-color-primary, #64d2ff);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 15%, transparent);
+  padding: 3px 8px;
+  border-radius: 999px;
+  margin-top: 4px;
+}
+.app-icon-title {
+  font-weight: 700;
+  font-size: 0.82rem;
+  color: var(--md-sys-color-on-surface);
+  margin-bottom: 2px;
+  line-height: 1.2;
+}
+.app-icon-desc {
+  font-size: 0.70rem;
+  color: var(--md-sys-color-on-surface-variant, #999);
+  line-height: 1.25;
+}
+.app-icon-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--md-sys-color-primary, #64d2ff);
+  color: var(--md-sys-color-on-primary, #000);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+.tonal-btn.sm, .chip-btn.sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* ── 25 Unique App Opening Animations (YouTube / App Splash Style) ────────── */
+.app-splash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  overflow: hidden;
+  pointer-events: auto;
+  cursor: pointer;
+  background: #081612;
+  transition: opacity 220ms cubic-bezier(0.2, 0.9, 0.3, 1), transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  will-change: opacity, transform;
+}
+.app-splash-screen.fade-out {
+  opacity: 0;
+  transform: scale(1.04);
+  pointer-events: none;
+}
+.splash-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  z-index: 2;
+  padding: 24px;
+}
+.splash-fx-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 1;
+}
+.splash-icon-box {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border-radius: 26px;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 16px 45px rgba(0, 0, 0, 0.55);
+  margin-bottom: 20px;
+  z-index: 2;
+  animation: splashIconPop 650ms cubic-bezier(0.18, 0.9, 0.25, 1.25) backwards;
+}
+@keyframes splashIconPop {
+  0% { transform: scale(0.4) rotate(-8deg); opacity: 0; }
+  60% { transform: scale(1.08) rotate(2deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+.splash-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  animation: splashTextFade 500ms ease 180ms backwards;
+}
+.splash-title {
+  font-size: 2.6rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin: 0 0 6px;
+  line-height: 1;
+  color: #ffffff;
+  text-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+  animation: splashTextFade 500ms ease 240ms backwards;
+}
+.splash-sub {
+  font-size: 0.85rem;
+  opacity: 0.8;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: #e2e8f0;
+  animation: splashTextFade 500ms ease 300ms backwards;
+}
+.splash-yt-bar {
+  width: 112px;
+  height: 3.5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+  margin-top: 16px;
+  animation: splashTextFade 400ms ease 260ms backwards;
+}
+.splash-yt-bar i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  transform-origin: left center;
+  animation: splashYtSweep 950ms cubic-bezier(0.22, 1, 0.36, 1) 140ms both;
+}
+@keyframes splashYtSweep {
+  0% { transform: scaleX(0); opacity: 0.7; }
+  80% { transform: scaleX(1); opacity: 1; }
+  100% { transform: scaleX(1); opacity: 0.9; }
+}
+@keyframes splashTextFade {
+  0% { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* 1. Sakura Blossom Animation */
+.fx-sakura-petal {
+  position: absolute;
+  width: 14px;
+  height: 20px;
+  background: linear-gradient(135deg, #ffcbf2, #fb7185);
+  border-radius: 50% 0 50% 50%;
+  opacity: 0.85;
+  animation: sakuraFall 1.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+@keyframes sakuraFall {
+  0% { transform: translate3d(var(--sx), -40px, 0) rotate(0deg) scale(0.6); opacity: 0; }
+  20% { opacity: 0.9; }
+  100% { transform: translate3d(calc(var(--sx) + var(--drift)), 105vh, 0) rotate(380deg) scale(1); opacity: 0.2; }
+}
+.fx-sakura-glow {
+  position: absolute;
+  width: 260px;
+  height: 260px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(251, 113, 133, 0.35) 0%, transparent 70%);
+  animation: pulseScale 1.2s ease-out infinite alternate;
+}
+
+/* 2. Shadow Ninja Animation */
+.fx-ninja-slash {
+  position: absolute;
+  width: 160vw;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, #ff3344, #ffffff, #ff3344, transparent);
+  box-shadow: 0 0 20px #ff2233;
+  transform: rotate(-35deg);
+  animation: ninjaSlashBeam 400ms cubic-bezier(0.1, 1, 0.1, 1) forwards;
+}
+@keyframes ninjaSlashBeam {
+  0% { transform: rotate(-35deg) scaleX(0); opacity: 0; }
+  50% { opacity: 1; transform: rotate(-35deg) scaleX(1); }
+  100% { transform: rotate(-35deg) scaleX(1.4); opacity: 0; }
+}
+.fx-ninja-shuriken {
+  position: absolute;
+  width: 130px;
+  height: 130px;
+  opacity: 0.25;
+  animation: shurikenSpin 1.2s linear forwards;
+}
+@keyframes shurikenSpin {
+  0% { transform: scale(0.2) rotate(0deg); opacity: 0; }
+  30% { opacity: 0.4; }
+  100% { transform: scale(1.8) rotate(720deg); opacity: 0; }
+}
+
+/* 3. Cyber Anime Animation */
+.fx-cyber-grid {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(rgba(0, 240, 255, 0.15) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255, 0, 127, 0.15) 1px, transparent 1px);
+  background-size: 32px 32px;
+  animation: cyberGridScan 1.2s linear infinite;
+}
+@keyframes cyberGridScan {
+  0% { background-position: 0 0; }
+  100% { background-position: 32px 32px; }
+}
+.fx-cyber-scanline {
+  position: absolute;
+  width: 100%;
+  height: 6px;
+  background: linear-gradient(90deg, transparent, #00f0ff, #ffffff, #ff007f, transparent);
+  box-shadow: 0 0 16px #00f0ff;
+  animation: scanlineSweep 1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes scanlineSweep {
+  0% { top: -10%; opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { top: 110%; opacity: 0; }
+}
+
+/* 4. Kawaii Mochi Animation */
+.fx-mochi-star {
+  position: absolute;
+  font-size: 20px;
+  color: #ffcbf2;
+  animation: starFloat 1.2s cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+}
+@keyframes starFloat {
+  0% { transform: translate(var(--mx), var(--my)) scale(0) rotate(0deg); opacity: 0; }
+  40% { opacity: 1; transform: translate(var(--mx), var(--my)) scale(1.2) rotate(180deg); }
+  100% { transform: translate(calc(var(--mx) + 15px), calc(var(--my) - 40px)) scale(0.8) rotate(360deg); opacity: 0; }
+}
+
+/* 5. Mecha Unit-01 Animation */
+.fx-at-field {
+  position: absolute;
+  width: 220px;
+  height: 220px;
+  border: 3px solid #39ff14;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  box-shadow: 0 0 24px rgba(57, 255, 20, 0.6), inset 0 0 20px rgba(57, 255, 20, 0.4);
+  animation: atFieldExpand 1.2s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+}
+@keyframes atFieldExpand {
+  0% { transform: scale(0.2); opacity: 0; }
+  40% { opacity: 0.9; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+/* 6. Shonen Flame Animation */
+.fx-shonen-flame {
+  position: absolute;
+  width: 280px;
+  height: 280px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 61, 0, 0.55) 0%, rgba(255, 230, 0, 0.32) 45%, transparent 72%);
+  will-change: transform, opacity;
+  animation: flameBurst 1s cubic-bezier(0.2, 0.9, 0.3, 1) infinite alternate;
+}
+@keyframes flameBurst {
+  0% { transform: scale(0.85); opacity: 0.75; }
+  100% { transform: scale(1.25); opacity: 1; }
+}
+
+/* 7. Chibi Sparkle Animation */
+.fx-chibi-sparkle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #cfbaf0;
+  border-radius: 50%;
+  box-shadow: 0 0 12px #f1c0e8, 0 0 20px #a3c4f3;
+  animation: chibiSpiral 1.2s ease-out forwards;
+}
+@keyframes chibiSpiral {
+  0% { transform: rotate(var(--deg)) translateX(0) scale(0); opacity: 0; }
+  50% { opacity: 1; }
+  100% { transform: rotate(var(--deg)) translateX(130px) scale(1.4); opacity: 0; }
+}
+
+/* 8. Blurple Gamer Wave Animation */
+.fx-blurple-ring {
+  position: absolute;
+  width: 140px;
+  height: 140px;
+  border: 2.5px solid #5865f2;
+  border-radius: 50%;
+  box-shadow: 0 0 20px rgba(88, 101, 242, 0.6);
+  animation: blurpleWave 1.2s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+@keyframes blurpleWave {
+  0% { transform: scale(0.3); opacity: 0.9; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+/* 9. Gem Booster Animation */
+.fx-booster-facet {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  border-radius: 35% 65% 60% 40% / 45% 35% 65% 55%;
+  background: radial-gradient(circle, rgba(244, 127, 255, 0.45) 0%, rgba(190, 24, 93, 0.28) 45%, transparent 72%);
+  will-change: transform;
+  animation: boosterPrism 1.2s linear infinite;
+}
+@keyframes boosterPrism {
+  0% { transform: rotate(0deg) scale(0.9); }
+  100% { transform: rotate(360deg) scale(1.15); }
+}
+
+/* 10. Matrix Console Animation */
+.fx-matrix-col {
+  position: absolute;
+  top: -50px;
+  font-family: monospace;
+  font-size: 13px;
+  color: #00ff66;
+  text-shadow: 0 0 8px #00ff66;
+  opacity: 0.7;
+  line-height: 1.2;
+  white-space: pre;
+  animation: matrixDrop 1.2s linear forwards;
+}
+@keyframes matrixDrop {
+  0% { transform: translateY(0); opacity: 0; }
+  20% { opacity: 0.8; }
+  100% { transform: translateY(110vh); opacity: 0; }
+}
+
+/* 11. 8-Bit Arcade Animation */
+.fx-arcade-coin {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border: 4px solid #fbb954;
+  background: #e43b44;
+  animation: arcadeCoinJump 1s cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+}
+@keyframes arcadeCoinJump {
+  0% { transform: translateY(60px) scale(0.5); opacity: 0; }
+  50% { transform: translateY(-70px) scale(1.2); opacity: 1; }
+  100% { transform: translateY(-40px) scale(1); opacity: 0; }
+}
+
+/* 12. Solar Flare Animation */
+.fx-solar-burst {
+  position: absolute;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 140, 0, 0.6) 0%, rgba(255, 234, 121, 0.3) 50%, transparent 75%);
+  animation: solarPulse 1.2s ease-out infinite alternate;
+}
+@keyframes solarPulse {
+  0% { transform: scale(0.8); opacity: 0.6; }
+  100% { transform: scale(1.3); opacity: 1; }
+}
+
+/* 13. Vaporwave Animation */
+.fx-vwave-grid {
+  position: absolute;
+  width: 200%;
+  height: 50%;
+  bottom: 0;
+  background-image: linear-gradient(rgba(247, 37, 133, 0.3) 2px, transparent 2px),
+                    linear-gradient(90deg, rgba(76, 201, 240, 0.3) 2px, transparent 2px);
+  background-size: 40px 40px;
+  transform: perspective(300px) rotateX(65deg);
+  animation: vwaveScroll 1.2s linear infinite;
+}
+@keyframes vwaveScroll {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 40px; }
+}
+
+/* 14. Synthwave Sunset Animation */
+.fx-synth-sun {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #ff4b91 0%, #6c00ff 100%);
+  box-shadow: 0 0 35px #ff4b91;
+  clip-path: polygon(0 0, 100% 0, 100% 60%, 0 60%, 0 65%, 100% 65%, 100% 75%, 0 75%, 0 82%, 100% 82%, 100% 90%, 0 90%, 0 100%, 100% 100%);
+  animation: synthRise 1.2s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+}
+@keyframes synthRise {
+  0% { transform: translateY(40px) scale(0.7); opacity: 0; }
+  100% { transform: translateY(0) scale(1); opacity: 0.9; }
+}
+
+/* 15. Cosmic Nebula Animation */
+.fx-nebula-swirl {
+  position: absolute;
+  width: 300px;
+  height: 300px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(181, 23, 158, 0.5) 0%, rgba(72, 12, 168, 0.38) 52%, transparent 74%);
+  will-change: transform;
+  animation: nebulaSpin 1.3s linear infinite;
+}
+@keyframes nebulaSpin {
+  0% { transform: rotate(0deg) scale(0.9); }
+  100% { transform: rotate(360deg) scale(1.1); }
+}
+
+/* 16. Ruby Crimson Animation */
+.fx-ruby-spark {
+  position: absolute;
+  width: 140px;
+  height: 140px;
+  border: 2px solid #ff4d6d;
+  transform: rotate(45deg);
+  box-shadow: 0 0 25px #ff4d6d;
+  animation: rubyGlint 1.1s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+}
+@keyframes rubyGlint {
+  0% { transform: rotate(45deg) scale(0.3); opacity: 0; }
+  50% { opacity: 0.9; }
+  100% { transform: rotate(90deg) scale(1.4); opacity: 0; }
+}
+
+/* 17. Imperial Jade Animation */
+.fx-jade-ripple {
+  position: absolute;
+  width: 160px;
+  height: 160px;
+  border: 2px solid #52b788;
+  border-radius: 50%;
+  box-shadow: 0 0 20px rgba(82, 183, 136, 0.5);
+  animation: jadeRing 1.2s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+@keyframes jadeRing {
+  0% { transform: scale(0.3); opacity: 0.8; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+/* 18. Holo Prism Animation */
+.fx-holo-prism {
+  position: absolute;
+  width: 240px;
+  height: 240px;
+  background: radial-gradient(circle, rgba(224, 170, 255, 0.42) 0%, rgba(123, 44, 191, 0.25) 48%, transparent 74%);
+  border-radius: 30%;
+  will-change: transform;
+  animation: holoPrismSpin 1.2s linear infinite;
+}
+@keyframes holoPrismSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 19. Y2K Liquid Chrome Animation */
+.fx-chrome-drop {
+  position: absolute;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffffff 0%, #94a3b8 50%, #0f172a 100%);
+  box-shadow: 0 0 30px rgba(255, 255, 255, 0.7);
+  animation: chromeSplash 1.1s cubic-bezier(0.15, 0.9, 0.3, 1) forwards;
+}
+@keyframes chromeSplash {
+  0% { transform: scale(0.2); opacity: 0; }
+  40% { opacity: 0.9; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+/* 20. Obsidian Stealth Animation */
+.fx-stealth-laser {
+  position: absolute;
+  width: 180px;
+  height: 180px;
+  border: 1.5px solid rgba(148, 163, 184, 0.6);
+  border-radius: 12px;
+  animation: stealthLock 1.1s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+}
+@keyframes stealthLock {
+  0% { transform: scale(1.6) rotate(45deg); opacity: 0; }
+  60% { transform: scale(1) rotate(0deg); opacity: 0.9; }
+  100% { transform: scale(1.05) rotate(0deg); opacity: 0.4; }
+}
+
+/* 21. Lofi Twilight Animation */
+.fx-lofi-vinyl {
+  position: absolute;
+  width: 220px;
+  height: 220px;
+  border-radius: 50%;
+  border: 1px dashed rgba(252, 163, 17, 0.3);
+  box-shadow: 0 0 25px rgba(230, 57, 70, 0.3);
+  animation: lofiSpin 1.3s linear infinite;
+}
+@keyframes lofiSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 22. Abyssal Deep Animation */
+.fx-abyss-sonar {
+  position: absolute;
+  width: 150px;
+  height: 150px;
+  border: 2px solid #00b4d8;
+  border-radius: 50%;
+  box-shadow: 0 0 18px rgba(0, 180, 216, 0.6);
+  animation: abyssSonar 1.2s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+@keyframes abyssSonar {
+  0% { transform: scale(0.2); opacity: 0.9; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+
+/* 23. Citrus Punch Animation */
+.fx-citrus-splash {
+  position: absolute;
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 159, 28, 0.6) 0%, rgba(46, 196, 182, 0.3) 50%, transparent 75%);
+  animation: citrusBlast 1.1s cubic-bezier(0.2, 0.9, 0.3, 1) forwards;
+}
+@keyframes citrusBlast {
+  0% { transform: scale(0.3); opacity: 0; }
+  50% { opacity: 0.9; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+/* 24. Royal Amethyst Animation */
+.fx-amethyst-crown {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  border: 2px solid #d8b4e2;
+  border-radius: 50%;
+  box-shadow: 0 0 30px rgba(216, 180, 226, 0.6);
+  animation: amethystPulse 1.2s ease-out infinite alternate;
+}
+@keyframes amethystPulse {
+  0% { transform: scale(0.85); opacity: 0.5; }
+  100% { transform: scale(1.3); opacity: 0.9; }
+}
+
+/* 25. Classic Muchi Soundwave Animation */
+.fx-classic-ring {
+  position: absolute;
+  width: 130px;
+  height: 130px;
+  border: 2.5px solid #12c48c;
+  border-radius: 50%;
+  box-shadow: 0 0 25px rgba(18, 196, 140, 0.7);
+  animation: classicWave 1.2s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+@keyframes classicWave {
+  0% { transform: scale(0.3); opacity: 0.9; }
+  100% { transform: scale(2.3); opacity: 0; }
+}
+@keyframes pulseScale {
+  0% { transform: scale(0.9); }
+  100% { transform: scale(1.2); }
 }
 

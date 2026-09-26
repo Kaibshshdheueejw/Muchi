@@ -574,6 +574,33 @@ export function previewSearch(q) {
     previewUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
     streamUrl: t.previewUrl || "/api/preview/audio?dur=" + (t.duration || 30),
   }));
+  const artists = [];
+  const seenArt = new Set();
+  for (const t of matched) {
+    if (!t || !t.artist) continue;
+    const k = String(t.artist).toLowerCase().trim();
+    if (!k || seenArt.has(k)) continue;
+    seenArt.add(k);
+    artists.push({
+      id: `artist:apple:${t.artist}`,
+      kind: "artist",
+      name: t.artist,
+      artwork: t.artwork || ARTWORK,
+      source: "apple",
+      query: t.artist,
+    });
+  }
+  if (needle && !artists.some((a) => a.name.toLowerCase().includes(needle))) {
+    const titleCase = String(q || "").trim().replace(/\b\w/g, (c) => c.toUpperCase());
+    artists.unshift({
+      id: `artist:apple:${titleCase}`,
+      kind: "artist",
+      name: titleCase,
+      artwork: ARTWORK,
+      source: "apple",
+      query: titleCase,
+    });
+  }
   return {
     query: q,
     tracks: tracks.slice(0, 20),
@@ -582,7 +609,7 @@ export function previewSearch(q) {
     itunes: apple,
     deezer,
     audius,
-    artists: [],
+    artists: artists.slice(0, 20),
     playlists: [],
   };
 }
