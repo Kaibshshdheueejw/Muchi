@@ -7,7 +7,7 @@
 //     (user-generated keys are NOT KV-cached — KV free allows 1k writes/day)
 // Response shapes are byte-identical to server.js.
 
-import { json, cached, kvCached, fetchJSON, isEnglishTrack } from "./util.js";
+import { json, cached, kvCached, invalidateCached, fetchJSON, isEnglishTrack } from "./util.js";
 import {
   searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
   itunesSearch,
@@ -672,54 +672,130 @@ export async function handleYtPlaylist(url) {
 }
 
 export async function handleYtStream(url) {
-  const id = url.searchParams.get("v") || url.searchParams.get("id") || url.searchParams.get("videoId") || "";
+  const id = (url.searchParams.get("v") || url.searchParams.get("id") || url.searchParams.get("videoId") || "").trim();
   const title = (url.searchParams.get("title") || "").trim();
   const artist = (url.searchParams.get("artist") || "").trim();
-  if (!id) return json(400, { error: "Missing videoId" });
+  const refresh = url.searchParams.get("refresh") === "1";
+  const allowPreview = url.searchParams.get("allowPreview") === "1";
+  const rawCandidates = (url.searchParams.get("candidates") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s && s !== id);
+  if (!id && !title) return json(400, { error: "Missing videoId" });
 
-  const metaExtra =
-    `&v=${encodeURIComponent(id)}` +
+  const buildMetaExtra = (vid) =>
+    (vid ? `&v=${encodeURIComponent(vid)}` : "") +
     (title ? `&title=${encodeURIComponent(title)}` : "") +
-    (artist ? `&artist=${encodeURIComponent(artist)}` : "");
+    (artist ? `&artist=${encodeURIComponent(artist)}` : "") +
+    (allowPreview ? "&allowPreview=1" : "&allowPreview=0");
 
-  try {
-    const stream = await cached(`ytstream:${id}`, 15 * 60 * 1000, () => youtubeAudioStream(id));
-    if (stream && stream.url) {
-      const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}${metaExtra}`;
-      return json(200, {
-        url: proxied,
-        format: stream.format || "",
-        mimeType: stream.mimeType || "",
-        quality: stream.quality || "",
-        duration: stream.duration || 0,
-        source: "youtube",
-      });
-    }
-  } catch {}
+  const resolveForVideoId = async (vid) => {
+    if (refresh) invalidateCached(`ytstream:${vid}`);
+    const s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid));
+    if (s && s.url) return { ...s, videoId: vid };
+    throw new Error("empty stream");
+  };
 
-  // Cross-provider audio fallback for native Android/iOS playback when YouTube edge extraction is gated
+  if (id) {
+    try {
+      const stream = await resolveForVideoId(id);
+      if (stream && stream.url) {
+        const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}${buildMetaExtra(id)}`;
+        return json(200, {
+          url: proxied,
+          videoId: id,
+          format: stream.format || "",
+          mimeType: stream.mimeType || "",
+          quality: stream.quality || "",
+          duration: stream.duration || 0,
+          source: "youtube",
+          isPreview: false,
+        });
+      }
+    } catch {}
+  }
+
+  // Tier 2: If the primary videoId was gated (e.g. VEVO / age-gated music video),
+  // try candidate YouTube videoIds (provided by client or discovered via official audio / lyrics search).
   const searchQuery = `${title} ${artist}`.trim();
-  if (searchQuery) {
+  const candidateIds = [...rawCandidates];
+  if (searchQuery && candidateIds.length < 3) {
+    try {
+      const [audioHits, lyricHits] = await Promise.allSettled([
+        searchYouTube(`${searchQuery} official audio`, "US", true),
+        searchYouTube(`${searchQuery} lyrics`, "US", true),
+      ]);
+      const merged = [
+        ...(audioHits.status === "fulfilled" && Array.isArray(audioHits.value) ? audioHits.value : []),
+        ...(lyricHits.status === "fulfilled" && Array.isArray(lyricHits.value) ? lyricHits.value : []),
+      ];
+      for (const item of merged) {
+        const vid = item && item.videoId ? String(item.videoId).trim() : "";
+        const dur = Number(item && item.duration) || 0;
+        if (!vid || vid === id || candidateIds.includes(vid)) continue;
+        // Skip shorts / 30s clips when looking for a full song
+        if (dur > 0 && dur < 45) continue;
+        candidateIds.push(vid);
+        if (candidateIds.length >= 5) break;
+      }
+    } catch {}
+  }
+
+  if (candidateIds.length > 0) {
+    try {
+      const altStream = await Promise.any(candidateIds.slice(0, 4).map((candId) => resolveForVideoId(candId)));
+      if (altStream && altStream.url) {
+        const useVid = altStream.videoId || id;
+        const proxied = `/api/stream?url=${encodeURIComponent(altStream.url)}${buildMetaExtra(useVid)}`;
+        return json(200, {
+          url: proxied,
+          videoId: useVid,
+          format: altStream.format || "",
+          mimeType: altStream.mimeType || "",
+          quality: altStream.quality || "",
+          duration: altStream.duration || 0,
+          source: "youtube",
+          isPreview: false,
+        });
+      }
+    } catch {}
+  }
+
+  // Tier 3: Full-length Audius match (must be >= 45s and match the track title closely)
+  if (searchQuery && title) {
     try {
       const audHits = await audiusSearch(searchQuery);
       if (Array.isArray(audHits) && audHits.length) {
-        const topAud = audHits[0];
-        const audId = String(topAud.trackId || topAud.id || "").replace(/^audius:/, "");
-        if (audId) {
-          const audUrl = await audiusStreamUrl(audId);
-          if (audUrl) {
-            return json(200, {
-              url: `/api/stream?url=${encodeURIComponent(audUrl)}${metaExtra}`,
-              format: "mp3",
-              mimeType: "audio/mpeg",
-              quality: "320k",
-              duration: Number(topAud.duration) || 0,
-              source: "audius",
-            });
+        const wantTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const topAud = audHits.find((a) => {
+          if (!a || (Number(a.duration) || 0) < 45) return false;
+          const gotTitle = String(a.title || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+          return gotTitle && wantTitle && (gotTitle.includes(wantTitle) || wantTitle.includes(gotTitle));
+        });
+        if (topAud) {
+          const audId = String(topAud.trackId || topAud.id || "").replace(/^audius:/, "");
+          if (audId) {
+            const audUrl = await audiusStreamUrl(audId);
+            if (audUrl) {
+              return json(200, {
+                url: `/api/stream?url=${encodeURIComponent(audUrl)}${buildMetaExtra(id)}`,
+                format: "mp3",
+                mimeType: "audio/mpeg",
+                quality: "320k",
+                duration: Number(topAud.duration) || 0,
+                source: "audius",
+                isPreview: false,
+              });
+            }
           }
         }
       }
     } catch {}
+  }
+
+  // Only return 30-second Deezer/iTunes previews if explicitly requested via allowPreview=1.
+  // Otherwise return empty url so the app immediately plays the full-length song via YouTube player.
+  if (allowPreview && searchQuery) {
     try {
       const dzRes = await deezerSearch(searchQuery, { limit: 10, includeExtra: false });
       const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
@@ -727,12 +803,13 @@ export async function handleYtStream(url) {
       if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
         const dzUrl = dzHit.previewUrl || dzHit.preview;
         return json(200, {
-          url: `/api/stream?url=${encodeURIComponent(dzUrl)}${metaExtra}`,
+          url: `/api/stream?url=${encodeURIComponent(dzUrl)}${buildMetaExtra(id)}`,
           format: "mp3",
           mimeType: "audio/mpeg",
           quality: "128k",
-          duration: Number(dzHit.duration) || 30,
+          duration: 30,
           source: "deezer",
+          isPreview: true,
         });
       }
     } catch {}
@@ -742,12 +819,13 @@ export async function handleYtStream(url) {
       const itHit = itList.find((x) => x && x.previewUrl);
       if (itHit && itHit.previewUrl) {
         return json(200, {
-          url: `/api/stream?url=${encodeURIComponent(itHit.previewUrl)}${metaExtra}`,
+          url: `/api/stream?url=${encodeURIComponent(itHit.previewUrl)}${buildMetaExtra(id)}`,
           format: "m4a",
           mimeType: "audio/mp4",
           quality: "256k",
-          duration: Number(itHit.duration) || 30,
+          duration: 30,
           source: "apple",
+          isPreview: true,
         });
       }
     } catch {}

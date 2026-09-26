@@ -18,7 +18,7 @@
 // dashboard, which must stay < 10 ms on the free plan).
 
 import { corsHeaders, json } from "./util.js";
-import { handleHealth, handleMoods, handleGeo } from "./direct.js";
+import { handleHealth, handleMoods, handleGeo, handleAppIcon, handleManifest } from "./direct.js";
 import {
   handleAuthStatus, handleAuthUrl, handleGoogleCallback, handleYoutubeCallback,
   handleSignout, handleYoutubeDisconnect, handleYoutubeData, handleUserLibrary,
@@ -170,6 +170,8 @@ async function handleApi(request, env, url) {
   }
   if (p === "/api/moods") return handleMoods(url);
   if (p === "/api/geo") return handleGeo(request);
+  if (p === "/api/app-icon") return handleAppIcon(url);
+  if (p === "/api/manifest.json" || p === "/api/manifest.webmanifest") return handleManifest(url);
   if (p === "/api/home") return handleHome(env, url);
   if (p === "/api/shelf") return handleShelf(env, url);
   if (p === "/api/search") return handleSearch(env, url);

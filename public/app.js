@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.9";
+  const APP_VERSION = "1.7.0";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -545,6 +545,16 @@
     return cur.title;
   }
 
+  function syncNativeAppIcon(iconId) {
+    const norm = normalizeAppIconId(iconId || (state.prefs && state.prefs.appIcon));
+    const NP = nativePlayer();
+    if (NP && typeof NP.setAppIcon === "function") {
+      try {
+        NP.setAppIcon({ icon: norm }).catch(() => {});
+      } catch {}
+    }
+  }
+
   function applyAppIcon() {
     const url = activeAppIconUrl();
     const imgs = document.querySelectorAll(".brand img, .home-brand img, #sidebarBrandIcon, #homeBrandIcon");
@@ -557,6 +567,7 @@
     if (shortcutLink) shortcutLink.href = url;
     const appleLink = document.querySelector('link[rel="apple-touch-icon"]');
     if (appleLink) appleLink.href = url;
+    syncNativeAppIcon(state.prefs && state.prefs.appIcon);
   }
 
   function setAppIcon(id) {
@@ -565,6 +576,7 @@
     state.prefs.appIcon = ic.id;
     savePrefs();
     applyAppIcon();
+    syncNativeAppIcon(ic.id);
     toast(`App icon changed to "${ic.title}"`, true, "success");
     playAppOpeningAnimation(ic.id, true);
     render();
@@ -5002,12 +5014,17 @@
 
   async function resolveFallbackStreamUrl(t, skipYtStream = false) {
     if (!t) return "";
-    if (!skipYtStream && t.streamUrl) return t.streamUrl;
-    if (!skipYtStream && t.videoId) {
+    if (!skipYtStream && t.streamUrl && !t._isPreviewStream) return t.streamUrl;
+    if (!skipYtStream && (t.videoId || t.title)) {
+      const candParam = Array.isArray(t._ytCandidates) && t._ytCandidates.length
+        ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+        : "";
       try {
-        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}`, 6000);
+        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}`, 10000);
         if (sData && sData.url) {
           t.streamUrl = sData.url;
+          t._isPreviewStream = Boolean(sData.isPreview);
+          if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
           if (sData.duration && !t.duration) t.duration = Number(sData.duration);
           return t.streamUrl;
         }
@@ -5023,6 +5040,7 @@
             t.previewUrl = freshPrev;
             t.preview = freshPrev;
             t.streamUrl = freshPrev;
+            t._isPreviewStream = true;
             return freshPrev;
           }
         } catch {}
@@ -5030,6 +5048,7 @@
     }
     if (t.previewUrl || t.preview) {
       t.streamUrl = t.previewUrl || t.preview;
+      t._isPreviewStream = true;
       return t.streamUrl;
     }
     const q = `${t.title || ""} ${t.artist || ""}`.trim();
@@ -5041,6 +5060,7 @@
         if (hit && hit.previewUrl) {
           t.previewUrl = hit.previewUrl;
           t.streamUrl = hit.previewUrl;
+          t._isPreviewStream = true;
           return hit.previewUrl;
         }
       } catch {}
@@ -5190,6 +5210,16 @@
     }
     const gen = ++playGen;
     t._playingViaAudio = false;
+    if (reset) {
+      t._nativeRefreshTried = false;
+      t._nativeYtFallbackTried = false;
+      t._nativeFallbackTried = false;
+      t._webYtFallbackTried = false;
+      if (t._isPreviewStream) {
+        t.streamUrl = "";
+        t._isPreviewStream = false;
+      }
+    }
     state._xfading = false;
     state.playing = true;
     setWantPlay(true);
@@ -5366,20 +5396,24 @@
     if (!IS_NATIVE || !nativePlayer()) return false;
     if (state.prefs.ytAudio === false) return false;
     if (state.showVideo) return false;
-    let url = "";
+    let url = (!t._isPreviewStream && !t._nativeRefreshTried && t.streamUrl) ? t.streamUrl : "";
     let dur = t.duration || 0;
-    try {
-      const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}`, 6000);
-      if (data && data.url) {
-        url = data.url;
-        if (data.duration) dur = Number(data.duration);
-      }
-    } catch { url = ""; }
     if (!url) {
-      url = await resolveFallbackStreamUrl(t, true);
+      const candParam = Array.isArray(t._ytCandidates) && t._ytCandidates.length
+        ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+        : "";
+      try {
+        const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}`, 10000);
+        if (data && data.url && !data.isPreview) {
+          url = data.url;
+          if (data.videoId) t.videoId = data.videoId;
+          if (data.duration) dur = Number(data.duration);
+        }
+      } catch { url = ""; }
     }
     if (!url) return false;
     t.streamUrl = url;
+    t._isPreviewStream = false;
     t.duration = dur;
     t._playingViaAudio = true;
     await playAudio(t);
@@ -6584,6 +6618,40 @@
       if (npActive) { npActive = false; npPlaying = false; npSeenPlaying = false; }
       const cur = current();
       if (state.playing && cur) {
+        if (!cur._nativeRefreshTried && (cur.videoId || cur.title)) {
+          cur._nativeRefreshTried = true;
+          cur.streamUrl = "";
+          const candParam = Array.isArray(cur._ytCandidates) && cur._ytCandidates.length
+            ? `&candidates=${encodeURIComponent(cur._ytCandidates.slice(0, 5).join(","))}`
+            : "";
+          api(`/api/yt/stream?v=${encodeURIComponent(cur.videoId || "")}&title=${encodeURIComponent(cur.title || "")}&artist=${encodeURIComponent(artistName(cur) || cur.artist || "")}${candParam}&refresh=1`, 10000)
+            .then((fresh) => {
+              if (current() !== cur) return;
+              if (fresh && fresh.url && !fresh.isPreview) {
+                cur.streamUrl = fresh.url;
+                cur._isPreviewStream = false;
+                if (fresh.videoId) cur.videoId = fresh.videoId;
+                if (fresh.duration && !cur.duration) cur.duration = Number(fresh.duration);
+                cur._playingViaAudio = true;
+                return playAudio(cur);
+              }
+              throw new Error("no fresh stream");
+            })
+            .catch(() => {
+              if (current() !== cur) return;
+              nativeHandleControls({ message: "error" });
+            });
+          return;
+        }
+        if (!cur._nativeYtFallbackTried && cur.videoId) {
+          cur._nativeYtFallbackTried = true;
+          cur._playingViaAudio = false;
+          playYouTube(cur).catch(() => {
+            if (current() !== cur) return;
+            nativeHandleControls({ message: "error" });
+          });
+          return;
+        }
         if (!cur._nativeFallbackTried) {
           cur._nativeFallbackTried = true;
           cur.streamUrl = "";
@@ -13911,6 +13979,14 @@
       const cur = current();
       if (!cur) return;
       if (((cur.source === "youtube" || cur.videoId) && !cur._playingViaAudio) || npActive) return;
+      if (cur.videoId && !cur._webYtFallbackTried) {
+        cur._webYtFallbackTried = true;
+        cur._playingViaAudio = false;
+        playYouTube(cur).catch(() => {
+          if (current() === cur) skipFailed("Stream failed");
+        });
+        return;
+      }
       skipFailed("Stream failed");
     });
 

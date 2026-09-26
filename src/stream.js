@@ -11,7 +11,7 @@
 // /api/img: buffered like server.js (10 s abort, 8 MB cap → 413, public
 // cache 86400) with an early Content-Length guard added.
 
-import { json, corsHeaders, cached } from "./util.js";
+import { json, corsHeaders, cached, invalidateCached } from "./util.js";
 import { assertPublicUrl } from "./ssrf.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
 import { audiusStreamUrl, youtubeAudioStream, searchYouTube, audiusSearch, itunesSearch } from "./providers.js";
@@ -53,6 +53,12 @@ async function pipeUrl(request, src, accept, overrideMime) {
   if (isYt) {
     if (/c=ANDROID_VR/i.test(src)) {
       headers["User-Agent"] = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+    } else if (/c=ANDROID_TESTSUITE/i.test(src)) {
+      headers["User-Agent"] = "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip";
+    } else if (/c=TVHTML5/i.test(src)) {
+      headers["User-Agent"] = "Mozilla/5.0 (PlayStation; PlayStation 4/11.50) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15";
+      headers.Origin = "https://www.youtube.com";
+      headers.Referer = "https://www.youtube.com/";
     } else if (/c=ANDROID/i.test(src)) {
       if (/cver=20\.10/i.test(src)) {
         headers["User-Agent"] = "com.google.android.youtube/20.10.44 (Linux; U; Android 14) gzip";
@@ -176,43 +182,86 @@ export async function handleStream(request, url) {
   const primaryRes = await pipeUrl(request, targetUrl, PROXY_ACCEPT);
   if (primaryRes.status < 400) return primaryRes;
 
-  // If upstream (e.g. IP-bound googlevideo URL) failed with 403/502 on native Android/iOS,
-  // transparently resolve and pipe a working audio stream using track metadata params.
+  // If upstream (e.g. expired or IP-bound googlevideo URL) failed with 403/410/502,
+  // first try re-resolving a fresh full-length YouTube audio stream for the videoId or track query.
+  const vId = (url.searchParams.get("v") || url.searchParams.get("videoId") || "").trim();
   const title = (url.searchParams.get("title") || "").trim();
   const artist = (url.searchParams.get("artist") || "").trim();
+  const allowPreview = url.searchParams.get("allowPreview") !== "0";
   const q = `${title} ${artist}`.trim();
+
+  if (vId) {
+    try {
+      invalidateCached(`ytstream:${vId}`);
+      const fresh = await youtubeAudioStream(vId);
+      if (fresh && fresh.url && fresh.url !== targetUrl) {
+        const rFresh = await pipeUrl(request, fresh.url, PROXY_ACCEPT, fresh.mimeType || "audio/mp4");
+        if (rFresh.status < 400) return rFresh;
+      }
+    } catch {}
+  }
+
   if (q) {
     try {
-      const audHits = await audiusSearch(q);
-      if (Array.isArray(audHits) && audHits.length) {
-        const audId = String(audHits[0].trackId || audHits[0].id || "").replace(/^audius:/, "");
-        if (audId) {
-          const audUrl = await audiusStreamUrl(audId);
-          if (audUrl) {
-            const rAud = await pipeUrl(request, audUrl, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
-            if (rAud.status < 400) return rAud;
+      const ytHits = await searchYouTube(`${q} official audio`, "US", true);
+      const candidates = (Array.isArray(ytHits) ? ytHits : [])
+        .filter((x) => x && x.videoId && x.videoId !== vId && (!x.duration || x.duration >= 45))
+        .slice(0, 3);
+      for (const cand of candidates) {
+        try {
+          const alt = await youtubeAudioStream(cand.videoId);
+          if (alt && alt.url) {
+            const rAlt = await pipeUrl(request, alt.url, PROXY_ACCEPT, alt.mimeType || "audio/mp4");
+            if (rAlt.status < 400) return rAlt;
+          }
+        } catch {}
+      }
+    } catch {}
+
+    if (title) {
+      try {
+        const audHits = await audiusSearch(q);
+        if (Array.isArray(audHits) && audHits.length) {
+          const wantTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+          const matchAud = audHits.find((a) => {
+            if (!a || (Number(a.duration) || 0) < 45) return false;
+            const gotTitle = String(a.title || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+            return gotTitle && wantTitle && (gotTitle.includes(wantTitle) || wantTitle.includes(gotTitle));
+          });
+          if (matchAud) {
+            const audId = String(matchAud.trackId || matchAud.id || "").replace(/^audius:/, "");
+            if (audId) {
+              const audUrl = await audiusStreamUrl(audId);
+              if (audUrl) {
+                const rAud = await pipeUrl(request, audUrl, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
+                if (rAud.status < 400) return rAud;
+              }
+            }
           }
         }
-      }
-    } catch {}
-    try {
-      const dzRes = await deezerSearch(q, { limit: 10, includeExtra: false });
-      const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
-      const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
-      if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
-        const rDz = await pipeUrl(request, dzHit.previewUrl || dzHit.preview, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
-        if (rDz.status < 400) return rDz;
-      }
-    } catch {}
-    try {
-      const itRes = await itunesSearch(q, { includeExtra: false });
-      const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
-      const itHit = itList.find((x) => x && x.previewUrl);
-      if (itHit && itHit.previewUrl) {
-        const rIt = await pipeUrl(request, itHit.previewUrl, "audio/mp4, audio/*;q=0.9, */*;q=0.8", "audio/mp4");
-        if (rIt.status < 400) return rIt;
-      }
-    } catch {}
+      } catch {}
+    }
+
+    if (allowPreview) {
+      try {
+        const dzRes = await deezerSearch(q, { limit: 10, includeExtra: false });
+        const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
+        const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
+        if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
+          const rDz = await pipeUrl(request, dzHit.previewUrl || dzHit.preview, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
+          if (rDz.status < 400) return rDz;
+        }
+      } catch {}
+      try {
+        const itRes = await itunesSearch(q, { includeExtra: false });
+        const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
+        const itHit = itList.find((x) => x && x.previewUrl);
+        if (itHit && itHit.previewUrl) {
+          const rIt = await pipeUrl(request, itHit.previewUrl, "audio/mp4, audio/*;q=0.9, */*;q=0.8", "audio/mp4");
+          if (rIt.status < 400) return rIt;
+        }
+      } catch {}
+    }
   }
 
   return primaryRes;

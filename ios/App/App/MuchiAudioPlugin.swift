@@ -30,7 +30,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "resume", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "seekTo", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "emit", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "emit", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setAppIcon", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getAppIcon", returnType: CAPPluginReturnPromise)
     ]
 
     private var player: AVPlayer?
@@ -168,6 +170,36 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let action = call.getString("action") ?? ""
         if action == "stop" { doStop() }
         call.resolve()
+    }
+
+    @objc public func setAppIcon(_ call: CAPPluginCall) {
+        let requested = call.getString("icon") ?? "default"
+        UserDefaults.standard.set(requested, forKey: "muchi.app_icon")
+        DispatchQueue.main.async {
+            guard UIApplication.shared.supportsAlternateIcons else {
+                call.resolve(["ok": false, "icon": requested, "error": "Alternate icons not supported"])
+                return
+            }
+            let targetName: String? = (requested == "default" || requested.isEmpty) ? nil : requested
+            if UIApplication.shared.alternateIconName == targetName {
+                call.resolve(["ok": true, "icon": requested])
+                return
+            }
+            UIApplication.shared.setAlternateIconName(targetName) { error in
+                if let error = error {
+                    call.resolve(["ok": false, "icon": requested, "error": error.localizedDescription])
+                } else {
+                    call.resolve(["ok": true, "icon": requested])
+                }
+            }
+        }
+    }
+
+    @objc public func getAppIcon(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            let current = UIApplication.shared.alternateIconName ?? UserDefaults.standard.string(forKey: "muchi.app_icon") ?? "default"
+            call.resolve(["icon": current])
+        }
     }
 
     /* ── internals ─────────────────────────────────────────────────── */

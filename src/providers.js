@@ -270,7 +270,7 @@ const PIPED_STREAM_INSTANCES = [
   "https://pipedapi.reallyaweso.me",
   "https://pipedapi.ducks.party",
 ];
-const PIPED_API_TIMEOUT = 5000;
+const PIPED_API_TIMEOUT = 2400;
 
 export function pickPipedStream(data) {
   const streams = (data && data.audioStreams) || [];
@@ -321,7 +321,7 @@ function streamQualityScore(s) {
 // If Google ever gates this endpoint too, this tier simply returns null and
 // the existing Piped fan-out (Tier 2) + the client's iframe fallback keep
 // working exactly as before — nothing regresses.
-const INNERTUBE_PLAYER_TIMEOUT = 4000;
+const INNERTUBE_PLAYER_TIMEOUT = 2600;
 const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
 // Multiple client profiles, raced in parallel. A single client version/IP can
 // be gated (LOGIN_REQUIRED / cipher-only) by Google while others still return
@@ -330,6 +330,16 @@ const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=fa
 // reason is included in the final error so production logs/curls tell us WHY
 // (this is what /api/yt/stream's error field used to hide).
 const INNERTUBE_PROFILES = [
+  {
+    tag: "ANDROID_VR-1.60",
+    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
+  },
+  {
+    tag: "ANDROID_TESTSUITE-1.9",
+    ua: "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+    client: { clientName: "ANDROID_TESTSUITE", clientVersion: "1.9", androidSdkVersion: 30, hl: "en", gl: "US" },
+  },
   {
     tag: "ANDROID-19.09",
     ua: "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
@@ -341,20 +351,23 @@ const INNERTUBE_PROFILES = [
     client: { clientName: "ANDROID", clientVersion: "20.10.44", androidSdkVersion: 34, hl: "en", gl: "US" },
   },
   {
-    tag: "ANDROID_VR-1.60",
-    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-    client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
-  },
-  {
     tag: "IOS-19.09",
     ua: "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X) gzip",
     client: { clientName: "IOS", clientVersion: "19.09.3", deviceModel: "iPhone16,2", hl: "en", gl: "US" },
+  },
+  {
+    tag: "TV_EMBED-2.0",
+    ua: "Mozilla/5.0 (PlayStation; PlayStation 4/11.50) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
+    client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" },
+    thirdParty: { embedUrl: "https://www.youtube.com/" },
   },
 ];
 
 // One profile probe: direct audio stream or a REJECT carrying "TAG=reason"
 // (playability status, or NO_AUDIO_FORMATS when playable-but-empty).
 async function innertubeProbe(spec, videoId) {
+  const ctx = { client: spec.client };
+  if (spec.thirdParty) ctx.thirdParty = spec.thirdParty;
   const data = await fetchJSON(INNERTUBE_API, {
     method: "POST",
     headers: {
@@ -363,7 +376,12 @@ async function innertubeProbe(spec, videoId) {
       Referer: "https://www.youtube.com/",
       "User-Agent": spec.ua,
     },
-    body: JSON.stringify({ context: { client: spec.client }, videoId }),
+    body: JSON.stringify({
+      context: ctx,
+      videoId,
+      contentCheckOk: true,
+      racyCheckOk: true,
+    }),
   }, INNERTUBE_PLAYER_TIMEOUT);
   const picked = pickInnertubeStream(data);
   if (picked) return { ...picked, source: `innertube:${spec.tag}` };

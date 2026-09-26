@@ -252,6 +252,121 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         call.resolve();
     }
 
+    private static final String[] ICON_IDS = new String[] {
+        "default",
+        "anime_cyber",
+        "anime_kawaii",
+        "anime_mecha",
+        "anime_sakura",
+        "anime_shonen",
+        "anime_ninja",
+        "anime_chibi",
+        "blurple_gamer",
+        "gem_booster",
+        "matrix_terminal",
+        "pixel_arcade",
+        "solar_flare",
+        "vaporwave",
+        "synthwave",
+        "cosmic_nebula",
+        "ruby_crimson",
+        "emerald_jade",
+        "holographic",
+        "y2k_chrome",
+        "midnight_stealth",
+        "sunset_lofi",
+        "ocean_abyss",
+        "citrus_burst",
+        "royal_amethyst"
+    };
+
+    private String normalizeIconId(String raw) {
+        if (raw == null || raw.isEmpty()) return "default";
+        for (String id : ICON_IDS) {
+            if (id.equals(raw)) return id;
+        }
+        return "default";
+    }
+
+    @PluginMethod
+    public void setAppIcon(PluginCall call) {
+        String requested = normalizeIconId(call.getString("icon", "default"));
+        Context ctx = getContext();
+        try {
+            ctx.getSharedPreferences("muchi_prefs", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("app_icon", requested)
+                    .apply();
+            PackageManager pm = ctx.getPackageManager();
+            String pkg = ctx.getPackageName();
+
+            ComponentName targetComp = new ComponentName(pkg, pkg + ".MainActivityAlias_" + requested);
+            int targetState = pm.getComponentEnabledSetting(targetComp);
+            boolean targetAlreadyEnabled = (targetState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
+                    || ("default".equals(requested) && targetState == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+
+            boolean anyOtherEnabled = false;
+            for (String id : ICON_IDS) {
+                if (id.equals(requested)) continue;
+                ComponentName comp = new ComponentName(pkg, pkg + ".MainActivityAlias_" + id);
+                int curState = pm.getComponentEnabledSetting(comp);
+                boolean isDefaultAlias = "default".equals(id);
+                if (curState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
+                        (isDefaultAlias && curState == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT)) {
+                    anyOtherEnabled = true;
+                    break;
+                }
+            }
+
+            if (!targetAlreadyEnabled || anyOtherEnabled) {
+                // Enable the newly selected launcher alias first so the app always
+                // has an active launcher entry during the transition.
+                pm.setComponentEnabledSetting(
+                        targetComp,
+                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                        PackageManager.DONT_KILL_APP
+                );
+
+                // Disable all other launcher aliases.
+                for (String id : ICON_IDS) {
+                    if (id.equals(requested)) continue;
+                    ComponentName comp = new ComponentName(pkg, pkg + ".MainActivityAlias_" + id);
+                    int curState = pm.getComponentEnabledSetting(comp);
+                    boolean isDefaultAlias = "default".equals(id);
+                    if (curState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
+                            (isDefaultAlias && curState == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT)) {
+                        pm.setComponentEnabledSetting(
+                                comp,
+                                PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                PackageManager.DONT_KILL_APP
+                        );
+                    }
+                }
+            }
+
+            JSObject ret = new JSObject();
+            ret.put("ok", true);
+            ret.put("icon", requested);
+            call.resolve(ret);
+        } catch (Exception e) {
+            JSObject ret = new JSObject();
+            ret.put("ok", false);
+            ret.put("icon", requested);
+            ret.put("error", e.getMessage() != null ? e.getMessage() : "failed to switch launcher icon");
+            call.resolve(ret);
+        }
+    }
+
+    @PluginMethod
+    public void getAppIcon(PluginCall call) {
+        Context ctx = getContext();
+        String cur = ctx.getSharedPreferences("muchi_prefs", Context.MODE_PRIVATE)
+                .getString("app_icon", "default");
+        JSObject ret = new JSObject();
+        ret.put("icon", normalizeIconId(cur));
+        call.resolve(ret);
+    }
+
     @PluginMethod
     public void checkNotificationPermission(PluginCall call) {
         boolean granted = true;

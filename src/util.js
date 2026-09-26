@@ -60,6 +60,11 @@ const cache = new Map();
 const inflight = new Map();
 const CACHE_MAX = 500;
 
+export function invalidateCached(key) {
+  cache.delete(key);
+  inflight.delete(key);
+}
+
 export function cached(key, ttlMs, fn) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < ttlMs) return Promise.resolve(hit.value);

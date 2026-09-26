@@ -134,3 +134,96 @@ export function handleGeo(request) {
   if (!code) code = "IN";
   return json(200, { country: regionCode(code), via: "header" });
 }
+
+export const APP_ICON_SPECS = [
+  { id: "default", title: "Classic Muchi", bg: "#081612", discA: "#baffe6", discB: "#12c48c", ink: "#06241c", accent: "#34d399" },
+  { id: "anime_cyber", title: "Cyber Anime", bg: "#0d0221", discA: "#ff007f", discB: "#00f0ff", ink: "#0f051d", accent: "#ff007f" },
+  { id: "anime_kawaii", title: "Kawaii Mochi", bg: "#2a1526", discA: "#ffcbf2", discB: "#f72585", ink: "#ffffff", accent: "#ff70a6" },
+  { id: "anime_mecha", title: "Mecha Unit-01", bg: "#120826", discA: "#7000ff", discB: "#39ff14", ink: "#0a0314", accent: "#39ff14" },
+  { id: "anime_sakura", title: "Sakura Blossom", bg: "#1f1018", discA: "#ffe5ec", discB: "#fb7185", ink: "#3c0919", accent: "#fb7185" },
+  { id: "anime_shonen", title: "Shonen Flame", bg: "#1a0800", discA: "#ffe600", discB: "#ff3d00", ink: "#260600", accent: "#ff9100" },
+  { id: "anime_ninja", title: "Shadow Ninja", bg: "#05070e", discA: "#e63946", discB: "#1d3557", ink: "#ffffff", accent: "#e63946" },
+  { id: "anime_chibi", title: "Chibi Sparkle", bg: "#19082a", discA: "#f1c0e8", discB: "#a3c4f3", ink: "#3c1361", accent: "#cfbaf0" },
+  { id: "blurple_gamer", title: "Blurple Gamer", bg: "#1e1f22", discA: "#7289da", discB: "#5865f2", ink: "#ffffff", accent: "#5865f2" },
+  { id: "gem_booster", title: "Gem Booster", bg: "#23153c", discA: "#f47fff", discB: "#be185d", ink: "#ffffff", accent: "#f47fff" },
+  { id: "matrix_terminal", title: "Matrix Console", bg: "#001100", discA: "#80ff72", discB: "#008f11", ink: "#000000", accent: "#00ff66" },
+  { id: "pixel_arcade", title: "8-Bit Arcade", bg: "#181425", discA: "#fbb954", discB: "#cd683d", ink: "#261b36", accent: "#e43b44" },
+  { id: "solar_flare", title: "Solar Flare", bg: "#1c0d02", discA: "#ffea79", discB: "#ff6b00", ink: "#2b0d00", accent: "#ff8c00" },
+  { id: "vaporwave", title: "Vaporwave 1984", bg: "#10061e", discA: "#f72585", discB: "#4cc9f0", ink: "#0e021a", accent: "#7209b7" },
+  { id: "synthwave", title: "Synthwave Sunset", bg: "#180527", discA: "#ff4b91", discB: "#6c00ff", ink: "#ffffff", accent: "#ff4b91" },
+  { id: "cosmic_nebula", title: "Cosmic Nebula", bg: "#090919", discA: "#b5179e", discB: "#480ca8", ink: "#ffffff", accent: "#4cc9f0" },
+  { id: "ruby_crimson", title: "Crimson Ruby", bg: "#1a0006", discA: "#ff4d6d", discB: "#a4133c", ink: "#ffffff", accent: "#ff4d6d" },
+  { id: "emerald_jade", title: "Imperial Jade", bg: "#021c14", discA: "#52b788", discB: "#1b4332", ink: "#ffffff", accent: "#74c69d" },
+  { id: "holographic", title: "Holo Prism", bg: "#121420", discA: "#e0aaff", discB: "#7b2cbf", ink: "#ffffff", accent: "#c77dff" },
+  { id: "y2k_chrome", title: "Y2K Liquid Chrome", bg: "#171a21", discA: "#e2e8f0", discB: "#64748b", ink: "#0f172a", accent: "#94a3b8" },
+  { id: "midnight_stealth", title: "Obsidian Stealth", bg: "#000000", discA: "#334155", discB: "#0f172a", ink: "#f8fafc", accent: "#94a3b8" },
+  { id: "sunset_lofi", title: "Lofi Twilight", bg: "#1e1022", discA: "#fca311", discB: "#e63946", ink: "#14213d", accent: "#fca311" },
+  { id: "ocean_abyss", title: "Abyssal Deep", bg: "#030e1e", discA: "#48cae4", discB: "#0077b6", ink: "#03045e", accent: "#00b4d8" },
+  { id: "citrus_burst", title: "Citrus Punch", bg: "#1a1600", discA: "#cbf3f0", discB: "#ff9f1c", ink: "#2ec4b6", accent: "#ffbf69" },
+  { id: "royal_amethyst", title: "Royal Amethyst", bg: "#14041e", discA: "#d8b4e2", discB: "#5a189a", ink: "#ffffff", accent: "#e0aaff" },
+];
+
+export function handleAppIcon(url) {
+  const rawId = String(url.searchParams.get("icon") || "default").trim();
+  const size = Math.max(32, Math.min(1024, parseInt(url.searchParams.get("size") || "512", 10) || 512));
+  const ic = APP_ICON_SPECS.find((x) => x.id === rawId) || APP_ICON_SPECS[0];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${size}" height="${size}">
+  <defs>
+    <linearGradient id="ic_disc_${ic.id}" x1="20%" y1="15%" x2="80%" y2="85%">
+      <stop offset="0%" stop-color="${ic.discA}"/>
+      <stop offset="100%" stop-color="${ic.discB}"/>
+    </linearGradient>
+    <radialGradient id="ic_glow_${ic.id}" cx="40%" cy="35%" r="60%">
+      <stop offset="0%" stop-color="${ic.accent}" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="${ic.bg}" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="100" height="100" rx="23" fill="${ic.bg}"/>
+  <circle cx="50" cy="50" r="44" fill="url(#ic_glow_${ic.id})"/>
+  <circle cx="50" cy="50" r="38" fill="none" stroke="${ic.accent}" stroke-width="1.8" opacity="0.55"/>
+  <circle cx="50" cy="50" r="32" fill="url(#ic_disc_${ic.id})"/>
+  <ellipse cx="41" cy="29" rx="13" ry="5" fill="#ffffff" opacity="0.28"/>
+  <path d="M 33.5 64.5 L 33.5 35.5 L 50 56.5 L 66.5 35.5 L 66.5 64.5" fill="none" stroke="${ic.ink}" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="50" cy="66" r="4.3" fill="${ic.ink}"/>
+</svg>`;
+  return new Response(svg, {
+    status: 200,
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=86400",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
+export function handleManifest(url) {
+  const rawId = String(url.searchParams.get("icon") || "default").trim();
+  const ic = APP_ICON_SPECS.find((x) => x.id === rawId) || APP_ICON_SPECS[0];
+  const isDefault = ic.id === "default";
+  const icons = isDefault
+    ? [
+        { src: "/logo.png?v=53", sizes: "192x192", type: "image/png", purpose: "any maskable" },
+        { src: "/logo.png?v=53", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+      ]
+    : [
+        { src: `/api/app-icon?icon=${encodeURIComponent(ic.id)}&size=192`, sizes: "192x192", type: "image/svg+xml", purpose: "any maskable" },
+        { src: `/api/app-icon?icon=${encodeURIComponent(ic.id)}&size=512`, sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" },
+      ];
+  return new Response(JSON.stringify({
+    name: "Muchi",
+    short_name: "Muchi",
+    description: "Material You music player — YouTube official playback, Audius artists, live radio.",
+    start_url: "/",
+    display: "standalone",
+    background_color: ic.bg,
+    theme_color: ic.bg,
+    icons,
+  }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/manifest+json; charset=utf-8",
+      "Cache-Control": "no-cache",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+    <!-- Outer accent halo -->
+    <path
+        android:pathData="M50,22A28,28 0 1,1 49.9,22Z"
+        android:strokeWidth="1.5"
+        android:strokeColor="#88e63946"
+        android:fillColor="#00000000" />
+    <!-- Main gradient disc (safe zone centered at 50,50 r=24) -->
+    <path
+        android:pathData="M50,26A24,24 0 1,1 49.9,26Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="30"
+                android:startY="28"
+                android:endX="70"
+                android:endY="74"
+                android:startColor="#e63946"
+                android:endColor="#1d3557" />
+        </aapt:attr>
+    </path>
+    <!-- Top gloss highlight -->
+    <path
+        android:pathData="M34,34A10,3.8 0 1,0 54,34A10,3.8 0 1,0 34,34Z"
+        android:fillColor="#44FFFFFF" />
+    <!-- Muchi 'M' signature mark -->
+    <path
+        android:pathData="M37.5,61 L37.5,39 L50,54.8 L62.5,39 L62.5,61"
+        android:strokeColor="#ffffff"
+        android:strokeWidth="6.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+    <!-- Center resonance dot -->
+    <path
+        android:pathData="M50,58.8A3.2,3.2 0 1,1 49.9,58.8Z"
+        android:fillColor="#ffffff" />
+</vector>
