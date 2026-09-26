@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.6";
+  const APP_VERSION = "1.6.7";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1674,11 +1674,23 @@
       .replace(/^(name:|audius:)/i, "")
       .toLowerCase()
       .trim();
+    const origName = (typeof t === "object" && t.origName ? String(t.origName) : "")
+      .replace(/^(name:|audius:)/i, "")
+      .toLowerCase()
+      .trim();
+    const targetFold = targetName ? dzFold(targetName) : "";
+    const origFold = origName ? dzFold(origName) : "";
     return (state.following || []).some((f) => {
       if (!f) return false;
       const fk = String(f.key || "").toLowerCase().trim();
       const fn = String(f.name || fk.replace(/^(name:|audius:)/i, "")).toLowerCase().trim();
-      return (k && fk === k) || (targetName && (fn === targetName || fk === targetName || fk === `name:${targetName}`));
+      const fnFold = fn ? dzFold(fn) : "";
+      return (
+        (k && fk === k) ||
+        (targetName && (fn === targetName || fk === targetName || fk === `name:${targetName}`)) ||
+        (origName && (fn === origName || fk === origName || fk === `name:${origName}`)) ||
+        (fnFold && ((targetFold && fnFold === targetFold) || (origFold && fnFold === origFold)))
+      );
     });
   }
   function saveFollowing(opts) {
@@ -1686,24 +1698,34 @@
     save("aura.following", state.following);
     scheduleUserLibraryPush(opts);
   }
-  function unfollowArtistByKeyOrName(keyOrName) {
+  function unfollowArtistByKeyOrName(keyOrName, extraName) {
     const raw = String(keyOrName || "").trim();
-    if (!raw) return "";
+    if (!raw && !extraName) return "";
     const targetLower = raw.toLowerCase();
     const targetName = targetLower.replace(/^(name:|audius:)/i, "").trim();
+    const altName = String(extraName || "").replace(/^(name:|audius:)/i, "").toLowerCase().trim();
+    const targetFold = targetName ? dzFold(targetName) : "";
+    const altFold = altName ? dzFold(altName) : "";
     let removedName = "";
     state.following = (state.following || []).filter((f) => {
       if (!f) return false;
       const fk = String(f.key || "").toLowerCase().trim();
       const fn = String(f.name || "").toLowerCase().trim();
-      const match = fk === targetLower || fn === targetName || fk.replace(/^(name:|audius:)/i, "") === targetName;
+      const fnFold = fn ? dzFold(fn) : "";
+      const match =
+        fk === targetLower ||
+        (targetName && (fn === targetName || fk.replace(/^(name:|audius:)/i, "") === targetName)) ||
+        (altName && (fn === altName || fk.replace(/^(name:|audius:)/i, "") === altName)) ||
+        (fnFold && ((targetFold && fnFold === targetFold) || (altFold && fnFold === altFold)));
       if (match && !removedName) removedName = f.name || raw;
       return !match;
     });
     if (Array.isArray(state.prefs.tasteArtists)) {
-      state.prefs.tasteArtists = state.prefs.tasteArtists.filter(
-        (a) => String(a || "").toLowerCase().trim() !== targetName
-      );
+      state.prefs.tasteArtists = state.prefs.tasteArtists.filter((a) => {
+        const al = String(a || "").toLowerCase().trim();
+        const af = al ? dzFold(al) : "";
+        return al !== targetName && al !== altName && (!af || (af !== targetFold && af !== altFold));
+      });
       savePrefs();
     }
     saveFollowing({ replaceFollowing: true });
@@ -1719,7 +1741,7 @@
     const name = artistName(track) || track.name || "";
     if (!key || !name) return;
     if (isFollowing(track)) {
-      const unfollowed = unfollowArtistByKeyOrName(key || name);
+      const unfollowed = unfollowArtistByKeyOrName(key || name, track.origName || "");
       toast(`Unfollowed ${unfollowed || name}`, true, "success");
     } else {
       state.following.unshift({
@@ -6260,19 +6282,6 @@
       window.location.href = url;
     }
   }
-  function sanitizeGoogleSignInUrl(rawUrl) {
-    try {
-      const u = new URL(String(rawUrl || ""));
-      if (u.hostname.includes("google.com")) {
-        u.searchParams.set("scope", "openid email profile");
-        u.searchParams.delete("access_type");
-        u.searchParams.delete("include_granted_scopes");
-        u.searchParams.set("prompt", "select_account");
-        return u.toString();
-      }
-    } catch {}
-    return rawUrl;
-  }
   async function startGoogleSignIn() {
     if (!state.auth) {
       try { await refreshAuth(true); } catch {}
@@ -6280,7 +6289,7 @@
     if (!state.auth || state.auth.configured === false) { toast("Google Sign-In isn't configured on the server yet"); return; }
     try {
       const d = await api(`/api/auth/google/url?platform=${IS_NATIVE ? "native" : "web"}`);
-      if (d && d.url) openAuthUrl(sanitizeGoogleSignInUrl(d.url));
+      if (d && d.url) openAuthUrl(d.url);
     } catch { toast("Couldn't start Google Sign-In"); }
   }
   async function connectYouTube() {
@@ -6435,6 +6444,10 @@
           refreshAuth(true).then(() => {
             toast("Signed in with Google");
             syncUserLibrary(true);
+            if (state.auth && state.auth.youtube && state.auth.youtube.connected) {
+              loadYtLiked(true);
+              loadYtPlaylists(true);
+            }
             if (state.view === "settings" || state.view === "library") render();
           });
         }
@@ -6444,6 +6457,8 @@
         refreshAuth(true).then(() => {
           toast("YouTube connected");
           syncUserLibrary(true);
+          loadYtLiked(true);
+          loadYtPlaylists(true);
           if (state.view === "settings" || state.view === "library") render();
         });
       } else if (pathname === "auth/error" || pathname === "youtube/error") {
@@ -6479,6 +6494,10 @@
     }
     if (state.auth && state.auth.signedIn) {
       syncUserLibrary();
+      if (state.auth.youtube && state.auth.youtube.connected) {
+        loadYtLiked(true);
+        loadYtPlaylists(true);
+      }
     }
     if (state.view === "settings" || state.view === "library") render();
   }
@@ -7105,7 +7124,6 @@
       <div class="section">
         <div class="section-head">
           <h2>${taste.hasTaste ? "For your taste" : "Moods & genres"}</h2>
-          <button type="button" class="see-all" id="customizeTasteHomeBtn" title="Customize your music taste and followed artists">Customize taste</button>
         </div>
         <div class="chips taste-tabs">
           <button type="button" class="chip ${state.homeTasteTab !== "discover" ? "active" : ""}" data-taste-tab="moods">Moods</button>
@@ -7308,13 +7326,12 @@
     const prefStyles = Array.isArray(state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
     const prefArtists = Array.isArray(state.prefs.tasteArtists) ? state.prefs.tasteArtists : [];
     const followedNames = (state.following || []).map((f) => f && f.name).filter(Boolean);
-    const allArtists = [...new Set([...followedNames, ...prefArtists])];
+    const likedAndRecentArtists = [...(state.liked || []), ...(state.recents || [])]
+      .map((t) => artistName(t))
+      .filter((n) => n && n !== "YouTube");
+    const allArtists = [...new Set([...followedNames, ...prefArtists, ...likedAndRecentArtists])];
     const tTracks = Array.isArray(state.tasteTracks) ? state.tasteTracks : [];
     const fTracks = Array.isArray(state.followedArtistTracks) ? state.followedArtistTracks : [];
-
-    if (!tTracks.length && !fTracks.length && !prefGenres.length && !prefMoods.length && !prefEras.length && !prefStyles.length && !allArtists.length) {
-      return [];
-    }
 
     const allowIndian =
       countryCode === "IN" ||
@@ -7322,52 +7339,124 @@
       countryCode === "BD" ||
       prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
 
-    const masterMix = weaveDiverseTracks([tTracks, fTracks], 28, 2, countryCode, allowIndian);
-    const artistMix = weaveDiverseTracks([fTracks, tTracks], 24, 2, countryCode, allowIndian);
+    // Gather fallback tracks from home shelves & Made for you so cards are always richly populated
+    const homePool = [];
+    const h = state.home || {};
+    for (const s of (h.shelves || [])) {
+      if (s && Array.isArray(s.tracks)) homePool.push(...s.tracks);
+    }
+    if (Array.isArray(h.youtubeLocal)) homePool.push(...h.youtubeLocal);
+    if (Array.isArray(h.youtubeCharts)) homePool.push(...h.youtubeCharts);
+    for (const p of (h.forYouPlaylists || [])) {
+      if (p && Array.isArray(p.tracks)) homePool.push(...p.tracks);
+    }
+
+    const masterMix = weaveDiverseTracks(
+      [tTracks, fTracks, state.liked || [], state.recents || [], homePool],
+      48,
+      2,
+      countryCode,
+      allowIndian
+    );
+    const artistMix = weaveDiverseTracks(
+      [fTracks, tTracks, state.liked || [], homePool],
+      32,
+      2,
+      countryCode,
+      allowIndian
+    );
+
     const cards = [];
+    const seenTitles = new Set();
+    const usedArtworks = new Set();
+
+    function pickDistinctArtwork(trackList, fallbackArt) {
+      for (const t of (trackList || [])) {
+        const a = t && t.artwork;
+        if (a && a !== "/cover-default.jpg" && !usedArtworks.has(a)) {
+          usedArtworks.add(a);
+          return a;
+        }
+      }
+      if (fallbackArt && fallbackArt !== "/cover-default.jpg" && !usedArtworks.has(fallbackArt)) {
+        usedArtworks.add(fallbackArt);
+        return fallbackArt;
+      }
+      for (const t of masterMix) {
+        const a = t && t.artwork;
+        if (a && a !== "/cover-default.jpg" && !usedArtworks.has(a)) {
+          usedArtworks.add(a);
+          return a;
+        }
+      }
+      return (trackList && trackList[0] && trackList[0].artwork) || fallbackArt || (masterMix[0] && masterMix[0].artwork) || "/cover-default.jpg";
+    }
+
+    function rotateTracks(idx, preferred) {
+      const len = masterMix.length;
+      const offset = len ? ((idx * 3) % len) : 0;
+      const rotated = len ? masterMix.slice(offset).concat(masterMix.slice(0, offset)) : [];
+      if (Array.isArray(preferred) && preferred.length) {
+        return weaveDiverseTracks([preferred, rotated], 20, 2, countryCode, allowIndian);
+      }
+      return rotated.slice(0, 20);
+    }
+
+    function addCard(card) {
+      if (!card || !card.title || cards.length >= 10) return;
+      const key = String(card.title).toLowerCase().trim();
+      if (seenTitles.has(key)) return;
+      seenTitles.add(key);
+      cards.push(card);
+    }
+
+    const countryGenres = getOnboardGenresForCountry(countryCode);
+    const countryStyles = getOnboardStylesForCountry(countryCode);
+    const countryArtists = getOnboardArtistsForCountry(countryCode);
 
     // 1. Master combined playlist mixing both Picked for your taste & Artists you follow + similar
     const topArtistLabel = allArtists.slice(0, 2).join(", ");
-    const topGenreObjs = prefGenres.slice(0, 2).map((id) => findOnboardGenreById(id, countryCode)).filter(Boolean);
-    const topGenreLabel = topGenreObjs.map((g) => g.title).join(" · ");
+    const topGenreObjs = prefGenres.map((id) => findOnboardGenreById(id, countryCode)).filter(Boolean);
+    const topGenreLabel = topGenreObjs.slice(0, 2).map((g) => g.title).join(" · ");
+    const masterTracks = masterMix.length ? masterMix.slice(0, 24) : tTracks.slice(0, 24);
 
-    cards.push({
+    addCard({
       id: "taste-master-mix",
       title: "Picked for Your Taste",
       subtitle: topGenreLabel && topArtistLabel
         ? `${topGenreLabel} · ${topArtistLabel} & more`
         : topGenreLabel || (topArtistLabel ? `Featuring ${topArtistLabel} & similar` : "Your personalized music mix"),
-      artwork: (masterMix[0] && masterMix[0].artwork) || (tTracks[0] && tTracks[0].artwork) || "/cover-default.jpg",
+      artwork: pickDistinctArtwork(masterTracks, (tTracks[0] && tTracks[0].artwork)),
       query: (topGenreObjs[0] && topGenreObjs[0].query) || shelfQueryForCountryClient("pop", countryCode, "top hits official audio"),
-      tracks: masterMix.length ? masterMix : tTracks.slice(0, 24),
+      tracks: masterTracks,
     });
 
     // 2. Artists you follow & similar playlist card
-    if (allArtists.length || fTracks.length) {
-      const aSub = allArtists.length
-        ? `${allArtists.slice(0, 2).join(", ")} & similar artists`
-        : "Followed artists & similar tracks";
-      cards.push({
-        id: "taste-followed-mix",
-        title: "Artists You Follow & Similar",
-        subtitle: aSub,
-        artwork: (fTracks[0] && fTracks[0].artwork) || (artistMix[1] && artistMix[1].artwork) || (masterMix[1] && masterMix[1].artwork) || "/cover-default.jpg",
-        query: allArtists[0] ? `songs like ${allArtists[0]} mix official audio` : shelfQueryForCountryClient("today", countryCode, "top hits official audio"),
-        tracks: artistMix.length ? artistMix : fTracks.slice(0, 24),
-      });
-    }
+    const aSub = allArtists.length
+      ? `${allArtists.slice(0, 2).join(", ")} & similar artists`
+      : "Followed artists & similar tracks";
+    const fCardTracks = artistMix.length ? artistMix.slice(0, 24) : rotateTracks(1, fTracks);
+    addCard({
+      id: "taste-followed-mix",
+      title: "Artists You Follow & Similar",
+      subtitle: aSub,
+      artwork: pickDistinctArtwork(fCardTracks, (fTracks[0] && fTracks[0].artwork)),
+      query: allArtists[0]
+        ? `songs like ${allArtists[0]} mix official audio`
+        : shelfQueryForCountryClient("today", countryCode, "top hits official audio"),
+      tracks: fCardTracks,
+    });
 
-    // 3. Dedicated artist + similar mix cards for up to 2 followed artists
-    allArtists.slice(0, 2).forEach((aName, idx) => {
+    // 3. Dedicated artist + similar mix cards for followed/selected artists (up to 3)
+    allArtists.slice(0, 3).forEach((aName, idx) => {
       const aLower = String(aName).toLowerCase();
-      const matching = [...fTracks, ...tTracks].filter((t) => String(artistName(t) || "").toLowerCase().includes(aLower));
-      const others = [...fTracks, ...tTracks].filter((t) => !String(artistName(t) || "").toLowerCase().includes(aLower));
-      const mix = weaveDiverseTracks([matching, others], 20, 2, countryCode, allowIndian);
-      cards.push({
+      const matching = [...fTracks, ...tTracks, ...masterMix].filter((t) => String(artistName(t) || "").toLowerCase().includes(aLower));
+      const mix = rotateTracks(idx + 2, matching);
+      addCard({
         id: `taste-artist-${idx}`,
         title: `${aName} & Similar Mix`,
-        subtitle: `Mixed with similar songs & your taste`,
-        artwork: (matching[0] && matching[0].artwork) || _onbArtCache[aName] || (mix[0] && mix[0].artwork) || "/cover-default.jpg",
+        subtitle: "Mixed with similar songs & your taste",
+        artwork: pickDistinctArtwork(matching, _onbArtCache[aName] || (mix[0] && mix[0].artwork)),
         query: `songs like ${aName} mix official audio`,
         tracks: mix,
       });
@@ -7375,31 +7464,104 @@
 
     // 4. Dedicated genre playlist cards from user's chosen genres
     topGenreObjs.forEach((gObj, idx) => {
-      const rotated = masterMix.slice((idx + 1) * 2).concat(masterMix.slice(0, (idx + 1) * 2));
-      cards.push({
+      const mix = rotateTracks(cards.length + idx + 1);
+      addCard({
         id: `taste-genre-${gObj.id}`,
         title: `${gObj.title} Mix`,
         subtitle: gObj.sub || "Picked for your taste",
-        artwork: (rotated[0] && rotated[0].artwork) || "/cover-default.jpg",
+        artwork: pickDistinctArtwork(mix),
         query: gObj.query,
-        tracks: rotated.slice(0, 20),
+        tracks: mix,
       });
     });
 
-    // 5. Dedicated mood / era playlist cards from user's chosen moods/eras
-    prefMoods.slice(0, 2).forEach((mId, idx) => {
+    // 5. Dedicated mood playlist cards from user's chosen moods
+    prefMoods.forEach((mId, idx) => {
       const mObj = ONBOARD_MOODS.find((x) => x.id === mId);
       if (!mObj) return;
-      const rotated = masterMix.slice((idx + 2) * 3).concat(masterMix.slice(0, (idx + 2) * 3));
-      cards.push({
+      const mix = rotateTracks(cards.length + idx + 1);
+      addCard({
         id: `taste-mood-${mObj.id}`,
         title: `${mObj.title} Mix`,
         subtitle: mObj.sub || "Tailored mood playlist",
-        artwork: (rotated[0] && rotated[0].artwork) || "/cover-default.jpg",
+        artwork: pickDistinctArtwork(mix),
         query: mObj.query,
-        tracks: rotated.slice(0, 20),
+        tracks: mix,
       });
     });
+
+    // 6. Dedicated style & era playlist cards from user's chosen styles/eras
+    prefStyles.forEach((sId, idx) => {
+      const sObj = countryStyles.find((x) => x.id === sId);
+      if (!sObj) return;
+      const mix = rotateTracks(cards.length + idx + 1);
+      addCard({
+        id: `taste-style-${sObj.id}`,
+        title: `${sObj.title} Mix`,
+        subtitle: sObj.sub || "Tailored listening vibe",
+        artwork: pickDistinctArtwork(mix),
+        query: sObj.query,
+        tracks: mix,
+      });
+    });
+    prefEras.forEach((eId, idx) => {
+      const eObj = ONBOARD_ERAS.find((x) => x.id === eId);
+      if (!eObj) return;
+      const mix = rotateTracks(cards.length + idx + 1);
+      addCard({
+        id: `taste-era-${eObj.id}`,
+        title: `${eObj.title} Mix`,
+        subtitle: eObj.sub || "Era favorites",
+        artwork: pickDistinctArtwork(mix),
+        query: eObj.query,
+        tracks: mix,
+      });
+    });
+
+    // 7. Always top up to a full row of 10 playlists (using country-specific genres,
+    //    local artists, styles, and moods) so the live website never stops at 4 playlists
+    //    when a user only has followed artists or selected fewer options!
+    for (const gObj of countryGenres) {
+      if (cards.length >= 10) break;
+      const mix = rotateTracks(cards.length + 1);
+      addCard({
+        id: `taste-country-genre-${gObj.id}`,
+        title: `${gObj.title} Mix`,
+        subtitle: gObj.sub || "Picked for your taste",
+        artwork: pickDistinctArtwork(mix),
+        query: gObj.query,
+        tracks: mix,
+      });
+    }
+
+    for (const art of countryArtists) {
+      if (cards.length >= 10) break;
+      if (!art || !art.name) continue;
+      const aLower = String(art.name).toLowerCase();
+      const matching = masterMix.filter((t) => String(artistName(t) || "").toLowerCase().includes(aLower));
+      const mix = rotateTracks(cards.length + 1, matching);
+      addCard({
+        id: `taste-country-artist-${aLower.replace(/\s+/g, "-")}`,
+        title: `${art.name} & Similar Mix`,
+        subtitle: `${art.tag || "Popular artist"} · Mixed with similar songs`,
+        artwork: pickDistinctArtwork(matching, _onbArtCache[art.name]),
+        query: `songs like ${art.name} mix official audio`,
+        tracks: mix,
+      });
+    }
+
+    for (const mObj of ONBOARD_MOODS) {
+      if (cards.length >= 10) break;
+      const mix = rotateTracks(cards.length + 1);
+      addCard({
+        id: `taste-fallback-mood-${mObj.id}`,
+        title: `${mObj.title} Mix`,
+        subtitle: mObj.sub || "Tailored mood playlist",
+        artwork: pickDistinctArtwork(mix),
+        query: mObj.query,
+        tracks: mix,
+      });
+    }
 
     return cards.slice(0, 10);
   }
@@ -7698,9 +7860,9 @@
           <p>${a.loading ? "Loading catalogue…" : `${songs.length} songs · ${albums.length} albums`}</p>
           <div class="artist-actions">
             ${songs.length ? `<button class="filled-btn" id="playArtist" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
-            <button class="tonal-btn" id="followArtist" type="button" title="${isFollowing({ artist: a.name, source: a.source }) ? "Click to unfollow " + escapeAttr(a.name) : "Follow " + escapeAttr(a.name)}">
-              <span class="material-symbols-outlined">${isFollowing({ artist: a.name, source: a.source }) ? "person_remove" : "person_add"}</span>
-              ${isFollowing({ artist: a.name, source: a.source }) ? "Unfollow" : "Follow"}
+            <button class="tonal-btn" id="followArtist" type="button" title="${isFollowing({ artist: a.name, origName: a.origName, source: a.source }) ? "Click to unfollow " + escapeAttr(a.name) : "Follow " + escapeAttr(a.name)}">
+              <span class="material-symbols-outlined">${isFollowing({ artist: a.name, origName: a.origName, source: a.source }) ? "person_remove" : "person_add"}</span>
+              ${isFollowing({ artist: a.name, origName: a.origName, source: a.source }) ? "Unfollow" : "Follow"}
             </button>
           </div>
         </div>
@@ -8105,14 +8267,13 @@
         </div>
       </button>`).join("");
     const artistRows = state.following.map((a) => `
-      <div class="lib-row artist" data-artist="${escapeAttr(a.key)}" role="button" tabindex="0">
+      <button type="button" class="lib-row artist" data-artist="${escapeAttr(a.key)}">
         <img class="round" src="${escapeAttr(a.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
-        <div style="flex:1;min-width:0">
+        <div>
           <div class="t-title">${escapeHTML(a.name)}</div>
           <div class="t-sub">Artist · Following</div>
         </div>
-        <button type="button" class="chip-btn" data-unfollow="${escapeAttr(a.key)}" title="Unfollow ${escapeAttr(a.name)}" style="flex-shrink:0">Unfollow</button>
-      </div>`).join("");
+      </button>`).join("");
     const dlRows = state.downloads.map((t, i) => libTrackHTML(t, i, { isDownload: true })).join("");
     const ytOn = !!(state.auth && state.auth.signedIn && state.auth.youtube && state.auth.youtube.connected);
     let ytRows = "";
@@ -8224,6 +8385,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.7",
+      title: "Muchi 1.6.7",
+      notes: [
+        "First-launch Taste Onboarding with dedicated local genres and famous local artists across all 32 countries.",
+        "Combined 'Picked for your taste & artists you follow' playlist shelf under Made for you.",
+        "Restored automatic YouTube Liked Songs & Playlists loading on Google Sign-In and cloud profile restore for returning users.",
+      ],
+    },
     {
       ver: "1.6.6",
       title: "Muchi 1.6.6",
@@ -9782,7 +9952,7 @@
       followArtist.addEventListener("click", () => {
         const a = state.artistPage;
         if (!a) return;
-        toggleFollow({ artist: a.name, source: a.source || "youtube", artwork: a.artwork, id: a.id });
+        toggleFollow({ artist: a.name, origName: a.origName || a.name, source: a.source || "youtube", artwork: a.artwork, id: a.id });
       });
     }
     const nowArtist = viewEl.querySelector("#nowArtist");
@@ -10073,10 +10243,6 @@
     if (openAppIconFromAppearance) openAppIconFromAppearance.addEventListener("click", () => { rememberScroll(); state.settingsPage = "appicon"; navPush(); paintNav(false); });
     const openFollowing = viewEl.querySelector("#openFollowing");
     if (openFollowing) openFollowing.addEventListener("click", () => { rememberScroll(); state.settingsPage = "following"; navPush(); paintNav(false); });
-    const openTasteSetup = viewEl.querySelector("#openTasteSetup");
-    if (openTasteSetup) openTasteSetup.addEventListener("click", () => openTasteOnboarding(true));
-    const customizeTasteHomeBtn = viewEl.querySelector("#customizeTasteHomeBtn");
-    if (customizeTasteHomeBtn) customizeTasteHomeBtn.addEventListener("click", () => openTasteOnboarding(true));
     const openData = viewEl.querySelector("#openData");
     if (openData) openData.addEventListener("click", () => { rememberScroll(); state.settingsPage = "data"; navPush(); paintNav(false); measureCache(); });
 
@@ -10834,7 +11000,7 @@
     const gen = ++artistGen;
     if (!state.artistPage) state.artistFrom = state.view;
     state.view = "search";
-    state.artistPage = { name: rawName, artwork: artist.artwork, id: artist.id, source: artist.source, songs: [], albums: [], popular: [], playlists: [], loading: true };
+    state.artistPage = { name: rawName, origName: rawName, artwork: artist.artwork, id: artist.id, source: artist.source, songs: [], albums: [], popular: [], playlists: [], loading: true };
     navPush();
     paintNav();
     const q = artist.query || rawName;
@@ -13219,14 +13385,14 @@
       countryCode === "BD" ||
       prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
 
-    if (!prefGenres.length && !prefMoods.length && !prefEras.length && !prefStyles.length && !allArtists.length) return;
-    if (!force && (state.tasteTracks || []).length >= 8 && (!allArtists.length || (state.followedArtistTracks || []).length >= 6)) {
+    if (!force && (state.tasteTracks || []).length >= 12 && (!allArtists.length || (state.followedArtistTracks || []).length >= 8)) {
       return;
     }
 
     _tasteLoadInFlight = true;
     try {
       const styleList = getOnboardStylesForCountry(countryCode);
+      const countryGenres = getOnboardGenresForCountry(countryCode);
       // 1) Build diverse queries for "Picked for your taste" mixing genres, moods, eras, styles, country hits & artists
       const tasteQueries = [];
       for (const gId of prefGenres.slice(0, 3)) {
@@ -13247,6 +13413,11 @@
       }
       for (const aName of allArtists.slice(0, 2)) {
         tasteQueries.push(`${aName} hits official audio`);
+      }
+      // If user hasn't picked genres yet (e.g. existing user who only followed artists),
+      // include their country's top local genres so all 10 taste playlists have diverse tracks!
+      for (const gObj of countryGenres.slice(0, 3)) {
+        if (gObj && gObj.query) tasteQueries.push(gObj.query);
       }
       // Always include a country/genre anchor query so even if user only chose 1 artist,
       // the row is a rich mix of songs rather than just that single artist's songs.

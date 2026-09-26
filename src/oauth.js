@@ -232,20 +232,13 @@ export async function handleAuthUrl(request, env, url, path) {
     platform,
     exp: Date.now() + 10 * 60 * 1000,
   });
-  if (step === "youtube") {
-    // Optional second-step YouTube connection: only requested when a user
-    // explicitly clicks "Connect YouTube" in Library or Settings.
-    const ytScopes = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl";
-    const scope = "openid email profile " + ytScopes;
-    const extra = { access_type: "offline", prompt: "consent", include_granted_scopes: "true" };
-    return json(200, { url: makeOAuthUrl(scope, state, extra, env) });
-  }
-  // Standard Google Sign-In ONLY requests non-sensitive identity scopes
-  // ("openid email profile"). Non-sensitive scopes do not require Google
-  // OAuth verification and never trigger the "This app hasn't been verified
-  // by Google" warning screen.
-  const scope = "openid email profile";
-  const extra = { prompt: "select_account" };
+  // Request scopes so a connected user can authenticate, read their YouTube
+  // likes & playlists, and like songs or add them to playlists from MUCHI.
+  // Using access_type: "offline" + prompt: "consent" ensures Google issues
+  // a refresh_token for background refreshes.
+  const ytScopes = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl";
+  const scope = "openid email profile " + ytScopes;
+  const extra = { access_type: "offline", prompt: "consent" };
   return json(200, { url: makeOAuthUrl(scope, state, extra, env) });
 }
 
@@ -318,8 +311,6 @@ export async function handleGoogleCallback(request, env, url) {
     return withCookie(redirect(dest), sessionCookie(s.sid, env.MUCHI_SESSION_SECRET));
   }
   const sid = randomBytes(24).toString("hex");
-  const grantedScope = String(tok.scope || "");
-  const hasYtScope = grantedScope.includes("youtube");
   const session = {
     sid,
     at: Date.now(),
@@ -328,7 +319,7 @@ export async function handleGoogleCallback(request, env, url) {
     email_verified: true,
     role,
     picture: String(id.picture || ""),
-    yt: (hasYtScope && tok.access_token) ? {
+    yt: tok.access_token ? {
       access: tok.access_token,
       refresh: tok.refresh_token || "",
       expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),

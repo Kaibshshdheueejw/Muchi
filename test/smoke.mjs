@@ -671,7 +671,7 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
   ok("icon: getAppIconSvg renders pure logo mark without 'MUCHI' text inside the icon", !appJs.includes(">MUCHI</text>"));
 })();
 
-// ── 5e. Google Sign-In Non-Sensitive Scopes & Taste/Onboarding Verification ──
+// ── 5e. YouTube OAuth Sign-In, Artist Unfollow & First-Launch Taste Verification ──
 await (async () => {
   const { handleAuthUrl } = await import("../src/oauth.js");
   const mockEnv = {
@@ -695,20 +695,13 @@ await (async () => {
   const signInReq = new Request("https://muchi.twiarimascord.workers.dev/api/auth/google/url?platform=web");
   const signInRes = await handleAuthUrl(signInReq, mockEnv, new URL(signInReq.url), "/api/auth/google/url");
   const signInBody = await signInRes.json();
-  const signInUrl = new URL(signInBody.url);
-  ok("oauth: /api/auth/google/url requests ONLY non-sensitive 'openid email profile'", signInUrl.searchParams.get("scope") === "openid email profile");
-  ok("oauth: /api/auth/google/url does NOT include sensitive youtube scopes", !signInBody.url.includes("youtube"));
-  ok("oauth: /api/auth/google/url uses prompt=select_account without offline consent", signInUrl.searchParams.get("prompt") === "select_account" && !signInUrl.searchParams.has("access_type"));
-
-  const ytReq = new Request("https://muchi.twiarimascord.workers.dev/api/auth/youtube/url?platform=web");
-  const ytRes = await handleAuthUrl(ytReq, mockEnv, new URL(ytReq.url), "/api/auth/youtube/url");
-  const ytBody = await ytRes.json();
-  ok("oauth: /api/auth/youtube/url still requests youtube scope when explicitly connecting YouTube", ytBody.url.includes("youtube.readonly"));
+  ok("oauth: /api/auth/google/url includes youtube scopes like 1.6.6 so YouTube likes & playlists load on sign-in", signInBody.url.includes("youtube.readonly") && signInBody.url.includes("youtube.force-ssl"));
 
   const appJs = readFileSync("public/app.js", "utf8");
-  ok("oauth client: sanitizeGoogleSignInUrl present in public/app.js", appJs.includes("function sanitizeGoogleSignInUrl(") && appJs.includes('u.searchParams.set("scope", "openid email profile")'));
+  ok("homepage: 'Customize taste' button removed from homepage (onboarding is first-launch only)", !appJs.includes("customizeTasteHomeBtn") && !appJs.includes(">Customize taste<"));
   ok("taste: tastePlaylistSection placed directly under forYouSection", /\$\{forYouSection\(\)\}\s*\$\{tastePlaylistSection\(\)\}\s*\$\{viralSection\(\)\}/.test(appJs));
-  ok("follow: normalizeFollowEntry and inline Library Unfollow button present", appJs.includes("function normalizeFollowEntry(") && appJs.includes('data-unfollow="${escapeAttr(a.key)}"'));
+  ok("taste: tastePlaylistList always tops up to 10 playlists (never stops at 4 when only artists are followed)", appJs.includes("taste-country-genre-") && appJs.includes("taste-country-artist-") && appJs.includes("cards.length >= 10") && appJs.includes("return cards.slice(0, 10);"));
+  ok("library: artistRows in Library has no inline Unfollow button and opens Artist page where #followArtist unfollows", !appJs.includes('data-unfollow="${escapeAttr(a.key)}"') && appJs.includes('id="followArtist"') && appJs.includes("origName: a.origName"));
   ok("onboarding: returning Google user auto-skips onboarding and restores library", appJs.includes("res.isReturningUser") && appJs.includes('localStorage.setItem("aura.onboarded", "1")'));
 })();
 
