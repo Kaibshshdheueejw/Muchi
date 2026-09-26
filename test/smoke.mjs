@@ -235,7 +235,7 @@ ok("regionCode IN default", regionCode() === "IN");
 ok("regionCode lower→upper", regionCode("us") === "US");
 ok("regionCode invalid → IN", regionCode("12") === "IN");
 ok("regionCode XX passthrough", regionCode("XX") === "XX");
-ok("LOCAL_CHARTS 29 countries", Object.keys(LOCAL_CHARTS).length === 29);
+ok("LOCAL_CHARTS 32 countries", Object.keys(LOCAL_CHARTS).length === 32);
 ok("MOODS_BY_COUNTRY 25 countries", Object.keys(MOODS_BY_COUNTRY).length === 25);
 ok("moods IN = 12 (10 core + 5 local unique)", moodsForCountry("IN").length === 12);
 // US local = [us-pop, rnb, country, latin-us]; slice(0,2) → rnb duplicates
@@ -671,6 +671,47 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
   ok("icon: getAppIconSvg renders pure logo mark without 'MUCHI' text inside the icon", !appJs.includes(">MUCHI</text>"));
 })();
 
+// ── 5e. Google Sign-In Non-Sensitive Scopes & Taste/Onboarding Verification ──
+await (async () => {
+  const { handleAuthUrl } = await import("../src/oauth.js");
+  const mockEnv = {
+    GOOGLE_CLIENT_ID: "test-client-id.apps.googleusercontent.com",
+    GOOGLE_CLIENT_SECRET: "test-secret",
+    GOOGLE_REDIRECT_URI: "https://muchi.twiarimascord.workers.dev/api/auth/google/callback",
+    MUCHI_SESSION_SECRET: "test-session-secret-1234567890",
+    DB: {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async first() { return null; },
+              async run() { return { success: true }; },
+            };
+          },
+        };
+      },
+    },
+  };
+  const signInReq = new Request("https://muchi.twiarimascord.workers.dev/api/auth/google/url?platform=web");
+  const signInRes = await handleAuthUrl(signInReq, mockEnv, new URL(signInReq.url), "/api/auth/google/url");
+  const signInBody = await signInRes.json();
+  const signInUrl = new URL(signInBody.url);
+  ok("oauth: /api/auth/google/url requests ONLY non-sensitive 'openid email profile'", signInUrl.searchParams.get("scope") === "openid email profile");
+  ok("oauth: /api/auth/google/url does NOT include sensitive youtube scopes", !signInBody.url.includes("youtube"));
+  ok("oauth: /api/auth/google/url uses prompt=select_account without offline consent", signInUrl.searchParams.get("prompt") === "select_account" && !signInUrl.searchParams.has("access_type"));
+
+  const ytReq = new Request("https://muchi.twiarimascord.workers.dev/api/auth/youtube/url?platform=web");
+  const ytRes = await handleAuthUrl(ytReq, mockEnv, new URL(ytReq.url), "/api/auth/youtube/url");
+  const ytBody = await ytRes.json();
+  ok("oauth: /api/auth/youtube/url still requests youtube scope when explicitly connecting YouTube", ytBody.url.includes("youtube.readonly"));
+
+  const appJs = readFileSync("public/app.js", "utf8");
+  ok("oauth client: sanitizeGoogleSignInUrl present in public/app.js", appJs.includes("function sanitizeGoogleSignInUrl(") && appJs.includes('u.searchParams.set("scope", "openid email profile")'));
+  ok("taste: tastePlaylistSection placed directly under forYouSection", /\$\{forYouSection\(\)\}\s*\$\{tastePlaylistSection\(\)\}\s*\$\{viralSection\(\)\}/.test(appJs));
+  ok("follow: normalizeFollowEntry and inline Library Unfollow button present", appJs.includes("function normalizeFollowEntry(") && appJs.includes('data-unfollow="${escapeAttr(a.key)}"'));
+  ok("onboarding: returning Google user auto-skips onboarding and restores library", appJs.includes("res.isReturningUser") && appJs.includes('localStorage.setItem("aura.onboarded", "1")'));
+})();
+
 // ── 6. Live worker checks (only when WRANGLER_DEV_URL is set) ───────────────
 const BASE = process.env.WRANGLER_DEV_URL;
 if (BASE) {
@@ -896,13 +937,13 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=99");
+  const appJsRes = await fetch(BASE + "/app.js?v=101");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=99");
+  const stylesRes = await fetch(BASE + "/styles.css?v=101");
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=99 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=99 served 200", stylesRes.status === 200);
-  ok("client web: sw.js cache matches v99", swText.includes("muchi-shell-v99") && swText.includes("/app.js?v=99"));
+  ok("client web: app.js?v=101 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=101 served 200", stylesRes.status === 200);
+  ok("client web: sw.js cache matches v101", swText.includes("muchi-shell-v101") && swText.includes("/app.js?v=101"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // Multi-provider live search via Cloudflare Worker

@@ -232,13 +232,20 @@ export async function handleAuthUrl(request, env, url, path) {
     platform,
     exp: Date.now() + 10 * 60 * 1000,
   });
-  // Request scopes so a connected user can authenticate, read their YouTube
-  // likes & playlists, and like songs or add them to playlists from MUCHI.
-  // Using access_type: "offline" + prompt: "consent" ensures Google issues
-  // a refresh_token for background refreshes.
-  const ytScopes = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl";
-  const scope = "openid email profile " + ytScopes;
-  const extra = { access_type: "offline", prompt: "consent" };
+  if (step === "youtube") {
+    // Optional second-step YouTube connection: only requested when a user
+    // explicitly clicks "Connect YouTube" in Library or Settings.
+    const ytScopes = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl";
+    const scope = "openid email profile " + ytScopes;
+    const extra = { access_type: "offline", prompt: "consent", include_granted_scopes: "true" };
+    return json(200, { url: makeOAuthUrl(scope, state, extra, env) });
+  }
+  // Standard Google Sign-In ONLY requests non-sensitive identity scopes
+  // ("openid email profile"). Non-sensitive scopes do not require Google
+  // OAuth verification and never trigger the "This app hasn't been verified
+  // by Google" warning screen.
+  const scope = "openid email profile";
+  const extra = { prompt: "select_account" };
   return json(200, { url: makeOAuthUrl(scope, state, extra, env) });
 }
 
@@ -311,6 +318,8 @@ export async function handleGoogleCallback(request, env, url) {
     return withCookie(redirect(dest), sessionCookie(s.sid, env.MUCHI_SESSION_SECRET));
   }
   const sid = randomBytes(24).toString("hex");
+  const grantedScope = String(tok.scope || "");
+  const hasYtScope = grantedScope.includes("youtube");
   const session = {
     sid,
     at: Date.now(),
@@ -319,7 +328,7 @@ export async function handleGoogleCallback(request, env, url) {
     email_verified: true,
     role,
     picture: String(id.picture || ""),
-    yt: tok.access_token ? {
+    yt: (hasYtScope && tok.access_token) ? {
       access: tok.access_token,
       refresh: tok.refresh_token || "",
       expiresAt: Date.now() + (Number(tok.expires_in || 3600) * 1000),
@@ -488,7 +497,7 @@ export async function handleYoutubeData(request, env, url, path) {
   }
 }
 
-// ── Persistent User Library (Liked songs, playlists, followed artists across devices & browser resets) ──
+// ── Persistent User Library (Liked songs, playlists, followed artists & taste across devices & browser resets) ──
 export async function handleUserLibrary(request, env) {
   const s = await readSession(request, env);
   if (!s || !s.email) {
@@ -496,10 +505,38 @@ export async function handleUserLibrary(request, env) {
   }
   const userId = String(s.email).toLowerCase().trim();
 
+  const normalizeFollowKey = (f) => {
+    if (!f) return "";
+    if (typeof f === "string") {
+      const s = f.trim().toLowerCase();
+      return s ? (s.startsWith("audius:") || s.startsWith("name:") ? s : `name:${s}`) : "";
+    }
+    if (typeof f !== "object") return "";
+    const rawKey = String(f.key || "").trim().toLowerCase();
+    if (rawKey.startsWith("audius:") || rawKey.startsWith("name:")) return rawKey;
+    const nm = String(f.name || rawKey || "").trim().toLowerCase();
+    return nm ? `name:${nm}` : "";
+  };
+
   if (request.method === "GET") {
     const lib = await getUserLibrary(env, userId);
+    const hasData = Boolean(
+      lib && (
+        lib.onboarded ||
+        (Array.isArray(lib.liked) && lib.liked.length > 0) ||
+        (Array.isArray(lib.playlists) && lib.playlists.length > 0) ||
+        (Array.isArray(lib.following) && lib.following.length > 0) ||
+        (Array.isArray(lib.recents) && lib.recents.length > 0) ||
+        (lib.taste && Object.keys(lib.taste).some((k) => {
+          const v = lib.taste[k];
+          return Array.isArray(v) ? v.length > 0 : Boolean(v);
+        })) ||
+        lib.updated_at > 0
+      )
+    );
     return json(200, {
-      library: lib || { liked: [], playlists: [], following: [], taste: {} },
+      library: lib || { liked: [], playlists: [], following: [], recents: [], taste: {}, onboarded: false },
+      isReturningUser: hasData,
       syncedAt: (lib && lib.updated_at) || 0,
       user: { email: s.email, name: s.name },
     }, request);
@@ -512,34 +549,69 @@ export async function handleUserLibrary(request, env) {
         return json(400, { error: "Invalid library data" }, request);
       }
 
-      // Read existing to merge safely so user never loses items
-      const existing = (await getUserLibrary(env, userId)) || { liked: [], playlists: [], following: [], taste: {} };
+      // Read existing to merge safely so user never loses items unless explicitly replacing
+      const existing = (await getUserLibrary(env, userId)) || {
+        liked: [],
+        playlists: [],
+        following: [],
+        recents: [],
+        taste: {},
+        onboarded: false,
+      };
 
       const likedMap = new Map();
-      for (const t of (existing.liked || [])) {
-        if (t && t.id) likedMap.set(t.id, t);
+      if (!body.replaceLiked) {
+        for (const t of (existing.liked || [])) {
+          if (t && t.id) likedMap.set(t.id, t);
+        }
       }
       for (const t of (body.liked || [])) {
         if (t && t.id) likedMap.set(t.id, t);
       }
 
       const plMap = new Map();
-      for (const p of (existing.playlists || [])) {
-        const k = p && (p.id || p.name);
-        if (k) plMap.set(k, p);
+      if (!body.replacePlaylists) {
+        for (const p of (existing.playlists || [])) {
+          const k = p && (p.id || p.name);
+          if (k) plMap.set(k, p);
+        }
       }
       for (const p of (body.playlists || [])) {
         const k = p && (p.id || p.name);
         if (k) plMap.set(k, p);
       }
 
-      const followingSet = new Set([...(existing.following || []), ...(body.following || [])]);
+      const followMap = new Map();
+      if (!body.replaceFollowing) {
+        for (const f of (existing.following || [])) {
+          const k = normalizeFollowKey(f);
+          if (k) followMap.set(k, typeof f === "string" ? f : { ...f, key: k });
+        }
+      }
+      for (const f of (body.following || [])) {
+        const k = normalizeFollowKey(f);
+        if (k) followMap.set(k, typeof f === "string" ? f : { ...f, key: k });
+      }
+
+      const recentsMap = new Map();
+      for (const t of (body.recents || [])) {
+        if (t && t.id) recentsMap.set(t.id, t);
+      }
+      for (const t of (existing.recents || [])) {
+        if (t && t.id && !recentsMap.has(t.id)) recentsMap.set(t.id, t);
+      }
+
+      const mergedTaste = { ...(existing.taste || {}), ...(body.taste || {}) };
+      const isOnboarded = Boolean(existing.onboarded || body.onboarded || mergedTaste.onboarded);
+      if (isOnboarded) mergedTaste.onboarded = true;
 
       const merged = {
         liked: Array.from(likedMap.values()).slice(0, 2000),
         playlists: Array.from(plMap.values()).slice(0, 200),
-        following: Array.from(followingSet).slice(0, 500),
-        taste: { ...(existing.taste || {}), ...(body.taste || {}) },
+        following: Array.from(followMap.values()).slice(0, 500),
+        recents: Array.from(recentsMap.values()).slice(0, 100),
+        taste: mergedTaste,
+        onboarded: isOnboarded,
         updated_at: Date.now(),
       };
 
@@ -548,6 +620,7 @@ export async function handleUserLibrary(request, env) {
       return json(200, {
         ok: true,
         library: merged,
+        isReturningUser: true,
         syncedAt: merged.updated_at,
       }, request);
     } catch (err) {

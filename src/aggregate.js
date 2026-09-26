@@ -17,6 +17,7 @@ import {
 import {
   regionCode, utcDay, LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES, VIRAL_QUERIES,
   moodsForCountry, playlistsOf, uniqPlaylists, buildForYouPlaylists, buildViralPlaylists,
+  shelfQueryForCountry,
 } from "./data.js";
 import {
   dzFetch, normalizeDeezerTrack, deezerArtist, deezerAlbums,
@@ -128,15 +129,15 @@ export async function handleHome(env, url) {
   let globalPart = { shelves: [], globalPlaylists: [], audius: [], underground: [], radio: [], forYouPlaylists: [], viralPlaylists: [] };
   let localPart = { youtubeLocal: [], countryPlaylists: [] };
   try {
-    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:v8:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
+    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:${gl}:v11:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
   } catch (e) {
     console.error("home english", e);
-    globalPart.shelves = ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: s.query, tracks: [] }));
+    globalPart.shelves = ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: shelfQueryForCountry(s.id, gl, s.query), tracks: [] }));
     globalPart.forYouPlaylists = buildForYouPlaylists([]);
     globalPart.viralPlaylists = buildViralPlaylists([]);
   }
   try {
-    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v8:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
+    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v11:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
   } catch (e) {
     console.error("home local", e);
   }
@@ -179,7 +180,7 @@ export async function handleHome(env, url) {
     moods: moodsForCountry(gl),
     shelves: globalPart.shelves.length
       ? globalPart.shelves
-      : ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: s.query, tracks: [] })),
+      : ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: shelfQueryForCountry(s.id, gl, s.query), tracks: [] })),
     youtubeCharts: charts,
     youtubeLocal: localTracks.slice(0, 25),
     youtubeIndia: localTracks.slice(0, 25),
@@ -216,26 +217,45 @@ function weaveCatalogTracks(baseTracks = [], itunesTracks = [], deezerTracks = [
   return result;
 }
 
+function isUnwantedIndianTrackForRegion(t, gl) {
+  if (!t || gl === "IN" || gl === "PK" || gl === "BD") return false;
+  const s = `${t.title || ""} ${t.artist || ""} ${t.album || ""}`;
+  if (/[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0B80-\u0BFF\u0C00-\u0C7F\u0D00-\u0D7F]/.test(s)) return true;
+  if (/\b(bollywood|hindi|punjabi|bhojpuri|haryanvi|kollywood|tollywood|malayalam|kannada|marathi|gujarati|assamese|odia|arijit\s+singh|shreya\s+ghoshal|jubin\s+nautiyal|t-series|zee\s*music|yash\s*raj|saregama|sony\s*music\s*india|tips\s*official|speed\s*records|desi\s*melodies|pritam|vishal\s+mishra|vishal[\s-]*shekhar|tanishk\s+bagchi|amit\s+trivedi|a\.?\s*r\.?\s*rahman|diljit\s+dosanjh|karan\s+aujla|sidhu\s+moose|ap\s+dhillon|gurinder\s+gill|badshah|yo\s+yo\s+honey\s+singh|neha\s+kakkar|tony\s+kakkar|sonu\s+nigam|atif\s+aslam|kumar\s+sanu|udit\s+narayan|alka\s+yagnik|kk\b|mohit\s+chauhan|anuv\s+jain|prateek\s+kuhad|the\s+local\s+train|local\s+train|aditya\s+rikhari|mitraz|ritviz|zaeden|sanam\b|lucky\s+ali|kailash\s+kher|shankar\s+mahadevan|shaan\b|sunidhi\s+chauhan|darshan\s+raval|armaan\s+malik|asees\s+kaur|b\s+praak|jaani\b|guru\s+randhawa|hardy\s+sandhu|harrdy\s+sandhu|divine\b|kr\$na|seedhe\s+maut|raftaar|emiway|mc\s+stan|talha\s+anjum|talhah\s+yunus|young\s+stunners|hasan\s+raheem|abdul\s+hannan|ali\s+zafar|rahat\s+fateh|nusrat\s+fateh|coke\s+studio|nadaan\s+parindey|sadda\s+haq|choo\s+lo|baarishein|alag\s+aasmaan|kesariya|tum\s+hi\s+ho|channa\s+mereya|kabira|ilahi|agar\s+tum\s+saath|apna\s+bana\s+le|chaleya|satranga|heeriye|husn\b|bulleya|bekhayali|shayad\b|khairiyat|tera\s+ban\s+jaunga|raataan\s+lambiyan|pasoori)\b/i.test(s)) {
+    return true;
+  }
+  return false;
+}
+
 async function buildGlobal(gl, localQ) {
   const prime = ENGLISH_SHELVES.slice(0, 2);
-  const jobs = prime.map((s) => searchYouTube(s.query, "US", true));
+  const jobs = prime.map((s) => searchYouTube(shelfQueryForCountry(s.id, gl, s.query), gl, true));
+  const popShelfQ = shelfQueryForCountry("pop", gl, "english pop hits").replace(/\bofficial audio\b/i, "").trim();
   const extra = await Promise.allSettled([
     ...jobs,
     youtubeMusicSearch("global top hits playlist", "US", 6000, { limit: 40 }),
     audiusTrending(),
     audiusUnderground(),
     radioSearch("hits", 16),
-    itunesSearch("top hits", { includeExtra: false, country: gl || "US" }).catch(() => ({ songs: [] })),
-    deezerSearch("top hits", { limit: 40, includeExtra: false }).catch(() => ({ songs: [] })),
+    itunesSearch(popShelfQ, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
+    deezerSearch(popShelfQ, { limit: 40, includeExtra: false }).catch(() => ({ songs: [] })),
   ]);
-  const itExtra = extra[jobs.length + 4] && extra[jobs.length + 4].status === "fulfilled" ? (extra[jobs.length + 4].value.songs || []) : [];
-  const dzExtra = extra[jobs.length + 5] && extra[jobs.length + 5].status === "fulfilled" ? (extra[jobs.length + 5].value.songs || []) : [];
-  const filled = prime.map((s, i) => take(extra[i]).slice(0, 18));
+  const itExtra = (extra[jobs.length + 4] && extra[jobs.length + 4].status === "fulfilled" ? (extra[jobs.length + 4].value.songs || []) : [])
+    .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+  const dzExtra = (extra[jobs.length + 5] && extra[jobs.length + 5].status === "fulfilled" ? (extra[jobs.length + 5].value.songs || []) : [])
+    .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+  const filled = prime.map((s, i) => take(extra[i]).filter((t) => !isUnwantedIndianTrackForRegion(t, gl)).slice(0, 18));
+  // Only pre-fill the first 2 prime shelves (Today's Top Hits & Pop). Leave
+  // Hip-Hop, R&B, Rock, Dance, and Indie empty here so hydrateShelves() fetches
+  // each shelf's true genre tracks for the user's selected country instead of
+  // polluting Rock/Indie with generic top-hits tracks.
   const shelves = ENGLISH_SHELVES.map((s, i) => ({
     id: s.id,
     title: s.title,
-    query: s.query,
-    tracks: weaveCatalogTracks(i < filled.length ? filled[i] : [], itExtra.slice(i * 6), dzExtra.slice(i * 6), 25),
+    query: shelfQueryForCountry(s.id, gl, s.query),
+    tracks: i < filled.length
+      ? weaveCatalogTracks(filled[i], itExtra.slice(i * 6, (i + 1) * 6), dzExtra.slice(i * 6, (i + 1) * 6), 25)
+      : [],
   }));
   const globalPlaylists = ensureMinPlaylists(
     uniqPlaylists([
@@ -283,11 +303,13 @@ async function buildLocal(gl, localQ) {
     itunesSearch(localQ || "top hits", { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
     deezerSearch(localQ || "top hits", { limit: 40, includeExtra: false }).catch(() => ({ songs: [] })),
   ]);
-  const itLocalSongs = itLocalR.status === "fulfilled" ? (itLocalR.value.songs || []) : [];
-  const dzLocalSongs = dzLocalR.status === "fulfilled" ? (dzLocalR.value.songs || []) : [];
-  const ytTracks = take(ytLocal);
-  const plTracks = take(ytPl);
-  const trendTracks = take(ytTrendingPl);
+  const itLocalSongs = (itLocalR.status === "fulfilled" ? (itLocalR.value.songs || []) : [])
+    .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+  const dzLocalSongs = (dzLocalR.status === "fulfilled" ? (dzLocalR.value.songs || []) : [])
+    .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+  const ytTracks = take(ytLocal).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+  const plTracks = take(ytPl).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+  const trendTracks = take(ytTrendingPl).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
   const countryPool = [...ytTracks, ...plTracks, ...trendTracks];
 
   // Top songs in country: total of 25 songs
@@ -303,7 +325,7 @@ async function buildLocal(gl, localQ) {
     try {
       const extra = await searchYouTube(`top 50 new ${localQ} official music 2025 2026`, gl, false);
       for (const t of extra) {
-        if (!t || !t.id || seenLocal.has(t.id)) continue;
+        if (!t || !t.id || seenLocal.has(t.id) || isUnwantedIndianTrackForRegion(t, gl)) continue;
         seenLocal.add(t.id);
         localTracks.push(t);
         if (localTracks.length >= 25) break;
@@ -344,24 +366,39 @@ export async function handleShelf(env, url) {
   const id = url.searchParams.get("id") || "";
   const shelf = ENGLISH_SHELVES.find((s) => s.id === id);
   const gl = regionCode(url.searchParams.get("gl") || "US");
-  const q = url.searchParams.get("q") || (shelf && shelf.query) || (id === "local" ? (LOCAL_CHARTS[gl] || "top hits official audio") : "");
+  const rawQ = url.searchParams.get("q") || "";
+  const q = shelf
+    ? shelfQueryForCountry(id, gl, rawQ || shelf.query)
+    : (rawQ || (id === "local" ? (LOCAL_CHARTS[gl] || "top hits official audio") : ""));
   const full = url.searchParams.get("full") === "1";
   if (!q.trim()) return json(400, { error: "Missing query" });
   const cap = full ? 100 : (id === "local" ? 25 : 18);
   const refresh = url.searchParams.get("refresh") === "1";
   try {
-    const key = `shelf:${full ? "full" : "row"}:${id}:${q}:${gl}:${utcDay()}`;
+    const key = `shelf:v11:${full ? "full" : "row"}:${id}:${q}:${gl}:${utcDay()}`;
     const build = async () => {
-      let rows = [];
-      try {
-        rows = await searchYouTube(q, gl, false);
-      } catch {}
+      const cleanCatalogQ = q.replace(/\bofficial audio\b/ig, "").replace(/\bofficial\b/ig, "").trim();
+      const [ytR, itR, dzR] = await Promise.allSettled([
+        searchYouTube(q, gl, false),
+        id !== "local" ? itunesSearch(cleanCatalogQ, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })) : Promise.resolve({ songs: [] }),
+        id !== "local" ? deezerSearch(cleanCatalogQ, { limit: 25, includeExtra: false }).catch(() => ({ songs: [] })) : Promise.resolve({ songs: [] }),
+      ]);
+      let rows = (ytR.status === "fulfilled" ? ytR.value : []).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
       if (!rows || !rows.length) {
         try {
-          rows = await searchYouTube(q, gl, true);
+          rows = (await searchYouTube(q, gl, true)).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
         } catch {}
       }
-      const sliced = (rows || []).slice(0, cap);
+      const itSongs = ((itR.status === "fulfilled" && itR.value && Array.isArray(itR.value.songs)) ? itR.value.songs : [])
+        .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+      const dzSongs = ((dzR.status === "fulfilled" && dzR.value && Array.isArray(dzR.value.songs)) ? dzR.value.songs : [])
+        .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+      // Lead with iTunes local storefront + YouTube country results so the
+      // shelf authentically reflects the selected country (even if the server
+      // runs in a different region).
+      const combined = weaveCatalogTracks(itSongs.length ? itSongs : rows, rows, dzSongs, cap * 2)
+        .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
+      const sliced = combined.slice(0, cap);
       if (!sliced.length) throw new Error("no tracks");
       return sliced;
     };
@@ -369,7 +406,7 @@ export async function handleShelf(env, url) {
     return json(200, {
       id: id || (shelf && shelf.id) || "",
       title: (shelf && shelf.title) || q,
-      tracks: tracks || [],
+      tracks: (tracks || []).filter((t) => !isUnwantedIndianTrackForRegion(t, gl)),
     });
   } catch (e) {
     return json(200, {

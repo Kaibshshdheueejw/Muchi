@@ -88,6 +88,12 @@
       ui: "glass",
       playerStyle: "pill",
       iconSize: "default",
+      tasteGenres: [],
+      tasteMoods: [],
+      tasteEras: [],
+      tasteStyles: [],
+      tasteArtists: [],
+      onboarded: false,
     }, load("aura.prefs", {})),
     offlineMode: Boolean(load("aura.offlineMode", false)),
     isNetworkOffline: typeof navigator !== "undefined" ? !navigator.onLine : false,
@@ -96,6 +102,8 @@
     dlQueue: [],
     following: [],
     forYou: [],
+    tasteTracks: load("aura.tasteTracks", []),
+    followedArtistTracks: load("aura.followedArtistTracks", []),
     discovery: load("aura.discovery", { week: "", tracks: [] }),
     homeTasteTab: "moods",
     sleep: { mode: "off", until: 0, timer: null },
@@ -126,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.5";
+  const APP_VERSION = "1.6.6";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1017,10 +1025,58 @@
   const LIBRARY_KEYS = new Set(["aura.liked", "aura.playlists", "aura.recents", "aura.following", "aura.downloads", "aura.prefs"]);
   const LIBRARY_WIPE = new Set(["aura.liked", "aura.playlists", "aura.recents", "aura.following", "aura.downloads"]);
 
+  function normalizeFollowEntry(f) {
+    if (!f) return null;
+    if (typeof f === "string") {
+      const raw = f.replace(/^(name:|audius:)/i, "").trim();
+      if (!raw) return null;
+      return {
+        key: f.toLowerCase().startsWith("audius:") ? f.toLowerCase() : `name:${raw.toLowerCase()}`,
+        name: raw,
+        source: "catalog",
+        handle: "",
+        artwork: "/cover-default.jpg",
+      };
+    }
+    if (typeof f !== "object") return null;
+    const rawName = String(f.name || f.key || "").replace(/^(name:|audius:)/i, "").trim();
+    if (!rawName) return null;
+    const handle = String(f.handle || "").trim();
+    const rawKey = String(f.key || "").trim().toLowerCase();
+    const key = handle
+      ? `audius:${handle.toLowerCase()}`
+      : rawKey.startsWith("audius:")
+        ? rawKey
+        : `name:${rawName.toLowerCase()}`;
+    return {
+      ...f,
+      key,
+      name: rawName,
+      source: f.source || "catalog",
+      handle,
+      artwork: f.artwork || "/cover-default.jpg",
+    };
+  }
+
+  function dedupeFollowingList(list) {
+    const out = [];
+    const seen = new Set();
+    for (const item of asArray(list)) {
+      const norm = normalizeFollowEntry(item);
+      if (!norm) continue;
+      const nameKey = norm.name.toLowerCase();
+      if (seen.has(norm.key) || seen.has(nameKey)) continue;
+      seen.add(norm.key);
+      seen.add(nameKey);
+      out.push(norm);
+    }
+    return out;
+  }
+
   function hydrateLibrary() {
     state.liked = asArray(load("aura.liked", state.liked));
     state.recents = asArray(load("aura.recents", state.recents));
-    state.following = asArray(load("aura.following", state.following));
+    state.following = dedupeFollowingList(load("aura.following", state.following));
     state.downloads = asArray(load("aura.downloads", state.downloads));
     state.dlQueue = asArray(load("aura.dlQueue", state.dlQueue)).filter((d) => d && d.status === "downloading");
     const pls = asArray(load("aura.playlists", state.playlists)).map((p) => ({
@@ -1042,16 +1098,21 @@
   hydrateLibrary();
 
   let syncLibraryTimeout = null;
-  function scheduleUserLibraryPush() {
+  let _pendingReplaceFollowing = false;
+  function scheduleUserLibraryPush(opts) {
+    if (opts && opts.replaceFollowing) _pendingReplaceFollowing = true;
     if (!state.auth || !state.auth.signedIn) return;
     clearTimeout(syncLibraryTimeout);
     syncLibraryTimeout = setTimeout(() => {
-      pushUserLibrary();
-    }, 1500);
+      const rep = _pendingReplaceFollowing;
+      _pendingReplaceFollowing = false;
+      pushUserLibrary({ replaceFollowing: rep });
+    }, 1200);
   }
 
-  async function pushUserLibrary() {
+  async function pushUserLibrary(opts) {
     if (!state.auth || !state.auth.signedIn) return;
+    const onboardedFlag = Boolean(localStorage.getItem("aura.onboarded") || state.prefs.onboarded);
     try {
       await api("/api/user/library", 10000, {
         method: "POST",
@@ -1059,7 +1120,20 @@
         body: JSON.stringify({
           liked: (state.liked || []).slice(0, 1500),
           playlists: (state.playlists || []).slice(0, 150),
-          following: (state.following || []).slice(0, 400),
+          following: dedupeFollowingList(state.following).slice(0, 400),
+          recents: (state.recents || []).slice(0, 100),
+          replaceFollowing: Boolean(opts && opts.replaceFollowing),
+          onboarded: onboardedFlag,
+          taste: {
+            tasteGenres: Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : [],
+            tasteMoods: Array.isArray(state.prefs.tasteMoods) ? state.prefs.tasteMoods : [],
+            tasteEras: Array.isArray(state.prefs.tasteEras) ? state.prefs.tasteEras : [],
+            tasteStyles: Array.isArray(state.prefs.tasteStyles) ? state.prefs.tasteStyles : [],
+            tasteArtists: Array.isArray(state.prefs.tasteArtists) ? state.prefs.tasteArtists : [],
+            country: state.prefs.country || "",
+            countryChosen: Boolean(state.prefs.countryChosen),
+            onboarded: onboardedFlag,
+          },
         }),
       });
     } catch {}
@@ -1074,6 +1148,27 @@
       if (res && res.library) {
         const remote = res.library;
         let modified = false;
+        let restoredAny = false;
+
+        // Check if this Google user is an existing ("old") user with recorded data in Muchi
+        const remoteTaste = (remote.taste && typeof remote.taste === "object") ? remote.taste : {};
+        const hasRemoteTaste = Boolean(
+          (Array.isArray(remoteTaste.tasteGenres) && remoteTaste.tasteGenres.length > 0) ||
+          (Array.isArray(remoteTaste.tasteMoods) && remoteTaste.tasteMoods.length > 0) ||
+          (Array.isArray(remoteTaste.tasteEras) && remoteTaste.tasteEras.length > 0) ||
+          (Array.isArray(remoteTaste.tasteStyles) && remoteTaste.tasteStyles.length > 0) ||
+          (Array.isArray(remoteTaste.tasteArtists) && remoteTaste.tasteArtists.length > 0) ||
+          remoteTaste.onboarded
+        );
+        const isReturningUser = Boolean(
+          res.isReturningUser ||
+          remote.onboarded ||
+          hasRemoteTaste ||
+          (Array.isArray(remote.liked) && remote.liked.length > 0) ||
+          (Array.isArray(remote.playlists) && remote.playlists.length > 0) ||
+          (Array.isArray(remote.following) && remote.following.length > 0) ||
+          (Array.isArray(remote.recents) && remote.recents.length > 0)
+        );
 
         // 1. Liked songs merge
         if (Array.isArray(remote.liked) && remote.liked.length > 0) {
@@ -1089,6 +1184,7 @@
           }
           state.liked = Array.from(likedMap.values());
           save("aura.liked", state.liked);
+          restoredAny = true;
         } else if (state.liked.length > 0) {
           modified = true;
         }
@@ -1109,33 +1205,94 @@
           state.playlists = Array.from(plMap.values());
           save("aura.playlists", state.playlists);
           renderPlaylistsNav();
+          restoredAny = true;
         } else if (state.playlists.length > 0) {
           modified = true;
         }
 
-        // 3. Following merge
+        // 3. Following merge (normalized keys)
         if (Array.isArray(remote.following) && remote.following.length > 0) {
-          const followMap = new Map();
-          for (const f of remote.following) {
-            if (f && (f.key || f.name)) followMap.set(f.key || f.name, f);
+          const mergedFollowing = dedupeFollowingList([...remote.following, ...state.following]);
+          if (mergedFollowing.length > dedupeFollowingList(remote.following).length) {
+            modified = true;
           }
-          for (const f of state.following) {
-            const k = f && (f.key || f.name);
-            if (k && !followMap.has(k)) {
-              followMap.set(k, f);
-              modified = true;
-            }
-          }
-          state.following = Array.from(followMap.values());
+          state.following = mergedFollowing;
           save("aura.following", state.following);
+          restoredAny = true;
         } else if (state.following.length > 0) {
           modified = true;
+        }
+
+        // 4. Recents merge
+        if (Array.isArray(remote.recents) && remote.recents.length > 0) {
+          const recMap = new Map();
+          for (const t of state.recents) {
+            if (t && t.id) recMap.set(t.id, t);
+          }
+          for (const t of remote.recents) {
+            if (t && t.id && !recMap.has(t.id)) recMap.set(t.id, t);
+          }
+          state.recents = Array.from(recMap.values()).slice(0, 200);
+          save("aura.recents", state.recents);
+          restoredAny = true;
+        } else if (state.recents.length > 0) {
+          modified = true;
+        }
+
+        // 5. Taste preferences merge
+        if (hasRemoteTaste || remoteTaste.country) {
+          const mergeArr = (a, b) => [...new Set([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])])];
+          state.prefs.tasteGenres = mergeArr(remoteTaste.tasteGenres, state.prefs.tasteGenres);
+          state.prefs.tasteMoods = mergeArr(remoteTaste.tasteMoods, state.prefs.tasteMoods);
+          state.prefs.tasteEras = mergeArr(remoteTaste.tasteEras, state.prefs.tasteEras);
+          state.prefs.tasteStyles = mergeArr(remoteTaste.tasteStyles, state.prefs.tasteStyles);
+          state.prefs.tasteArtists = mergeArr(remoteTaste.tasteArtists, state.prefs.tasteArtists);
+          if (remoteTaste.country && !state.prefs.countryChosen) {
+            state.prefs.country = remoteTaste.country;
+            if (remoteTaste.countryChosen) state.prefs.countryChosen = true;
+          }
+          restoredAny = true;
+        }
+
+        // 6. Returning ("old") user handling: skip onboarding & start using app directly!
+        const pendingOnbAuth = (() => {
+          try { return sessionStorage.getItem("aura.onb_pending_auth") === "1"; } catch { return false; }
+        })();
+        try { sessionStorage.removeItem("aura.onb_pending_auth"); } catch {}
+
+        if (isReturningUser) {
+          const wasUnonboarded = !localStorage.getItem("aura.onboarded") || !state.prefs.onboarded || pendingOnbAuth;
+          localStorage.setItem("aura.onboarded", "1");
+          state.prefs.onboarded = true;
+          savePrefs();
+          const onbOverlay = document.getElementById("tasteOnboardingOverlay");
+          if (onbOverlay) {
+            window.__refreshTasteOnboarding = null;
+            onbOverlay.remove();
+          }
+          if (wasUnonboarded || forcePull || restoredAny) {
+            if (wasUnonboarded) {
+              toast("Welcome back! Your saved library and taste have been restored.", true, "success");
+            }
+            loadHome(true);
+            loadTasteRecommendations(true);
+            loadForYou();
+            loadDiscoveryMix(true);
+          }
+        } else {
+          // Brand-new Google user who has NOT used Muchi before:
+          // Keep them in the onboarding flow so they can pick their taste preferences.
+          if (typeof window.__refreshTasteOnboarding === "function") {
+            window.__refreshTasteOnboarding();
+          } else if (!localStorage.getItem("aura.onboarded") && !state.prefs.onboarded) {
+            openTasteOnboarding(false);
+          }
         }
 
         if (modified) {
           scheduleUserLibraryPush();
         }
-        if (state.view === "library") render();
+        render();
       }
     } catch {} finally {
       isSyncingLibrary = false;
@@ -1501,18 +1658,56 @@
   }
   function artistKey(t) {
     if (!t) return "";
+    if (typeof t === "string") {
+      const clean = t.replace(/^(name:|audius:)/i, "").trim().toLowerCase();
+      return clean ? `name:${clean}` : "";
+    }
     const h = audiusHandle(t);
     if (h) return `audius:${h.toLowerCase()}`;
-    const n = artistName(t).toLowerCase();
+    const n = String(artistName(t) || t.name || "").toLowerCase().trim();
     return n ? `name:${n}` : "";
   }
   function isFollowing(t) {
+    if (!t) return false;
     const k = artistKey(t);
-    return !!k && state.following.some((f) => f.key === k);
+    const targetName = (typeof t === "string" ? t : String(artistName(t) || t.name || ""))
+      .replace(/^(name:|audius:)/i, "")
+      .toLowerCase()
+      .trim();
+    return (state.following || []).some((f) => {
+      if (!f) return false;
+      const fk = String(f.key || "").toLowerCase().trim();
+      const fn = String(f.name || fk.replace(/^(name:|audius:)/i, "")).toLowerCase().trim();
+      return (k && fk === k) || (targetName && (fn === targetName || fk === targetName || fk === `name:${targetName}`));
+    });
   }
-  function saveFollowing() {
+  function saveFollowing(opts) {
+    state.following = dedupeFollowingList(state.following);
     save("aura.following", state.following);
-    scheduleUserLibraryPush();
+    scheduleUserLibraryPush(opts);
+  }
+  function unfollowArtistByKeyOrName(keyOrName) {
+    const raw = String(keyOrName || "").trim();
+    if (!raw) return "";
+    const targetLower = raw.toLowerCase();
+    const targetName = targetLower.replace(/^(name:|audius:)/i, "").trim();
+    let removedName = "";
+    state.following = (state.following || []).filter((f) => {
+      if (!f) return false;
+      const fk = String(f.key || "").toLowerCase().trim();
+      const fn = String(f.name || "").toLowerCase().trim();
+      const match = fk === targetLower || fn === targetName || fk.replace(/^(name:|audius:)/i, "") === targetName;
+      if (match && !removedName) removedName = f.name || raw;
+      return !match;
+    });
+    if (Array.isArray(state.prefs.tasteArtists)) {
+      state.prefs.tasteArtists = state.prefs.tasteArtists.filter(
+        (a) => String(a || "").toLowerCase().trim() !== targetName
+      );
+      savePrefs();
+    }
+    saveFollowing({ replaceFollowing: true });
+    return removedName || raw.replace(/^(name:|audius:)/i, "");
   }
 
   function toggleFollow(track) {
@@ -1521,23 +1716,23 @@
       return;
     }
     const key = artistKey(track);
-    if (!key) return;
+    const name = artistName(track) || track.name || "";
+    if (!key || !name) return;
     if (isFollowing(track)) {
-      state.following = state.following.filter((f) => f.key !== key);
-      saveFollowing();
-      toast(`Unfollowed ${artistName(track)}`, true, "success");
+      const unfollowed = unfollowArtistByKeyOrName(key || name);
+      toast(`Unfollowed ${unfollowed || name}`, true, "success");
     } else {
       state.following.unshift({
         key,
-        name: artistName(track),
-        source: track.source,
+        name,
+        source: track.source || "catalog",
         handle: audiusHandle(track),
         artwork: artUrl(track),
-        lastId: track.id,
+        lastId: track.id || "",
         followedAt: Date.now(),
       });
       saveFollowing();
-      toast(`Following ${artistName(track)}`, true, "success");
+      toast(`Following ${name}`, true, "success");
       if (state.prefs.notifyFollows && "Notification" in window && Notification.permission === "default") {
         Notification.requestPermission().catch(() => {});
       }
@@ -1546,30 +1741,633 @@
     if (state.view === "library" || state.view === "settings" || state.artistPage) render();
   }
 
+  const ONBOARD_CORE_GENRES = [
+    { id: "pop", title: "Pop", sub: "Top hits & chart anthems", query: "pop hits official audio", color: "#ff4d6d" },
+    { id: "hiphop", title: "Hip-Hop & Rap", sub: "Trap, melodic rap & flows", query: "hip hop rap hits official audio", color: "#f72585" },
+    { id: "rnb", title: "R&B & Soul", sub: "Smooth vocals & late-night grooves", query: "rnb soul hits official audio", color: "#c77dff" },
+    { id: "rock", title: "Rock & Alternative", sub: "Guitar anthems & modern rock", query: "rock hits official audio", color: "#ef476f" },
+    { id: "dance", title: "Dance & Electronic", sub: "EDM, house & club energy", query: "edm dance hits official audio", color: "#4cc9f0" },
+    { id: "indie", title: "Indie & Bedroom Pop", sub: "Dreamy & alternative sounds", query: "indie pop alternative official audio", color: "#80ed99" },
+    { id: "lofi", title: "Lo-Fi & Chillhop", sub: "Cozy beats & instrumentals", query: "lofi chill beats songs", color: "#4361ee" },
+    { id: "throwback", title: "90s & 2000s Throwback", sub: "Timeless classics & nostalgia", query: "throwback 90s 2000s hits official audio", color: "#f4a261" },
+  ];
+
+  const ONBOARD_COUNTRY_GENRES = {
+    IN: [
+      { id: "bollywood", title: "Bollywood & Hindi", sub: "Romantic hits & chartbusters", query: "bollywood hindi hits official audio", color: "#ff9f1c" },
+      { id: "punjabi", title: "Punjabi", sub: "Bhangra, hip-hop & viral beats", query: "punjabi hits official audio", color: "#ffb703" },
+      { id: "tamil", title: "Tamil & Kollywood", sub: "Kollywood melodies & hits", query: "tamil kollywood hits official audio", color: "#fb8500" },
+      { id: "telugu", title: "Telugu & Tollywood", sub: "Tollywood chartbusters", query: "telugu tollywood hits official audio", color: "#ff6b35" },
+      { id: "indie_in", title: "Indian Indie", sub: "Fresh independent Indian artists", query: "indian indie songs official audio", color: "#06d6a0" },
+    ],
+    PK: [
+      { id: "pak_pop", title: "Pakistani Pop & OST", sub: "Coke Studio & chart hits", query: "pakistani pop coke studio official audio", color: "#22c55e" },
+      { id: "urdu_rap", title: "Urdu Hip-Hop", sub: "Pakistani rap & new wave", query: "urdu rap pakistani hip hop official audio", color: "#f72585" },
+      { id: "qawwali", title: "Sufi & Qawwali", sub: "Soulful classics & fusion", query: "sufi qawwali pakistani songs official", color: "#a78bfa" },
+      { id: "punjabi", title: "Punjabi", sub: "Punjabi hits & beats", query: "punjabi hits official audio", color: "#ffb703" },
+    ],
+    BD: [
+      { id: "bangla_pop", title: "Bangla Pop & Hits", sub: "Modern Bangladeshi chart toppers", query: "bangla pop hits new songs official", color: "#22c55e" },
+      { id: "bangla_rock", title: "Bangla Rock & Band", sub: "Legendary Bangladeshi bands", query: "bangla rock bands warfaze artcell official", color: "#ef476f" },
+      { id: "bangla_indie", title: "Bangla Indie & Folk", sub: "Coke Studio Bangla & indie", query: "coke studio bangla indie songs official", color: "#ffb703" },
+    ],
+    PH: [
+      { id: "opm_pop", title: "OPM Pop & Hits", sub: "Top Filipino chartbusters", query: "opm pop hits philippines official audio", color: "#ff9f1c" },
+      { id: "pinoy_rock", title: "Pinoy Rock & Bands", sub: "OPM bands & guitar anthems", query: "pinoy rock opm bands hits official audio", color: "#ef476f" },
+      { id: "pinoy_indie", title: "Pinoy Indie & Alt", sub: "Modern Filipino indie bands", query: "pinoy indie opm alternative songs official", color: "#06d6a0" },
+      { id: "pinoy_hiphop", title: "Pinoy Hip-Hop & R&B", sub: "Filipino rap & smooth R&B", query: "pinoy hip hop rnb hits official audio", color: "#b5179e" },
+      { id: "hugot", title: "Hugot & Acoustic", sub: "Heartfelt OPM love ballads", query: "opm hugot love songs acoustic official", color: "#ff758f" },
+    ],
+    HK: [
+      { id: "cantopop", title: "Cantopop (廣東歌)", sub: "Hong Kong pop hits & classics", query: "hong kong cantopop hits official audio", color: "#ff9f1c" },
+      { id: "hk_rock", title: "HK Rock & Bands", sub: "Beyond, Dear Jane, Supper Moment", query: "hong kong rock band cantopop official", color: "#ef476f" },
+      { id: "hk_indie", title: "Hong Kong Indie", sub: "Alternative & indie HK scene", query: "hong kong indie cantopop alternative official", color: "#06d6a0" },
+      { id: "mandopop", title: "Mandopop (國語流行)", sub: "Mandarin pop chart hits", query: "mandopop hits official audio", color: "#b5179e" },
+    ],
+    CN: [
+      { id: "mandopop", title: "Mandopop (华语流行)", sub: "Top Mandarin pop & ballads", query: "mandopop chinese pop hits official audio", color: "#ff9f1c" },
+      { id: "cn_rock", title: "Chinese Rock & Band", sub: "Rock bands & live anthems", query: "chinese rock bands hits official audio", color: "#ef476f" },
+      { id: "cn_rap", title: "Chinese Hip-Hop", sub: "C-Rap & urban beats", query: "chinese rap hip hop hits official", color: "#b5179e" },
+      { id: "cn_indie", title: "Chinese Indie & Folk", sub: "Folk & indie singer-songwriters", query: "chinese indie folk songs official audio", color: "#06d6a0" },
+    ],
+    KR: [
+      { id: "kpop", title: "K-Pop", sub: "Korean pop icons & chart hits", query: "kpop top hits official audio", color: "#b5179e" },
+      { id: "krnb", title: "K-R&B & K-Hip-Hop", sub: "Korean R&B grooves & rap", query: "krnb khiphop hits official audio", color: "#c77dff" },
+      { id: "krock", title: "Korean Band & Rock", sub: "DAY6, Wave to Earth & K-Rock", query: "korean rock band krock songs official", color: "#ef476f" },
+      { id: "kindie", title: "K-Indie & Ballads", sub: "Korean indie & K-Drama OSTs", query: "korean indie kdrama ost songs official", color: "#06d6a0" },
+    ],
+    JP: [
+      { id: "jpop", title: "J-Pop", sub: "Japan Hot 100 & top hits", query: "jpop top hits official audio", color: "#ff4d6d" },
+      { id: "jrock", title: "J-Rock & Bands", sub: "Japanese rock bands & anthems", query: "jrock japanese rock bands official", color: "#ef476f" },
+      { id: "anime", title: "Anime & Vocaloid", sub: "Anime themes & Vocaloid hits", query: "anime openings hits official audio", color: "#4cc9f0" },
+      { id: "citypop", title: "City Pop & J-Indie", sub: "Retro grooves & Japanese indie", query: "japanese city pop indie official", color: "#ffb703" },
+    ],
+    TH: [
+      { id: "tpop", title: "T-Pop", sub: "Thai pop hits & chart toppers", query: "tpop thai pop hits official", color: "#ff9f1c" },
+      { id: "thai_rock", title: "Thai Rock & Bands", sub: "Thai bands & guitar hits", query: "thai rock bands songs official", color: "#ef476f" },
+      { id: "thai_indie", title: "Thai Indie & Chill", sub: "Indie pop & chill Thai vibes", query: "thai indie songs official", color: "#06d6a0" },
+    ],
+    VN: [
+      { id: "vpop", title: "V-Pop", sub: "Vietnamese pop chartbusters", query: "vpop top hits official", color: "#ff9f1c" },
+      { id: "rap_viet", title: "Rap Việt & Hip-Hop", sub: "Vietnamese rap & urban hits", query: "rap viet hip hop official", color: "#b5179e" },
+      { id: "viet_indie", title: "Viet Indie & Ballad", sub: "Indie bands & acoustic ballads", query: "viet indie ballad songs official", color: "#06d6a0" },
+    ],
+    ID: [
+      { id: "indo_pop", title: "Lagu Pop Indonesia", sub: "Indonesian pop chart hits", query: "lagu pop indonesia hits official", color: "#ff9f1c" },
+      { id: "indo_rock", title: "Band Rock Indonesia", sub: "Indonesian rock & pop bands", query: "band rock indonesia hits official", color: "#ef476f" },
+      { id: "indo_indie", title: "Indie Indonesia", sub: "Senja, folk & Indonesian indie", query: "indie indonesia songs official", color: "#06d6a0" },
+    ],
+    MY: [
+      { id: "my_pop", title: "Malaysia Pop & Melayu", sub: "Lagu Melayu & Malaysian hits", query: "malaysia pop lagu baru official", color: "#ff9f1c" },
+      { id: "my_rock", title: "Malaysia Rock & Indie", sub: "Local bands & indie scene", query: "malaysia rock indie bands official", color: "#06d6a0" },
+      { id: "mandopop", title: "Mandopop", sub: "Mandarin pop hits", query: "mandopop hits official audio", color: "#b5179e" },
+    ],
+    SG: [
+      { id: "sg_pop", title: "Singapore Pop & Hits", sub: "Local & regional chart toppers", query: "singapore top hits pop official", color: "#ff9f1c" },
+      { id: "mandopop", title: "Mandopop", sub: "JJ Lin, Stefanie Sun & hits", query: "mandopop hits official audio", color: "#b5179e" },
+      { id: "sg_indie", title: "Singapore Indie", sub: "Homegrown indie & alternative", query: "singapore indie songs official", color: "#06d6a0" },
+    ],
+    NG: [
+      { id: "afrobeats", title: "Afrobeats", sub: "Naija rhythms & global hits", query: "afrobeats top hits nigeria official", color: "#06d6a0" },
+      { id: "afro_alte", title: "Afro-Fusion & Alte", sub: "Soulful Afro-R&B & Alte scene", query: "afro rnb alte nigeria official", color: "#ffb703" },
+      { id: "amapiano", title: "Amapiano", sub: "Log drum grooves & club heat", query: "amapiano hits official audio", color: "#b5179e" },
+    ],
+    ZA: [
+      { id: "amapiano", title: "Amapiano", sub: "South African log drum anthems", query: "amapiano south africa hits official", color: "#06d6a0" },
+      { id: "za_house", title: "Afro Tech & SA House", sub: "Deep house & SA dance hits", query: "south africa afro house hits official", color: "#4cc9f0" },
+      { id: "afrobeats", title: "Afrobeats & Pop", sub: "African pop & chart hits", query: "afrobeats pop south africa official", color: "#ffb703" },
+    ],
+    BR: [
+      { id: "br_pop", title: "Pop Brasil & Funk", sub: "Top Brasil & baile funk", query: "pop brasil funk hits official", color: "#06d6a0" },
+      { id: "sertanejo", title: "Sertanejo & Pagode", sub: "Brazilian chart favorites", query: "sertanejo pagode brasil official", color: "#ffb703" },
+      { id: "br_rock", title: "Rock & Indie Brasil", sub: "Rock nacional & MPB", query: "rock nacional mpb brasil official", color: "#ef476f" },
+    ],
+    MX: [
+      { id: "mex_reg", title: "Regional Mexicano", sub: "Corridos tumbados & banda", query: "regional mexicano corridos hits official", color: "#ff9f1c" },
+      { id: "reggaeton", title: "Reggaeton & Urbano", sub: "Perreo & Latin club hits", query: "reggaeton urbano latino hits official", color: "#f72585" },
+      { id: "rock_esp", title: "Rock & Indie en Español", sub: "Mexican rock & indie bands", query: "rock indie en espanol mexico official", color: "#06d6a0" },
+    ],
+    ES: [
+      { id: "es_pop", title: "Pop Español", sub: "Top hits from Spain", query: "pop espanol exitos nuevos official", color: "#ff9f1c" },
+      { id: "reggaeton", title: "Reggaeton & Urbano", sub: "Latin urban & Spanish trap", query: "reggaeton trap espana hits official", color: "#f72585" },
+      { id: "es_indie", title: "Indie & Rock Español", sub: "Spanish indie & rock bands", query: "indie rock espanol hits official", color: "#06d6a0" },
+    ],
+    AE: [
+      { id: "arabic_pop", title: "Arabic Pop", sub: "Top Arabic chart hits", query: "arabic pop top hits official", color: "#ff9f1c" },
+      { id: "khaleeji", title: "Khaleeji Hits", sub: "Gulf rhythms & melodies", query: "khaleeji hits official audio", color: "#06d6a0" },
+      { id: "arabic_indie", title: "Arabic Indie & Rock", sub: "Alternative Arabic bands", query: "arabic indie rock cairokee official", color: "#b5179e" },
+    ],
+    SA: [
+      { id: "khaleeji", title: "Khaleeji Hits", sub: "Saudi & Gulf chartbusters", query: "khaleeji hits saudi official audio", color: "#06d6a0" },
+      { id: "arabic_pop", title: "Arabic Pop", sub: "Pan-Arab pop favorites", query: "arabic pop top hits official", color: "#ff9f1c" },
+      { id: "arabic_rap", title: "Arabic Hip-Hop", sub: "Saudi & Arab rap scene", query: "arabic hip hop rap official", color: "#b5179e" },
+    ],
+    EG: [
+      { id: "egypt_pop", title: "Egyptian Pop", sub: "Aghani Gadida & chart hits", query: "egyptian pop hits official", color: "#ff9f1c" },
+      { id: "mahraganat", title: "Mahraganat & Rap", sub: "Egyptian street beats & trap", query: "egyptian rap mahraganat wegz official", color: "#f72585" },
+      { id: "egypt_indie", title: "Egyptian Rock & Indie", sub: "Cairokee & indie bands", query: "egyptian indie rock cairokee official", color: "#06d6a0" },
+    ],
+    TR: [
+      { id: "tr_pop", title: "Türkçe Pop", sub: "Turkish pop chartbusters", query: "turkce pop hits official", color: "#ff9f1c" },
+      { id: "tr_rock", title: "Türkçe Rock & Indie", sub: "Anatolian & modern Turkish rock", query: "turkce rock alternatif hits official", color: "#ef476f" },
+      { id: "tr_rap", title: "Türkçe Rap", sub: "Turkish hip-hop & trap", query: "turkce rap hip hop official", color: "#b5179e" },
+    ],
+    DE: [
+      { id: "de_pop", title: "Deutschpop", sub: "German pop chart toppers", query: "deutschpop deutsche charts official", color: "#ff9f1c" },
+      { id: "deutschrap", title: "Deutschrap", sub: "German hip-hop & trap", query: "deutschrap hits official", color: "#b5179e" },
+      { id: "de_indie", title: "German Rock & Indie", sub: "Indie & rock from Germany", query: "german indie rock hits official", color: "#06d6a0" },
+    ],
+    FR: [
+      { id: "fr_pop", title: "Pop & Variété Française", sub: "French pop & chanson", query: "pop francaise hits officiels", color: "#ff9f1c" },
+      { id: "fr_rap", title: "Rap Français", sub: "French hip-hop & urban hits", query: "rap francais hits officiels", color: "#b5179e" },
+      { id: "french_touch", title: "French Touch & Indie", sub: "French electro & indie pop", query: "french touch indie pop official", color: "#4cc9f0" },
+    ],
+    IT: [
+      { id: "it_pop", title: "Pop Italiano", sub: "Sanremo & Italian chart hits", query: "pop italiano classifica singoli", color: "#ff9f1c" },
+      { id: "it_rap", title: "Rap & Trap Italiano", sub: "Italian urban & hip-hop", query: "rap trap italiano hits", color: "#b5179e" },
+      { id: "it_indie", title: "Rock & Indie Italiano", sub: "Måneskin & indie italiano", query: "rock indie italiano hits", color: "#06d6a0" },
+    ],
+    GB: [
+      { id: "uk_pop", title: "Britpop & UK Pop", sub: "Official UK Top 40 & chart icons", query: "uk pop hits dua lipa ed sheeran raye official", color: "#ff4d6d" },
+      { id: "uk_drill", title: "UK Drill, Grime & Rap", sub: "Central Cee, Dave, Stormzy & UK rap", query: "uk drill grime rap hits official", color: "#b5179e" },
+      { id: "uk_indie", title: "Britrock & UK Indie", sub: "Arctic Monkeys, Oasis, The 1975", query: "uk indie rock bands hits official", color: "#06d6a0" },
+      { id: "uk_house", title: "UK House, Garage & DnB", sub: "Fred again.., Calvin Harris & club bass", query: "uk house garage dance hits official", color: "#4cc9f0" },
+    ],
+    US: [
+      { id: "us_billboard", title: "US Hot 100 & Pop", sub: "Billboard chart toppers & US pop", query: "billboard hot 100 top hits official audio", color: "#ff4d6d" },
+      { id: "country", title: "Country & Americana", sub: "Morgan Wallen, Zach Bryan & Nashville", query: "country hits billboard official audio", color: "#ff9f1c" },
+      { id: "us_hiphop", title: "US Hip-Hop & Trap", sub: "Atlanta, West Coast & melodic rap", query: "us hip hop rap hits official audio", color: "#f72585" },
+      { id: "latin", title: "Latin & Reggaeton", sub: "Global Latin chartbusters", query: "latin reggaeton hits official audio", color: "#ffb703" },
+    ],
+    CA: [
+      { id: "ca_pop", title: "Canadian Pop & R&B", sub: "The Weeknd, Tate McRae & Toronto R&B", query: "canadian pop rnb hits the weeknd tate mcrae official", color: "#ff4d6d" },
+      { id: "ca_indie", title: "Canadian Indie & Alt", sub: "Arcade Fire, Alvvays, Men I Trust", query: "canadian indie rock alternative songs official", color: "#06d6a0" },
+      { id: "ca_rock", title: "Canadian Rock Classics", sub: "Sum 41, Billy Talent, The Tragically Hip", query: "canadian rock bands hits official", color: "#ef476f" },
+      { id: "franco_ca", title: "Franco-Pop & Québec", sub: "Charlotte Cardin & French-Canadian hits", query: "chanson quebec franco pop hits official", color: "#4cc9f0" },
+    ],
+    AU: [
+      { id: "au_pop", title: "Aussie Pop & ARIA Hits", sub: "Troye Sivan, The Kid LAROI & Sia", query: "australian pop hits aria chart official", color: "#ff9f1c" },
+      { id: "au_indie", title: "Aussie Indie & Psych", sub: "Tame Impala, Spacey Jane, Ocean Alley", query: "australian indie rock triple j hottest 100 official", color: "#06d6a0" },
+      { id: "au_dance", title: "Aussie Electronic & Club", sub: "RÜFÜS DU SOL, Dom Dolla, Flume, Fisher", query: "australian electronic dance rufus du sol dom dolla official", color: "#4cc9f0" },
+      { id: "au_rock", title: "Aussie Rock & Pub Anthems", sub: "AC/DC, INXS, Gang of Youths", query: "australian rock bands hits official", color: "#ef476f" },
+    ],
+    NZ: [
+      { id: "nz_pop", title: "Aotearoa Pop & Roots", sub: "SIX60, L.A.B, Lorde & BENEE", query: "new zealand pop hits six60 l.a.b lorde official", color: "#06d6a0" },
+      { id: "nz_indie", title: "Kiwi Indie & Alternative", sub: "The Beths, Unknown Mortal Orchestra", query: "new zealand indie rock songs official", color: "#4cc9f0" },
+      { id: "nz_rnb", title: "NZ Soul, Reggae & R&B", sub: "Stan Walker, Fat Freddy's Drop, Katchafire", query: "new zealand roots reggae soul hits official", color: "#ffb703" },
+    ],
+    NL: [
+      { id: "nl_pop", title: "Nederpop & Top 40", sub: "Roxy Dekker, Flemming, Suzan & Freek", query: "nederpop nederlandse top 40 hits official", color: "#ff9f1c" },
+      { id: "nl_edm", title: "Dutch EDM & Festival", sub: "Martin Garrix, Tiësto, Armin van Buuren", query: "dutch edm dance martin garrix tiesto official", color: "#4cc9f0" },
+      { id: "nederhop", title: "Nederhop & Dutch Urban", sub: "Frenna, Boef, Ronnie Flex & hip-hop", query: "nederhop dutch hip hop hits official", color: "#b5179e" },
+      { id: "nl_indie", title: "Dutch Rock & Indie", sub: "Son Mieux, Kensington, Within Temptation", query: "dutch rock indie bands hits official", color: "#06d6a0" },
+    ],
+    SE: [
+      { id: "se_pop", title: "Svensk Pop & Topplistan", sub: "Zara Larsson, Benjamin Ingrosso, Molly Sandén", query: "svensk pop sverigetopplistan hits official", color: "#4cc9f0" },
+      { id: "se_house", title: "Swedish House & Dance", sub: "Avicii, Swedish House Mafia, Alesso", query: "swedish house edm avicii alesso official", color: "#06d6a0" },
+      { id: "se_hiphop", title: "Svensk Hip-Hop & Rap", sub: "Hov1, Bolaget, C.Gambino", query: "svensk hip hop rap hits official", color: "#b5179e" },
+      { id: "se_indie", title: "Swedish Indie & Rock", sub: "The Hives, Lykke Li, First Aid Kit", query: "swedish indie rock pop songs official", color: "#ff9f1c" },
+    ],
+  };
+
+  function getOnboardGenresForCountry(countryCode) {
+    const code = String(countryCode || (state.prefs && state.prefs.country) || "US").toUpperCase();
+    const regional = ONBOARD_COUNTRY_GENRES[code] || ONBOARD_COUNTRY_GENRES.US || [];
+    const core = ONBOARD_CORE_GENRES.map((g) => ({
+      ...g,
+      query: shelfQueryForCountryClient(g.id, code, g.query),
+    }));
+    // Place regional options right at the top alongside core genres so users immediately see their country's music varieties
+    const seen = new Set();
+    const out = [];
+    for (const item of [...regional, ...core]) {
+      if (!item || seen.has(item.id)) continue;
+      seen.add(item.id);
+      out.push(item);
+    }
+    return out;
+  }
+
+  function findOnboardGenreById(id, countryCode) {
+    const list = getOnboardGenresForCountry(countryCode);
+    const hit = list.find((g) => g.id === id);
+    if (hit) return hit;
+    for (const arr of Object.values(ONBOARD_COUNTRY_GENRES)) {
+      const m = arr.find((g) => g.id === id);
+      if (m) return m;
+    }
+    return ONBOARD_CORE_GENRES.find((g) => g.id === id) || null;
+  }
+
+  const ONBOARD_MOODS = [
+    { id: "chill", title: "Chill & Relax", sub: "Easy listening & unwind", query: "chill vibes songs official audio", color: "#4cc9f0" },
+    { id: "latenight", title: "Late Night Drive", sub: "Midnight synth & city lights", query: "late night drive songs official audio", color: "#7209b7" },
+    { id: "workout", title: "Workout & Gym", sub: "High-tempo pump & energy", query: "workout motivation songs official audio", color: "#ff4d6d" },
+    { id: "focus", title: "Focus & Study", sub: "Deep concentration & flow", query: "focus study music lofi", color: "#4361ee" },
+    { id: "party", title: "Party & Club", sub: "Turn up the energy", query: "party dance club hits official audio", color: "#f72585" },
+    { id: "morning", title: "Feel-Good Morning", sub: "Upbeat sunshine & good vibes", query: "morning feel good songs official", color: "#ffb703" },
+    { id: "romance", title: "Romance & Love", sub: "Warm acoustic & love songs", query: "romantic love songs official audio", color: "#ff758f" },
+    { id: "sad", title: "Heartbreak & Deep", sub: "Emotional ballads & late thoughts", query: "sad emotional songs official audio", color: "#4895ef" },
+    { id: "roadtrip", title: "Road Trip Singalong", sub: "Anthems everyone knows", query: "road trip singalong hits official audio", color: "#f4a261" },
+    { id: "gaming", title: "Gaming & Phonk", sub: "Bass-heavy phonk & electronic", query: "gaming phonk edm songs", color: "#06d6a0" },
+    { id: "acoustic", title: "Acoustic & Unplugged", sub: "Stripped-back guitars & vocals", query: "acoustic unplugged songs official audio", color: "#80ed99" },
+    { id: "rainy", title: "Rainy Day & Cozy", sub: "Warm coffeehouse melodies", query: "cozy rainy day indie acoustic songs", color: "#c77dff" },
+  ];
+
+  const ONBOARD_ERAS = [
+    { id: "new_2025", title: "2024–2026 New & Trending", sub: "Fresh releases & viral chartbusters", query: "new trending hits 2025 2026 official audio", color: "#ff4d6d" },
+    { id: "2010s", title: "2010s Anthems", sub: "2010–2019 pop, EDM & hip-hop classics", query: "2010s top hits anthems official audio", color: "#4cc9f0" },
+    { id: "2000s", title: "2000s Throwbacks", sub: "Y2K pop, R&B & rock nostalgia", query: "2000s hits throwback songs official audio", color: "#f72585" },
+    { id: "90s", title: "90s Classics", sub: "Golden era 90s hits & bands", query: "90s classic hits songs official audio", color: "#ffb703" },
+    { id: "80s", title: "80s & Retro Gold", sub: "Synthpop, classic rock & legends", query: "80s greatest hits retro official audio", color: "#c77dff" },
+    { id: "timeless", title: "All Eras Mix", sub: "Blend brand-new songs with classics", query: "all time greatest hits mix official audio", color: "#06d6a0" },
+  ];
+
+  function getOnboardStylesForCountry(countryCode) {
+    const code = String(countryCode || (state.prefs && state.prefs.country) || "US").toUpperCase();
+    const cName = countryName(code);
+    return [
+      { id: "mix_local_en", title: `${cName} + International Mix`, sub: `Blend ${cName} favorites with global hits`, query: `${cName} top hits official audio`, color: "#06d6a0" },
+      { id: "mostly_local", title: `Mostly ${cName} Music`, sub: `Prioritize local artists & bands from ${cName}`, query: `${cName} popular songs official audio`, color: "#ff9f1c" },
+      { id: "mostly_english", title: "Mostly International English", sub: "Global pop, rock, R&B & chart hits", query: "global english top hits official audio", color: "#4cc9f0" },
+      { id: "vocal_melodic", title: "Melodic & Vocal-Focused", sub: "Rich vocals, hooks & storytelling", query: "melodic vocal pop rnb songs official audio", color: "#c77dff" },
+      { id: "upbeat_energy", title: "Upbeat & High-Energy", sub: "Fast-paced anthems & feel-good beats", query: "upbeat energetic hits songs official audio", color: "#ff4d6d" },
+      { id: "discovered_gems", title: "Hidden Gems & Indie", sub: "Rising artists & underrated tracks", query: "underrated indie pop hidden gems songs", color: "#80ed99" },
+    ];
+  }
+
+  const ONBOARD_GLOBAL_ARTISTS = [
+    { name: "The Weeknd", tag: "Pop · R&B", genres: ["pop", "rnb", "dance"] },
+    { name: "Taylor Swift", tag: "Pop · Indie", genres: ["pop", "indie"] },
+    { name: "Bruno Mars", tag: "Pop · R&B", genres: ["pop", "rnb", "throwback"] },
+    { name: "Billie Eilish", tag: "Pop · Alternative", genres: ["pop", "indie"] },
+    { name: "Coldplay", tag: "Rock · Pop", genres: ["rock", "pop", "indie"] },
+    { name: "Ariana Grande", tag: "Pop · R&B", genres: ["pop", "rnb"] },
+    { name: "Drake", tag: "Hip-Hop · R&B", genres: ["hiphop", "rnb"] },
+    { name: "SZA", tag: "R&B · Soul", genres: ["rnb", "pop"] },
+    { name: "Dua Lipa", tag: "Pop · Dance", genres: ["pop", "dance"] },
+    { name: "Ed Sheeran", tag: "Pop · Acoustic", genres: ["pop"] },
+    { name: "Kendrick Lamar", tag: "Hip-Hop", genres: ["hiphop"] },
+    { name: "Post Malone", tag: "Pop · Hip-Hop", genres: ["pop", "hiphop", "rock"] },
+    { name: "Linkin Park", tag: "Rock", genres: ["rock", "throwback"] },
+    { name: "Lana Del Rey", tag: "Indie · Alternative", genres: ["indie", "pop"] },
+    { name: "Sabrina Carpenter", tag: "Pop", genres: ["pop"] },
+    { name: "Justin Bieber", tag: "Pop · R&B", genres: ["pop", "rnb"] },
+    { name: "Travis Scott", tag: "Hip-Hop", genres: ["hiphop"] },
+    { name: "Eminem", tag: "Hip-Hop", genres: ["hiphop", "throwback"] },
+    { name: "Calvin Harris", tag: "Dance · EDM", genres: ["dance", "pop"] },
+    { name: "Rihanna", tag: "Pop · R&B", genres: ["pop", "rnb", "throwback"] },
+  ];
+
+  const ONBOARD_ARTISTS_BY_COUNTRY = {
+    IN: [
+      { name: "Arijit Singh", tag: "India · Bollywood", genres: ["bollywood", "pop"], local: true },
+      { name: "Diljit Dosanjh", tag: "India · Punjabi", genres: ["punjabi", "bollywood", "pop"], local: true },
+      { name: "Karan Aujla", tag: "India · Punjabi", genres: ["punjabi", "hiphop"], local: true },
+      { name: "Shreya Ghoshal", tag: "India · Melody", genres: ["bollywood", "tamil", "telugu"], local: true },
+      { name: "A.R. Rahman", tag: "India · Legend", genres: ["bollywood", "tamil"], local: true },
+      { name: "Anuv Jain", tag: "India · Indie", genres: ["indie_in", "indie"], local: true },
+      { name: "Pritam", tag: "India · Bollywood", genres: ["bollywood", "pop"], local: true },
+      { name: "AP Dhillon", tag: "India · Punjabi", genres: ["punjabi", "hiphop"], local: true },
+      { name: "The Local Train", tag: "India · Rock", genres: ["rock", "indie_in"], local: true },
+      { name: "Prateek Kuhad", tag: "India · Indie", genres: ["indie_in", "indie"], local: true },
+    ],
+    PK: [
+      { name: "Atif Aslam", tag: "Pakistan · Pop & Rock", genres: ["pak_pop", "pop", "rock"], local: true },
+      { name: "Young Stunners", tag: "Pakistan · Hip-Hop", genres: ["urdu_rap", "hiphop"], local: true },
+      { name: "Abdul Hannan", tag: "Pakistan · Indie Pop", genres: ["pak_pop", "indie"], local: true },
+      { name: "Nusrat Fateh Ali Khan", tag: "Pakistan · Qawwali", genres: ["qawwali"], local: true },
+      { name: "Hasan Raheem", tag: "Pakistan · R&B & Indie", genres: ["pak_pop", "rnb", "indie"], local: true },
+      { name: "Ali Zafar", tag: "Pakistan · Pop", genres: ["pak_pop", "pop"], local: true },
+    ],
+    BD: [
+      { name: "Arnob", tag: "Bangladesh · Indie", genres: ["bangla_indie", "indie"], local: true },
+      { name: "Artcell", tag: "Bangladesh · Rock", genres: ["bangla_rock", "rock"], local: true },
+      { name: "Warfaze", tag: "Bangladesh · Rock", genres: ["bangla_rock", "rock"], local: true },
+      { name: "Pritom Hasan", tag: "Bangladesh · Pop", genres: ["bangla_pop", "pop"], local: true },
+      { name: "Tahsan", tag: "Bangladesh · Pop", genres: ["bangla_pop", "pop"], local: true },
+      { name: "Habib Wahid", tag: "Bangladesh · Fusion", genres: ["bangla_pop", "dance"], local: true },
+    ],
+    PH: [
+      { name: "BINI", tag: "Philippines · P-Pop", genres: ["opm_pop", "pop", "dance"], local: true },
+      { name: "Ben&Ben", tag: "Philippines · Indie Folk", genres: ["pinoy_indie", "indie", "opm_pop"], local: true },
+      { name: "SB19", tag: "Philippines · P-Pop", genres: ["opm_pop", "pop", "dance"], local: true },
+      { name: "Zack Tabudlo", tag: "Philippines · OPM & R&B", genres: ["opm_pop", "rnb", "hugot"], local: true },
+      { name: "Arthur Nery", tag: "Philippines · R&B", genres: ["pinoy_hiphop", "rnb", "hugot"], local: true },
+      { name: "Cup of Joe", tag: "Philippines · Band", genres: ["pinoy_rock", "pinoy_indie", "opm_pop"], local: true },
+      { name: "TJ Monterde", tag: "Philippines · Acoustic", genres: ["hugot", "opm_pop"], local: true },
+      { name: "Eraserheads", tag: "Philippines · Pinoy Rock", genres: ["pinoy_rock", "rock", "throwback"], local: true },
+      { name: "IV of Spades", tag: "Philippines · Alt Rock", genres: ["pinoy_rock", "pinoy_indie", "rock"], local: true },
+      { name: "Lola Amour", tag: "Philippines · Indie Rock", genres: ["pinoy_indie", "pinoy_rock"], local: true },
+    ],
+    HK: [
+      { name: "Eason Chan", tag: "Hong Kong · Cantopop", genres: ["cantopop", "pop", "mandopop"], local: true },
+      { name: "Hins Cheung", tag: "Hong Kong · Cantopop", genres: ["cantopop", "pop"], local: true },
+      { name: "G.E.M.", tag: "Hong Kong · Pop & Rock", genres: ["cantopop", "mandopop", "pop"], local: true },
+      { name: "Beyond", tag: "Hong Kong · Rock Legend", genres: ["hk_rock", "rock", "cantopop"], local: true },
+      { name: "Dear Jane", tag: "Hong Kong · Pop Rock", genres: ["hk_rock", "rock", "cantopop"], local: true },
+      { name: "MIRROR", tag: "Hong Kong · Cantopop", genres: ["cantopop", "pop", "dance"], local: true },
+      { name: "Keung To", tag: "Hong Kong · Cantopop", genres: ["cantopop", "pop"], local: true },
+      { name: "Terence Lam", tag: "Hong Kong · Indie Pop", genres: ["hk_indie", "cantopop", "indie"], local: true },
+      { name: "Gareth.T", tag: "Hong Kong · R&B & Indie", genres: ["hk_indie", "rnb", "cantopop"], local: true },
+      { name: "Supper Moment", tag: "Hong Kong · Rock Band", genres: ["hk_rock", "rock"], local: true },
+    ],
+    CN: [
+      { name: "Jay Chou", tag: "Mandopop · Legend", genres: ["mandopop", "pop", "rnb"], local: true },
+      { name: "G.E.M.", tag: "Mandopop · Pop", genres: ["mandopop", "pop"], local: true },
+      { name: "Xue Zhiqian", tag: "Mandopop · Ballad", genres: ["mandopop", "pop"], local: true },
+      { name: "Mao Buyi", tag: "China · Folk & Pop", genres: ["cn_indie", "mandopop"], local: true },
+      { name: "Mayday", tag: "Mandopop · Rock Band", genres: ["cn_rock", "rock", "mandopop"], local: true },
+      { name: "Wang Leehom", tag: "Mandopop · R&B", genres: ["mandopop", "rnb"], local: true },
+    ],
+    KR: [
+      { name: "BTS", tag: "Korea · K-Pop", genres: ["kpop", "pop"], local: true },
+      { name: "BLACKPINK", tag: "Korea · K-Pop", genres: ["kpop", "pop", "dance"], local: true },
+      { name: "NewJeans", tag: "Korea · K-Pop", genres: ["kpop", "pop", "rnb"], local: true },
+      { name: "IU", tag: "Korea · K-Pop & Indie", genres: ["kpop", "kindie", "pop"], local: true },
+      { name: "DAY6", tag: "Korea · K-Rock Band", genres: ["krock", "rock"], local: true },
+      { name: "wave to earth", tag: "Korea · K-Indie", genres: ["kindie", "indie", "krock"], local: true },
+      { name: "SEVENTEEN", tag: "Korea · K-Pop", genres: ["kpop", "pop"], local: true },
+      { name: "aespa", tag: "Korea · K-Pop", genres: ["kpop", "dance"], local: true },
+    ],
+    JP: [
+      { name: "YOASOBI", tag: "Japan · J-Pop", genres: ["jpop", "anime", "pop"], local: true },
+      { name: "Fujii Kaze", tag: "Japan · J-Pop & R&B", genres: ["jpop", "citypop", "rnb"], local: true },
+      { name: "Kenshi Yonezu", tag: "Japan · J-Pop & Rock", genres: ["jpop", "jrock", "anime"], local: true },
+      { name: "Mrs. GREEN APPLE", tag: "Japan · J-Rock", genres: ["jrock", "jpop", "rock"], local: true },
+      { name: "King Gnu", tag: "Japan · Alternative Rock", genres: ["jrock", "rock"], local: true },
+      { name: "Vaundy", tag: "Japan · J-Indie & Rock", genres: ["citypop", "jrock", "indie"], local: true },
+      { name: "Official HIGE DANdism", tag: "Japan · Pop Band", genres: ["jpop", "jrock"], local: true },
+      { name: "Ado", tag: "Japan · J-Pop & Anime", genres: ["jpop", "anime"], local: true },
+    ],
+    TH: [
+      { name: "Jeff Satur", tag: "Thailand · T-Pop & R&B", genres: ["tpop", "rnb", "pop"], local: true },
+      { name: "Three Man Down", tag: "Thailand · Pop Rock", genres: ["thai_rock", "rock", "tpop"], local: true },
+      { name: "Tilly Birds", tag: "Thailand · Alt Rock", genres: ["thai_rock", "thai_indie", "rock"], local: true },
+      { name: "Bowkylion", tag: "Thailand · T-Pop", genres: ["tpop", "pop"], local: true },
+      { name: "Billkin", tag: "Thailand · T-Pop & Soul", genres: ["tpop", "rnb"], local: true },
+      { name: "Bodyslam", tag: "Thailand · Rock Band", genres: ["thai_rock", "rock"], local: true },
+    ],
+    VN: [
+      { name: "Sơn Tùng M-TP", tag: "Vietnam · V-Pop", genres: ["vpop", "pop"], local: true },
+      { name: "HIEUTHUHAI", tag: "Vietnam · Rap Việt", genres: ["rap_viet", "hiphop"], local: true },
+      { name: "Đen Vâu", tag: "Vietnam · Rap & Indie", genres: ["rap_viet", "viet_indie"], local: true },
+      { name: "Vũ.", tag: "Vietnam · Indie Ballad", genres: ["viet_indie", "indie"], local: true },
+      { name: "tlinh", tag: "Vietnam · R&B & Rap", genres: ["rap_viet", "rnb", "vpop"], local: true },
+      { name: "Chillies", tag: "Vietnam · Indie Rock", genres: ["viet_indie", "rock"], local: true },
+    ],
+    ID: [
+      { name: "Tulus", tag: "Indonesia · Pop & Soul", genres: ["indo_pop", "pop", "rnb"], local: true },
+      { name: "Mahalini", tag: "Indonesia · Pop", genres: ["indo_pop", "pop"], local: true },
+      { name: "Sheila On 7", tag: "Indonesia · Pop Rock", genres: ["indo_rock", "rock"], local: true },
+      { name: "Hindia", tag: "Indonesia · Indie", genres: ["indo_indie", "indie"], local: true },
+      { name: "Bernadya", tag: "Indonesia · Indie Pop", genres: ["indo_pop", "indo_indie"], local: true },
+      { name: "Dewa 19", tag: "Indonesia · Rock Legend", genres: ["indo_rock", "rock"], local: true },
+    ],
+    MY: [
+      { name: "Siti Nurhaliza", tag: "Malaysia · Pop Legend", genres: ["my_pop", "pop"], local: true },
+      { name: "Yuna", tag: "Malaysia · R&B & Indie", genres: ["my_pop", "rnb", "indie"], local: true },
+      { name: "Insomniacks", tag: "Malaysia · Pop Rock", genres: ["my_rock", "rock", "my_pop"], local: true },
+      { name: "DOLLA", tag: "Malaysia · M-Pop", genres: ["my_pop", "pop", "dance"], local: true },
+      { name: "Kugiran Masdo", tag: "Malaysia · Indie Retro", genres: ["my_rock", "indie"], local: true },
+    ],
+    SG: [
+      { name: "JJ Lin", tag: "Singapore · Mandopop", genres: ["mandopop", "sg_pop", "pop"], local: true },
+      { name: "Stefanie Sun", tag: "Singapore · Mandopop", genres: ["mandopop", "sg_pop", "pop"], local: true },
+      { name: "Gentle Bones", tag: "Singapore · R&B & Pop", genres: ["sg_pop", "rnb", "sg_indie"], local: true },
+      { name: "Linying", tag: "Singapore · Indie", genres: ["sg_indie", "indie"], local: true },
+    ],
+    NG: [
+      { name: "Burna Boy", tag: "Nigeria · Afrobeats", genres: ["afrobeats", "pop"], local: true },
+      { name: "Wizkid", tag: "Nigeria · Afrobeats", genres: ["afrobeats", "rnb"], local: true },
+      { name: "Rema", tag: "Nigeria · Afrorave", genres: ["afrobeats", "pop"], local: true },
+      { name: "Tems", tag: "Nigeria · R&B & Soul", genres: ["afro_alte", "rnb", "afrobeats"], local: true },
+      { name: "Asake", tag: "Nigeria · Afrobeats", genres: ["afrobeats", "amapiano"], local: true },
+      { name: "Ayra Starr", tag: "Nigeria · Afropop", genres: ["afrobeats", "pop"], local: true },
+    ],
+    ZA: [
+      { name: "Tyla", tag: "South Africa · Popiano", genres: ["amapiano", "pop", "rnb"], local: true },
+      { name: "Kabza De Small", tag: "South Africa · Amapiano", genres: ["amapiano", "za_house"], local: true },
+      { name: "Black Coffee", tag: "South Africa · Afro House", genres: ["za_house", "dance"], local: true },
+      { name: "Nasty C", tag: "South Africa · Hip-Hop", genres: ["hiphop"], local: true },
+    ],
+    BR: [
+      { name: "Anitta", tag: "Brazil · Pop & Funk", genres: ["br_pop", "pop", "dance"], local: true },
+      { name: "Ludmilla", tag: "Brazil · Pagode & Pop", genres: ["br_pop", "sertanejo"], local: true },
+      { name: "Alok", tag: "Brazil · Dance & EDM", genres: ["dance", "br_pop"], local: true },
+      { name: "Henrique & Juliano", tag: "Brazil · Sertanejo", genres: ["sertanejo"], local: true },
+      { name: "Charlie Brown Jr.", tag: "Brazil · Rock", genres: ["br_rock", "rock"], local: true },
+    ],
+    MX: [
+      { name: "Peso Pluma", tag: "Mexico · Regional", genres: ["mex_reg", "reggaeton"], local: true },
+      { name: "Natalia Lafourcade", tag: "Mexico · Folk & Indie", genres: ["rock_esp", "indie"], local: true },
+      { name: "Zoé", tag: "Mexico · Indie Rock", genres: ["rock_esp", "rock", "indie"], local: true },
+      { name: "Kevin Kaarl", tag: "Mexico · Indie Folk", genres: ["rock_esp", "indie"], local: true },
+      { name: "Maná", tag: "Mexico · Rock en Español", genres: ["rock_esp", "rock"], local: true },
+    ],
+    ES: [
+      { name: "Rosalía", tag: "Spain · Pop & Urbano", genres: ["es_pop", "reggaeton", "pop"], local: true },
+      { name: "Quevedo", tag: "Spain · Urbano", genres: ["reggaeton", "hiphop"], local: true },
+      { name: "Aitana", tag: "Spain · Pop", genres: ["es_pop", "pop"], local: true },
+      { name: "Vetusta Morla", tag: "Spain · Indie Rock", genres: ["es_indie", "rock", "indie"], local: true },
+    ],
+    AE: [
+      { name: "Amr Diab", tag: "Arabic Pop", genres: ["arabic_pop", "pop"], local: true },
+      { name: "Nancy Ajram", tag: "Arabic Pop", genres: ["arabic_pop", "pop"], local: true },
+      { name: "Cairokee", tag: "Arabic Rock & Indie", genres: ["arabic_indie", "rock"], local: true },
+      { name: "Abdul Majeed Abdullah", tag: "Khaleeji", genres: ["khaleeji"], local: true },
+    ],
+    SA: [
+      { name: "Abdul Majeed Abdullah", tag: "Saudi · Khaleeji", genres: ["khaleeji", "arabic_pop"], local: true },
+      { name: "Assala", tag: "Arabic & Khaleeji", genres: ["khaleeji", "arabic_pop"], local: true },
+      { name: "Majid Al Mohandis", tag: "Khaleeji Pop", genres: ["khaleeji", "arabic_pop"], local: true },
+    ],
+    EG: [
+      { name: "Amr Diab", tag: "Egypt · Pop Legend", genres: ["egypt_pop", "pop"], local: true },
+      { name: "Wegz", tag: "Egypt · Rap & Trap", genres: ["mahraganat", "hiphop"], local: true },
+      { name: "Cairokee", tag: "Egypt · Rock Band", genres: ["egypt_indie", "rock"], local: true },
+      { name: "Tamer Hosny", tag: "Egypt · Pop", genres: ["egypt_pop", "pop"], local: true },
+    ],
+    TR: [
+      { name: "Tarkan", tag: "Turkey · Pop", genres: ["tr_pop", "pop"], local: true },
+      { name: "Sezen Aksu", tag: "Turkey · Legend", genres: ["tr_pop", "pop"], local: true },
+      { name: "Duman", tag: "Turkey · Rock Band", genres: ["tr_rock", "rock"], local: true },
+      { name: "Mabel Matiz", tag: "Turkey · Alt Pop", genres: ["tr_pop", "tr_rock"], local: true },
+      { name: "Ezhel", tag: "Turkey · Rap", genres: ["tr_rap", "hiphop"], local: true },
+    ],
+    DE: [
+      { name: "Apache 207", tag: "Germany · Rap & Pop", genres: ["deutschrap", "de_pop"], local: true },
+      { name: "Nina Chuba", tag: "Germany · Pop", genres: ["de_pop", "pop"], local: true },
+      { name: "Rammstein", tag: "Germany · Rock", genres: ["de_indie", "rock"], local: true },
+      { name: "Milky Chance", tag: "Germany · Indie", genres: ["de_indie", "indie"], local: true },
+      { name: "Robin Schulz", tag: "Germany · Dance", genres: ["dance", "de_pop"], local: true },
+    ],
+    FR: [
+      { name: "Stromae", tag: "Pop & Chanson", genres: ["fr_pop", "pop", "dance"], local: true },
+      { name: "Aya Nakamura", tag: "France · Pop & R&B", genres: ["fr_pop", "rnb"], local: true },
+      { name: "Daft Punk", tag: "France · Electronic", genres: ["french_touch", "dance"], local: true },
+      { name: "Ninho", tag: "France · Rap", genres: ["fr_rap", "hiphop"], local: true },
+      { name: "Phoenix", tag: "France · Indie Rock", genres: ["french_touch", "indie", "rock"], local: true },
+    ],
+    IT: [
+      { name: "Måneskin", tag: "Italy · Rock Band", genres: ["it_indie", "rock"], local: true },
+      { name: "Annalisa", tag: "Italy · Pop", genres: ["it_pop", "pop"], local: true },
+      { name: "Mahmood", tag: "Italy · Pop & R&B", genres: ["it_pop", "rnb"], local: true },
+      { name: "Geolier", tag: "Italy · Rap", genres: ["it_rap", "hiphop"], local: true },
+    ],
+    GB: [
+      { name: "Ed Sheeran", tag: "UK · Pop", genres: ["uk_pop", "pop"], local: true },
+      { name: "Dua Lipa", tag: "UK · Pop & Dance", genres: ["uk_pop", "pop", "dance"], local: true },
+      { name: "Coldplay", tag: "UK · Rock & Pop", genres: ["rock", "pop", "uk_indie"], local: true },
+      { name: "Arctic Monkeys", tag: "UK · Indie Rock", genres: ["uk_indie", "rock", "indie"], local: true },
+      { name: "Central Cee", tag: "UK · Drill & Rap", genres: ["uk_drill", "hiphop"], local: true },
+      { name: "RAYE", tag: "UK · R&B & Pop", genres: ["uk_pop", "rnb", "pop"], local: true },
+      { name: "Fred again..", tag: "UK · Electronic", genres: ["uk_house", "dance"], local: true },
+      { name: "Sam Fender", tag: "UK · Indie Rock", genres: ["uk_indie", "rock"], local: true },
+      { name: "Dave", tag: "UK · Rap", genres: ["uk_drill", "hiphop"], local: true },
+      { name: "The 1975", tag: "UK · Alt Pop", genres: ["uk_indie", "indie", "pop"], local: true },
+    ],
+    US: [
+      { name: "Taylor Swift", tag: "US · Pop", genres: ["us_billboard", "pop"], local: true },
+      { name: "Kendrick Lamar", tag: "US · Hip-Hop", genres: ["us_hiphop", "hiphop"], local: true },
+      { name: "Billie Eilish", tag: "US · Alt Pop", genres: ["us_billboard", "pop", "indie"], local: true },
+      { name: "SZA", tag: "US · R&B", genres: ["rnb", "us_billboard", "pop"], local: true },
+      { name: "Morgan Wallen", tag: "US · Country", genres: ["country", "pop"], local: true },
+      { name: "Sabrina Carpenter", tag: "US · Pop", genres: ["us_billboard", "pop"], local: true },
+      { name: "Post Malone", tag: "US · Pop & Country", genres: ["country", "us_billboard", "pop"], local: true },
+      { name: "Travis Scott", tag: "US · Hip-Hop", genres: ["us_hiphop", "hiphop"], local: true },
+      { name: "Zach Bryan", tag: "US · Country & Folk", genres: ["country", "indie"], local: true },
+      { name: "Bruno Mars", tag: "US · Pop & R&B", genres: ["us_billboard", "pop", "rnb"], local: true },
+    ],
+    AU: [
+      { name: "Tame Impala", tag: "Australia · Psych Indie", genres: ["au_indie", "indie", "rock"], local: true },
+      { name: "The Kid LAROI", tag: "Australia · Pop & Rap", genres: ["au_pop", "pop", "hiphop"], local: true },
+      { name: "Troye Sivan", tag: "Australia · Pop & Dance", genres: ["au_pop", "pop", "dance"], local: true },
+      { name: "RÜFÜS DU SOL", tag: "Australia · Electronic", genres: ["au_dance", "dance", "indie"], local: true },
+      { name: "Spacey Jane", tag: "Australia · Indie Rock", genres: ["au_indie", "indie", "rock"], local: true },
+      { name: "Dom Dolla", tag: "Australia · House", genres: ["au_dance", "dance"], local: true },
+      { name: "Sia", tag: "Australia · Pop", genres: ["au_pop", "pop"], local: true },
+      { name: "Flume", tag: "Australia · Electronic", genres: ["au_dance", "dance"], local: true },
+    ],
+    NZ: [
+      { name: "Lorde", tag: "New Zealand · Indie Pop", genres: ["nz_pop", "indie", "pop"], local: true },
+      { name: "SIX60", tag: "New Zealand · Pop & Roots", genres: ["nz_pop", "nz_rnb", "pop"], local: true },
+      { name: "BENEE", tag: "New Zealand · Alt Pop", genres: ["nz_pop", "indie", "pop"], local: true },
+      { name: "L.A.B", tag: "New Zealand · Roots & Soul", genres: ["nz_rnb", "nz_pop", "rnb"], local: true },
+      { name: "The Beths", tag: "New Zealand · Indie Rock", genres: ["nz_indie", "indie", "rock"], local: true },
+      { name: "Crowded House", tag: "New Zealand · Rock Legend", genres: ["nz_indie", "rock"], local: true },
+      { name: "Stan Walker", tag: "New Zealand · R&B & Pop", genres: ["nz_rnb", "rnb", "pop"], local: true },
+    ],
+    CA: [
+      { name: "The Weeknd", tag: "Canada · Pop & R&B", genres: ["ca_pop", "pop", "rnb"], local: true },
+      { name: "Drake", tag: "Canada · Hip-Hop", genres: ["hiphop", "rnb"], local: true },
+      { name: "Justin Bieber", tag: "Canada · Pop", genres: ["ca_pop", "pop", "rnb"], local: true },
+      { name: "Tate McRae", tag: "Canada · Pop", genres: ["ca_pop", "pop", "dance"], local: true },
+      { name: "Shawn Mendes", tag: "Canada · Pop", genres: ["ca_pop", "pop"], local: true },
+      { name: "Charlotte Cardin", tag: "Canada · Indie & Franco-Pop", genres: ["franco_ca", "ca_pop", "indie"], local: true },
+      { name: "Daniel Caesar", tag: "Canada · R&B", genres: ["ca_pop", "rnb"], local: true },
+      { name: "Arcade Fire", tag: "Canada · Indie Rock", genres: ["ca_indie", "indie", "rock"], local: true },
+    ],
+    NL: [
+      { name: "Martin Garrix", tag: "Netherlands · EDM", genres: ["nl_edm", "dance", "pop"], local: true },
+      { name: "Tiësto", tag: "Netherlands · Dance", genres: ["nl_edm", "dance"], local: true },
+      { name: "Roxy Dekker", tag: "Netherlands · Nederpop", genres: ["nl_pop", "pop"], local: true },
+      { name: "Suzan & Freek", tag: "Netherlands · Nederpop", genres: ["nl_pop", "pop"], local: true },
+      { name: "Flemming", tag: "Netherlands · Pop", genres: ["nl_pop", "pop"], local: true },
+      { name: "Frenna", tag: "Netherlands · Nederhop", genres: ["nederhop", "hiphop"], local: true },
+      { name: "Armin van Buuren", tag: "Netherlands · Trance & EDM", genres: ["nl_edm", "dance"], local: true },
+      { name: "Son Mieux", tag: "Netherlands · Indie Pop", genres: ["nl_indie", "indie", "pop"], local: true },
+    ],
+    SE: [
+      { name: "Zara Larsson", tag: "Sweden · Pop", genres: ["se_pop", "pop", "dance"], local: true },
+      { name: "Avicii", tag: "Sweden · Dance Legend", genres: ["se_house", "dance", "pop"], local: true },
+      { name: "Swedish House Mafia", tag: "Sweden · Electronic", genres: ["se_house", "dance"], local: true },
+      { name: "Benjamin Ingrosso", tag: "Sweden · Pop", genres: ["se_pop", "pop"], local: true },
+      { name: "Tove Lo", tag: "Sweden · Alt Pop", genres: ["se_pop", "pop", "indie"], local: true },
+      { name: "Hov1", tag: "Sweden · Hip-Hop & Pop", genres: ["se_hiphop", "se_pop", "hiphop"], local: true },
+      { name: "Robyn", tag: "Sweden · Electro Pop", genres: ["se_pop", "dance", "pop"], local: true },
+      { name: "The Hives", tag: "Sweden · Garage Rock", genres: ["se_indie", "rock"], local: true },
+    ],
+  };
+
+  function getOnboardArtistsForCountry(countryCode) {
+    const code = String(countryCode || (state.prefs && state.prefs.country) || "US").toUpperCase();
+    const localArtists = ONBOARD_ARTISTS_BY_COUNTRY[code] || [];
+    const seen = new Set();
+    const out = [];
+    for (const a of [...localArtists, ...ONBOARD_GLOBAL_ARTISTS]) {
+      if (!a || !a.name) continue;
+      const k = a.name.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(a);
+    }
+    return out;
+  }
+
   function tasteProfile() {
     const pool = [...(state.recents || []), ...(state.liked || [])];
     const artists = {};
     const sources = {};
     const genres = {};
+
+    // Seed from onboarding & followed artists so homepage personalization works immediately
+    const prefGenres = Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
+    const prefMoods = Array.isArray(state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+    const prefEras = Array.isArray(state.prefs.tasteEras) ? state.prefs.tasteEras : [];
+    const prefStyles = Array.isArray(state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
+    const prefArtists = Array.isArray(state.prefs.tasteArtists) ? state.prefs.tasteArtists : [];
+
+    for (const gId of prefGenres) {
+      const gObj = findOnboardGenreById(gId);
+      const label = gObj ? gObj.title : String(gId || "");
+      if (label) genres[label] = (genres[label] || 0) + 4;
+      if (gId) genres[gId] = (genres[gId] || 0) + 4;
+    }
+    for (const mId of prefMoods) {
+      const mObj = ONBOARD_MOODS.find((x) => x.id === mId);
+      const label = mObj ? mObj.title : String(mId || "");
+      if (label) genres[label] = (genres[label] || 0) + 3;
+      if (mId) genres[mId] = (genres[mId] || 0) + 3;
+    }
+    for (const eId of prefEras) {
+      const eObj = ONBOARD_ERAS.find((x) => x.id === eId);
+      if (eObj && eObj.title) genres[eObj.title] = (genres[eObj.title] || 0) + 2;
+    }
+    for (const aName of prefArtists) {
+      const clean = String(aName || "").trim();
+      if (clean) artists[clean] = (artists[clean] || 0) + 4;
+    }
+    for (const f of (state.following || [])) {
+      if (f && f.name) artists[f.name] = (artists[f.name] || 0) + 5;
+    }
+
     for (const t of pool) {
       if (!t) continue;
       const a = artistName(t);
       if (a && a !== "YouTube" && a !== "Live radio") artists[a] = (artists[a] || 0) + 1;
       sources[t.source || "other"] = (sources[t.source || "other"] || 0) + 1;
-      // Genre/mood signals come from several places: explicit `genre` (radio /
-      // curated), the mood tag carried by preview/catalog rows (`_tag` /
-      // `mood`), and the Audius album-fallback. Collect all of them so a
-      // listener's favourite moods drive the "Made for you" reordering.
       const g = t.genre || t._tag || t.mood || (t.album && t.source === "audius" ? t.album : "");
       if (g) genres[g] = (genres[g] || 0) + 1;
     }
     const rank = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+    const hasTaste = Boolean(
+      state.recents.length ||
+      state.liked.length ||
+      state.following.length ||
+      prefGenres.length ||
+      prefMoods.length ||
+      prefEras.length ||
+      prefStyles.length ||
+      prefArtists.length
+    );
     return {
       plays: state.recents.length,
       liked: state.liked.length,
       following: state.following.length,
-      artists: rank(artists).slice(0, 8),
-      genres: rank(genres).slice(0, 6),
+      hasTaste,
+      artists: rank(artists).slice(0, 10),
+      genres: rank(genres).slice(0, 8),
       sources: rank(sources),
     };
   }
@@ -1744,7 +2542,7 @@
   // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
   // a stale IndexedDB/payload from the previous deployment (which is exactly
   // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
-  const API_CACHE_V = "v9-sync-166";
+  const API_CACHE_V = "v11-sync-166";
   // Never cache an "empty" catalog payload. If a provider is temporarily
   // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
   // tracks); caching that would freeze the shelf empty for the whole TTL.
@@ -2519,11 +3317,8 @@
     const mode = spatialMode();
     try {
       if (mode === "off" && !fx.src) return;
-      if (!fx.ctx) {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
-      }
-      if (fx.ctx && fx.ctx.state === "suspended") fx.ctx.resume();
+      if (!fx.ctx) fx.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (fx.ctx.state === "suspended") fx.ctx.resume();
       if (!fx.src) fx.src = fx.ctx.createMediaElementSource(audio);
       fx.src.disconnect();
       clearFx();
@@ -2534,22 +3329,22 @@
       }
 
       const hpf = fxAdd(ctx.createBiquadFilter());
-      hpf.type = "highpass"; hpf.frequency.value = 24; hpf.Q.value = 0.7;
+      hpf.type = "highpass"; hpf.frequency.value = 28; hpf.Q.value = 0.7;
       fx.src.connect(hpf);
 
       if (mode === "phone") {
         const bass = fxAdd(ctx.createBiquadFilter());
-        bass.type = "lowshelf"; bass.frequency.value = 80; bass.gain.value = 4.2;
+        bass.type = "lowshelf"; bass.frequency.value = 78; bass.gain.value = 9.5;
         const sub = fxAdd(ctx.createBiquadFilter());
-        sub.type = "peaking"; sub.frequency.value = 58; sub.Q.value = 0.75; sub.gain.value = 2.0;
+        sub.type = "peaking"; sub.frequency.value = 58; sub.Q.value = 0.75; sub.gain.value = 5.5;
         const body = fxAdd(ctx.createBiquadFilter());
-        body.type = "peaking"; body.frequency.value = 145; body.Q.value = 0.8; body.gain.value = 1.4;
+        body.type = "peaking"; body.frequency.value = 145; body.Q.value = 0.8; body.gain.value = 3.2;
         const scoop = fxAdd(ctx.createBiquadFilter());
-        scoop.type = "peaking"; scoop.frequency.value = 420; scoop.Q.value = 0.85; scoop.gain.value = -1.2;
+        scoop.type = "peaking"; scoop.frequency.value = 420; scoop.Q.value = 0.85; scoop.gain.value = -2.8;
         const presence = fxAdd(ctx.createBiquadFilter());
-        presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 1.8;
+        presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;
         const air = fxAdd(ctx.createBiquadFilter());
-        air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 1.8;
+        air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 2.6;
         hpf.connect(bass);
         bass.connect(sub);
         sub.connect(body);
@@ -2558,7 +3353,7 @@
         presence.connect(air);
 
         const mix = fxAdd(ctx.createGain());
-        mix.gain.value = 0.92;
+        mix.gain.value = 1;
         air.connect(mix);
 
         const bp = fxAdd(ctx.createBiquadFilter());
@@ -2568,7 +3363,7 @@
         const hc = new Float32Array(hn);
         for (let i = 0; i < hn; i++) {
           const x = (i * 2) / hn - 1;
-          hc[i] = Math.tanh(1.8 * x) * 0.65 + x * 0.35;
+          hc[i] = Math.tanh(3.1 * x) * 0.52 + x * Math.abs(x) * 0.48;
         }
         harm.curve = hc;
         harm.oversample = "2x";
@@ -2577,7 +3372,7 @@
         const lpH = fxAdd(ctx.createBiquadFilter());
         lpH.type = "lowpass"; lpH.frequency.value = 340; lpH.Q.value = 0.7;
         const wet = fxAdd(ctx.createGain());
-        wet.gain.value = 0.16;
+        wet.gain.value = 0.72;
         hpf.connect(bp);
         bp.connect(harm);
         harm.connect(hpH);
@@ -2586,23 +3381,23 @@
         wet.connect(mix);
 
         const punch = fxAdd(ctx.createDynamicsCompressor());
-        punch.threshold.value = -18;
-        punch.knee.value = 16;
-        punch.ratio.value = 2.4;
-        punch.attack.value = 0.008;
-        punch.release.value = 0.16;
-        const out = fxAdd(ctx.createGain());
-        out.gain.value = 1.08;
+        punch.threshold.value = -20;
+        punch.knee.value = 14;
+        punch.ratio.value = 3.6;
+        punch.attack.value = 0.005;
+        punch.release.value = 0.14;
         const lim = fxAdd(ctx.createDynamicsCompressor());
-        lim.threshold.value = -0.6;
+        lim.threshold.value = -0.9;
         lim.knee.value = 1.5;
         lim.ratio.value = 20;
         lim.attack.value = 0.002;
         lim.release.value = 0.08;
+        const out = fxAdd(ctx.createGain());
+        out.gain.value = 1.55;
         mix.connect(punch);
-        punch.connect(out);
-        out.connect(lim);
-        lim.connect(ctx.destination);
+        punch.connect(lim);
+        lim.connect(out);
+        out.connect(ctx.destination);
         return;
       }
 
@@ -2618,23 +3413,23 @@
       air.type = "highshelf"; air.frequency.value = 9000;
 
       if (mode === "bass") {
-        bass.frequency.value = 72; bass.gain.value = 5.2;
-        sub.gain.value = 2.4;
-        scoop.gain.value = -1.4;
-        presence.gain.value = 1.0;
-        air.gain.value = 0.5;
+        bass.frequency.value = 72; bass.gain.value = 8.5;
+        sub.gain.value = 4.2;
+        scoop.gain.value = -2.2;
+        presence.gain.value = 1.2;
+        air.gain.value = -0.8;
       } else if (mode === "spatial") {
-        bass.frequency.value = 90; bass.gain.value = 2.0;
-        sub.gain.value = 1.0;
-        scoop.gain.value = -1.0;
-        presence.gain.value = 2.0;
-        air.gain.value = 2.5;
+        bass.frequency.value = 90; bass.gain.value = 2.4;
+        sub.gain.value = 1.2;
+        scoop.gain.value = -1.4;
+        presence.gain.value = 2.4;
+        air.gain.value = 3.2;
       } else {
-        bass.frequency.value = 85; bass.gain.value = 3.2;
-        sub.gain.value = 1.6;
-        scoop.gain.value = -1.2;
-        presence.gain.value = 2.2;
-        air.gain.value = 1.8;
+        bass.frequency.value = 85; bass.gain.value = 5.5;
+        sub.gain.value = 2.6;
+        scoop.gain.value = -1.8;
+        presence.gain.value = 3.1;
+        air.gain.value = 2.4;
       }
 
       hpf.connect(bass);
@@ -2645,34 +3440,28 @@
 
       const comp = fxAdd(ctx.createDynamicsCompressor());
       if (mode === "dynamic") {
-        comp.threshold.value = -20;
+        comp.threshold.value = -22;
         comp.knee.value = 18;
-        comp.ratio.value = 3.0;
-        comp.attack.value = 0.006;
-        comp.release.value = 0.14;
+        comp.ratio.value = 4.2;
+        comp.attack.value = 0.004;
+        comp.release.value = 0.12;
       } else if (mode === "bass") {
         comp.threshold.value = -18;
-        comp.knee.value = 14;
-        comp.ratio.value = 2.2;
+        comp.knee.value = 12;
+        comp.ratio.value = 2.6;
         comp.attack.value = 0.012;
-        comp.release.value = 0.20;
+        comp.release.value = 0.22;
       } else {
-        comp.threshold.value = -16;
+        comp.threshold.value = -14;
         comp.knee.value = 16;
-        comp.ratio.value = 2.0;
+        comp.ratio.value = 2.2;
         comp.attack.value = 0.008;
         comp.release.value = 0.18;
       }
       air.connect(comp);
 
       const out = fxAdd(ctx.createGain());
-      out.gain.value = mode === "bass" ? 1.06 : mode === "dynamic" ? 1.08 : 1.04;
-      const lim = fxAdd(ctx.createDynamicsCompressor());
-      lim.threshold.value = -0.6;
-      lim.knee.value = 1.5;
-      lim.ratio.value = 20;
-      lim.attack.value = 0.002;
-      lim.release.value = 0.08;
+      out.gain.value = mode === "bass" ? 1.28 : mode === "dynamic" ? 1.22 : 1.18;
 
       if (mode === "spatial") {
         const lis = ctx.listener;
@@ -2691,9 +3480,9 @@
         const height = makeHrtfPanner(ctx, 0, 1.7);
         setAudioVec(height, "positionX", "positionY", "positionZ", 0, 0.55, -1.1, height.setPosition);
         const rearG = fxAdd(ctx.createGain());
-        rearG.gain.value = 0.28;
+        rearG.gain.value = 0.38;
         const hiG = fxAdd(ctx.createGain());
-        hiG.gain.value = 0.22;
+        hiG.gain.value = 0.28;
         comp.connect(split);
         split.connect(left, 0);
         split.connect(right, 1);
@@ -2710,13 +3499,12 @@
         height.connect(out);
       } else {
         const shaper = fxAdd(ctx.createWaveShaper());
-        shaper.curve = makeDriveCurve(mode === "bass" ? 1.8 : 1.4);
+        shaper.curve = makeDriveCurve(mode === "bass" ? 5 : 4);
         shaper.oversample = "2x";
         comp.connect(shaper);
         shaper.connect(out);
       }
-      out.connect(lim);
-      lim.connect(ctx.destination);
+      out.connect(ctx.destination);
     } catch (e) {
       console.warn("sound stage", e);
     }
@@ -2807,11 +3595,8 @@
 
   function unlockSound() {
     try {
-      if (!fx.ctx) {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (AudioCtx) fx.ctx = new AudioCtx({ latencyHint: "playback" });
-      }
-      if (fx.ctx && fx.ctx.state === "suspended") fx.ctx.resume();
+      if (!fx.ctx) fx.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (fx.ctx.state === "suspended") fx.ctx.resume();
     } catch {}
   }
   window.addEventListener("pointerdown", unlockSound, true);
@@ -4101,13 +4886,7 @@
       } catch {}
     }
     const hit = (Array.isArray(rows) ? rows : []).find((x) => x && x.videoId);
-    if (!hit) {
-      if (t.previewUrl) {
-        t.streamUrl = t.previewUrl;
-        return t;
-      }
-      throw new Error("No playable version found");
-    }
+    if (!hit) throw new Error("No playable version");
     t.videoId = hit.videoId;
     if (!t.origSource) t.origSource = t.source;
     if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
@@ -4437,14 +5216,6 @@
           return;
         } catch {}
       }
-      if (!url.includes("/api/preview/audio")) {
-        try {
-          audio.src = `${API_BASE}/api/preview/audio?dur=30`;
-          const p3 = audio.play();
-          if (p3 !== undefined) await p3;
-          return;
-        } catch {}
-      }
       throw err;
     }
     if (seq !== audioPlaySeq) return;
@@ -4623,61 +5394,33 @@
     return ytWait;
   }
 
-  async function onYouTubeError(code) {
+  function onYouTubeError(code) {
     const want = ytWanted;
     const cur = current();
     if (!want || !cur || String(cur.videoId || "") !== String(want)) return;
     if (code === 100 || code === 101 || code === 150) {
-      state.showVideo = false;
-      showEl($("ytWrap"), false);
-      const recovered = await recoverYouTubeAlt(cur);
-      if (recovered) return;
-      try {
-        await playAudio(cur);
-        return;
-      } catch {}
+      recoverYouTubeAlt(cur);
+      return;
     }
-    if (ytRetry < 2) {
+    if (ytRetry < 3) {
       ytRetry += 1;
-      setTimeout(() => retryYouTube(want, ytToken), 240 * ytRetry);
-    } else {
-      state.showVideo = false;
-      showEl($("ytWrap"), false);
-      const rec = await recoverYouTubeAlt(cur);
-      if (!rec) {
-        try { await playAudio(cur); } catch {}
-      }
+      setTimeout(() => retryYouTube(want, ytToken), 220 * ytRetry);
     }
   }
 
   async function recoverYouTubeAlt(t) {
-    if (!t) return false;
+    if (!t) return;
     const blocked = String(t.videoId || "");
     const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
-    if (!q) return false;
+    if (!q) return;
     try {
       const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 12000);
       const hit = (data.tracks || []).find((x) => x && x.videoId && x.videoId !== blocked);
-      if (hit && current() === t) {
-        t.videoId = hit.videoId;
-        ytRetry = 0;
-        await playYouTube(t);
-        return true;
-      }
+      if (!hit || current() !== t) return;
+      t.videoId = hit.videoId;
+      ytRetry = 0;
+      await playYouTube(t);
     } catch {}
-    try {
-      if (!t.streamUrl && t.title) {
-        const altData = await api(`/api/search?q=${encodeURIComponent(`${t.title} ${artistName(t) || t.artist || ""}`)}&source=deezer&${glq()}`, 8000);
-        const altHit = (altData && altData.deezer && altData.deezer[0]) || (altData && altData.apple && altData.apple[0]);
-        if (altHit && (altHit.previewUrl || altHit.streamUrl) && current() === t) {
-          t.previewUrl = altHit.previewUrl;
-          t.streamUrl = altHit.streamUrl || altHit.previewUrl;
-          await playAudio(t);
-          return true;
-        }
-      }
-    } catch {}
-    return false;
   }
 
   function retryYouTube(id, token) {
@@ -5517,11 +6260,27 @@
       window.location.href = url;
     }
   }
+  function sanitizeGoogleSignInUrl(rawUrl) {
+    try {
+      const u = new URL(String(rawUrl || ""));
+      if (u.hostname.includes("google.com")) {
+        u.searchParams.set("scope", "openid email profile");
+        u.searchParams.delete("access_type");
+        u.searchParams.delete("include_granted_scopes");
+        u.searchParams.set("prompt", "select_account");
+        return u.toString();
+      }
+    } catch {}
+    return rawUrl;
+  }
   async function startGoogleSignIn() {
+    if (!state.auth) {
+      try { await refreshAuth(true); } catch {}
+    }
     if (!state.auth || state.auth.configured === false) { toast("Google Sign-In isn't configured on the server yet"); return; }
     try {
       const d = await api(`/api/auth/google/url?platform=${IS_NATIVE ? "native" : "web"}`);
-      if (d && d.url) openAuthUrl(d.url);
+      if (d && d.url) openAuthUrl(sanitizeGoogleSignInUrl(d.url));
     } catch { toast("Couldn't start Google Sign-In"); }
   }
   async function connectYouTube() {
@@ -6314,6 +7073,25 @@
         tracks: (hit && hit.tracks && hit.tracks.length) ? hit.tracks : (fb.id === "today" ? (h.youtubeCharts || []) : []),
       };
     });
+    // Reorder shelves based on user's chosen genres from onboarding & listening taste
+    const prefGenres = Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
+    const prefMoods = Array.isArray(state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+    const taste = tasteProfile();
+    if (prefGenres.length || taste.genres.length) {
+      const genreWeight = (id) => {
+        if (id === "today") return 100; // Keep Today's Top Hits anchored first
+        let w = 0;
+        const idx = prefGenres.indexOf(id);
+        if (idx >= 0) w += 50 - idx;
+        for (const [gName, score] of (taste.genres || [])) {
+          if (String(gName).toLowerCase().includes(id)) w += score;
+        }
+        return w;
+      };
+      shelves.sort((a, b) => genreWeight(b.id) - genreWeight(a.id));
+    }
+    const tasteTracks = (state.tasteTracks || []).slice(0, 14);
+    const followedTracks = (state.followedArtistTracks || []).slice(0, 14);
     return `
       ${homeBarHTML()}
       <div class="hero home-hero">
@@ -6321,11 +7099,14 @@
         <div>
           <span class="hero-brand-kicker">Muchi</span>
           <h1>${greeting()}</h1>
-          <p>English hits · pop, hip-hop, rock, R&amp;B, dance · a little from ${escapeHTML(region)}${liveNote}</p>
+          ${liveNote ? `<p>${escapeHTML(liveNote.replace(/^\s*·\s*/, ""))}</p>` : ""}
         </div>
       </div>
       <div class="section">
-        <div class="section-head"><h2>${tasteProfile().plays ? "For your taste" : "Moods & genres"}</h2></div>
+        <div class="section-head">
+          <h2>${taste.hasTaste ? "For your taste" : "Moods & genres"}</h2>
+          <button type="button" class="see-all" id="customizeTasteHomeBtn" title="Customize your music taste and followed artists">Customize taste</button>
+        </div>
         <div class="chips taste-tabs">
           <button type="button" class="chip ${state.homeTasteTab !== "discover" ? "active" : ""}" data-taste-tab="moods">Moods</button>
           <button type="button" class="chip ${state.homeTasteTab === "discover" ? "active" : ""}" data-taste-tab="discover">Discovery Mix</button>
@@ -6346,6 +7127,7 @@
       </div>
       ${recents.length ? section("Jump back in", recents) : ""}
       ${forYouSection()}
+      ${tastePlaylistSection()}
       ${viralSection()}
       ${playlistSection(`Trending in ${region}`, h.countryPlaylists || [], "country")}
       ${section(`Top songs in ${region}`, local, "local")}
@@ -6515,6 +7297,152 @@
   function forYouSection() {
     const pls = forYouPlaylistList();
     return `<div class="section"><div class="section-head"><h2>Made for you</h2><span>${pls.length}</span></div><div class="row">${pls.map(forYouCardHTML).join("")}</div></div>`;
+  }
+
+  // ---- Combined "Picked for your taste & artists you follow" playlist shelf (under Made for you) ----
+  function tastePlaylistList() {
+    const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
+    const prefGenres = Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
+    const prefMoods = Array.isArray(state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+    const prefEras = Array.isArray(state.prefs.tasteEras) ? state.prefs.tasteEras : [];
+    const prefStyles = Array.isArray(state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
+    const prefArtists = Array.isArray(state.prefs.tasteArtists) ? state.prefs.tasteArtists : [];
+    const followedNames = (state.following || []).map((f) => f && f.name).filter(Boolean);
+    const allArtists = [...new Set([...followedNames, ...prefArtists])];
+    const tTracks = Array.isArray(state.tasteTracks) ? state.tasteTracks : [];
+    const fTracks = Array.isArray(state.followedArtistTracks) ? state.followedArtistTracks : [];
+
+    if (!tTracks.length && !fTracks.length && !prefGenres.length && !prefMoods.length && !prefEras.length && !prefStyles.length && !allArtists.length) {
+      return [];
+    }
+
+    const allowIndian =
+      countryCode === "IN" ||
+      countryCode === "PK" ||
+      countryCode === "BD" ||
+      prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
+
+    const masterMix = weaveDiverseTracks([tTracks, fTracks], 28, 2, countryCode, allowIndian);
+    const artistMix = weaveDiverseTracks([fTracks, tTracks], 24, 2, countryCode, allowIndian);
+    const cards = [];
+
+    // 1. Master combined playlist mixing both Picked for your taste & Artists you follow + similar
+    const topArtistLabel = allArtists.slice(0, 2).join(", ");
+    const topGenreObjs = prefGenres.slice(0, 2).map((id) => findOnboardGenreById(id, countryCode)).filter(Boolean);
+    const topGenreLabel = topGenreObjs.map((g) => g.title).join(" · ");
+
+    cards.push({
+      id: "taste-master-mix",
+      title: "Picked for Your Taste",
+      subtitle: topGenreLabel && topArtistLabel
+        ? `${topGenreLabel} · ${topArtistLabel} & more`
+        : topGenreLabel || (topArtistLabel ? `Featuring ${topArtistLabel} & similar` : "Your personalized music mix"),
+      artwork: (masterMix[0] && masterMix[0].artwork) || (tTracks[0] && tTracks[0].artwork) || "/cover-default.jpg",
+      query: (topGenreObjs[0] && topGenreObjs[0].query) || shelfQueryForCountryClient("pop", countryCode, "top hits official audio"),
+      tracks: masterMix.length ? masterMix : tTracks.slice(0, 24),
+    });
+
+    // 2. Artists you follow & similar playlist card
+    if (allArtists.length || fTracks.length) {
+      const aSub = allArtists.length
+        ? `${allArtists.slice(0, 2).join(", ")} & similar artists`
+        : "Followed artists & similar tracks";
+      cards.push({
+        id: "taste-followed-mix",
+        title: "Artists You Follow & Similar",
+        subtitle: aSub,
+        artwork: (fTracks[0] && fTracks[0].artwork) || (artistMix[1] && artistMix[1].artwork) || (masterMix[1] && masterMix[1].artwork) || "/cover-default.jpg",
+        query: allArtists[0] ? `songs like ${allArtists[0]} mix official audio` : shelfQueryForCountryClient("today", countryCode, "top hits official audio"),
+        tracks: artistMix.length ? artistMix : fTracks.slice(0, 24),
+      });
+    }
+
+    // 3. Dedicated artist + similar mix cards for up to 2 followed artists
+    allArtists.slice(0, 2).forEach((aName, idx) => {
+      const aLower = String(aName).toLowerCase();
+      const matching = [...fTracks, ...tTracks].filter((t) => String(artistName(t) || "").toLowerCase().includes(aLower));
+      const others = [...fTracks, ...tTracks].filter((t) => !String(artistName(t) || "").toLowerCase().includes(aLower));
+      const mix = weaveDiverseTracks([matching, others], 20, 2, countryCode, allowIndian);
+      cards.push({
+        id: `taste-artist-${idx}`,
+        title: `${aName} & Similar Mix`,
+        subtitle: `Mixed with similar songs & your taste`,
+        artwork: (matching[0] && matching[0].artwork) || _onbArtCache[aName] || (mix[0] && mix[0].artwork) || "/cover-default.jpg",
+        query: `songs like ${aName} mix official audio`,
+        tracks: mix,
+      });
+    });
+
+    // 4. Dedicated genre playlist cards from user's chosen genres
+    topGenreObjs.forEach((gObj, idx) => {
+      const rotated = masterMix.slice((idx + 1) * 2).concat(masterMix.slice(0, (idx + 1) * 2));
+      cards.push({
+        id: `taste-genre-${gObj.id}`,
+        title: `${gObj.title} Mix`,
+        subtitle: gObj.sub || "Picked for your taste",
+        artwork: (rotated[0] && rotated[0].artwork) || "/cover-default.jpg",
+        query: gObj.query,
+        tracks: rotated.slice(0, 20),
+      });
+    });
+
+    // 5. Dedicated mood / era playlist cards from user's chosen moods/eras
+    prefMoods.slice(0, 2).forEach((mId, idx) => {
+      const mObj = ONBOARD_MOODS.find((x) => x.id === mId);
+      if (!mObj) return;
+      const rotated = masterMix.slice((idx + 2) * 3).concat(masterMix.slice(0, (idx + 2) * 3));
+      cards.push({
+        id: `taste-mood-${mObj.id}`,
+        title: `${mObj.title} Mix`,
+        subtitle: mObj.sub || "Tailored mood playlist",
+        artwork: (rotated[0] && rotated[0].artwork) || "/cover-default.jpg",
+        query: mObj.query,
+        tracks: rotated.slice(0, 20),
+      });
+    });
+
+    return cards.slice(0, 10);
+  }
+
+  function tastePlaylistCardHTML(p, i) {
+    const art = p.artwork || (p.tracks && p.tracks[0] && p.tracks[0].artwork) || "/cover-default.jpg";
+    const n = Math.max(0, (p.tracks || []).length);
+    const count = n ? `${n} songs` : "Mix";
+    return `<div class="card-wrap">
+      <button type="button" class="card card-hit" data-open-taste-pl="${i}">
+        <div class="art">
+          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+          <span class="badge yt">Playlist</span>
+        </div>
+        <h3>${escapeHTML(p.title || "Taste Mix")}</h3>
+        <p>${escapeHTML(p.subtitle || "Personalized mix")}</p>
+        <em class="fy-count">${count}</em>
+      </button>
+    </div>`;
+  }
+
+  function tastePlaylistSection() {
+    const pls = tastePlaylistList();
+    if (!pls.length) return "";
+    return `<div class="section">
+      <div class="section-head">
+        <button type="button" class="section-title" data-open-shelf="taste">Picked for your taste &amp; artists you follow</button>
+        <button type="button" class="see-all" data-open-shelf="taste">See all</button>
+      </div>
+      <div class="row">${pls.map(tastePlaylistCardHTML).join("")}</div>
+    </div>`;
+  }
+
+  function openTastePlaylist(i) {
+    const p = tastePlaylistList()[i];
+    if (!p) return;
+    openCatalogPlaylist({
+      title: p.title || "Picked for Your Taste",
+      artist: p.subtitle || "Personalized mix",
+      artwork: p.artwork || (p.tracks && p.tracks[0] && p.tracks[0].artwork) || "",
+      query: p.query || "",
+      tracks: (p.tracks || []).slice(),
+    });
   }
 
   // ---- "Viral & Trending worldwide" home shelf ---------------------------
@@ -6770,9 +7698,9 @@
           <p>${a.loading ? "Loading catalogue…" : `${songs.length} songs · ${albums.length} albums`}</p>
           <div class="artist-actions">
             ${songs.length ? `<button class="filled-btn" id="playArtist" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
-            <button class="tonal-btn" id="followArtist" type="button">
-              <span class="material-symbols-outlined">${isFollowing({ artist: a.name, source: a.source }) ? "person_check" : "person_add"}</span>
-              ${isFollowing({ artist: a.name, source: a.source }) ? "Following" : "Follow"}
+            <button class="tonal-btn" id="followArtist" type="button" title="${isFollowing({ artist: a.name, source: a.source }) ? "Click to unfollow " + escapeAttr(a.name) : "Follow " + escapeAttr(a.name)}">
+              <span class="material-symbols-outlined">${isFollowing({ artist: a.name, source: a.source }) ? "person_remove" : "person_add"}</span>
+              ${isFollowing({ artist: a.name, source: a.source }) ? "Unfollow" : "Follow"}
             </button>
           </div>
         </div>
@@ -7177,13 +8105,14 @@
         </div>
       </button>`).join("");
     const artistRows = state.following.map((a) => `
-      <button type="button" class="lib-row artist" data-artist="${escapeAttr(a.key)}">
+      <div class="lib-row artist" data-artist="${escapeAttr(a.key)}" role="button" tabindex="0">
         <img class="round" src="${escapeAttr(a.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
-        <div>
+        <div style="flex:1;min-width:0">
           <div class="t-title">${escapeHTML(a.name)}</div>
-          <div class="t-sub">Artist</div>
+          <div class="t-sub">Artist · Following</div>
         </div>
-      </button>`).join("");
+        <button type="button" class="chip-btn" data-unfollow="${escapeAttr(a.key)}" title="Unfollow ${escapeAttr(a.name)}" style="flex-shrink:0">Unfollow</button>
+      </div>`).join("");
     const dlRows = state.downloads.map((t, i) => libTrackHTML(t, i, { isDownload: true })).join("");
     const ytOn = !!(state.auth && state.auth.signedIn && state.auth.youtube && state.auth.youtube.connected);
     let ytRows = "";
@@ -7295,6 +8224,14 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.6.6",
+      title: "Muchi 1.6.6",
+      notes: [
+        "Restored original v1.5.5 Sound Stage DSP & acoustics across Phone, Bass, Spatial, and Dynamic modes for full warmth, sub-bass punch, and clarity.",
+        "Removed low-bitrate preview and synthetic audio fallbacks from playback so songs always stream at full fidelity.",
+      ],
+    },
     {
       ver: "1.6.5",
       title: "Muchi 1.6.5",
@@ -8416,6 +9353,10 @@
             <div><strong>Following & Alerts</strong><p>${state.following.length} followed · get notified when artists drop new music.</p></div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
+          <button type="button" class="set-row set-go" id="openTasteSetup">
+            <div><strong>Music Taste & Setup</strong><p>Choose your favorite song varieties, moods, and artists to personalize Home.</p></div>
+            <span class="material-symbols-outlined">tune</span>
+          </button>
         </div>
         <div class="set-card">
           <h3>Offline Mode (Android & iOS)</h3>
@@ -8871,6 +9812,9 @@
     viewEl.querySelectorAll("[data-open-fy]").forEach((el) => {
       el.addEventListener("click", () => openForYouPlaylist(Number(el.dataset.openFy)));
     });
+    viewEl.querySelectorAll("[data-open-taste-pl]").forEach((el) => {
+      el.addEventListener("click", () => openTastePlaylist(Number(el.dataset.openTastePl)));
+    });
     viewEl.querySelectorAll("[data-open-viral]").forEach((el) => {
       el.addEventListener("click", () => openViralPlaylist(Number(el.dataset.openViral)));
     });
@@ -9129,6 +10073,10 @@
     if (openAppIconFromAppearance) openAppIconFromAppearance.addEventListener("click", () => { rememberScroll(); state.settingsPage = "appicon"; navPush(); paintNav(false); });
     const openFollowing = viewEl.querySelector("#openFollowing");
     if (openFollowing) openFollowing.addEventListener("click", () => { rememberScroll(); state.settingsPage = "following"; navPush(); paintNav(false); });
+    const openTasteSetup = viewEl.querySelector("#openTasteSetup");
+    if (openTasteSetup) openTasteSetup.addEventListener("click", () => openTasteOnboarding(true));
+    const customizeTasteHomeBtn = viewEl.querySelector("#customizeTasteHomeBtn");
+    if (customizeTasteHomeBtn) customizeTasteHomeBtn.addEventListener("click", () => openTasteOnboarding(true));
     const openData = viewEl.querySelector("#openData");
     if (openData) openData.addEventListener("click", () => { rememberScroll(); state.settingsPage = "data"; navPush(); paintNav(false); measureCache(); });
 
@@ -9185,14 +10133,15 @@
       try {
         const data = await api(`/api/artist?name=${encodeURIComponent(q)}&${glq()}`);
         const art = data && data.artist ? data.artist : { name: q };
-        const key = (art.name || q).toLowerCase();
-        if (state.following.some((f) => f.key === key)) {
-          toast(`Already following ${art.name || q}`);
+        const cleanName = String(art.name || q).trim();
+        const key = artistKey({ artist: cleanName, permalink: art.handle || "" });
+        if (isFollowing({ artist: cleanName, permalink: art.handle || "" })) {
+          toast(`Already following ${cleanName}`);
           return;
         }
         state.following.unshift({
           key,
-          name: art.name || q,
+          name: cleanName,
           source: art.source || "catalog",
           handle: art.handle || "",
           artwork: art.artwork || (data && data.latest && artUrl(data.latest)) || "/cover-default.jpg",
@@ -9200,14 +10149,14 @@
           followedAt: Date.now(),
         });
         saveFollowing();
-        toast(`Following ${art.name || q}! You'll be notified on new releases.`, true, "success");
+        toast(`Following ${cleanName}! You'll be notified on new releases.`, true, "success");
         if (state.prefs.notifyFollows && "Notification" in window && Notification.permission === "default") {
           Notification.requestPermission().catch(() => {});
         }
         render();
       } catch {
-        const key = q.toLowerCase();
-        if (!state.following.some((f) => f.key === key)) {
+        const key = artistKey(q);
+        if (!isFollowing(q)) {
           state.following.unshift({
             key,
             name: q,
@@ -9448,9 +10397,15 @@
         state.prefs.country = setCountry.value;
         state.prefs.countryChosen = true;
         savePrefs();
+        try { localStorage.removeItem("aura.home_cache"); } catch {}
         state.home = null;
+        state.tasteTracks = [];
+        state.followedArtistTracks = [];
+        save("aura.tasteTracks", []);
+        save("aura.followedArtistTracks", []);
         if (state.view === "settings") render();
         loadHome(true);
+        loadTasteRecommendations(true);
       });
     }
     const setSpeed = viewEl.querySelector("#setSpeed");
@@ -9514,9 +10469,11 @@
       window.open(`${u}/issues/new?title=${encodeURIComponent("Bug: ")}&body=${body}`, "_blank", "noopener");
     });
     viewEl.querySelectorAll("[data-unfollow]").forEach((el) => {
-      el.addEventListener("click", () => {
-        state.following = state.following.filter((f) => f.key !== el.dataset.unfollow);
-        saveFollowing();
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const removed = unfollowArtistByKeyOrName(el.dataset.unfollow);
+        if (removed) toast(`Unfollowed ${removed}`, true, "success");
         render();
       });
     });
@@ -9529,8 +10486,15 @@
       });
     });
     viewEl.querySelectorAll("[data-artist]").forEach((el) => {
-      el.addEventListener("click", () => {
-        const f = state.following.find((x) => x.key === el.dataset.artist);
+      el.addEventListener("click", (e) => {
+        if (e.target && e.target.closest && e.target.closest("[data-unfollow]")) return;
+        const targetKey = String(el.dataset.artist || "").toLowerCase().trim();
+        const targetName = targetKey.replace(/^(name:|audius:)/i, "").trim();
+        const f = state.following.find(
+          (x) =>
+            String(x.key || "").toLowerCase() === targetKey ||
+            String(x.name || "").toLowerCase() === targetName
+        );
         if (f) openArtistProfile({ name: f.name, artwork: f.artwork, id: f.id || "", source: f.source, query: f.name });
       });
     });
@@ -10406,6 +11370,24 @@
       tracks = h.youtubeLocal && h.youtubeLocal.length ? h.youtubeLocal : (h.youtubeIndia || []);
       query = h.localQuery || "top hits official audio";
       shelfId = "local";
+    } else if (key === "taste" || key === "following") {
+      title = "Picked for your taste & artists you follow";
+      const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
+      const prefGenres = Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
+      const allowIndian =
+        countryCode === "IN" ||
+        countryCode === "PK" ||
+        countryCode === "BD" ||
+        prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
+      tracks = weaveDiverseTracks(
+        [state.tasteTracks || [], state.followedArtistTracks || []],
+        40,
+        2,
+        countryCode,
+        allowIndian
+      );
+      if (!tracks.length) tracks = [...(state.tasteTracks || []), ...(state.followedArtistTracks || [])];
+      shelfId = "taste";
     } else if (key === "audius") {
       title = "Independent artists";
       tracks = h.audius || [];
@@ -10620,6 +11602,307 @@
     { id: "indie", title: "Indie", query: "indie pop alternative official audio" },
   ];
 
+  const CLIENT_COUNTRY_SHELF_QUERIES = {
+    IN: {
+      today: "india top 50 bollywood hindi hits official audio",
+      pop: "indian pop hindi hits official audio",
+      hiphop: "desi hip hop indian rap hits official audio",
+      rnb: "indian rnb chill hindi songs official audio",
+      rock: "indian rock bands hindi rock songs official audio",
+      dance: "bollywood dance party hits official audio",
+      indie: "indian indie songs hindi indie pop official audio",
+    },
+    PK: {
+      today: "pakistan top hits new songs official audio",
+      pop: "pakistani pop songs coke studio official audio",
+      hiphop: "urdu rap pakistani hip hop official audio",
+      rnb: "pakistani rnb chill songs official audio",
+      rock: "pakistani rock bands songs official audio",
+      dance: "pakistani dance party hits official audio",
+      indie: "pakistani indie alternative songs official audio",
+    },
+    BD: {
+      today: "bangla top hits new songs official audio",
+      pop: "bangla pop hits official audio",
+      hiphop: "bangla hip hop rap songs official audio",
+      rnb: "bangla romantic rnb songs official audio",
+      rock: "bangla rock bands warfaze artcell songs official",
+      dance: "bangla dance party songs official audio",
+      indie: "bangla indie songs coke studio bangla official",
+    },
+    PH: {
+      today: "opm top hits philippines chart official audio",
+      pop: "opm pop hits philippines bini zack tabudlo official audio",
+      hiphop: "pinoy hip hop rap flow g hev abi official audio",
+      rnb: "opm rnb soul arthur nery denise julia official audio",
+      rock: "pinoy rock opm bands eraserheads iv of spades cup of joe official",
+      dance: "opm dance pop philippines hits official audio",
+      indie: "pinoy indie opm alternative ben&ben lola amour official audio",
+    },
+    HK: {
+      today: "hong kong cantopop top hits official audio",
+      pop: "cantopop hong kong pop hits eason chan hins cheung mirror official",
+      hiphop: "hong kong cantonese hip hop rap official audio",
+      rnb: "hong kong cantopop rnb soul gareth t terence lam official",
+      rock: "hong kong rock band beyond dear jane supper moment rubberband official",
+      dance: "hong kong cantopop dance electronic hits official",
+      indie: "hong kong indie cantopop serrini moon tang my little airport official",
+    },
+    CN: {
+      today: "mandopop china top hits official audio",
+      pop: "mandopop chinese pop hits jay chou jj lin official",
+      hiphop: "chinese rap c-rap hip hop hits official",
+      rnb: "chinese rnb soul mandopop official audio",
+      rock: "chinese rock bands mayday omnipotent youth society official",
+      dance: "chinese electronic dance music hits official",
+      indie: "chinese indie folk pop songs official audio",
+    },
+    KR: {
+      today: "kpop top hits korea chart official audio",
+      pop: "kpop hits newjeans bts blackpink aespa official audio",
+      hiphop: "khiphop korean rap hits jay park zico official audio",
+      rnb: "krnb korean rnb soul dean crush bibi official audio",
+      rock: "korean rock band day6 wave to earth jannabi official audio",
+      dance: "kpop dance electronic hits official audio",
+      indie: "korean indie k-indie hyukoh wave to earth 10cm official audio",
+    },
+    JP: {
+      today: "billboard japan hot 100 jpop hits official",
+      pop: "jpop top hits yoasobi fujii kaze kenshi yonezu official",
+      hiphop: "japanese hip hop rap creepy nuts bad hop official",
+      rnb: "japanese rnb city pop fujii kaze official",
+      rock: "jrock japanese rock bands king gnu mrs green apple one ok rock official",
+      dance: "japanese electronic dance pop perfume capsule official",
+      indie: "japanese indie rock vaundy lamp hitsujibungaku official",
+    },
+    TH: {
+      today: "thai top hits tpop new songs official",
+      pop: "tpop thai pop hits jeff satur bowkylion billkin official",
+      hiphop: "thai hip hop rap milli youngohm official",
+      rnb: "thai rnb soul songs jeff satur official",
+      rock: "thai rock bands three man down tilly birds bodyslam official",
+      dance: "thai dance pop hits official",
+      indie: "thai indie popfellows dept anatomy rabbit official",
+    },
+    VN: {
+      today: "vpop top hits vietnam new songs official",
+      pop: "vpop hits son tung mtp mono ame official",
+      hiphop: "rap viet hip hop den vau hieuthuhai tlinh official",
+      rnb: "vpop rnb chill wren evans vu official",
+      rock: "vietnam rock bands chillies ngọt cá hồi hoang official",
+      dance: "vpop dance edm remix hits official",
+      indie: "viet indie vu chillies trang official",
+    },
+    ID: {
+      today: "indonesia top hits lagu viral official",
+      pop: "lagu pop indonesia tulus mahalini lyodra bernadya official",
+      hiphop: "hip hop rap indonesia rich brian ramengvrl official",
+      rnb: "rnb soul indonesia tulus raisa teddy adhitya official",
+      rock: "band rock indonesia dewa 19 sheila on 7 noah official",
+      dance: "indonesia electronic dance weird genius official",
+      indie: "indie indonesia hindia feast pamungkas nadin amizah official",
+    },
+    MY: {
+      today: "malaysia top hits lagu baru official",
+      pop: "malaysia pop hits siti nurhaliza ernie zakri dolla official",
+      hiphop: "malaysia hip hop rap joe flizzow sova official",
+      rnb: "malaysia rnb yuna aisha retno official",
+      rock: "malaysia rock bands wings search bunkface insomniacks official",
+      dance: "malaysia dance pop hits official",
+      indie: "malaysia indie hujan kugiran masdo noh salleh official",
+    },
+    SG: {
+      today: "singapore top hits official audio",
+      pop: "singapore pop hits jj lin stefanie sun benjamin kheng official",
+      hiphop: "singapore hip hop rap shigga shay official",
+      rnb: "singapore rnb soul gentle bones seint official",
+      rock: "singapore rock bands electrico caracal official",
+      dance: "singapore dance electronic hits official",
+      indie: "singapore indie linying subsonic eye pleasantry official",
+    },
+    NG: {
+      today: "afrobeats top hits nigeria official audio",
+      pop: "afrobeats pop hits burna boy wizkid rema ayra starr official",
+      hiphop: "nigerian hip hop rap odumodublvck olamide phyno official",
+      rnb: "afro rnb soul tems omah lay chike official",
+      rock: "african rock alternative songs official",
+      dance: "afrobeats dance club hits asake davido official",
+      indie: "alte nigerian indie cruell santino lady donli cavemen official",
+    },
+    ZA: {
+      today: "south africa amapiano top hits official",
+      pop: "south africa pop hits tyla jeremy loops official",
+      hiphop: "south african hip hop nasty c a-reece cassper nyovest official",
+      rnb: "south africa rnb soul elaine lloydgoy official",
+      rock: "south african rock seether prime circle Kongos official",
+      dance: "amapiano dance hits kabza de small uncle waffles kelvin momo official",
+      indie: "south africa indie alternative desmond and the tutus shortstraw official",
+    },
+    BR: {
+      today: "top brasil hits novas musicas oficiais",
+      pop: "pop brasil hits anitta ludmilla luisa sonza jao official",
+      hiphop: "trap rap nacional brasil matue filipe ret orochi official",
+      rnb: "rnb brasil iza liniker gloria groove official",
+      rock: "rock nacional brasil charlie brown jr legiao urbana skank pita",
+      dance: "brazilian bass dance alok vintage culture funk brasil official",
+      indie: "indie brasil mpba lagum terno rei jovm dionisio official",
+    },
+    MX: {
+      today: "mexico top hits musica nueva oficial",
+      pop: "latin pop mexico belinda Reik camila natalia lafourcade official",
+      hiphop: "rap hip hop mexicano santa fe klan aleman gera mx official",
+      rnb: "rnb latino humbe girl ultra jesse baez official",
+      rock: "rock en espanol mexico caifanes zoe mana cafe tacvba official",
+      dance: "reggaeton latin dance hits mexico official",
+      indie: "indie mexico kevin kaarl ed maverick siddhartha bratty official",
+    },
+    ES: {
+      today: "top 50 espana exitos nuevos oficial",
+      pop: "pop espanol aitana rosalia lola indigo pablo alboran official",
+      hiphop: "rap trap espana quevedo dels Rels B morad c tangana official",
+      rnb: "rnb espanol rels b sen senra maikel delacalle official",
+      rock: "rock espanol vetusta morla izal fito cabrales extremoduro",
+      dance: "latin dance reggaeton espana hits official",
+      indie: "indie espanol vetusta morla arde bogota lori meyers viva suecia",
+    },
+    FR: {
+      today: "top singles france hits officiels",
+      pop: "variete pop francaise angele aya nakamura clara luciani stromae",
+      hiphop: "rap francais jul ninho gazo tiakola booba pnl official",
+      rnb: "rnb francais dadju tayc monsieur nov ronisia official",
+      rock: "rock francais indochine shaka ponk telephone noir desir",
+      dance: "french touch electro dance daft punk david guetta dj snake",
+      indie: "indie pop francaise phoenix air l'imperatrice videoclub",
+    },
+    DE: {
+      today: "offizielle deutsche charts hits official",
+      pop: "deutschpop nina chuba apache 207 lea mark forster official",
+      hiphop: "deutschrap apache 207 luciano bonez mc raf camora pashanim",
+      rnb: "german rnb soul joy denalane cro aylo official",
+      rock: "german rock rammstein die toten hosen kraftklub annenmaykantereit",
+      dance: "german electronic dance robin schulz felix jaehn purple disco machine",
+      indie: "german indie annenmaykantereit giant rooks milky chance jeremias",
+    },
+    IT: {
+      today: "classifica singoli italia nuove canzoni",
+      pop: "pop italiano annalisa marco mengoni elodie mahmood tiziano ferro",
+      hiphop: "rap trap italiano geolier lazza sfera ebbasta guè marracash",
+      rnb: "rnb italiano mahmood venerus frah quintale official",
+      rock: "rock italiano maneskin pinguini tattici nucleari vasco rossi ligabue",
+      dance: "italo dance electronic meduza gabry ponte bob sinclar",
+      indie: "indie italiano calcutta gazzelle psicologi ariete fulminacci",
+    },
+    TR: {
+      today: "turkce pop yeni cikanlar hits official",
+      pop: "turkce pop hits tarkan sezen aksu simge edis mabel matiz",
+      hiphop: "turkce rap hip hop ezhel cezza sago lvbel c5 uzu",
+      rnb: "turkce rnb alternatif mert demir melike sahin Emir can igrek",
+      rock: "turkce rock duman mor ve otesi manga teoman sebnem ferah",
+      dance: "turkce dance club hits mahmut orhan burak yeter",
+      indie: "turkce indie alternatif adamlar buyuk ev ablukada dktt",
+    },
+    AE: {
+      today: "arabic top hits 2025 new songs official",
+      pop: "arabic pop hits amr diab nancy ajram elissa tamer hosny",
+      hiphop: "arabic hip hop rap wegz marwan pablo afroto dafencii",
+      rnb: "arabic chill rnb saint levant elyanna dana salah",
+      rock: "arabic rock indie cairokee mashrou leila jadal",
+      dance: "arabic dance party hits saad lamjarred mohamed ramadan",
+      indie: "arabic indie alternative cairokee Aziz maraka massar egbari",
+    },
+    SA: {
+      today: "khaleeji new hits saudi top songs official",
+      pop: "khaleeji pop hits abdul majeed abdullah majid al mohandis assala",
+      hiphop: "saudi arabic hip hop dafencii klash wegz official",
+      rnb: "arabic rnb chill songs official audio",
+      rock: "arabic rock indie cairokee jadal official",
+      dance: "khaleeji dance party hits official",
+      indie: "arabic indie alternative aziz maraka cairokee",
+    },
+    EG: {
+      today: "egypt top hits aghani gadida official",
+      pop: "egyptian pop hits amr diab tamer hosny sherine hamaki",
+      hiphop: "egyptian rap trap mahraganat wegz marwan pablo afroto",
+      rnb: "egyptian chill rnb songs official",
+      rock: "egyptian rock indie cairokee massar egbari sharmoofers",
+      dance: "mahraganat egyptian party hits mohamed ramadan hassan shakosh",
+      indie: "egyptian indie cairokee massar egbari disco misr",
+    },
+    GB: {
+      today: "official uk top 40 singles chart hits",
+      pop: "uk pop hits dua lipa ed sheeran harry styles raye charli xcx",
+      hiphop: "uk drill grime rap central cee dave stormzy skepta",
+      rnb: "uk rnb soul raye jorja smith cleo sol mahalia",
+      rock: "uk rock bands arctic monkeys oasis coldplay muse the 1975",
+      dance: "uk dance house garage calvin harris Fred again disclosure",
+      indie: "uk indie rock the 1975 sam fender wolf alice beabadoobee",
+    },
+    AU: {
+      today: "aria charts australia top hits official",
+      pop: "australian pop hits troye sivan the kid laroi sia kylie minogue",
+      hiphop: "australian hip hop the kid laroi hilltop hoods onefour",
+      rnb: "australian rnb ruel tkay maidza jordan rakei",
+      rock: "australian rock tame impala acdc gang of youths powderfinger",
+      dance: "australian electronic dance rufus du sol flume dom dolla fisher",
+      indie: "australian indie spacey jane vance joy royel otis ocean alley",
+    },
+    NZ: {
+      today: "new zealand top 40 hits official",
+      pop: "new zealand pop hits lorde benee Kimbra",
+      hiphop: "new zealand hip hop savage scribe",
+      rnb: "new zealand rnb soul six60 l.a.b stan walker",
+      rock: "new zealand rock crowded house six60 the naked and famous",
+      dance: "new zealand electronic dance shapeshifter netsky",
+      indie: "new zealand indie the beths unknown mortal orchestra fazerdaze",
+    },
+    CA: {
+      today: "canada top hits billboard canadian hot 100",
+      pop: "canadian pop hits the weeknd justin bieber tate mcrae shawn mendes",
+      hiphop: "canadian hip hop drake nav tory lanez",
+      rnb: "canadian rnb soul the weeknd daniel caesar partynextdoor",
+      rock: "canadian rock nickelback sum 41 billy talent the tragically hip",
+      dance: "canadian electronic deadmau5 kaytranada loud luxury rezz",
+      indie: "canadian indie arcade fire alvvays men i trust mac demarco",
+    },
+    NL: {
+      today: "nederlandse top 40 hits official",
+      pop: "dutch pop hits roxy dekker flemming suzan & freek davina michelle",
+      hiphop: "dutch hip hop boef lil kleine frenna josylvio",
+      rnb: "dutch rnb soul rimon joya moo",
+      rock: "dutch rock kensington within temptation golden earring",
+      dance: "dutch edm dance martin garrix tiesto armin van buuren hardwell",
+      indie: "dutch indie pip blom eut son mieux",
+    },
+    SE: {
+      today: "sverigetopplistan sweden top hits official",
+      pop: "swedish pop hits zara larsson tove lo robyn benjamin ingrosso",
+      hiphop: "swedish hip hop einar hov1 c.gambino",
+      rnb: "swedish rnb snoh aalegra cherrie seinabo sey",
+      rock: "swedish rock ghost the hives kent mando diao",
+      dance: "swedish house mafia avicii alesso galantis",
+      indie: "swedish indie lykke li peter bjorn and john viagra boys",
+    },
+  };
+
+  function shelfQueryForCountryClient(id, gl, fallbackQuery = "") {
+    const code = String(gl || (state.prefs && state.prefs.country) || "US").toUpperCase();
+    const byCountry = CLIENT_COUNTRY_SHELF_QUERIES[code];
+    if (byCountry && byCountry[id]) return byCountry[id];
+    const fb = FALLBACK_SHELVES.find((s) => s.id === id);
+    return (fb && fb.query) || fallbackQuery || "top hits official audio";
+  }
+
+  function isUnwantedIndianTrackClient(t, gl) {
+    const code = String(gl || (state.prefs && state.prefs.country) || "US").toUpperCase();
+    if (!t || code === "IN" || code === "PK" || code === "BD") return false;
+    const s = `${t.title || ""} ${t.artist || ""} ${t.album || ""}`;
+    if (/[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0B80-\u0BFF\u0C00-\u0C7F\u0D00-\u0D7F]/.test(s)) return true;
+    if (/\b(bollywood|hindi|punjabi|bhojpuri|haryanvi|kollywood|tollywood|malayalam|kannada|marathi|gujarati|assamese|odia|arijit\s+singh|shreya\s+ghoshal|jubin\s+nautiyal|t-series|zee\s*music|yash\s*raj|saregama|sony\s*music\s*india|tips\s*official|speed\s*records|desi\s*melodies|pritam|vishal\s+mishra|vishal[\s-]*shekhar|tanishk\s+bagchi|amit\s+trivedi|a\.?\s*r\.?\s*rahman|diljit\s+dosanjh|karan\s+aujla|sidhu\s+moose|ap\s+dhillon|gurinder\s+gill|badshah|yo\s+yo\s+honey\s+singh|neha\s+kakkar|tony\s+kakkar|sonu\s+nigam|atif\s+aslam|kumar\s+sanu|udit\s+narayan|alka\s+yagnik|kk\b|mohit\s+chauhan|anuv\s+jain|prateek\s+kuhad|the\s+local\s+train|local\s+train|aditya\s+rikhari|mitraz|ritviz|zaeden|sanam\b|lucky\s+ali|kailash\s+kher|shankar\s+mahadevan|shaan\b|sunidhi\s+chauhan|darshan\s+raval|armaan\s+malik|asees\s+kaur|b\s+praak|jaani\b|guru\s+randhawa|hardy\s+sandhu|harrdy\s+sandhu|divine\b|kr\$na|seedhe\s+maut|raftaar|emiway|mc\s+stan|talha\s+anjum|talhah\s+yunus|young\s+stunners|hasan\s+raheem|abdul\s+hannan|ali\s+zafar|rahat\s+fateh|nusrat\s+fateh|coke\s+studio|nadaan\s+parindey|sadda\s+haq|choo\s+lo|baarishein|alag\s+aasmaan|kesariya|tum\s+hi\s+ho|channa\s+mereya|kabira|ilahi|agar\s+tum\s+saath|apna\s+bana\s+le|chaleya|satranga|heeriye|husn\b|bulleya|bekhayali|shayad\b|khairiyat|tera\s+ban\s+jaunga|raataan\s+lambiyan|pasoori)\b/i.test(s)) {
+      return true;
+    }
+    return false;
+  }
+
   let homeFetchedAt = 0;
   let homeRetries = 0;
   let homeRetryT = null;
@@ -10638,6 +11921,7 @@
       "Asia/Singapore":"SG","Asia/Manila":"PH","Asia/Bangkok":"TH","Asia/Ho_Chi_Minh":"VN",
       "Africa/Cairo":"EG","Europe/Rome":"IT","Europe/Madrid":"ES","Europe/Istanbul":"TR",
       "Pacific/Auckland":"NZ","Europe/Amsterdam":"NL","Europe/Stockholm":"SE",
+      "Asia/Hong_Kong":"HK","Asia/Shanghai":"CN","Asia/Chongqing":"CN","Asia/Harbin":"CN",
     };
     let code = TZ[tz] || "";
     if (!code && lang.includes("-")) {
@@ -10680,9 +11964,15 @@
     state.prefs.country = code;
     state.prefs.countryChosen = "auto";
     savePrefs();
+    try { localStorage.removeItem("aura.home_cache"); } catch {}
+    state.home = null;
     homeFetchedAt = 0;
+    if (typeof window.__refreshTasteOnboarding === "function") {
+      try { window.__refreshTasteOnboarding(); } catch {}
+    }
     if (state.view === "home") loadHome(true);
     else paintHomeSoon();
+    loadTasteRecommendations(true);
     if (prev && prev !== code) toast(`Catalog set to ${countryName(code)}`, true);
   }
 
@@ -10691,11 +11981,16 @@
   }
 
   function seedHome() {
+    const code = state.prefs.country || "US";
     return {
-      country: state.prefs.country || "US",
+      country: code,
       moods: [],
       day: utcDayClient(),
-      shelves: FALLBACK_SHELVES.map((s) => ({ ...s, tracks: [] })),
+      shelves: FALLBACK_SHELVES.map((s) => ({
+        ...s,
+        query: shelfQueryForCountryClient(s.id, code, s.query),
+        tracks: [],
+      })),
       youtubeCharts: [],
       youtubeIndia: [],
       youtubeLocal: [],
@@ -10716,7 +12011,8 @@
   }
 
   async function loadHome(force) {
-    if (!force && state.home && Date.now() - homeFetchedAt < 86400000 && state.home.day === utcDayClient()) {
+    const targetCountry = state.prefs.country || "IN";
+    if (!force && state.home && state.home.country === targetCountry && Date.now() - homeFetchedAt < 86400000 && state.home.day === utcDayClient()) {
       if (state.view === "home") render();
       return;
     }
@@ -10725,7 +12021,7 @@
         const cached = localStorage.getItem("aura.home_cache");
         if (cached) {
           const parsed = JSON.parse(cached);
-          if (parsed && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
+          if (parsed && parsed.country === targetCountry && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
             state.home = parsed;
             if (state.view === "home") render();
           }
@@ -10743,7 +12039,7 @@
     // feel alive: rows appear within seconds even when the aggregate endpoint
     // is slow (Worker cold start, provider latency) — no long dead skeleton
     // and no permanently empty rows.
-    if (!state.home) {
+    if (!state.home || state.home.country !== targetCountry) {
       state.home = seedHome();
       render();
     }
@@ -10755,9 +12051,9 @@
       if (!data) throw new Error("empty home");
       state.apiStatus = "ok";
       // Keep shelves the background hydration already filled if the worker
-      // returned them empty (provider degradation).
+      // returned them empty (provider degradation) — ONLY when country matches!
       const prev = state.home;
-      if (prev && Array.isArray(prev.shelves) && data.shelves && data.shelves.length) {
+      if (prev && prev.country === data.country && Array.isArray(prev.shelves) && data.shelves && data.shelves.length) {
         const filled = {};
         prev.shelves.forEach((s) => { if (s.tracks && s.tracks.length) filled[s.id] = s.tracks; });
         data.shelves.forEach((s) => {
@@ -10770,12 +12066,17 @@
       // Home row is never left empty (queue + vertical playlists share
       // looksLikeSong and stay strict).
       if (state.home) {
+        const curCountry = state.home.country || targetCountry;
         if (Array.isArray(state.home.shelves)) {
-          state.home.shelves = state.home.shelves.map((s) => ({ ...s, tracks: keepBestTracks(s.tracks) }));
+          state.home.shelves = state.home.shelves.map((s) => ({
+            ...s,
+            query: shelfQueryForCountryClient(s.id, curCountry, s.query),
+            tracks: keepBestTracks((s.tracks || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry))),
+          }));
         }
-        state.home.youtubeLocal = keepBestTracks(state.home.youtubeLocal);
-        state.home.youtubeIndia = keepBestTracks(state.home.youtubeIndia);
-        state.home.youtubeCharts = keepBestTracks(state.home.youtubeCharts);
+        state.home.youtubeLocal = keepBestTracks((state.home.youtubeLocal || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeIndia = keepBestTracks((state.home.youtubeIndia || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeCharts = keepBestTracks((state.home.youtubeCharts || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
         persistHomeCache();
       }
       homeRetries = 0;
@@ -10794,11 +12095,17 @@
       }
     }
     if (!state.home.shelves || !state.home.shelves.length) {
-      state.home.shelves = FALLBACK_SHELVES.map((s) => ({ ...s, tracks: [] }));
+      const curCountry = (state.home && state.home.country) || targetCountry;
+      state.home.shelves = FALLBACK_SHELVES.map((s) => ({
+        ...s,
+        query: shelfQueryForCountryClient(s.id, curCountry, s.query),
+        tracks: [],
+      }));
     }
     homeFetchedAt = Date.now();
     persistHomeCache();
     loadForYou();
+    loadTasteRecommendations();
     checkFollowReleases();
     if (state.view === "home") render();
     hydrateShelves();
@@ -10820,21 +12127,29 @@
   async function hydrateShelves() {
     const h = state.home;
     if (!h) return;
-    const rows = h.shelves && h.shelves.length ? h.shelves : FALLBACK_SHELVES.map((s) => ({ ...s, tracks: [] }));
+    const countryCode = String(h.country || state.prefs.country || "US").toUpperCase();
+    const rows = h.shelves && h.shelves.length
+      ? h.shelves
+      : FALLBACK_SHELVES.map((s) => ({
+          ...s,
+          query: shelfQueryForCountryClient(s.id, countryCode, s.query),
+          tracks: [],
+        }));
     h.shelves = rows;
     await Promise.all(rows.map(async (s) => {
       if (s.tracks && s.tracks.length) return;
-      const q = s.query || (FALLBACK_SHELVES.find((d) => d.id === s.id) || {}).query;
+      const q = shelfQueryForCountryClient(s.id, countryCode, s.query || (FALLBACK_SHELVES.find((d) => d.id === s.id) || {}).query);
       if (!q) return;
+      s.query = q;
       try {
-        const data = await api(`/api/shelf?id=${encodeURIComponent(s.id || "")}&q=${encodeURIComponent(q)}&gl=US`, 16000);
-        const tracks = data.tracks || [];
+        const data = await api(`/api/shelf?id=${encodeURIComponent(s.id || "")}&q=${encodeURIComponent(q)}&gl=${encodeURIComponent(countryCode)}`, 16000);
+        const tracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
         s.tracks = tracks;
         if (!s.title && data.title) s.title = data.title;
         // /api/home may have resolved while this fetch was in flight and
         // swapped state.home — forward the rows into the CURRENT home so
         // nothing is dropped when the worker returned that shelf empty.
-        if (state.home !== h && state.home) {
+        if (state.home !== h && state.home && state.home.country === countryCode) {
           const cur = (state.home.shelves || []).find((x) => String(x.id) === String(s.id));
           if (cur && !(cur.tracks && cur.tracks.length) && tracks.length) {
             cur.tracks = tracks;
@@ -10851,7 +12166,7 @@
         const countryGl = encodeURIComponent((cur && cur.country) || state.prefs.country || "US");
         const q = (cur && cur.localQuery) || "top hits official audio";
         const data = await api(`/api/shelf?id=local&q=${encodeURIComponent(q)}&gl=${countryGl}`, 16000);
-        const tracks = (data && data.tracks) || [];
+        const tracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
         if (tracks.length) {
           const target = state.home || cur;
           target.youtubeLocal = tracks;
@@ -11858,7 +13173,661 @@
   setQueueOpen(false);
   renderPlaylistsNav();
   try { history.replaceState(navSnap(), ""); } catch {}
+  function weaveDiverseTracks(buckets, max = 24, maxPerArtist = 2, countryCode = "US", allowIndian = false) {
+    const seenTrack = new Set();
+    const artistCount = new Map();
+    const out = [];
+    const maxLen = Math.max(0, ...buckets.map((b) => (Array.isArray(b) ? b.length : 0)));
+    for (let i = 0; i < maxLen; i++) {
+      for (const bucket of buckets) {
+        if (!Array.isArray(bucket) || !bucket[i]) continue;
+        const t = bucket[i];
+        if (!t || !t.title || !looksLikeSong(t)) continue;
+        if (!allowIndian && isUnwantedIndianTrackClient(t, countryCode)) continue;
+        const aNorm = String(artistName(t) || "").toLowerCase().trim();
+        const tNorm = String(t.title || "").toLowerCase().trim();
+        const key = `${tNorm}__${aNorm}`;
+        if (seenTrack.has(key)) continue;
+        const count = artistCount.get(aNorm) || 0;
+        if (aNorm && count >= maxPerArtist) continue;
+        // Avoid placing the exact same artist back-to-back when other songs exist
+        const prevArtist = out.length ? String(artistName(out[out.length - 1]) || "").toLowerCase().trim() : "";
+        if (aNorm && aNorm === prevArtist && buckets.length > 1) continue;
+        seenTrack.add(key);
+        if (aNorm) artistCount.set(aNorm, count + 1);
+        out.push(t);
+        if (out.length >= max) return out;
+      }
+    }
+    return out;
+  }
+
+  let _tasteLoadInFlight = false;
+  async function loadTasteRecommendations(force) {
+    if (_tasteLoadInFlight) return;
+    const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
+    const prefGenres = Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
+    const prefMoods = Array.isArray(state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+    const prefEras = Array.isArray(state.prefs.tasteEras) ? state.prefs.tasteEras : [];
+    const prefStyles = Array.isArray(state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
+    const prefArtists = Array.isArray(state.prefs.tasteArtists) ? state.prefs.tasteArtists : [];
+    const followedNames = (state.following || []).map((f) => f && f.name).filter(Boolean);
+    const allArtists = [...new Set([...followedNames, ...prefArtists])];
+    const allowIndian =
+      countryCode === "IN" ||
+      countryCode === "PK" ||
+      countryCode === "BD" ||
+      prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
+
+    if (!prefGenres.length && !prefMoods.length && !prefEras.length && !prefStyles.length && !allArtists.length) return;
+    if (!force && (state.tasteTracks || []).length >= 8 && (!allArtists.length || (state.followedArtistTracks || []).length >= 6)) {
+      return;
+    }
+
+    _tasteLoadInFlight = true;
+    try {
+      const styleList = getOnboardStylesForCountry(countryCode);
+      // 1) Build diverse queries for "Picked for your taste" mixing genres, moods, eras, styles, country hits & artists
+      const tasteQueries = [];
+      for (const gId of prefGenres.slice(0, 3)) {
+        const gObj = findOnboardGenreById(gId, countryCode);
+        if (gObj && gObj.query) tasteQueries.push(gObj.query);
+      }
+      for (const mId of prefMoods.slice(0, 2)) {
+        const mObj = ONBOARD_MOODS.find((x) => x.id === mId);
+        if (mObj && mObj.query) tasteQueries.push(mObj.query);
+      }
+      for (const eId of prefEras.slice(0, 1)) {
+        const eObj = ONBOARD_ERAS.find((x) => x.id === eId);
+        if (eObj && eObj.query) tasteQueries.push(eObj.query);
+      }
+      for (const sId of prefStyles.slice(0, 1)) {
+        const sObj = styleList.find((x) => x.id === sId);
+        if (sObj && sObj.query) tasteQueries.push(sObj.query);
+      }
+      for (const aName of allArtists.slice(0, 2)) {
+        tasteQueries.push(`${aName} hits official audio`);
+      }
+      // Always include a country/genre anchor query so even if user only chose 1 artist,
+      // the row is a rich mix of songs rather than just that single artist's songs.
+      tasteQueries.push(shelfQueryForCountryClient("pop", countryCode, "top hits official audio"));
+      if (prefGenres.length === 0) {
+        tasteQueries.push(shelfQueryForCountryClient("indie", countryCode, "indie pop official audio"));
+      }
+
+      const uniqueTasteQueries = [...new Set(tasteQueries)].slice(0, 6);
+      if (uniqueTasteQueries.length) {
+        const settled = await Promise.allSettled(
+          uniqueTasteQueries.map((q) => api(`/api/search?q=${encodeURIComponent(q)}&${glq()}`, 12000))
+        );
+        const buckets = [];
+        for (const r of settled) {
+          if (r.status !== "fulfilled" || !r.value) continue;
+          const d = r.value;
+          buckets.push([
+            ...((d.apple || d.itunes || []).slice(0, 5)),
+            ...((d.youtube || []).slice(0, 6)),
+            ...((d.deezer || []).slice(0, 4)),
+          ]);
+        }
+        const combined = weaveDiverseTracks(buckets, 24, 2, countryCode, allowIndian);
+        if (combined.length) {
+          state.tasteTracks = combined;
+          save("aura.tasteTracks", state.tasteTracks);
+          paintHomeSoon();
+        }
+      }
+
+      // 2) Build "Artists you follow & similar" shelf: mix songs by followed artists
+      //    WITH other songs (similar artists, chosen genres/moods, and country hits)
+      //    so it never looks odd or one-artist-only even if the user followed just 1 artist.
+      if (allArtists.length) {
+        const artistQueries = [];
+        for (const name of allArtists.slice(0, 3)) {
+          artistQueries.push(`${name} official audio`);
+          artistQueries.push(`songs like ${name} mix official audio`);
+        }
+        // Add companion genre/country queries to guarantee variety alongside followed artists
+        if (prefGenres.length) {
+          const gObj = findOnboardGenreById(prefGenres[0], countryCode);
+          if (gObj && gObj.query) artistQueries.push(gObj.query);
+        }
+        if (prefMoods.length) {
+          const mObj = ONBOARD_MOODS.find((x) => x.id === prefMoods[0]);
+          if (mObj && mObj.query) artistQueries.push(mObj.query);
+        }
+        artistQueries.push(shelfQueryForCountryClient("today", countryCode, "top hits official audio"));
+
+        const uniqueArtistQueries = [...new Set(artistQueries)].slice(0, 6);
+        const artistSettled = await Promise.allSettled(
+          uniqueArtistQueries.map((q) => api(`/api/search?q=${encodeURIComponent(q)}&${glq()}`, 12000))
+        );
+        const artistBuckets = [];
+        for (const r of artistSettled) {
+          if (r.status !== "fulfilled" || !r.value) continue;
+          const d = r.value;
+          artistBuckets.push([
+            ...((d.apple || d.itunes || []).slice(0, 5)),
+            ...((d.youtube || []).slice(0, 5)),
+            ...((d.deezer || []).slice(0, 4)),
+          ]);
+        }
+        // Cap any single artist at max 2 tracks in this shelf so followed artists
+        // are woven naturally with other songs!
+        const mixedArtistTracks = weaveDiverseTracks(artistBuckets, 24, 2, countryCode, allowIndian);
+        if (mixedArtistTracks.length) {
+          state.followedArtistTracks = mixedArtistTracks;
+          save("aura.followedArtistTracks", state.followedArtistTracks);
+          paintHomeSoon();
+        }
+      }
+    } catch {} finally {
+      _tasteLoadInFlight = false;
+    }
+  }
+
+  const _onbArtCache = load("aura.onbArtCache", {});
+  function saveOnbArtCache() {
+    save("aura.onbArtCache", _onbArtCache);
+  }
+
+  function getArtistAvatarSvg(name) {
+    const clean = String(name || "Artist").trim();
+    const parts = clean.split(/\s+/);
+    const initials = ((parts[0] && parts[0][0]) || "M") + ((parts[1] && parts[1][0]) || "");
+    let hash = 0;
+    for (let i = 0; i < clean.length; i++) hash = (hash * 31 + clean.charCodeAt(i)) >>> 0;
+    const h1 = hash % 360;
+    const h2 = (h1 + 48) % 360;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="hsl(${h1},70%,42%)"/><stop offset="100%" stop-color="hsl(${h2},75%,24%)"/></linearGradient></defs><rect width="120" height="120" fill="url(#g)"/><text x="60" y="68" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif" font-weight="700" font-size="40">${initials.toUpperCase()}</text></svg>`;
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  }
+
+  async function hydrateOnbArtistAvatars(overlay) {
+    if (!overlay) return;
+    const imgs = Array.from(overlay.querySelectorAll("img[data-onb-artist-img]"));
+    const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
+    for (const img of imgs) {
+      const name = img.getAttribute("data-onb-artist-img") || "";
+      if (!name) continue;
+      if (_onbArtCache[name]) {
+        img.src = _onbArtCache[name];
+        continue;
+      }
+      try {
+        const d = await api(`/api/catalog/proxy?provider=apple&path=${encodeURIComponent(`/search?term=${encodeURIComponent(name)}&media=music&entity=song&limit=1&country=${encodeURIComponent(countryCode)}`)}`, 5000);
+        const row = d && Array.isArray(d.results) && d.results[0];
+        if (row && row.artworkUrl100) {
+          const hi = String(row.artworkUrl100).replace("100x100bb", "400x400bb");
+          _onbArtCache[name] = hi;
+          img.src = hi;
+          saveOnbArtCache();
+        }
+      } catch {}
+    }
+  }
+
+  function openTasteOnboarding(force = false) {
+    if (!force && localStorage.getItem("aura.onboarded")) return;
+    const existing = document.getElementById("tasteOnboardingOverlay");
+    if (existing) existing.remove();
+
+    const TOTAL_STEPS = 4;
+    let step = 1;
+    const selectedGenres = new Set(Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : []);
+    const selectedMoods = new Set(Array.isArray(state.prefs.tasteMoods) ? state.prefs.tasteMoods : []);
+    const selectedEras = new Set(Array.isArray(state.prefs.tasteEras) ? state.prefs.tasteEras : []);
+    const selectedStyles = new Set(Array.isArray(state.prefs.tasteStyles) ? state.prefs.tasteStyles : []);
+    const selectedArtists = new Set([
+      ...(Array.isArray(state.prefs.tasteArtists) ? state.prefs.tasteArtists : []),
+      ...((state.following || []).map((f) => f && f.name).filter(Boolean)),
+    ]);
+    let customSearchedArtists = [];
+    let artistQuery = "";
+
+    const overlay = document.createElement("div");
+    overlay.id = "tasteOnboardingOverlay";
+    overlay.className = "onb-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Personalize your music taste");
+
+    const closeOnboarding = (saveSelections) => {
+      window.__refreshTasteOnboarding = null;
+      localStorage.setItem("aura.onboarded", "1");
+      state.prefs.onboarded = true;
+      if (saveSelections) {
+        state.prefs.tasteGenres = Array.from(selectedGenres);
+        state.prefs.tasteMoods = Array.from(selectedMoods);
+        state.prefs.tasteEras = Array.from(selectedEras);
+        state.prefs.tasteStyles = Array.from(selectedStyles);
+        state.prefs.tasteArtists = Array.from(selectedArtists);
+        // Sync selected artists into state.following using canonical artistKey ("name:...")
+        const selectedLower = new Set(Array.from(selectedArtists).map((n) => String(n || "").toLowerCase().trim()).filter(Boolean));
+        // Remove any previously followed artist that the user unchecked in the onboarding modal
+        state.following = (state.following || []).filter((f) => {
+          if (!f || !f.name) return false;
+          return selectedLower.has(String(f.name).toLowerCase().trim());
+        });
+        for (const name of selectedArtists) {
+          const clean = String(name || "").trim();
+          if (!clean) continue;
+          const key = artistKey(clean);
+          if (!isFollowing(clean)) {
+            state.following.unshift({
+              key,
+              name: clean,
+              source: "catalog",
+              handle: "",
+              artwork: _onbArtCache[clean] || "/cover-default.jpg",
+              lastId: "",
+              followedAt: Date.now(),
+            });
+          }
+        }
+        saveFollowing({ replaceFollowing: true });
+      }
+      savePrefs();
+      scheduleUserLibraryPush();
+      overlay.remove();
+      if (saveSelections && (selectedGenres.size || selectedMoods.size || selectedEras.size || selectedStyles.size || selectedArtists.size)) {
+        toast("Homepage personalized for your taste!", true, "success");
+        state.tasteTracks = [];
+        state.followedArtistTracks = [];
+        loadTasteRecommendations(true);
+        loadForYou();
+        loadDiscoveryMix(true);
+      }
+      if (state.view === "home" || state.view === "settings") render();
+    };
+
+    const renderStep = () => {
+      const curCountry = String((state.prefs && state.prefs.country) || "US").toUpperCase();
+      const cName = countryName(curCountry);
+      const countryOptionsHtml = COUNTRIES.map(([code, label]) =>
+        `<option value="${escapeAttr(code)}" ${code === curCountry ? "selected" : ""}>${escapeHTML(label)}</option>`
+      ).join("");
+
+      const signedIn = Boolean(state.auth && state.auth.signedIn);
+      const userProfile = (state.auth && state.auth.profile) || {};
+      const googleCard = step === 1 ? `
+        <div class="onb-auth-card">
+          <div class="onb-auth-copy">
+            ${signedIn
+              ? `<strong>Signed in as ${escapeHTML(userProfile.name || userProfile.email || "Google User")}</strong>
+                 <span>Your liked songs, playlists & taste sync automatically.</span>`
+              : `<strong>Already used Muchi? Or want to sync across devices?</strong>
+                 <span>Sign in with Google — returning users jump straight into the app with their saved library & taste.</span>`}
+          </div>
+          ${signedIn
+            ? `<span class="chip active" style="pointer-events:none">✓ Connected</span>`
+            : `<button type="button" class="onb-google-btn" id="onbGoogleLoginBtn">
+                 <span class="material-symbols-outlined" style="font-size:18px">account_circle</span>
+                 Continue with Google
+               </button>`}
+        </div>
+      ` : "";
+
+      let bodyHtml = "";
+      let countHint = "";
+
+      if (step === 1) {
+        const genresForCountry = getOnboardGenresForCountry(curCountry);
+        countHint = `${selectedGenres.size} selected`;
+        bodyHtml = `
+          ${googleCard}
+          <div class="onb-head">
+            <h2>What kind of songs do you like?</h2>
+            <p>Tailored for <strong>${escapeHTML(cName)}</strong> — pick the music varieties you enjoy, or tap Skip anytime.</p>
+          </div>
+          <div class="onb-grid">
+            ${genresForCountry.map((g) => {
+              const on = selectedGenres.has(g.id);
+              return `
+                <button type="button" class="onb-tile ${on ? "selected" : ""}" data-onb-genre="${escapeAttr(g.id)}" style="--tile-clr:${g.color}">
+                  <span class="onb-tile-check">✓</span>
+                  <span class="onb-tile-title">${escapeHTML(g.title)}</span>
+                  <span class="onb-tile-sub">${escapeHTML(g.sub)}</span>
+                </button>
+              `;
+            }).join("")}
+          </div>
+        `;
+      } else if (step === 2) {
+        countHint = `${selectedMoods.size} selected`;
+        bodyHtml = `
+          <div class="onb-head">
+            <h2>What moods match your vibe?</h2>
+            <p>Choose the listening moments and moods you love — we'll build mixes around them.</p>
+          </div>
+          <div class="onb-grid">
+            ${ONBOARD_MOODS.map((m) => {
+              const on = selectedMoods.has(m.id);
+              return `
+                <button type="button" class="onb-tile ${on ? "selected" : ""}" data-onb-mood="${escapeAttr(m.id)}" style="--tile-clr:${m.color}">
+                  <span class="onb-tile-check">✓</span>
+                  <span class="onb-tile-title">${escapeHTML(m.title)}</span>
+                  <span class="onb-tile-sub">${escapeHTML(m.sub)}</span>
+                </button>
+              `;
+            }).join("")}
+          </div>
+        `;
+      } else if (step === 3) {
+        const stylesForCountry = getOnboardStylesForCountry(curCountry);
+        countHint = `${selectedEras.size + selectedStyles.size} selected`;
+        bodyHtml = `
+          <div class="onb-head">
+            <h2>How do you like your music mix?</h2>
+            <p>Pick your favorite eras and how you want ${escapeHTML(cName)} & international songs blended.</p>
+          </div>
+          <h3 class="onb-subhead">Listening Style & Language Mix</h3>
+          <div class="onb-grid" style="margin-bottom:18px">
+            ${stylesForCountry.map((st) => {
+              const on = selectedStyles.has(st.id);
+              return `
+                <button type="button" class="onb-tile ${on ? "selected" : ""}" data-onb-style="${escapeAttr(st.id)}" style="--tile-clr:${st.color}">
+                  <span class="onb-tile-check">✓</span>
+                  <span class="onb-tile-title">${escapeHTML(st.title)}</span>
+                  <span class="onb-tile-sub">${escapeHTML(st.sub)}</span>
+                </button>
+              `;
+            }).join("")}
+          </div>
+          <h3 class="onb-subhead">Favorite Music Eras</h3>
+          <div class="onb-grid">
+            ${ONBOARD_ERAS.map((er) => {
+              const on = selectedEras.has(er.id);
+              return `
+                <button type="button" class="onb-tile ${on ? "selected" : ""}" data-onb-era="${escapeAttr(er.id)}" style="--tile-clr:${er.color}">
+                  <span class="onb-tile-check">✓</span>
+                  <span class="onb-tile-title">${escapeHTML(er.title)}</span>
+                  <span class="onb-tile-sub">${escapeHTML(er.sub)}</span>
+                </button>
+              `;
+            }).join("")}
+          </div>
+        `;
+      } else {
+        countHint = `${selectedArtists.size} followed`;
+        const countryArtists = getOnboardArtistsForCountry(curCountry);
+        // Keep local country artists and genre-matching artists at the top
+        const sortedArtists = [
+          ...customSearchedArtists,
+          ...countryArtists.filter((a) => !customSearchedArtists.some((c) => c.name.toLowerCase() === a.name.toLowerCase())),
+        ].sort((a, b) => {
+          const aCustom = customSearchedArtists.some((c) => c.name.toLowerCase() === a.name.toLowerCase()) ? 4 : 0;
+          const bCustom = customSearchedArtists.some((c) => c.name.toLowerCase() === b.name.toLowerCase()) ? 4 : 0;
+          if (aCustom !== bCustom) return bCustom - aCustom;
+          const aLocal = a.local ? 2 : 0;
+          const bLocal = b.local ? 2 : 0;
+          const aMatch = (a.genres || []).some((g) => selectedGenres.has(g)) ? 1 : 0;
+          const bMatch = (b.genres || []).some((g) => selectedGenres.has(g)) ? 1 : 0;
+          return (bLocal + bMatch) - (aLocal + aMatch);
+        });
+        bodyHtml = `
+          <div class="onb-head">
+            <h2>Which artists do you want to follow?</h2>
+            <p>Featuring top artists from <strong>${escapeHTML(cName)}</strong> & global icons — we'll mix their songs with similar tracks you'll love.</p>
+          </div>
+          <div class="onb-search-row">
+            <span class="material-symbols-outlined" style="font-size:20px;opacity:0.7">search</span>
+            <input type="text" id="onbArtistSearchInput" placeholder="Search any artist from ${escapeAttr(cName)} or worldwide…" value="${escapeAttr(artistQuery)}" autocomplete="off" />
+            <button type="button" class="chip-btn sm" id="onbArtistSearchBtn">Search</button>
+          </div>
+          <div class="onb-artists-grid" id="onbArtistsGrid">
+            ${sortedArtists.map((a) => {
+              const on = selectedArtists.has(a.name);
+              const cachedArt = _onbArtCache[a.name] || getArtistAvatarSvg(a.name);
+              return `
+                <button type="button" class="onb-artist-card ${on ? "selected" : ""}" data-onb-artist="${escapeAttr(a.name)}">
+                  <div class="onb-artist-avatar">
+                    <img src="${escapeAttr(cachedArt)}" data-onb-artist-img="${escapeAttr(a.name)}" alt="${escapeAttr(a.name)}" loading="lazy" />
+                    <div class="onb-artist-check"><span class="material-symbols-outlined">check</span></div>
+                  </div>
+                  <span class="onb-artist-name">${escapeHTML(a.name)}</span>
+                  <span class="onb-artist-tag">${escapeHTML(a.tag || "Artist")}</span>
+                </button>
+              `;
+            }).join("")}
+          </div>
+        `;
+      }
+
+      overlay.innerHTML = `
+        <div class="onb-dialog">
+          <div class="onb-top">
+            <div class="onb-brand">
+              <img src="${escapeAttr(activeAppIconUrl())}" alt="Muchi" />
+              <span>Muchi Setup</span>
+              <div class="onb-step-dots" aria-label="Step ${step} of ${TOTAL_STEPS}">
+                <span class="onb-step-dot ${step === 1 ? "active" : "done"}"></span>
+                <span class="onb-step-dot ${step === 2 ? "active" : step > 2 ? "done" : ""}"></span>
+                <span class="onb-step-dot ${step === 3 ? "active" : step > 3 ? "done" : ""}"></span>
+                <span class="onb-step-dot ${step === 4 ? "active" : ""}"></span>
+              </div>
+            </div>
+            <div class="onb-top-actions">
+              <label class="onb-country-pill" title="Detected country — change to see options & artists for another country">
+                <span class="material-symbols-outlined" style="font-size:15px">public</span>
+                <select id="onbCountrySelect" aria-label="Country">${countryOptionsHtml}</select>
+              </label>
+              <button type="button" class="onb-skip-top" id="onbSkipAllBtn">Skip</button>
+            </div>
+          </div>
+          <div class="onb-body">
+            ${bodyHtml}
+          </div>
+          <div class="onb-foot">
+            <div class="onb-foot-left">
+              ${step > 1 ? `<button type="button" class="chip-btn" id="onbBackBtn">Back</button>` : ""}
+              <span class="onb-count-hint" id="onbCountHint">${escapeHTML(countHint)}</span>
+            </div>
+            <div class="onb-foot-right">
+              <button type="button" class="chip-btn" id="onbSkipStepBtn">${step < TOTAL_STEPS ? "Skip question" : "Skip"}</button>
+              <button type="button" class="filled-btn" id="onbNextBtn">${step < TOTAL_STEPS ? "Next" : "Done"}</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      // Wire country selector inside onboarding
+      const countrySel = overlay.querySelector("#onbCountrySelect");
+      if (countrySel) {
+        countrySel.addEventListener("change", () => {
+          state.prefs.country = countrySel.value;
+          state.prefs.countryChosen = true;
+          savePrefs();
+          try { localStorage.removeItem("aura.home_cache"); } catch {}
+          state.home = null;
+          loadHome(true);
+          renderStep();
+        });
+      }
+
+      // Wire events
+      const skipAll = overlay.querySelector("#onbSkipAllBtn");
+      if (skipAll) skipAll.addEventListener("click", () => closeOnboarding(true));
+
+      const skipStep = overlay.querySelector("#onbSkipStepBtn");
+      if (skipStep) {
+        skipStep.addEventListener("click", () => {
+          if (step < TOTAL_STEPS) {
+            step += 1;
+            renderStep();
+          } else {
+            closeOnboarding(true);
+          }
+        });
+      }
+
+      const backBtn = overlay.querySelector("#onbBackBtn");
+      if (backBtn) {
+        backBtn.addEventListener("click", () => {
+          if (step > 1) {
+            step -= 1;
+            renderStep();
+          }
+        });
+      }
+
+      const nextBtn = overlay.querySelector("#onbNextBtn");
+      if (nextBtn) {
+        nextBtn.addEventListener("click", () => {
+          if (step < TOTAL_STEPS) {
+            step += 1;
+            renderStep();
+          } else {
+            closeOnboarding(true);
+          }
+        });
+      }
+
+      const gBtn = overlay.querySelector("#onbGoogleLoginBtn");
+      if (gBtn) {
+        gBtn.addEventListener("click", () => {
+          // Do NOT set aura.onboarded="1" yet: after Google login completes,
+          // syncUserLibrary() will check if this Google account is an old/returning
+          // user. Returning users will automatically skip onboarding & restore their
+          // saved data, while brand-new users will continue onboarding!
+          try { sessionStorage.setItem("aura.onb_pending_auth", "1"); } catch {}
+          state.prefs.tasteGenres = Array.from(selectedGenres);
+          state.prefs.tasteMoods = Array.from(selectedMoods);
+          state.prefs.tasteEras = Array.from(selectedEras);
+          state.prefs.tasteStyles = Array.from(selectedStyles);
+          state.prefs.tasteArtists = Array.from(selectedArtists);
+          savePrefs();
+          startGoogleSignIn();
+        });
+      }
+
+      overlay.querySelectorAll("[data-onb-genre]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-onb-genre");
+          if (!id) return;
+          if (selectedGenres.has(id)) selectedGenres.delete(id);
+          else selectedGenres.add(id);
+          btn.classList.toggle("selected", selectedGenres.has(id));
+          const hint = overlay.querySelector("#onbCountHint");
+          if (hint) hint.textContent = `${selectedGenres.size} selected`;
+        });
+      });
+
+      overlay.querySelectorAll("[data-onb-mood]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-onb-mood");
+          if (!id) return;
+          if (selectedMoods.has(id)) selectedMoods.delete(id);
+          else selectedMoods.add(id);
+          btn.classList.toggle("selected", selectedMoods.has(id));
+          const hint = overlay.querySelector("#onbCountHint");
+          if (hint) hint.textContent = `${selectedMoods.size} selected`;
+        });
+      });
+
+      overlay.querySelectorAll("[data-onb-style]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-onb-style");
+          if (!id) return;
+          if (selectedStyles.has(id)) selectedStyles.delete(id);
+          else selectedStyles.add(id);
+          btn.classList.toggle("selected", selectedStyles.has(id));
+          const hint = overlay.querySelector("#onbCountHint");
+          if (hint) hint.textContent = `${selectedEras.size + selectedStyles.size} selected`;
+        });
+      });
+
+      overlay.querySelectorAll("[data-onb-era]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-onb-era");
+          if (!id) return;
+          if (selectedEras.has(id)) selectedEras.delete(id);
+          else selectedEras.add(id);
+          btn.classList.toggle("selected", selectedEras.has(id));
+          const hint = overlay.querySelector("#onbCountHint");
+          if (hint) hint.textContent = `${selectedEras.size + selectedStyles.size} selected`;
+        });
+      });
+
+      overlay.querySelectorAll("[data-onb-artist]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const name = btn.getAttribute("data-onb-artist");
+          if (!name) return;
+          if (selectedArtists.has(name)) selectedArtists.delete(name);
+          else selectedArtists.add(name);
+          btn.classList.toggle("selected", selectedArtists.has(name));
+          const hint = overlay.querySelector("#onbCountHint");
+          if (hint) hint.textContent = `${selectedArtists.size} followed`;
+        });
+      });
+
+      const searchInp = overlay.querySelector("#onbArtistSearchInput");
+      const searchBtn = overlay.querySelector("#onbArtistSearchBtn");
+      const runArtistSearch = async () => {
+        const q = String((searchInp && searchInp.value) || "").trim();
+        if (!q) return;
+        artistQuery = q;
+        if (searchBtn) {
+          searchBtn.disabled = true;
+          searchBtn.textContent = "Searching…";
+        }
+        try {
+          const d = await api(`/api/search?q=${encodeURIComponent(q)}&${glq()}`, 8000);
+          const found = [];
+          const seen = new Set();
+          for (const a of (d && d.artists) || []) {
+            if (!a || !a.name) continue;
+            const k = a.name.toLowerCase();
+            if (seen.has(k)) continue;
+            seen.add(k);
+            if (a.artwork && a.artwork !== "/cover-default.jpg") _onbArtCache[a.name] = a.artwork;
+            found.push({ name: a.name, tag: "Artist", genres: [], local: true });
+          }
+          for (const s of [...((d && d.apple) || []), ...((d && d.youtube) || [])]) {
+            const nm = artistName(s);
+            if (!nm || nm === "YouTube") continue;
+            const k = nm.toLowerCase();
+            if (seen.has(k)) continue;
+            seen.add(k);
+            if (s.artwork && s.artwork !== "/cover-default.jpg" && !_onbArtCache[nm]) _onbArtCache[nm] = s.artwork;
+            found.push({ name: nm, tag: "Artist", genres: [], local: true });
+            if (found.length >= 6) break;
+          }
+          if (found.length) {
+            saveOnbArtCache();
+            customSearchedArtists = [...found, ...customSearchedArtists.filter((x) => !found.some((f) => f.name.toLowerCase() === x.name.toLowerCase()))];
+          }
+        } catch {}
+        renderStep();
+      };
+      if (searchBtn) searchBtn.addEventListener("click", runArtistSearch);
+      if (searchInp) searchInp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runArtistSearch(); } });
+
+      if (step === TOTAL_STEPS) {
+        hydrateOnbArtistAvatars(overlay);
+      }
+    };
+
+    window.__refreshTasteOnboarding = renderStep;
+    document.body.appendChild(overlay);
+    renderStep();
+  }
+
+  function maybeShowFirstLaunchOnboarding() {
+    try {
+      if (localStorage.getItem("aura.onboarded") || state.prefs.onboarded) return;
+      // Only show on first-ever launch; wait briefly for opening splash to fade
+      setTimeout(() => {
+        if (!localStorage.getItem("aura.onboarded")) {
+          openTasteOnboarding(false);
+        }
+      }, 1250);
+    } catch {}
+  }
+
   loadHome();
+  loadTasteRecommendations();
+  maybeShowFirstLaunchOnboarding();
   checkUpdates(true);
   const homeStale = () => Date.now() - homeFetchedAt > 86400000 || (state.home && state.home.day !== utcDayClient());
   setInterval(() => {

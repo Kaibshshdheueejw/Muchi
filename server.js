@@ -1,4 +1,5 @@
 import express from "express";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
@@ -9,12 +10,44 @@ const __dirname = path.dirname(__filename);
 
 const PORT = 3000;
 const HOST = "0.0.0.0";
+const CLOUD_DB_FILE = path.join(__dirname, ".muchi-cloud-db.json");
 
-// In-memory Cloudflare D1 stub for session & OAuth state storage
+// Persistent Cloudflare D1 stub for session, OAuth state & user library storage
 function createInMemoryD1() {
   const sessions = new Map();
   const oauthStates = new Map();
   const userLibraries = new Map();
+
+  // Load persisted sessions & user libraries from disk if present
+  try {
+    if (fs.existsSync(CLOUD_DB_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(CLOUD_DB_FILE, "utf8") || "{}");
+      if (raw && raw.sessions && typeof raw.sessions === "object") {
+        for (const [k, v] of Object.entries(raw.sessions)) {
+          if (v && v.expires_at > Date.now()) sessions.set(k, v);
+        }
+      }
+      if (raw && raw.userLibraries && typeof raw.userLibraries === "object") {
+        for (const [k, v] of Object.entries(raw.userLibraries)) {
+          if (v && v.payload) userLibraries.set(k, v);
+        }
+      }
+    }
+  } catch {}
+
+  let saveTimer = null;
+  const schedulePersist = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      try {
+        const dump = {
+          sessions: Object.fromEntries(sessions.entries()),
+          userLibraries: Object.fromEntries(userLibraries.entries()),
+        };
+        fs.writeFileSync(CLOUD_DB_FILE, JSON.stringify(dump), "utf8");
+      } catch {}
+    }, 150);
+  };
 
   // Pre-seed authenticated dev session for live testing and admin verification
   const devTestSid = "test-smoke-session-sid-12345";
@@ -72,16 +105,19 @@ function createInMemoryD1() {
                   created_at: existing ? existing.created_at : created_at,
                   updated_at,
                 });
+                schedulePersist();
                 return { success: true };
               }
               if (sql.includes("INSERT INTO user_library")) {
                 const [userId, payload, updatedAt] = args;
                 userLibraries.set(userId, { payload, updated_at: updatedAt });
+                schedulePersist();
                 return { success: true };
               }
               if (sql.includes("DELETE FROM sessions WHERE sid = ?")) {
                 const [sid] = args;
                 sessions.delete(sid);
+                schedulePersist();
                 return { success: true };
               }
               if (sql.includes("DELETE FROM sessions WHERE expires_at < ?")) {
