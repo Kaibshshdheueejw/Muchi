@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.3";
+  const APP_VERSION = "1.7.4";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -957,11 +957,23 @@
   function normalizeUiMode(v) {
     return VALID_UI_MODES.includes(v) ? v : "glass";
   }
+  const VALID_PLAYER_STYLES = ["pill", "wave", "vinyl", "aura"];
+  function normalizePlayerStyle(v) {
+    return VALID_PLAYER_STYLES.includes(v) ? v : "pill";
+  }
+  const VALID_SEEK_WIGGLES = ["sine", "ribbon", "glow", "orbit"];
+  function normalizeSeekWiggle(v) {
+    if (v === "pulse") return "ribbon";
+    if (v === "zigzag") return "glow";
+    return VALID_SEEK_WIGGLES.includes(v) ? v : "sine";
+  }
   function applyUi() {
     const ui = normalizeUiMode(state.prefs.ui);
     document.documentElement.dataset.ui = ui;
-    const ps = state.prefs.playerStyle;
-    document.documentElement.dataset.player = ["pill", "island", "wave", "bar"].includes(ps) ? ps : "pill";
+    const ps = normalizePlayerStyle(state.prefs.playerStyle);
+    document.documentElement.dataset.player = ps;
+    const wg = normalizeSeekWiggle(state.prefs.seekWiggle);
+    document.documentElement.dataset.wiggle = wg;
     const icons = ["small", "default", "medium", "large"].includes(state.prefs.iconSize) ? state.prefs.iconSize : "default";
     document.documentElement.dataset.icons = icons;
     // "Interface size" drives the WHOLE app, not just icon glyphs: pick a
@@ -980,7 +992,10 @@
       document.documentElement.style.zoom = "";
     }
     const bar = $("playerBar");
-    if (bar) bar.dataset.player = document.documentElement.dataset.player;
+    if (bar) {
+      bar.dataset.player = ps;
+      bar.dataset.wiggle = wg;
+    }
     syncPlayerVisibility();
   }
   function uiLabel() {
@@ -2823,12 +2838,15 @@
     return "m4a";
   }
   function slimTrack(t) {
-    const s = { id: t.id, title: t.title, artist: t.artist, source: t.source, duration: t.duration };
+    const dur = Math.round(Number(t.duration) || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0);
+    const s = { id: t.id, title: t.title, artist: t.artist, source: t.source, duration: dur };
     if (t.videoId) s.videoId = t.videoId;
     if (t.trackId) s.trackId = t.trackId;
     if (t.album) s.album = t.album;
     if (t.genre) s.genre = t.genre;
     if (t.artwork) s.artwork = t.artwork;
+    if (t.lyrics) s.lyrics = t.lyrics;
+    if (Array.isArray(t.synced) && t.synced.length) s.synced = t.synced;
     return s;
   }
   function isPreviewOrPlaceholderStream(u, t) {
@@ -3089,7 +3107,8 @@
       collect.push(new Uint8Array(ab));
       onProgress({ bytes: ab.byteLength, total: total || ab.byteLength, progress: 1 });
     }
-    let audioBytes = concatBytes(collect);
+    const rawAudioBytes = concatBytes(collect);
+    let taggedBytes = rawAudioBytes;
     if (MM) {
       try {
         // Best-effort artwork bytes (CORS-permitting); title/artist/album always embed.
@@ -3101,16 +3120,19 @@
             if (ar.ok) picture = { mime: (ar.headers.get("content-type") || "image/jpeg").split(";")[0], data: new Uint8Array(await ar.arrayBuffer()) };
           } catch {}
         }
-        audioBytes = MM.embed(audioBytes, ext, {
+        taggedBytes = MM.embed(rawAudioBytes, ext, {
           title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
         });
       } catch (metaErr) {
         console.warn("MuchiMeta embed failed, keeping raw audio bytes:", metaErr);
+        taggedBytes = rawAudioBytes;
       }
     }
     const blobType = ctype || "audio/webm";
-    // Always persist raw Blob into IndexedDB first under all candidate keys so offline playback works immediately.
-    const blob = new Blob([audioBytes], { type: blobType });
+    // Always persist untouched raw audio bytes into IndexedDB first under all candidate keys
+    // so in-app offline playback and timestamp seeking work with 100% original sample offsets.
+    const blob = new Blob([rawAudioBytes], { type: blobType });
+    const exportBlob = new Blob([taggedBytes], { type: blobType });
     const keysToPersist = [
       t.id,
       trackKey(t),
@@ -3130,7 +3152,7 @@
       try {
         const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
         const writable = await handle.createWritable();
-        await writable.write(audioBytes);
+        await writable.write(taggedBytes);
         await writable.close();
         // IMPORTANT: preserve { blob, handle, fname } so offline playback works
         // even if browser revokes file handle permission on page reload / offline!
@@ -3147,7 +3169,7 @@
     }
     // Standard browser download fallback via temporary anchor
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    a.href = URL.createObjectURL(exportBlob);
     a.download = fname;
     document.body.appendChild(a);
     a.click();
@@ -3212,8 +3234,21 @@
       const uri = await saveDownloadToDisk(meta, resolved, job, onProgress);
       if (job.status === "cancelled" || !uri) throw new Error("cancelled");
       job.status = "done"; job.progress = 1; saveDlJob(job);
-      // Record metadata + the local uri so it can replay offline.
-      const dl = { ...slimTrack(resolved), uri, streamMime: meta.mime, savedAt: Date.now() };
+      // Pre-fetch and persist synced lyrics alongside the offline download so lyrics move offline.
+      let dlLyrics = null;
+      try {
+        dlLyrics = await ensureOfflineLyricsForTrack(resolved);
+      } catch {}
+      // Record metadata + the local uri + cached lyrics so it can replay offline with moving lyrics.
+      const dl = {
+        ...slimTrack(resolved),
+        uri,
+        streamMime: meta.mime,
+        savedAt: Date.now(),
+        ...(dlLyrics && (dlLyrics.lyrics || (dlLyrics.synced && dlLyrics.synced.length))
+          ? { lyrics: dlLyrics.lyrics || "", synced: dlLyrics.synced || [] }
+          : {}),
+      };
       delete dl.streamUrl;
       state.downloads = [dl, ...state.downloads.filter((d) => d.id !== dl.id)];
       save("aura.downloads", state.downloads);
@@ -3914,9 +3949,6 @@
     const canDl = !!t && t.source !== "radio" && !!(t.videoId || t.trackId || t.source === "youtube" || t.source === "apple" || t.source === "itunes" || t.source === "deezer" || saved);
     const canFollow = !!(t && t.source !== "radio");
     const followingNow = !!(canFollow && isFollowing(t));
-    const canVideo = !!(t && t.source !== "radio" && t.source !== "audius");
-    const curStyle = ["pill", "island", "wave", "bar"].includes(state.prefs.playerStyle) ? state.prefs.playerStyle : "pill";
-    const curSpeed = Number(state.prefs.speed || 1) || 1;
     const ytChip = ytConnected() && t && t.videoId
       ? `<div class="po-row"><div><strong>YouTube</strong><p>Add the current song to your account.</p></div>
           <div class="po-yt-actions">
@@ -3948,26 +3980,9 @@
               <button type="button" class="chip-btn" id="poDetails">Details</button>
             </div>
           </div>` : ""}
-          ${canVideo ? `
-          <div class="po-row">
-            <div><strong>Video player</strong><p>${state.showVideo ? "Showing official video pane." : "Watch the official video while listening."}</p></div>
-            <button type="button" class="chip-btn" id="poVideo">${state.showVideo ? "Hide video" : "Watch video"}</button>
-          </div>` : ""}
           <div class="po-row">
             <div><strong>Sleep timer</strong><p>${escapeHTML(sleepStatusLabel())}</p></div>
             <button type="button" class="chip-btn" id="poSleep">Choose…</button>
-          </div>
-          <div class="po-row">
-            <div><strong>Playback speed</strong><p>Current speed: ${curSpeed}×</p></div>
-            <div class="po-yt-actions">
-              ${[0.75, 1, 1.25, 1.5].map((sp) => `<button type="button" class="chip ${curSpeed === sp ? "active" : ""}" data-po-speed="${sp}">${sp}×</button>`).join("")}
-            </div>
-          </div>
-          <div class="po-row">
-            <div><strong>Player style</strong><p>Switch the docked player bar look.</p></div>
-            <div class="po-yt-actions">
-              ${[["pill", "Pill"], ["island", "Island"], ["wave", "Wave"], ["bar", "Bar"]].map(([id, lbl]) => `<button type="button" class="chip ${curStyle === id ? "active" : ""}" data-po-style="${id}">${lbl}</button>`).join("")}
-            </div>
           </div>
         </div>
         ${ytChip}`,
@@ -3984,31 +3999,6 @@
     if (poFollow) poFollow.addEventListener("click", () => { hideModal(); toggleFollow(t); });
     const poDetails = $("poDetails");
     if (poDetails) poDetails.addEventListener("click", () => { hideModal(); openTrackDetail(t); });
-    const poVideo = $("poVideo");
-    if (poVideo) poVideo.addEventListener("click", () => {
-      hideModal();
-      const vBtn = $("videoBtn");
-      if (vBtn && typeof vBtn.onclick === "function") vBtn.onclick();
-    });
-    $("modalCard").querySelectorAll("[data-po-speed]").forEach((b) => {
-      b.addEventListener("click", () => {
-        state.prefs.speed = Number(b.dataset.poSpeed || 1);
-        savePrefs();
-        applyPlaybackPrefs();
-        hideModal();
-        toast(`Speed ${state.prefs.speed}×`);
-      });
-    });
-    $("modalCard").querySelectorAll("[data-po-style]").forEach((b) => {
-      b.addEventListener("click", () => {
-        state.prefs.playerStyle = b.dataset.poStyle;
-        savePrefs();
-        applyUi();
-        drawSeekWave();
-        renderChrome();
-        hideModal();
-      });
-    });
     const poYtLike = $("poYtLike");
     if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
     const poYtPl = $("poYtPl");
@@ -5096,53 +5086,34 @@
   async function resolveFallbackStreamUrl(t, skipYtStream = false) {
     if (!t) return "";
     if (!skipYtStream && t.streamUrl && !t._isPreviewStream) return t.streamUrl;
+    const candParam = Array.isArray(t._ytCandidates) && t._ytCandidates.length
+      ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+      : "";
     if (!skipYtStream && (t.videoId || t.title)) {
-      const candParam = Array.isArray(t._ytCandidates) && t._ytCandidates.length
-        ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
-        : "";
       try {
-        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}`, 10000);
-        if (sData && sData.url) {
+        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0`, 10000);
+        if (sData && sData.url && !sData.isPreview) {
           t.streamUrl = sData.url;
-          t._isPreviewStream = Boolean(sData.isPreview);
+          t._isPreviewStream = false;
           if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
           if (sData.duration && !t.duration) t.duration = Number(sData.duration);
           return t.streamUrl;
         }
       } catch {}
     }
-    if (t.source === "deezer" || t.origSource === "deezer" || String(t.id || "").startsWith("deezer:")) {
-      const cleanId = String(t.rawId || t.id || "").replace(/^deezer:/, "").trim();
-      if (/^\d+$/.test(cleanId)) {
-        try {
-          const tr = await dzFetch(`/track/${cleanId}`, 4500);
-          const freshPrev = tr && (tr.preview || (tr.data && tr.data[0] && tr.data[0].preview));
-          if (freshPrev) {
-            t.previewUrl = freshPrev;
-            t.preview = freshPrev;
-            t.streamUrl = freshPrev;
-            t._isPreviewStream = true;
-            return freshPrev;
-          }
-        } catch {}
-      }
-    }
-    if (t.previewUrl || t.preview) {
-      t.streamUrl = t.previewUrl || t.preview;
-      t._isPreviewStream = true;
-      return t.streamUrl;
-    }
-    const q = `${t.title || ""} ${t.artist || ""}`.trim();
-    if (q) {
+    // Try secondary stripped query via /api/yt/stream (1.6.6 full-track resolution, never 30s preview clips)
+    const queries = buildTrackPlayQueries(t);
+    for (let i = 0; i < Math.min(queries.length, 2); i++) {
+      const q = queries[i];
+      if (!q) continue;
       try {
-        const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=5`);
-        const rows = (itRes && (itRes.results || itRes.apple || itRes.itunes)) || [];
-        const hit = rows.find((r) => r && r.previewUrl);
-        if (hit && hit.previewUrl) {
-          t.previewUrl = hit.previewUrl;
-          t.streamUrl = hit.previewUrl;
-          t._isPreviewStream = true;
-          return hit.previewUrl;
+        const sData = await api(`/api/yt/stream?title=${encodeURIComponent(q)}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0&refresh=1`, 9000);
+        if (sData && sData.url && !sData.isPreview) {
+          t.streamUrl = sData.url;
+          t._isPreviewStream = false;
+          if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
+          if (sData.duration && !t.duration) t.duration = Number(sData.duration);
+          return t.streamUrl;
         }
       } catch {}
     }
@@ -5358,8 +5329,9 @@
       try { ensureYT(t.videoId || ""); } catch {}
     }
 
+    // Always load lyrics (uses IndexedDB / saved download cache when offline)
+    loadLyrics(t);
     if (!isNetworkOff) {
-      loadLyrics(t);
       loadQueueRecs();
       const hasQueueFollowers = Array.isArray(state.queue) && (state.index + 1 < state.queue.length);
       if (!hasQueueFollowers && t.source !== "radio") {
@@ -5387,6 +5359,7 @@
           showEl($("eqBars"), true);
           updateMediaSession();
           updateWakeLock();
+          startTimer();
           renderChrome();
           updateProgress();
           if (state.view === "now" && gen === playGen) render();
@@ -5452,6 +5425,7 @@
       showEl($("eqBars"), true);
       updateMediaSession();
       updateWakeLock();
+      startTimer();
       renderChrome();
       updateProgress();
     } catch (err) {
@@ -5483,6 +5457,7 @@
           showEl($("eqBars"), true);
           updateMediaSession();
           updateWakeLock();
+          startTimer();
           if (state.view === "now" && gen === playGen) render();
           return;
         }
@@ -5513,17 +5488,30 @@
       } catch { url = ""; }
     }
     // If the Worker's datacenter IP was gated by YouTube or timed out,
-    // hand "yt:<videoId>" to the native foreground service so MuchiAudioService
+    // hand "yt:<videoId>" to the Android native foreground service so MuchiAudioService
     // resolves the stream directly on the user's residential phone IP in parallel
     // and plays it with full OS media notification + background playback.
-    if (!url && IS_NATIVE && nativePlayer() && !t._nativeOnDeviceTried) {
+    const isAndroidNative = IS_NATIVE && window.Capacitor && typeof window.Capacitor.getPlatform === "function" && window.Capacitor.getPlatform() === "android";
+    if (!url && isAndroidNative && nativePlayer() && !t._nativeOnDeviceTried) {
       t._nativeOnDeviceTried = true;
       url = `yt:${t.videoId}`;
     }
+    if (!url) {
+      try {
+        const fullData = await getWarmStream(t.videoId, t.title || "", t.artist || "", t._ytCandidates || [], 6500, false);
+        if (fullData && fullData.url && !fullData.isPreview) {
+          url = fullData.url;
+          if (fullData.videoId) t.videoId = fullData.videoId;
+          if (fullData.duration) dur = Number(fullData.duration);
+        }
+      } catch {}
+    }
     if (!url) return false;
+    const urlDur = parseStreamUrlDuration(url);
+    if (!dur && urlDur > 0) dur = urlDur;
     t.streamUrl = url;
     t._isPreviewStream = false;
-    t.duration = dur;
+    if (dur > 0) t.duration = dur;
     t._playingViaAudio = true;
     await playAudio(t);
     return (!!nativePlayer() && npActive) || !audio.paused;
@@ -5587,7 +5575,15 @@
     }
 
     if (offlineBlob) {
-      url = URL.createObjectURL(offlineBlob);
+      if (activeOfflineBlobUrl && activeOfflineBlobTrackKey !== trackKey(t)) {
+        try { URL.revokeObjectURL(activeOfflineBlobUrl); } catch {}
+        activeOfflineBlobUrl = "";
+      }
+      if (!activeOfflineBlobUrl || activeOfflineBlobTrackKey !== trackKey(t)) {
+        activeOfflineBlobUrl = URL.createObjectURL(offlineBlob);
+        activeOfflineBlobTrackKey = trackKey(t);
+      }
+      url = activeOfflineBlobUrl;
     } else if (!isNetworkOff) {
       url = t.streamUrl || t.url || "";
     }
@@ -5673,14 +5669,19 @@
   }
 
   let audioPlaySeq = 0;
+  let activeOfflineBlobUrl = "";
+  let activeOfflineBlobTrackKey = "";
+  let _webSeekTarget = -1;
   async function playAudioWeb(url) {
     const t = current();
     if (!t || !url) return;
+    t._playingViaAudio = true;
     const seq = ++audioPlaySeq;
     adaptiveBuffer.buffering = false;
     adaptiveBuffer.startTime = performance.now();
     renderBufferState(false);
     if (audio.src !== url) {
+      _webSeekTarget = -1;
       audio.src = url;
     }
     applyPlaybackPrefs();
@@ -5711,10 +5712,12 @@
           audio.src = proxied;
           const p2 = audio.play();
           if (p2 !== undefined) await p2;
-          return;
-        } catch {}
+        } catch {
+          throw err;
+        }
+      } else {
+        throw err;
       }
-      throw err;
     }
     if (seq !== audioPlaySeq) return;
     // Resume the restored track's saved position once metadata is loaded.
@@ -6192,20 +6195,46 @@
     playCurrent(true);
   }
 
+  function parseStreamUrlDuration(u) {
+    if (!u || typeof u !== "string") return 0;
+    try {
+      let target = u;
+      if (target.includes("url=")) {
+        const m = target.match(/[?&]url=([^&]+)/);
+        if (m && m[1]) target = decodeURIComponent(m[1]);
+      }
+      const dm = target.match(/[?&]dur=([0-9]+(?:\.[0-9]+)?)/);
+      if (dm && dm[1]) {
+        const sec = Math.round( parseFloat(dm[1]) );
+        if (sec > 0 && isFinite(sec)) return sec;
+      }
+    } catch {}
+    return 0;
+  }
+
   function position() {
     const t = current();
     if (!t) return 0;
     if (npActive) {
       if (state.playing && npPlaying && npPosAt > 0 && Date.now() >= npSeekGuardUntil) {
-        const elapsed = Math.max(0, Math.min(1.5, (performance.now() - npPosAt) / 1000));
-        const est = (npPos || 0) + elapsed;
-        const d = npDur || t.duration || 0;
-        return d > 0 ? Math.min(d, est) : est;
+        const rate = Number(state.prefs.speed || 1) || 1;
+        const elapsed = Math.max(0, Math.min(12.0, ((performance.now() - npPosAt) / 1000) * rate));
+        // Only extrapolate from 0 once native player has confirmed playing or after initial buffer
+        const basePos = npPos || 0;
+        if (basePos > 0 || npSeenPlaying) {
+          const est = basePos + elapsed;
+          const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+          return d > 0 ? Math.min(d, est) : est;
+        }
       }
       return npPos || 0;
     }
-    if ((t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.getCurrentTime === "function") {
+    const isUsingAudioEl = Boolean(t._playingViaAudio || (audio.src && audio.src.startsWith("blob:")));
+    if ((t.source === "youtube" || !!t.videoId) && !isUsingAudioEl && state.yt && typeof state.yt.getCurrentTime === "function") {
       return state.yt.getCurrentTime() || 0;
+    }
+    if (_webSeekTarget >= 0 && audio.readyState < 1) {
+      return _webSeekTarget;
     }
     return audio.currentTime || 0;
   }
@@ -6214,24 +6243,57 @@
     const t = current();
     if (!t) return 0;
     if (t.source === "radio") return 0;
-    if (npActive) return npDur || t.duration || 0;
-    if ((t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.getDuration === "function") {
-      return state.yt.getDuration() || t.duration || 0;
+    if (npActive) {
+      const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+      if (d > 0 && !t.duration) t.duration = d;
+      return d;
     }
-    return audio.duration && isFinite(audio.duration) ? audio.duration : t.duration || 0;
+    const isUsingAudioEl = Boolean(t._playingViaAudio || (audio.src && audio.src.startsWith("blob:")));
+    if ((t.source === "youtube" || !!t.videoId) && !isUsingAudioEl && state.yt && typeof state.yt.getDuration === "function") {
+      const d = state.yt.getDuration() || t.duration || 0;
+      if (d > 0 && !t.duration) t.duration = Math.round(d);
+      return d;
+    }
+    if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
+      if (!t.duration) t.duration = Math.round(audio.duration);
+      return audio.duration;
+    }
+    const saved = findSavedTrack(t);
+    const fallbackDur = t.duration || (saved && saved.duration) || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+    if (fallbackDur > 0 && !t.duration) t.duration = fallbackDur;
+    return fallbackDur;
   }
 
   function seekTo(sec) {
     const t = current();
     if (!t || t.source === "radio") return;
-    const at = Math.max(0, Number(sec) || 0);
-    if (npActive && nativeSeekTo(at)) { updateProgress(); return; }
-    if ((t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.seekTo === "function") {
+    const d = duration();
+    const at = d > 0 ? Math.max(0, Math.min(Number(sec) || 0, Math.max(0, d - 0.05))) : Math.max(0, Number(sec) || 0);
+    seekCur = -1;
+    seekTgt = -1;
+    if (seekRaf) {
+      cancelAnimationFrame(seekRaf);
+      seekRaf = 0;
+    }
+    if (npActive && nativeSeekTo(at)) {
+      updateProgress();
+      highlightLyric(at, true);
+      return;
+    }
+    const isUsingAudioEl = Boolean(t._playingViaAudio || (audio.src && audio.src.startsWith("blob:")));
+    if ((t.source === "youtube" || !!t.videoId) && !isUsingAudioEl && state.yt && typeof state.yt.seekTo === "function") {
       state.yt.seekTo(at, true);
     } else {
-      audio.currentTime = at;
+      _webSeekTarget = at;
+      try {
+        audio.currentTime = at;
+        if (audio.readyState >= 1 && Math.abs((audio.currentTime || 0) - at) < 1.5) {
+          _webSeekTarget = -1;
+        }
+      } catch {}
     }
     updateProgress();
+    highlightLyric(at, true);
   }
 
   let waveRaf = 0;
@@ -6243,7 +6305,7 @@
   function restartWaveLoop() {
     if (!state.playing || waveRaf || document.hidden) return;
     // On phones/native shells, updateProgress() drives drawSeekWave() directly
-    // at low frequency so we never hold a 60-120Hz rAF loop open during playback.
+    // at 250ms so we never hold a 60-120Hz rAF loop open during playback.
     if (cheapPhone()) {
       drawSeekWave();
       return;
@@ -6269,8 +6331,7 @@
   }
   function startTimer() {
     stopTimer();
-    const cheap = cheapPhone();
-    state.timer = setInterval(updateProgress, cheap ? 600 : 250);
+    state.timer = setInterval(updateProgress, 250);
     restartWaveLoop();
     updateProgress();
     renderChrome();
@@ -6331,13 +6392,15 @@
 
     if (document.hidden) return;
     const seek = $("seek");
-    const activeScrub = Boolean(isSeekingUi || (seek && seek.matches(":active")));
-    if (!activeScrub) {
+    const activeScrub = Boolean(isSeekingUi);
+    if (!activeScrub && $("curTime")) {
       $("curTime").textContent = fmt(p);
     }
-    $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
+    if ($("durTime")) {
+      $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
+    }
     if (seek) {
-      const tv = d ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+      const tv = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
       if (activeScrub) {
         seekCur = -1; seekTgt = -1;
         if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
@@ -6357,19 +6420,44 @@
   let seekCur = -1, seekTgt = -1, seekRaf = 0;
   function seekTick() {
     const seek = $("seek");
-    if (!seek || isSeekingUi || seek.matches(":active") || seekTgt < 0) { seekRaf = 0; return; }
+    if (!seek || isSeekingUi || seekTgt < 0) { seekRaf = 0; return; }
     const diff = seekTgt - seekCur;
     if (Math.abs(diff) < 0.25) {
       seek.value = seekTgt;
       seekCur = -1; seekTgt = -1; seekRaf = 0;
+      drawSeekWave();
       return;
     }
     seekCur += diff * 0.28;
     seek.value = Math.round(seekCur);
+    drawSeekWave();
     seekRaf = requestAnimationFrame(seekTick);
   }
   function prefersReducedMotion() {
     return matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function sampleSeekWiggleY(wiggle, x, t, amp, mid, span) {
+    const s = Math.max(1, Number(span) || 400);
+    const norm = Math.max(0, Math.min(1, x / s));
+    const taper = s > 6 ? Math.pow(Math.sin(Math.PI * norm), 0.55) : 0;
+    if (wiggle === "ribbon") {
+      // Harmonic Ribbon: silky multi-layered acoustic wave with gentle swell
+      const swell = 0.78 + 0.22 * Math.sin(x / 36 - t * 0.65);
+      const wave = Math.sin(x / 18 + t * 1.15) * 0.74 + Math.sin(x / 9.5 - t * 0.8) * 0.26;
+      return mid + wave * (amp * 1.08) * swell * taper;
+    }
+    if (wiggle === "glow") {
+      // Laser Glow: sleek studio laser beam with subtle breathing shimmer
+      const shimmer = Math.sin(x / 24 + t * 0.9) * 0.36 + Math.cos(x / 14 - t * 0.55) * 0.14;
+      return mid + shimmer * amp * taper;
+    }
+    if (wiggle === "orbit") {
+      // Dual Helix: braided phase-modulated wave with harmonic depth
+      return mid + Math.sin(x / 14 + t * 1.2) * Math.cos(x / 28 - t * 0.82) * (amp * 1.18) * taper;
+    }
+    // Default "sine": Smooth Sine
+    return mid + (Math.sin(x / 16 + t) + Math.sin(x / 7.5 + t * 1.35) * 0.24) * amp * taper;
   }
 
   function drawSeekWave() {
@@ -6377,29 +6465,63 @@
     const seek = $("seek");
     if (!svg || !seek) return;
     const playing = !!state.playing;
-    const style = document.documentElement.dataset.player || "pill";
-    const strong = style === "wave" || style === "pill";
-    const v = Number(seek.value) || 0;
+    const style = normalizePlayerStyle(document.documentElement.dataset.player);
+    const wiggle = normalizeSeekWiggle(document.documentElement.dataset.wiggle || state.prefs.seekWiggle);
+    const strong = style === "wave" || style === "pill" || style === "aura";
+    const v = Math.max(0, Math.min(1000, Number(seek.value) || 0));
+    seek.style.setProperty("--seek-pct", `${(v / 10).toFixed(1)}%`);
     const t = Date.now() / 240;
     const W = 400, mid = 8;
-    const amp = !playing ? 0.4 : strong ? 4.4 : 2.2;
+    const amp = !playing ? 0.38 : strong ? 4.2 : 3.1;
+    const step = 4;
     const filled = (v / 1000) * W;
-    let d = `M 0 ${mid}`;
-    for (let x = 0; x <= W; x += 5) {
-      const live = x <= filled ? 1 : 0.28;
-      const y = mid + Math.sin(x / 16 + t) * amp * live + Math.sin(x / 7 + t * 1.4) * (amp * 0.28) * live;
-      d += ` L ${x} ${y.toFixed(2)}`;
+    let dBg = `M 0 ${mid}`;
+    let dFg = `M 0 ${mid}`;
+    for (let x = 0; x <= W; x += step) {
+      const bgTaper = Math.pow(Math.sin(Math.PI * (x / W)), 0.5);
+      let yBg = mid;
+      if (wiggle === "orbit") {
+        yBg = mid - Math.sin(x / 14 + t * 1.2) * (amp * 0.42) * bgTaper;
+      } else if (wiggle === "ribbon") {
+        yBg = mid - Math.sin(x / 18 + t * 1.15) * (amp * 0.32) * bgTaper;
+      } else if (wiggle === "glow") {
+        yBg = mid + Math.sin(x / 24 + t * 0.9) * (amp * 0.14) * bgTaper;
+      } else {
+        yBg = mid + Math.sin(x / 16 + t) * (amp * 0.22) * bgTaper;
+      }
+      dBg += ` L ${x} ${yBg.toFixed(2)}`;
+      if (x <= filled) {
+        const yFg = sampleSeekWiggleY(wiggle, x, t, amp, mid, filled);
+        dFg += ` L ${x} ${yFg.toFixed(2)}`;
+      }
     }
-    let path = svg.querySelector("path");
-    if (!path) {
-      path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("fill", "none");
-      path.setAttribute("stroke-linecap", "round");
-      path.setAttribute("stroke-linejoin", "round");
-      svg.appendChild(path);
+    if (filled > 0) {
+      dFg += ` L ${filled.toFixed(1)} ${mid.toFixed(2)}`;
     }
-    path.setAttribute("d", d);
-    path.setAttribute("stroke-width", playing ? (strong ? "2.4" : "2") : "1.6");
+    let bgPath = svg.querySelector("path.seek-wave-bg");
+    let fgPath = svg.querySelector("path.seek-wave-fg");
+    if (!bgPath || !fgPath) {
+      svg.innerHTML = "";
+      bgPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      bgPath.setAttribute("class", "seek-wave-bg");
+      bgPath.setAttribute("fill", "none");
+      bgPath.setAttribute("stroke-linecap", "round");
+      bgPath.setAttribute("stroke-linejoin", "round");
+      fgPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      fgPath.setAttribute("class", "seek-wave-fg");
+      fgPath.setAttribute("fill", "none");
+      fgPath.setAttribute("stroke-linecap", "round");
+      fgPath.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(bgPath);
+      svg.appendChild(fgPath);
+    }
+    bgPath.setAttribute("stroke-linejoin", "round");
+    fgPath.setAttribute("stroke-linejoin", "round");
+    bgPath.setAttribute("d", dBg);
+    bgPath.setAttribute("stroke-width", (wiggle === "orbit" || wiggle === "ribbon") ? "1.65" : "1.45");
+    fgPath.setAttribute("d", v > 0 ? dFg : `M 0 ${mid} L 0.1 ${mid}`);
+    const fgWidth = playing ? (wiggle === "glow" ? (strong ? "3.0" : "2.5") : (strong ? "2.6" : "2.2")) : "1.8";
+    fgPath.setAttribute("stroke-width", fgWidth);
   }
 
   function setVolume(v) {
@@ -6666,12 +6788,13 @@
     const NP = nativePlayer();
     if (!NP) return false;
     nativeEnsureNotifyPermission();
+    const resolvedDur = Number(durationSec) || parseStreamUrlDuration(url) || 0;
     npActive = true;
     npPlaying = true;
     npSeenPlaying = false;
     npPos = 0;
     npPosAt = performance.now();
-    npDur = Number(durationSec) || 0;
+    npDur = resolvedDur;
     npCmdUntil = Date.now() + 4500;
     npSeekGuardUntil = 0;
     NP.play({
@@ -6681,7 +6804,7 @@
       title: String(title || "Muchi"),
       artist: String(artist || ""),
       artwork: String(artwork || ""),
-      duration: Math.round((Number(durationSec) || 0) * 1000),
+      duration: Math.round(resolvedDur * 1000),
       volume: Number(state.volume ?? 100),
       normalize: Boolean(state.prefs.normalize),
       speed: Number(state.prefs.speed || 1),
@@ -6954,9 +7077,9 @@
               state.playing = true;
               setWantPlay(true);
               showEl($("eqBars"), true);
-              if (!state.timer) startTimer();
               renderChrome();
             }
+            if (!state.timer) startTimer();
           } else {
             if (now >= npCmdUntil && npSeenPlaying) {
               npPlaying = false;
@@ -6969,7 +7092,7 @@
               }
             }
           }
-          if (state.playing) updateProgress();
+          updateProgress();
         });
       } catch {}
     }
@@ -7269,9 +7392,121 @@
     return t ? (t.id || `${t.title}|${t.artist}`) : "";
   }
 
+  function synthesizeSyncedLyrics(plainText, durSec) {
+    const raw = String(plainText || "").trim();
+    if (!raw) return [];
+    const lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (!lines.length) return [];
+    const totalDur = Math.max(30, Number(durSec) || Number(duration()) || 180);
+    const startPad = Math.min(4, totalDur * 0.03);
+    const usableSpan = Math.max(10, totalDur - startPad - Math.min(6, totalDur * 0.05));
+    const step = lines.length > 1 ? usableSpan / lines.length : usableSpan;
+    return lines.map((text, idx) => ({
+      t: Number((startPad + idx * step).toFixed(2)),
+      text,
+    }));
+  }
+
+  function candidateLyricsKeys(t) {
+    if (!t) return [];
+    const meta = cleanLyricsMeta(t);
+    return [
+      lyricsKey(t),
+      t.id || "",
+      trackKey(t),
+      t.videoId ? `yt:${t.videoId}` : "",
+      meta.cleanTitle ? `${meta.cleanTitle.toLowerCase()}|${(meta.cleanArtist || "").toLowerCase()}` : "",
+    ].filter(Boolean);
+  }
+
+  async function saveOfflineLyrics(t, data) {
+    if (!t || !data || (!data.lyrics && (!Array.isArray(data.synced) || !data.synced.length))) return;
+    const payload = {
+      lyrics: String(data.lyrics || ""),
+      synced: Array.isArray(data.synced) ? data.synced : [],
+      _synthesized: Boolean(data._synthesized),
+      updatedAt: Date.now(),
+    };
+    const keys = candidateLyricsKeys(t);
+    for (const k of keys) {
+      try { await idbPut(`lyrics:${k}`, payload); } catch {}
+    }
+    const saved = findSavedTrack(t);
+    if (saved) {
+      saved.lyrics = payload.lyrics;
+      saved.synced = payload.synced;
+      save("aura.downloads", state.downloads);
+    }
+  }
+
+  async function getOfflineLyrics(t) {
+    if (!t) return null;
+    if (Array.isArray(t.synced) && t.synced.length) {
+      return { lyrics: t.lyrics || "", synced: t.synced };
+    }
+    const saved = findSavedTrack(t);
+    if (saved && ((Array.isArray(saved.synced) && saved.synced.length) || saved.lyrics)) {
+      return { lyrics: saved.lyrics || "", synced: Array.isArray(saved.synced) ? saved.synced : [] };
+    }
+    const keys = candidateLyricsKeys(t);
+    for (const k of keys) {
+      try {
+        const rec = await idbGet(`lyrics:${k}`);
+        if (rec && ((Array.isArray(rec.synced) && rec.synced.length) || rec.lyrics)) {
+          return { lyrics: rec.lyrics || "", synced: Array.isArray(rec.synced) ? rec.synced : [], _synthesized: Boolean(rec._synthesized) };
+        }
+      } catch {}
+    }
+    if (t.lyrics) {
+      return { lyrics: t.lyrics, synced: [] };
+    }
+    return null;
+  }
+
+  async function ensureOfflineLyricsForTrack(t) {
+    if (!t || t.source === "radio") return null;
+    const existing = await getOfflineLyrics(t);
+    if (existing && Array.isArray(existing.synced) && existing.synced.length && !existing._synthesized) {
+      await saveOfflineLyrics(t, existing);
+      return existing;
+    }
+    const meta = cleanLyricsMeta(t);
+    const dur = Math.round(Number(t.duration || duration() || 0)) || 0;
+    let found = null;
+    try {
+      const data = await api(
+        `/api/lyrics?title=${encodeURIComponent(meta.cleanTitle)}&artist=${encodeURIComponent(meta.cleanArtist)}${dur ? `&duration=${dur}` : ""}`,
+        8000
+      );
+      if (data && (data.lyrics || (Array.isArray(data.synced) && data.synced.length))) {
+        found = { lyrics: data.lyrics || "", synced: data.synced || [] };
+      }
+    } catch {}
+    if (!found) {
+      try {
+        found = await fetchLyricsBrowserFallback(meta, dur);
+      } catch {}
+    }
+    if (!found && existing) found = existing;
+    if (found) {
+      if ((!Array.isArray(found.synced) || !found.synced.length) && found.lyrics) {
+        found.synced = synthesizeSyncedLyrics(found.lyrics, dur || 180);
+        found._synthesized = true;
+      }
+      await saveOfflineLyrics(t, found);
+    }
+    return found;
+  }
+
   function lyricsBodyHTML() {
     const L = state.lyrics;
     if (!L) return `<div class="ly-wait">Looking up lyrics…</div>`;
+    if ((!Array.isArray(L.synced) || !L.synced.length) && L.lyrics) {
+      const effDur = Math.round(Number(duration() || (current() && current().duration) || 180));
+      L.synced = synthesizeSyncedLyrics(L.lyrics, effDur);
+      L._synthesized = true;
+      L._syncDur = effDur;
+    }
     const synced = Array.isArray(L.synced) && L.synced.length ? L.synced : null;
     if (synced) {
       return synced.map((l, i) =>
@@ -7450,8 +7685,43 @@
     const gen = ++lyricsGen;
     lyActive = -1;
     state.lyrics = { key, lyrics: "", synced: [] };
-    const meta = cleanLyricsMeta(t);
     const dur = Math.round(Number(t.duration || duration() || 0)) || 0;
+    const isNetworkOff = Boolean(
+      state.offlineMode ||
+      state.isNetworkOffline ||
+      (typeof navigator !== "undefined" && navigator.onLine === false)
+    );
+
+    // 1. Check offline cached lyrics (from IndexedDB or saved download track) first!
+    const cached = await getOfflineLyrics(t);
+    if (gen !== lyricsGen) return;
+    if (cached && ((Array.isArray(cached.synced) && cached.synced.length) || cached.lyrics)) {
+      let syncedRows = Array.isArray(cached.synced) ? cached.synced : [];
+      let isSynth = Boolean(cached._synthesized);
+      if ((!syncedRows.length || isSynth) && cached.lyrics) {
+        const effDur = dur || Math.round(Number(duration() || 180));
+        syncedRows = synthesizeSyncedLyrics(cached.lyrics, effDur);
+        isSynth = true;
+      }
+      state.lyrics = {
+        lyrics: cached.lyrics || "",
+        synced: syncedRows,
+        _synthesized: isSynth,
+        _syncDur: dur || Math.round(Number(duration() || 180)),
+        key,
+      };
+      if (state.view === "now") paintLyricsBox() || render();
+      highlightLyric(position(), true);
+      // If we're offline or already have real time-synced lyrics, we're done!
+      if (isNetworkOff || (syncedRows.length && !isSynth)) {
+        return;
+      }
+    } else if (isNetworkOff) {
+      if (state.view === "now") paintLyricsBox() || render();
+      return;
+    }
+
+    const meta = cleanLyricsMeta(t);
     let found = null;
     try {
       const data = await api(
@@ -7485,18 +7755,55 @@
       } catch {}
       if (gen !== lyricsGen) return;
     }
+    if (!found && cached) {
+      found = cached;
+    }
+    let finalSynced = (found && Array.isArray(found.synced)) ? found.synced : [];
+    let isSynth = Boolean(found && found._synthesized);
+    const finalPlain = (found && found.lyrics) || "";
+    const effDur = Math.round(Number(duration() || t.duration || dur || 180));
+    if (!finalSynced.length && finalPlain) {
+      finalSynced = synthesizeSyncedLyrics(finalPlain, effDur);
+      isSynth = true;
+    }
     state.lyrics = {
-      lyrics: (found && found.lyrics) || "",
-      synced: (found && found.synced) || [],
+      lyrics: finalPlain,
+      synced: finalSynced,
+      _synthesized: isSynth,
+      _syncDur: effDur,
       key,
     };
+    if (finalPlain || finalSynced.length) {
+      saveOfflineLyrics(t, state.lyrics).catch(() => {});
+    }
     if (state.view === "now") paintLyricsBox() || render();
+    highlightLyric(position(), true);
   }
 
   function highlightLyric(p, forceScroll) {
+    if (!state.lyrics) return;
+    const effDur = Math.round(Number(duration() || (current() && current().duration) || 0));
+    if (state.lyrics.lyrics && (!Array.isArray(state.lyrics.synced) || !state.lyrics.synced.length || (state.lyrics._synthesized && effDur > 15 && Math.abs((state.lyrics._syncDur || 0) - effDur) > 3))) {
+      const useDur = effDur > 15 ? effDur : 180;
+      state.lyrics.synced = synthesizeSyncedLyrics(state.lyrics.lyrics, useDur);
+      state.lyrics._synthesized = true;
+      state.lyrics._syncDur = useDur;
+      if (state.view === "now") {
+        const boxCheck = $("lyScroll") || document.querySelector(".ly-scroll");
+        if (boxCheck) {
+          boxCheck.innerHTML = lyricsBodyHTML();
+          bindLyricLines(boxCheck);
+        }
+      }
+    }
     const box = $("lyScroll") || document.querySelector(".ly-scroll") || document.querySelector(".lyrics");
-    const lines = box ? box.querySelectorAll("[data-ly]") : document.querySelectorAll("[data-ly]");
-    if (!lines.length || !state.lyrics || !state.lyrics.synced || !state.lyrics.synced.length) return;
+    let lines = box ? box.querySelectorAll("[data-ly]") : document.querySelectorAll("[data-ly]");
+    if (!lines.length && box && state.lyrics.synced && state.lyrics.synced.length) {
+      box.innerHTML = lyricsBodyHTML();
+      bindLyricLines(box);
+      lines = box.querySelectorAll("[data-ly]");
+    }
+    if (!lines.length || !state.lyrics.synced || !state.lyrics.synced.length) return;
     let active = -1;
     const rows = state.lyrics.synced;
     for (let i = 0; i < rows.length; i++) {
@@ -9339,6 +9646,15 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.7.4",
+      title: "Muchi 1.7.4",
+      notes: [
+        "Fixed the player timer bar (div.seek-row) in the Android & iOS app so elapsed time, total duration, seek thumb, and live dual-layer wave progress stay smoothly synchronized without freezing.",
+        "Upgraded native Android & iOS audio engines to match the exact 1.6.6 / 1.5.5 Sound Stage DSP (6-band Pre-EQ, Multi-Band Compressor, 32-bit float audio path, and Limiter across Phone, Bass, Spatial, and Dynamic modes).",
+        "Fixed stream codec & bitrate prioritization so 160kbps Opus / 256kbps AAC studio masters are always selected over 48kbps low-bitrate streams, and removed 30-second preview fallbacks.",
+      ],
+    },
+    {
       ver: "1.7.3",
       title: "Muchi 1.7.3",
       notes: [
@@ -10232,8 +10548,11 @@
 
 
   function playerStyleLabel() {
-    const id = state.prefs.playerStyle || "pill";
-    return ({ pill: "Glass pill", island: "Island", wave: "Wave", bar: "Solid bar" })[id] || "Glass pill";
+    const id = normalizePlayerStyle(state.prefs.playerStyle);
+    const wg = normalizeSeekWiggle(state.prefs.seekWiggle);
+    const styleName = ({ pill: "Glass pill", wave: "Wave", vinyl: "Vinyl", aura: "Aura" })[id] || "Glass pill";
+    const wiggleName = ({ sine: "Smooth Sine", ribbon: "Harmonic Ribbon", glow: "Laser Glow", orbit: "Dual Helix" })[wg] || "Smooth Sine";
+    return `${styleName} · ${wiggleName}`;
   }
 
   function accountCardHTML() {
@@ -10297,25 +10616,50 @@
   }
 
   function renderPlayerPage() {
-    const cur = ["pill", "island", "wave", "bar"].includes(state.prefs.playerStyle) ? state.prefs.playerStyle : "pill";
+    const cur = normalizePlayerStyle(state.prefs.playerStyle);
+    const curWiggle = normalizeSeekWiggle(state.prefs.seekWiggle);
     const types = [
       ["pill", "Glass pill", "Floating capsule with liquid shine."],
-      ["island", "Island", "Compact, round — like a Dynamic Island."],
       ["wave", "Wave", "Live wiggly seek line while music plays."],
-      ["bar", "Solid bar", "Filled Material bar, less glass."],
+      ["vinyl", "Vinyl", "Spinning vinyl disc cover with warm studio deck trim."],
+      ["aura", "Aura", "Ambient song-color halo glow with frosted crystal trim."],
+    ];
+    const wiggles = [
+      ["sine", "Smooth Sine", "Classic flowing sine wave between timestamps.", "M 4 12 Q 18 3, 32 12 T 60 12 T 88 12 T 116 12"],
+      ["ribbon", "Harmonic Ribbon", "Silky multi-layered acoustic wave with gentle swell.", "M 4 12 C 16 4, 28 20, 42 12 C 56 4, 70 19, 84 12 C 96 6, 106 16, 116 12"],
+      ["glow", "Laser Glow", "Sleek glowing studio beam with subtle breathing shimmer.", "M 4 12 C 26 9, 52 15, 78 11 C 94 9, 106 13, 116 12"],
+      ["orbit", "Dual Helix", "Braided double-strand phase wave with glowing depth.", "M 4 12 C 20 2, 36 22, 52 12 C 68 2, 84 22, 100 12 C 108 7, 112 10, 116 12"],
     ];
     const fade = Number(state.prefs.crossfade || 0);
     return `
-      ${settingsSubChrome("Player", "Four looks for the bar, crossfading, and the seek line.")}
+      ${settingsSubChrome("Player", "Four looks for the bar, timestamp wiggle styles, and crossfading.")}
       <div class="settings">
         <div class="set-card">
-          <h3><span class="material-symbols-outlined">dock_to_bottom</span>Type</h3>
+          <h3><span class="material-symbols-outlined">dock_to_bottom</span>Player style</h3>
           <div class="ui-pick-list">
             ${types.map(([id, name, blurb]) => `
               <button type="button" class="ui-pick ${cur === id ? "on" : ""}" data-set-player="${id}">
                 <div class="ui-pick-preview player-${id}"><i></i><i></i><i></i></div>
                 <span><strong>${name}</strong><em>${blurb}</em></span>
                 ${cur === id ? `<span class="ui-pick-on">On</span>` : ""}
+              </button>`).join("")}
+          </div>
+        </div>
+        <div class="set-card">
+          <h3><span class="material-symbols-outlined">timeline</span>Timestamp wiggle</h3>
+          <p class="set-lead">Choose how the animated progress line wiggles between the current and total timestamps.</p>
+          <div class="ui-pick-list">
+            ${wiggles.map(([id, name, blurb, svgPath]) => `
+              <button type="button" class="ui-pick ${curWiggle === id ? "on" : ""}" data-set-wiggle="${id}">
+                <div class="ui-pick-preview wiggle-preview wiggle-${id}">
+                  <span class="wiggle-time">1:24</span>
+                  <svg viewBox="0 0 120 24" preserveAspectRatio="none" aria-hidden="true">
+                    <path d="${svgPath}" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="${id === "zigzag" ? "miter" : "round"}"/>
+                  </svg>
+                  <span class="wiggle-time">3:45</span>
+                </div>
+                <span><strong>${name}</strong><em>${blurb}</em></span>
+                ${curWiggle === id ? `<span class="ui-pick-on">On</span>` : ""}
               </button>`).join("")}
           </div>
         </div>
@@ -11813,6 +12157,7 @@
           appearance: "system",
           appIcon: "default",
           playerStyle: "pill",
+          seekWiggle: "sine",
           quality: "high",
           autoplay: true,
           normalize: true,
@@ -11845,7 +12190,16 @@
     }
     viewEl.querySelectorAll("[data-set-player]").forEach((el) => {
       el.addEventListener("click", () => {
-        state.prefs.playerStyle = el.dataset.setPlayer;
+        state.prefs.playerStyle = normalizePlayerStyle(el.dataset.setPlayer);
+        savePrefs();
+        applyUi();
+        drawSeekWave();
+        render();
+      });
+    });
+    viewEl.querySelectorAll("[data-set-wiggle]").forEach((el) => {
+      el.addEventListener("click", () => {
+        state.prefs.seekWiggle = normalizeSeekWiggle(el.dataset.setWiggle);
         savePrefs();
         applyUi();
         drawSeekWave();
@@ -14354,38 +14708,60 @@
     });
     const seekEl = $("seek");
     if (seekEl) {
+      let lastScrubVal = -1;
+      let scrubReleaseTimer = 0;
       const beginSeekScrub = () => {
+        clearTimeout(scrubReleaseTimer);
         isSeekingUi = true;
         seekCur = -1;
         seekTgt = -1;
         if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
       };
-      const commitSeekScrub = () => {
-        if (!isSeekingUi) return;
+      const commitSeekScrub = (explicitVal) => {
+        clearTimeout(scrubReleaseTimer);
+        const hasExplicit = typeof explicitVal === "number" && !isNaN(explicitVal);
+        if (!isSeekingUi && !hasExplicit && lastScrubVal < 0) return;
         isSeekingUi = false;
+        const v = hasExplicit ? explicitVal : (lastScrubVal >= 0 ? lastScrubVal : Number(seekEl.value));
+        lastScrubVal = -1;
         const d = duration();
-        if (d) seekTo((Number(seekEl.value) / 1000) * d);
+        if (d > 0 && isFinite(d)) {
+          seekTo((Math.max(0, Math.min(1000, v)) / 1000) * d);
+        }
+      };
+      const scheduleReleaseCommit = () => {
+        if (!isSeekingUi) return;
+        clearTimeout(scrubReleaseTimer);
+        scrubReleaseTimer = setTimeout(() => {
+          if (isSeekingUi) commitSeekScrub(Number(seekEl.value));
+        }, 40);
       };
       seekEl.addEventListener("pointerdown", beginSeekScrub);
       seekEl.addEventListener("touchstart", beginSeekScrub, { passive: true });
       seekEl.addEventListener("mousedown", beginSeekScrub);
       seekEl.addEventListener("input", (e) => {
+        clearTimeout(scrubReleaseTimer);
         isSeekingUi = true;
+        lastScrubVal = Number(e.target.value);
         const d = duration();
-        if (d) {
-          const previewSec = (Number(e.target.value) / 1000) * d;
+        if (d > 0 && isFinite(d)) {
+          const previewSec = (lastScrubVal / 1000) * d;
           if ($("curTime")) $("curTime").textContent = fmt(previewSec);
-          if (!IS_NATIVE && !npActive) seekTo(previewSec);
+          highlightLyric(previewSec, true);
         }
         drawSeekWave();
       });
-      seekEl.addEventListener("change", () => {
+      seekEl.addEventListener("change", (e) => {
         hapticFeedback("selection");
-        commitSeekScrub();
+        commitSeekScrub(Number(e.target.value));
       });
-      seekEl.addEventListener("pointerup", commitSeekScrub);
-      seekEl.addEventListener("touchend", commitSeekScrub);
-      seekEl.addEventListener("pointercancel", () => { isSeekingUi = false; });
+      seekEl.addEventListener("pointerup", scheduleReleaseCommit);
+      seekEl.addEventListener("touchend", scheduleReleaseCommit);
+      seekEl.addEventListener("mouseup", scheduleReleaseCommit);
+      seekEl.addEventListener("pointercancel", () => { isSeekingUi = false; lastScrubVal = -1; });
+      seekEl.addEventListener("touchcancel", () => { isSeekingUi = false; lastScrubVal = -1; });
+      window.addEventListener("pointerup", scheduleReleaseCommit);
+      window.addEventListener("touchend", scheduleReleaseCommit, { passive: true });
     }
     $("volume").addEventListener("input", (e) => setVolume(Number(e.target.value)));
     $("queueBtn").onclick = () => {
@@ -14600,12 +14976,42 @@
       }
       next(false);
     });
-    audio.addEventListener("play", () => { state.playing = true; updateMediaSession(); renderChrome(); });
+    audio.addEventListener("play", () => {
+      state.playing = true;
+      if (!state.timer) startTimer();
+      updateMediaSession();
+      renderChrome();
+    });
     audio.addEventListener("playing", onPlaybackPlaying);
+    audio.addEventListener("timeupdate", () => {
+      if (!document.hidden && !npActive) updateProgress();
+    });
+    audio.addEventListener("loadedmetadata", () => {
+      if (_webSeekTarget >= 0) {
+        try {
+          const target = _webSeekTarget;
+          _webSeekTarget = -1;
+          audio.currentTime = target;
+        } catch {}
+      }
+      if (!npActive) updateProgress();
+    });
+    audio.addEventListener("durationchange", () => {
+      if (!npActive) updateProgress();
+    });
     audio.addEventListener("waiting", onPlaybackWaiting);
     audio.addEventListener("stalled", onPlaybackWaiting);
     audio.addEventListener("progress", checkBufferResume);
-    audio.addEventListener("canplay", checkBufferResume);
+    audio.addEventListener("canplay", () => {
+      if (_webSeekTarget >= 0) {
+        try {
+          const target = _webSeekTarget;
+          _webSeekTarget = -1;
+          audio.currentTime = target;
+        } catch {}
+      }
+      checkBufferResume();
+    });
     audio.addEventListener("canplaythrough", checkBufferResume);
     audio.addEventListener("pause", () => {
       if (current() && current().source === "youtube" && !current()._playingViaAudio) return;

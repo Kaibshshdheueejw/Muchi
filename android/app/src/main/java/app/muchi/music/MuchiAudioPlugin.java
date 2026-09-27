@@ -99,6 +99,12 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     };
 
     @Override
+    public void load() {
+        super.load();
+        MuchiAudioService.setStaticListener(this);
+    }
+
+    @Override
     protected void handleOnDestroy() {
         main.removeCallbacks(bindTimeout);
         if (bindTimeout != null) main.removeCallbacks(bindTimeout);
@@ -107,6 +113,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             pendingPlay = null;
             try { pc.resolve(); } catch (Exception ignored) {}
         }
+        MuchiAudioService.setStaticListener(null);
         if (service != null) {
             try {
                 service.setListener(null);
@@ -123,6 +130,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     }
 
     private void ensureService(Runnable onBound) {
+        MuchiAudioService.setStaticListener(this);
         if (service != null) {
             if (onBound != null) onBound.run();
             return;
@@ -151,6 +159,21 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         }
     }
 
+    private static long readLong(PluginCall call, String key, long defaultValue) {
+        if (call == null || call.getData() == null) return defaultValue;
+        Object raw = call.getData().opt(key);
+        if (raw instanceof Number) {
+            return ((Number) raw).longValue();
+        }
+        if (raw instanceof String) {
+            try {
+                return Math.round(Double.parseDouble((String) raw));
+            } catch (Exception ignored) {}
+        }
+        Long val = call.getLong(key, defaultValue);
+        return val != null ? val : defaultValue;
+    }
+
     @PluginMethod
     public void play(PluginCall call) {
         String url = call.getString("url", "");
@@ -176,7 +199,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_TITLE, call.getString("title", "Muchi"));
         i.putExtra(MuchiAudioService.EXTRA_ARTIST, call.getString("artist", ""));
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
-        i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, call.getLong("duration", 0L));
+        i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, readLong(call, "duration", 0L));
         if (call.hasOption("volume")) {
             Double v = call.getDouble("volume", 100.0);
             i.putExtra(MuchiAudioService.EXTRA_VOLUME, v != null ? v.floatValue() : 100f);
@@ -235,8 +258,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_TITLE, call.getString("title", "Muchi"));
         i.putExtra(MuchiAudioService.EXTRA_ARTIST, call.getString("artist", ""));
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
-        i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, call.getLong("duration", 0L));
-        i.putExtra(MuchiAudioService.EXTRA_POSITION_MS, call.getLong("position", 0L));
+        i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, readLong(call, "duration", 0L));
+        i.putExtra(MuchiAudioService.EXTRA_POSITION_MS, readLong(call, "position", 0L));
         Boolean playing = call.getBoolean("playing", true);
         i.putExtra(MuchiAudioService.EXTRA_PLAYING, playing == null || playing);
         startService(i);
@@ -304,7 +327,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     @PluginMethod
     public void seekTo(PluginCall call) {
-        long position = call.getLong("position", 0L);
+        long position = readLong(call, "position", 0L);
         ensureService(() -> { if (service != null) service.seekToPlayback(position); });
         call.resolve();
     }

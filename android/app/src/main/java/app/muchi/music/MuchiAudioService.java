@@ -11,8 +11,10 @@ import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.audiofx.BassBoost;
+import android.media.audiofx.DynamicsProcessing;
 import android.media.audiofx.Equalizer;
 import android.media.audiofx.LoudnessEnhancer;
+import android.media.audiofx.Virtualizer;
 import android.net.wifi.WifiManager;
 import android.os.Binder;
 import android.os.Build;
@@ -31,6 +33,7 @@ import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import android.support.v4.media.MediaMetadataCompat;
@@ -165,11 +168,23 @@ public class MuchiAudioService extends Service {
     private MediaSessionCompat session;
     private NotificationManager notificationManager;
     private PluginListener listener;
+    private static volatile PluginListener staticListener;
     private PowerManager.WakeLock cpuWakeLock;
     private WifiManager.WifiLock wifiLock;
 
-    // 1.5.5 Sound Stage hardware DSP effects attached to ExoPlayer's audio session
+    public static void setStaticListener(PluginListener l) {
+        staticListener = l;
+    }
+
+    private PluginListener activeListener() {
+        PluginListener l = listener;
+        return l != null ? l : staticListener;
+    }
+
+    // 1.5.5 / 1.6.6 Sound Stage hardware DSP effects attached to ExoPlayer's audio session
     private int currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET;
+    private DynamicsProcessing dynamicsProcessing;
+    private Virtualizer virtualizer;
     private LoudnessEnhancer loudnessEnhancer;
     private Equalizer equalizer;
     private BassBoost bassBoost;
@@ -201,27 +216,44 @@ public class MuchiAudioService extends Service {
         @Override
         public void run() {
             ticker.removeCallbacks(tick);
+            PluginListener l = activeListener();
             if (mirrorMode) {
                 if (session != null) {
                     updatePlaybackState(mirrorPlaying, mirrorPositionMs);
                 }
+                if (l != null) {
+                    l.onProgress(mirrorPositionMs, mirrorDurationMs, mirrorPlaying);
+                }
                 if (mirrorPlaying) {
-                    mirrorPositionMs += 1000L;
+                    mirrorPositionMs += 250L;
                     if (mirrorDurationMs > 0 && mirrorPositionMs > mirrorDurationMs) {
                         mirrorPositionMs = mirrorDurationMs;
                     }
-                    ticker.postDelayed(tick, 1000);
+                    ticker.postDelayed(tick, 250L);
                 }
                 return;
             }
-            if (player == null || session == null) return;
-            long positionMs = player.getCurrentPosition();
-            long durationMs = Math.max(0L, player.getDuration());
+            if (session == null) return;
+            if (player == null) {
+                if (l != null) l.onProgress(0L, currentDurationMs, true);
+                ticker.postDelayed(tick, 250L);
+                return;
+            }
+            long positionMs = Math.max(0L, player.getCurrentPosition());
+            long rawDur = player.getDuration();
+            long durationMs = (rawDur != C.TIME_UNSET && rawDur > 0) ? rawDur : 0L;
             if (durationMs <= 0 && currentDurationMs > 0) durationMs = currentDurationMs;
-            boolean playing = player.isPlaying();
-            if (listener != null) listener.onProgress(positionMs, durationMs, playing);
+            if (durationMs <= 0 && currentUrl != null) {
+                long urlDur = extractDurationMsFromUrl(currentUrl);
+                if (urlDur > 0) {
+                    currentDurationMs = urlDur;
+                    durationMs = urlDur;
+                }
+            }
+            boolean playing = player.isPlaying() || (player.getPlayWhenReady() && player.getPlaybackState() == Player.STATE_BUFFERING);
+            if (l != null) l.onProgress(positionMs, durationMs, playing);
             updatePlaybackState(playing, positionMs);
-            ticker.postDelayed(tick, 1000);
+            ticker.postDelayed(tick, 250L);
         }
     };
 
@@ -478,7 +510,9 @@ public class MuchiAudioService extends Service {
                 .setReadTimeoutMs(18000)
                 .setAllowCrossProtocolRedirects(true);
         DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(this, httpFactory);
-        ExoPlayer.Builder builder = new ExoPlayer.Builder(this)
+        DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
+                .setEnableAudioFloatOutput(true);
+        ExoPlayer.Builder builder = new ExoPlayer.Builder(this, renderersFactory)
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(dataSourceFactory))
                 // Hold both CPU wake lock and Wi-Fi lock so background streaming
                 // survives screen-off doze over Wi-Fi and mobile data.
@@ -640,6 +674,10 @@ public class MuchiAudioService extends Service {
         }
         currentCandidates = candidates != null ? candidates : "";
         currentDurationMs = Math.max(0L, durationMs);
+        if (currentDurationMs <= 0 && url != null) {
+            long urlDur = extractDurationMsFromUrl(url);
+            if (urlDur > 0) currentDurationMs = urlDur;
+        }
         mirrorMode = false;
 
         // Deduplicate rapid double-invocation (e.g. startForegroundService + binder.playIntent)
@@ -648,6 +686,8 @@ public class MuchiAudioService extends Service {
             ensureSession();
             session.setMetadata(buildMetadata(currentDurationMs));
             showNotification();
+            ticker.removeCallbacks(tick);
+            ticker.post(tick);
             if (artwork != null && !artwork.isEmpty() && !artwork.equals(trackArtworkUrl)) {
                 trackArtworkUrl = artwork;
                 fetchArtwork(artwork);
@@ -661,6 +701,8 @@ public class MuchiAudioService extends Service {
 
         ensurePlayer();
         ensureSession();
+        ticker.removeCallbacks(tick);
+        ticker.post(tick);
 
         if (artwork != null && !artwork.isEmpty()) {
             if (!artwork.equals(trackArtworkUrl)) {
@@ -708,6 +750,13 @@ public class MuchiAudioService extends Service {
     private void startExoPlayerWithUrl(String streamUrl, String userAgent, long durationMs) {
         ensurePlayer();
         ensureSession();
+        if (durationMs <= 0 && streamUrl != null) {
+            long parsedDur = extractDurationMsFromUrl(streamUrl);
+            if (parsedDur > 0) {
+                durationMs = parsedDur;
+                currentDurationMs = parsedDur;
+            }
+        }
         if (httpFactory != null) {
             httpFactory.setUserAgent(userAgent != null && !userAgent.isEmpty() ? userAgent : userAgentForStreamUrl(streamUrl));
             Map<String, String> headers = new HashMap<>();
@@ -731,6 +780,27 @@ public class MuchiAudioService extends Service {
 
         ticker.removeCallbacks(tick);
         ticker.post(tick);
+    }
+
+    private static long extractDurationMsFromUrl(String url) {
+        if (url == null || url.isEmpty()) return 0L;
+        try {
+            String target = url;
+            int uIdx = target.indexOf("url=");
+            if (uIdx >= 0) {
+                String sub = target.substring(uIdx + 4);
+                int amp = sub.indexOf('&');
+                target = java.net.URLDecoder.decode(amp >= 0 ? sub.substring(0, amp) : sub, "UTF-8");
+            }
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:[?&]|%26)dur(?:=|%3D)([0-9]+(?:\\.[0-9]+)?)").matcher(target);
+            if (m.find()) {
+                double sec = Double.parseDouble(m.group(1));
+                if (sec > 0 && sec < 86400) {
+                    return Math.round(sec * 1000.0);
+                }
+            }
+        } catch (Exception ignored) {}
+        return 0L;
     }
 
     private static String extractVideoIdFromUrl(String url) {
@@ -763,12 +833,12 @@ public class MuchiAudioService extends Service {
         return DEFAULT_UA;
     }
 
-    /* ── 1.5.5 Sound Stage & Volume/Speed DSP ──────────────────────── */
+    /* ── 1.5.5 / 1.6.6 Sound Stage & Volume/Speed DSP ──────────────── */
 
     private void applyPlayerPrefsAndEffects() {
         if (player == null) return;
         try {
-            // 1.5.5 volumeFor(volumePct, normalize) math: normalizeGain = 0.86 when on, 1.0 when off
+            // 1.5.5 / 1.6.6 volumeFor(volumePct, normalize) math: normalizeGain = 0.86 when on, 1.0 when off
             float normGain = prefNormalize ? 0.86f : 1.0f;
             float clampedVol = Math.max(0f, Math.min(100f, prefVolume)) / 100f;
             float targetVol = Math.min(1.0f, clampedVol * normGain);
@@ -788,9 +858,166 @@ public class MuchiAudioService extends Service {
 
         try {
             if ("off".equals(mode)) {
+                if (dynamicsProcessing != null) dynamicsProcessing.setEnabled(false);
+                if (virtualizer != null) virtualizer.setEnabled(false);
                 if (loudnessEnhancer != null) loudnessEnhancer.setEnabled(false);
                 if (equalizer != null) equalizer.setEnabled(false);
                 if (bassBoost != null) bassBoost.setEnabled(false);
+                return;
+            }
+
+            // On Android 9+ (API 28+), use hardware DynamicsProcessing to mirror the exact
+            // 1.5.5 / 1.6.6 WebAudio hookSound() mastering chain:
+            //   6-band Pre-EQ -> 6-band Multi-Band Compressor (harmonic sub-bass exciter + punch)
+            //   -> 6-band Post-EQ -> Brickwall Limiter (-0.9 dB, 20:1, +3.8 dB makeup gain).
+            boolean dpActive = false;
+            if (Build.VERSION.SDK_INT >= 28) {
+                try {
+                    if (dynamicsProcessing == null || currentAudioSessionId != sessionId) {
+                        releaseAudioEffects();
+                        currentAudioSessionId = sessionId;
+                        DynamicsProcessing.Config.Builder cb = new DynamicsProcessing.Config.Builder(
+                                DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
+                                2,
+                                true, 6,
+                                true, 6,
+                                true, 6,
+                                true
+                        );
+                        cb.setPreferredFrameDuration(10.0f);
+                        dynamicsProcessing = new DynamicsProcessing(0, sessionId, cb.build());
+                        try {
+                            virtualizer = new Virtualizer(0, sessionId);
+                        } catch (Exception ignored) {}
+                    }
+                    if (dynamicsProcessing != null) {
+                        // Exact cutoff bands matching hookSound() biquads:
+                        // [0]: <=62Hz (sub-bass 58-62Hz), [1]: <=95Hz (lowshelf 72-90Hz),
+                        // [2]: <=220Hz (body 145Hz + harmonic exciter 88-340Hz),
+                        // [3]: <=650Hz (scoop 380-420Hz), [4]: <=4800Hz (presence 2800-3200Hz),
+                        // [5]: <=20000Hz (air 8500-9000Hz)
+                        float[] cutoffs = new float[] { 62f, 95f, 220f, 650f, 4800f, 20000f };
+                        float[] preGains;
+                        float[] postGains;
+                        float compThresh;
+                        float compKnee;
+                        float compRatio;
+                        float compAttackMs;
+                        float compReleaseMs;
+                        float outGainDb;
+
+                        if ("phone".equals(mode)) {
+                            // 1.5.5 / 1.6.6 "Phone · feel it":
+                            // bass lowshelf 78Hz +9.5dB, sub 58Hz +5.5dB, body 145Hz +3.2dB,
+                            // scoop 420Hz -2.8dB, presence 2800Hz +2.8dB, air 8500Hz +2.6dB,
+                            // + parallel harmonic sub-bass exciter (88-340Hz, wet 0.72)
+                            // + punch compressor (-20dB, knee 14, ratio 3.6, attack 5ms, release 140ms)
+                            // + limiter (-0.9dB, ratio 20, out gain 1.55x = +3.8dB)
+                            preGains = new float[] { 5.5f, 9.5f, 3.2f, -2.8f, 2.8f, 2.6f };
+                            postGains = new float[] { 1.8f, 2.4f, 2.2f, 0.0f, 0.6f, 0.5f };
+                            compThresh = -20.0f;
+                            compKnee = 14.0f;
+                            compRatio = 3.6f;
+                            compAttackMs = 5.0f;
+                            compReleaseMs = 140.0f;
+                            outGainDb = 3.8f;
+                        } else if ("bass".equals(mode)) {
+                            // 1.5.5 / 1.6.6 "Super Bass":
+                            // bass 72Hz +8.5dB, sub 62Hz +4.2dB, scoop 380Hz -2.2dB,
+                            // presence 3200Hz +1.2dB, air 9000Hz -0.8dB, comp (-18dB, knee 12, ratio 2.6), out 1.28x (+2.15dB)
+                            preGains = new float[] { 4.2f, 8.5f, 3.0f, -2.2f, 1.2f, -0.8f };
+                            postGains = new float[] { 2.0f, 2.2f, 1.4f, 0.0f, 0.2f, 0.0f };
+                            compThresh = -18.0f;
+                            compKnee = 12.0f;
+                            compRatio = 2.6f;
+                            compAttackMs = 12.0f;
+                            compReleaseMs = 220.0f;
+                            outGainDb = 2.15f;
+                        } else if ("spatial".equals(mode)) {
+                            // 1.5.5 / 1.6.6 "3D Spatial":
+                            // bass 90Hz +2.4dB, sub 62Hz +1.2dB, scoop 380Hz -1.4dB,
+                            // presence 3200Hz +2.4dB, air 9000Hz +3.2dB, comp (-14dB, knee 16, ratio 2.2), out 1.18x (+1.44dB)
+                            preGains = new float[] { 1.2f, 2.4f, 0.8f, -1.4f, 2.4f, 3.2f };
+                            postGains = new float[] { 0.4f, 0.6f, 0.4f, 0.0f, 1.0f, 1.2f };
+                            compThresh = -14.0f;
+                            compKnee = 16.0f;
+                            compRatio = 2.2f;
+                            compAttackMs = 8.0f;
+                            compReleaseMs = 180.0f;
+                            outGainDb = 1.44f;
+                        } else {
+                            // 1.5.5 / 1.6.6 "Dynamic":
+                            // bass 85Hz +5.5dB, sub 62Hz +2.6dB, scoop 380Hz -1.8dB,
+                            // presence 3200Hz +3.1dB, air 9000Hz +2.4dB, comp (-22dB, knee 18, ratio 4.2, 4ms/120ms), out 1.22x (+1.73dB)
+                            preGains = new float[] { 2.6f, 5.5f, 2.0f, -1.8f, 3.1f, 2.4f };
+                            postGains = new float[] { 1.0f, 1.4f, 1.0f, 0.0f, 0.8f, 0.6f };
+                            compThresh = -22.0f;
+                            compKnee = 18.0f;
+                            compRatio = 4.2f;
+                            compAttackMs = 4.0f;
+                            compReleaseMs = 120.0f;
+                            outGainDb = 1.73f;
+                        }
+
+                        DynamicsProcessing.Eq preEq = new DynamicsProcessing.Eq(true, true, 6);
+                        DynamicsProcessing.Mbc mbc = new DynamicsProcessing.Mbc(true, true, 6);
+                        DynamicsProcessing.Eq postEq = new DynamicsProcessing.Eq(true, true, 6);
+
+                        for (int i = 0; i < 6; i++) {
+                            DynamicsProcessing.EqBand eb = preEq.getBand(i);
+                            eb.setCutoffFrequency(cutoffs[i]);
+                            eb.setGain(preGains[i]);
+                            eb.setEnabled(true);
+                            preEq.setBand(i, eb);
+
+                            DynamicsProcessing.MbcBand mb = mbc.getBand(i);
+                            mb.setCutoffFrequency(cutoffs[i]);
+                            mb.setAttackTime(compAttackMs);
+                            mb.setReleaseTime(compReleaseMs);
+                            mb.setRatio(compRatio);
+                            mb.setThreshold(compThresh);
+                            mb.setKneeWidth(compKnee);
+                            mb.setNoiseGateThreshold(-75.0f);
+                            mb.setExpanderRatio(1.0f);
+                            mb.setPreGain(0.0f);
+                            mb.setPostGain(postGains[i]);
+                            mb.setEnabled(true);
+                            mbc.setBand(i, mb);
+
+                            DynamicsProcessing.EqBand peb = postEq.getBand(i);
+                            peb.setCutoffFrequency(cutoffs[i]);
+                            peb.setGain(0.0f);
+                            peb.setEnabled(true);
+                            postEq.setBand(i, peb);
+                        }
+
+                        DynamicsProcessing.Limiter lim = new DynamicsProcessing.Limiter(
+                                true, true, 0,
+                                2.0f, 80.0f, 20.0f, -0.9f, outGainDb
+                        );
+
+                        dynamicsProcessing.setInputGainAllChannelsTo(0.0f);
+                        dynamicsProcessing.setPreEqAllChannelsTo(preEq);
+                        dynamicsProcessing.setMbcAllChannelsTo(mbc);
+                        dynamicsProcessing.setPostEqAllChannelsTo(postEq);
+                        dynamicsProcessing.setLimiterAllChannelsTo(lim);
+                        dynamicsProcessing.setEnabled(true);
+                        dpActive = true;
+                    }
+                    if (virtualizer != null && virtualizer.getStrengthSupported()) {
+                        if ("spatial".equals(mode)) {
+                            virtualizer.setStrength((short) 850);
+                            virtualizer.setEnabled(true);
+                        } else {
+                            virtualizer.setEnabled(false);
+                        }
+                    }
+                } catch (Exception ignored) {
+                    dpActive = false;
+                }
+            }
+
+            if (dpActive) {
                 return;
             }
 
@@ -808,15 +1035,15 @@ public class MuchiAudioService extends Service {
                 } catch (Exception ignored) {}
             }
 
-            // 1.5.5 Sound Stage tuning (Phone · feel it / Super Bass / Spatial / Dynamic)
+            // Fallback Sound Stage tuning for pre-API-28 devices
             if (loudnessEnhancer != null) {
-                int gainMb = "phone".equals(mode) ? 350 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;
+                int gainMb = "phone".equals(mode) ? 380 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;
                 loudnessEnhancer.setTargetGain(gainMb);
                 loudnessEnhancer.setEnabled(true);
             }
 
             if (bassBoost != null && bassBoost.getStrengthSupported()) {
-                short strength = (short) ("phone".equals(mode) ? 650 : "bass".equals(mode) ? 800 : "spatial".equals(mode) ? 320 : 450);
+                short strength = (short) ("phone".equals(mode) ? 720 : "bass".equals(mode) ? 850 : "spatial".equals(mode) ? 320 : 480);
                 bassBoost.setStrength(strength);
                 bassBoost.setEnabled(true);
             }
@@ -831,28 +1058,26 @@ public class MuchiAudioService extends Service {
                         int freqHz = equalizer.getCenterFreq(b) / 1000;
                         int targetMb = 0;
                         if ("phone".equals(mode)) {
-                            // 1.5.5 "Phone · feel it": +9.5dB sub/bass, -2.8dB 420Hz scoop, +2.8dB 2.8kHz presence, +2.6dB 8.5kHz air
-                            if (freqHz <= 90) targetMb = 750;
-                            else if (freqHz <= 200) targetMb = 380;
-                            else if (freqHz <= 600) targetMb = -240;
+                            if (freqHz <= 90) targetMb = 950;
+                            else if (freqHz <= 200) targetMb = 450;
+                            else if (freqHz <= 600) targetMb = -280;
                             else if (freqHz <= 4000) targetMb = 280;
                             else targetMb = 260;
                         } else if ("bass".equals(mode)) {
                             if (freqHz <= 90) targetMb = 850;
                             else if (freqHz <= 200) targetMb = 420;
-                            else if (freqHz <= 600) targetMb = -200;
+                            else if (freqHz <= 600) targetMb = -220;
                             else if (freqHz <= 4000) targetMb = 120;
-                            else targetMb = -50;
+                            else targetMb = -80;
                         } else if ("spatial".equals(mode)) {
                             if (freqHz <= 120) targetMb = 240;
                             else if (freqHz <= 600) targetMb = -140;
                             else if (freqHz <= 4000) targetMb = 240;
                             else targetMb = 320;
                         } else {
-                            // dynamic
-                            if (freqHz <= 120) targetMb = 500;
+                            if (freqHz <= 120) targetMb = 550;
                             else if (freqHz <= 600) targetMb = -180;
-                            else if (freqHz <= 4000) targetMb = 300;
+                            else if (freqHz <= 4000) targetMb = 310;
                             else targetMb = 240;
                         }
                         short clamped = (short) Math.max(minL, Math.min(maxL, targetMb));
@@ -867,6 +1092,14 @@ public class MuchiAudioService extends Service {
     }
 
     private void releaseAudioEffects() {
+        if (dynamicsProcessing != null) {
+            try { dynamicsProcessing.release(); } catch (Exception ignored) {}
+            dynamicsProcessing = null;
+        }
+        if (virtualizer != null) {
+            try { virtualizer.release(); } catch (Exception ignored) {}
+            virtualizer = null;
+        }
         if (loudnessEnhancer != null) {
             try { loudnessEnhancer.release(); } catch (Exception ignored) {}
             loudnessEnhancer = null;
@@ -1030,16 +1263,21 @@ public class MuchiAudioService extends Service {
                             }
                         }
 
-                        // 1.5.5 stream quality rule: prefer highest-bitrate AAC/m4a, then highest-bitrate Opus
-                        String chosen = !bestM4aUrl.isEmpty() ? bestM4aUrl : bestOpusUrl;
-                        String chosenMime = !bestM4aUrl.isEmpty() ? "audio/mp4" : "audio/webm";
+                        // 1.5.5 / 1.6.6 stream quality rule: prefer high-bitrate AAC/m4a (>=120kbps) or
+                        // high-bitrate Opus (160kbps itag=251); never let 48kbps itag=139 beat 160kbps Opus.
+                        boolean useM4a = !bestM4aUrl.isEmpty() && (bestOpusUrl.isEmpty() || (bestM4aBitrate >= 115000 && bestM4aBitrate >= bestOpusBitrate * 0.75));
+                        String chosen = useM4a ? bestM4aUrl : (!bestOpusUrl.isEmpty() ? bestOpusUrl : bestM4aUrl);
+                        String chosenMime = useM4a || bestOpusUrl.isEmpty() ? "audio/mp4" : "audio/webm";
                         if (!chosen.isEmpty()) {
-                            long durSec = 0L;
+                            long durMs = 0L;
                             JSONObject vd = root.optJSONObject("videoDetails");
                             if (vd != null) {
-                                durSec = vd.optLong("lengthSeconds", 0L);
+                                durMs = vd.optLong("lengthSeconds", 0L) * 1000L;
                             }
-                            return new ResolvedStream(chosen, ua, durSec * 1000L, chosenMime);
+                            if (durMs <= 0) {
+                                durMs = extractDurationMsFromUrl(chosen);
+                            }
+                            return new ResolvedStream(chosen, ua, durMs, chosenMime);
                         }
                     }
                 } catch (Exception ignored) {
@@ -1323,7 +1561,7 @@ public class MuchiAudioService extends Service {
     }
 
     private void emitControls(String message, long positionMs) {
-        PluginListener l = listener;
+        PluginListener l = activeListener();
         if (l != null) l.onControls(message, positionMs);
     }
 

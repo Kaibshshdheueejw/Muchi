@@ -3535,7 +3535,7 @@ html[data-ui="glass"] .lib-track {
 
 .seek-box {
   position: relative;
-  height: 16px;
+  height: 18px;
   display: grid;
   align-items: center;
 }
@@ -3543,30 +3543,40 @@ html[data-ui="glass"] .lib-track {
   position: absolute;
   inset: 0;
   width: 100%;
-  height: 16px;
+  height: 100%;
   pointer-events: none;
   z-index: 0;
+  overflow: visible;
 }
 .seek-wave path {
   stroke: var(--song-primary, #7dd3bb);
   filter: drop-shadow(0 0 6px var(--song-glow, rgba(125,211,187,0.45)));
 }
+.seek-wave path.seek-wave-bg {
+  stroke: color-mix(in srgb, var(--song-primary, #7dd3bb) 28%, rgba(255, 255, 255, 0.22));
+  filter: none;
+  opacity: 0.55;
+}
+html[data-theme="light"] .seek-wave path.seek-wave-bg {
+  stroke: color-mix(in srgb, var(--song-primary, #0f766e) 28%, rgba(15, 23, 42, 0.22));
+}
 .seek-box input[type="range"] {
   position: relative;
   z-index: 1;
   width: 100%;
-  height: 16px;
+  height: 18px;
   background: transparent;
   margin: 0;
+  touch-action: pan-y;
 }
 .seek-box input[type="range"]::-webkit-slider-runnable-track {
-  height: 16px;
+  height: 18px;
   background: transparent;
 }
 .seek-box input[type="range"]::-webkit-slider-thumb {
   width: 14px;
   height: 14px;
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 html[data-ui="glass"] .player {
@@ -3604,34 +3614,6 @@ html[data-player="pill"] .player {
   padding: 8px 14px;
 }
 
-/* Island — compact, centered "Dynamic Island" capsule: narrower than the
-   screen, fully rounded, tinted border so it reads as a floating pill. */
-html[data-player="island"] .player {
-  left: 0;
-  right: 0;
-  margin: 0 auto;
-  max-width: min(620px, calc(100% - 24px));
-  border-radius: 999px;
-  padding: 6px 12px;
-  min-height: 62px;
-  gap: 2px 8px;
-  border-width: 1.5px;
-}
-html[data-player="island"] .now { gap: 8px; }
-html[data-player="island"] .cover-btn {
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-}
-html[data-player="island"] .fab {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-}
-html[data-player="island"] .meta { max-width: 22ch; }
-html[data-player="island"] .extras { gap: 0; }
-html[data-player="island"] .extras .icon-btn { width: 30px; }
-
 /* Wave — the seek line is the hero: taller, thicker, glowing, and always
    animated while playing; the bar shell recedes behind it. */
 html[data-player="wave"] .player {
@@ -3648,26 +3630,48 @@ html[data-player="wave"][data-ui="glass"] body[data-playing="1"] .player::before
   animation-duration: 4.5s;
 }
 
-/* Solid bar — a flat, opaque Material bar: no glass blur, no shine, square
-   corners, full-width, controls sit on a hard surface. */
-html[data-player="bar"] .player {
-  left: 0;
-  right: 0;
-  border-radius: 0;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: color-mix(in srgb, var(--song-container) 96%, #000);
-  box-shadow: 0 -1px 0 var(--md-sys-color-outline-variant), 0 -8px 24px rgba(0,0,0,0.28);
-  border: 0;
+/* Vinyl — warm studio deck look with a spinning vinyl disc cover and grooved trim. */
+html[data-player="vinyl"] .player {
+  border-radius: 26px;
+  padding: 8px 14px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #1c201f) 90%, #090b0b), color-mix(in srgb, var(--song-container, #1c201f) 76%, #000));
+  border: 1px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 32%, rgba(255, 255, 255, 0.14));
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
-/* Re-assert the light mix at higher specificity (matches the top-of-file
-   light override). */
-html[data-theme="light"][data-player="bar"] .player {
-  background: color-mix(in srgb, var(--song-container) 96%, #fff);
+html[data-theme="light"][data-player="vinyl"] .player {
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #e6eae6) 90%, #fff), color-mix(in srgb, var(--song-container, #e6eae6) 80%, #dce4e0));
 }
-html[data-player="bar"] .player::before { display: none; }
-html[data-player="bar"] .player-wash { display: none; }
-html[data-player="bar"] .cover-btn { border-radius: 10px; }
+html[data-player="vinyl"] .cover-btn {
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 55%, rgba(255, 255, 255, 0.25));
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.32);
+}
+html[data-player="vinyl"] body[data-playing="1"] .cover-btn img {
+  animation: vinylSpin 9s linear infinite;
+}
+@keyframes vinylSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Aura — luminous song-color ambient halo with frosted crystal border. */
+html[data-player="aura"] .player {
+  border-radius: 28px;
+  padding: 8px 14px;
+  border: 1.5px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 52%, rgba(255, 255, 255, 0.28));
+  box-shadow:
+    0 12px 38px rgba(0, 0, 0, 0.34),
+    0 0 26px var(--song-glow, rgba(125, 211, 187, 0.38)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+html[data-player="aura"] .player-wash {
+  opacity: 0.44;
+  filter: blur(28px) saturate(1.65);
+}
+html[data-player="aura"] .cover-btn {
+  border-radius: 14px;
+  box-shadow: 0 0 16px var(--song-glow, rgba(125, 211, 187, 0.42));
+}
 
 /* Settings picker previews — distinct silhouettes per type. Each preview is a
    mini rendition of the docked player so the choice is obvious in Settings.
@@ -3680,17 +3684,6 @@ html[data-player="bar"] .cover-btn { border-radius: 10px; }
 }
 .ui-pick-preview.player-pill i { height: 6px; }
 .ui-pick-preview.player-pill i:nth-child(2) { width: 72%; }
-.ui-pick-preview.player-island {
-  background: #111;
-  border-radius: 999px;
-  width: 70%;
-  max-width: 70%;
-  margin: 0 auto;
-  padding: 10px 12px;
-  align-content: center;
-}
-.ui-pick-preview.player-island i { height: 6px; }
-.ui-pick-preview.player-island i:nth-child(2) { width: 66%; }
 .ui-pick-preview.player-wave {
   background: linear-gradient(90deg, #64f0ff, #ff8ad8);
   border-radius: 18px;
@@ -3698,12 +3691,83 @@ html[data-player="bar"] .cover-btn { border-radius: 10px; }
 }
 .ui-pick-preview.player-wave i { height: 6px; border-radius: 2px; }
 .ui-pick-preview.player-wave i:nth-child(2) { width: 60%; }
-.ui-pick-preview.player-bar {
-  background: #1b2421;
-  border-radius: 4px;
+.ui-pick-preview.player-vinyl {
+  background: radial-gradient(circle at 24% 50%, #7dd3bb 0 6px, #111 7px 18px, #252b29 19px 100%);
+  border-radius: 20px;
+  border: 1px solid rgba(125, 211, 187, 0.4);
+  padding: 10px 12px 10px 42px;
   align-content: center;
 }
-.ui-pick-preview.player-bar i { height: 6px; }
+.ui-pick-preview.player-vinyl i { height: 6px; }
+.ui-pick-preview.player-vinyl i:nth-child(2) { width: 68%; }
+.ui-pick-preview.player-aura {
+  background: linear-gradient(125deg, rgba(125, 211, 187, 0.42), rgba(168, 203, 226, 0.25), rgba(196, 181, 253, 0.42));
+  border-radius: 22px;
+  border: 1.5px solid rgba(125, 211, 187, 0.65);
+  box-shadow: inset 0 0 14px rgba(125, 211, 187, 0.38);
+  padding: 10px 12px;
+  align-content: center;
+}
+.ui-pick-preview.player-aura i { height: 6px; }
+.ui-pick-preview.player-aura i:nth-child(2) { width: 74%; }
+
+/* Timestamp wiggle previews in Settings -> Player */
+.ui-pick-preview.wiggle-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(18, 24, 23, 0.92), rgba(30, 40, 38, 0.85));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--song-primary, #7dd3bb);
+}
+.ui-pick-preview.wiggle-preview .wiggle-time {
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.72);
+  flex-shrink: 0;
+}
+.ui-pick-preview.wiggle-preview svg {
+  width: 100%;
+  height: 20px;
+  overflow: visible;
+  filter: drop-shadow(0 0 5px rgba(125, 211, 187, 0.45));
+}
+.ui-pick-preview.wiggle-ribbon { color: #64f0ff; }
+.ui-pick-preview.wiggle-glow { color: #38bdf8; }
+.ui-pick-preview.wiggle-orbit { color: #c4b5fd; }
+
+/* Selected element styling: footer#playerBar > div.controls > div.seek-row */
+footer#playerBar > div.controls > div.seek-row {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  align-items: center;
+  transition: color 180ms ease;
+}
+footer#playerBar > div.controls > div.seek-row > span {
+  font-weight: 600;
+  opacity: 0.86;
+  user-select: none;
+}
+html[data-wiggle="ribbon"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-fg {
+  filter: drop-shadow(0 0 8px var(--song-glow, rgba(100, 240, 255, 0.62)));
+}
+html[data-wiggle="ribbon"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-bg {
+  opacity: 0.68;
+  stroke: color-mix(in srgb, var(--song-primary, #7dd3bb) 42%, rgba(100, 240, 255, 0.35));
+}
+html[data-wiggle="glow"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-fg {
+  filter:
+    drop-shadow(0 0 6px var(--song-primary, #7dd3bb))
+    drop-shadow(0 0 14px var(--song-glow, rgba(56, 189, 248, 0.78)));
+}
+html[data-wiggle="orbit"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-bg {
+  opacity: 0.72;
+  stroke: color-mix(in srgb, var(--song-primary, #7dd3bb) 48%, rgba(196, 181, 253, 0.45));
+}
 
 /* ── Player bar extras: fit every quick-action button without clipping ─────
    The bottom bar now has save / sleep / lyrics / follow / queue / video /
@@ -3722,11 +3786,6 @@ html[data-player="bar"] .cover-btn { border-radius: 10px; }
   .player .extras #followBtn,
   .player .extras #videoBtn { display: none !important; }
 }
-/* The Island look confines the whole player to a narrow capsule; a full
-   extras row cannot fit there, so show only the essential quick actions. */
-html[data-player="island"] .player .extras #followBtn,
-html[data-player="island"] .player .extras #videoBtn,
-html[data-player="island"] .player .extras .vol { display: none !important; }
 
 /* ── Player options bottom sheet (tune button) ───────────────────────────
    Quick sleep-timer presets + player-look chips (and YouTube actions when a
@@ -5127,6 +5186,7 @@ html[data-native="1"] .player .seek-row {
   margin-top: 2px;
 }
 html[data-native="1"] .player .seek-box,
+html[data-native="1"] .player .seek-wave,
 html[data-native="1"] .player .seek-box input[type="range"] {
   height: 22px;
 }
@@ -5651,35 +5711,6 @@ html[data-native="1"][data-player="pill"] .player {
 html[data-native="1"][data-player="pill"] .fab { border-radius: 50%; }
 html[data-native="1"][data-player="pill"] .cover-btn { border-radius: 12px; }
 
-html[data-native="1"][data-player="island"] .player {
-  left: 0;
-  right: 0;
-  margin: 0 auto;
-  max-width: min(620px, calc(100% - 24px));
-  border-radius: 999px;
-  padding: 6px 12px;
-  min-height: 62px;
-  gap: 2px 8px;
-  border-width: 1.5px;
-}
-html[data-native="1"][data-player="island"] .now { gap: 8px; }
-html[data-native="1"][data-player="island"] .cover-btn {
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-}
-html[data-native="1"][data-player="island"] .fab {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-}
-html[data-native="1"][data-player="island"] .meta { max-width: 22ch; }
-html[data-native="1"][data-player="island"] .extras { gap: 0; }
-html[data-native="1"][data-player="island"] .extras .icon-btn { width: 32px; }
-html[data-native="1"][data-player="island"] .player .extras #followBtn,
-html[data-native="1"][data-player="island"] .player .extras #videoBtn,
-html[data-native="1"][data-player="island"] .player .extras .vol { display: none !important; }
-
 html[data-native="1"][data-player="wave"] .player {
   border-radius: 24px;
   padding: 6px 12px 4px;
@@ -5691,22 +5722,32 @@ html[data-native="1"][data-player="wave"] .seek-wave path {
   filter: drop-shadow(0 0 8px var(--song-glow, rgba(125,211,187,0.7)));
 }
 
-html[data-native="1"][data-player="bar"] .player {
-  left: 0;
-  right: 0;
-  border-radius: 0;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: color-mix(in srgb, var(--song-container) 96%, #000);
-  box-shadow: 0 -1px 0 var(--md-sys-color-outline-variant), 0 -8px 24px rgba(0,0,0,0.28);
-  border: 0;
+html[data-native="1"][data-player="vinyl"] .player {
+  border-radius: 26px;
+  padding: 8px 14px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #1c201f) 90%, #090b0b), color-mix(in srgb, var(--song-container, #1c201f) 76%, #000));
+  border: 1px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 32%, rgba(255, 255, 255, 0.14));
 }
-html[data-theme="light"][data-native="1"][data-player="bar"] .player {
-  background: color-mix(in srgb, var(--song-container) 96%, #fff);
+html[data-theme="light"][data-native="1"][data-player="vinyl"] .player {
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #e6eae6) 90%, #fff), color-mix(in srgb, var(--song-container, #e6eae6) 80%, #dce4e0));
 }
-html[data-native="1"][data-player="bar"] .player::before,
-html[data-native="1"][data-player="bar"] .player-wash { display: none; }
-html[data-native="1"][data-player="bar"] .cover-btn { border-radius: 10px; }
+html[data-native="1"][data-player="vinyl"] .cover-btn {
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 55%, rgba(255, 255, 255, 0.25));
+}
+
+html[data-native="1"][data-player="aura"] .player {
+  border-radius: 28px;
+  padding: 8px 14px;
+  border: 1.5px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 52%, rgba(255, 255, 255, 0.28));
+  box-shadow:
+    0 12px 38px rgba(0, 0, 0, 0.34),
+    0 0 24px var(--song-glow, rgba(125, 211, 187, 0.38)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+html[data-native="1"][data-player="aura"] .cover-btn {
+  border-radius: 14px;
+}
 
 /* The same native block also collapses `.extras` on desktop widths on phones;
    keep the variants' extras-fit rules alive inside the native shell. */

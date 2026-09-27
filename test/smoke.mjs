@@ -813,7 +813,126 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.3", APP_VERSION === "1.7.3" && appJs.includes('const APP_VERSION = "1.7.3"'));
+  ok("version: APP_VERSION is 1.7.4", APP_VERSION === "1.7.4" && appJs.includes('const APP_VERSION = "1.7.4"'));
+  ok("player timer bar (1.7.4): dual-layer seek-wave-bg & seek-wave-fg paths, 250ms native+web progress ticks, URL duration parser, and non-sticky activeScrub",
+    appJs.includes('bgPath.setAttribute("class", "seek-wave-bg")') &&
+    appJs.includes('fgPath.setAttribute("class", "seek-wave-fg")') &&
+    appJs.includes("function parseStreamUrlDuration(") &&
+    appJs.includes("const activeScrub = Boolean(isSeekingUi);") &&
+    stylesCss.includes(".seek-wave path.seek-wave-bg") &&
+    androidService.includes("setStaticListener") &&
+    androidService.includes("extractDurationMsFromUrl") &&
+    iosPlugin.includes("timeInterval: 0.25")
+  );
+  ok("sound quality (1.7.4 / 1.6.6): Android DynamicsProcessing 6-band Pre-EQ + MBC + 32-bit float audio output and high-bitrate stream selection",
+    androidService.includes("DynamicsProcessing") &&
+    androidService.includes("setEnableAudioFloatOutput(true)") &&
+    androidService.includes("bestM4aBitrate >= 115000")
+  );
+  const poMatch = appJs.match(/function openPlayerOptions\(\)\s*\{([\s\S]*?)window\.handleImgErr/);
+  const poBody = poMatch ? poMatch[1] : "";
+  ok("player options cleanup: Video player, Playback speed, and Player style removed from openPlayerOptions()",
+    Boolean(poBody) &&
+    !poBody.includes("Video player") &&
+    !poBody.includes("poVideo") &&
+    !poBody.includes("Playback speed") &&
+    !poBody.includes("data-po-speed") &&
+    !poBody.includes("Player style") &&
+    !poBody.includes("data-po-style") &&
+    poBody.includes("poSleep") &&
+    poBody.includes("poDl")
+  );
+  ok("settings player style: Island and Bar removed, Pill and Wave preserved, Vinyl and Aura added across web and native",
+    appJs.includes('const VALID_PLAYER_STYLES = ["pill", "wave", "vinyl", "aura"];') &&
+    !appJs.includes('["island"') &&
+    !appJs.includes('["bar"') &&
+    stylesCss.includes('html[data-player="pill"] .player') &&
+    stylesCss.includes('html[data-player="wave"] .player') &&
+    stylesCss.includes('html[data-player="vinyl"] .player') &&
+    stylesCss.includes('html[data-player="aura"] .player') &&
+    stylesCss.includes('html[data-native="1"][data-player="vinyl"] .player') &&
+    stylesCss.includes('html[data-native="1"][data-player="aura"] .player') &&
+    !stylesCss.includes('html[data-player="island"]') &&
+    !stylesCss.includes('html[data-player="bar"]')
+  );
+  ok("settings timestamp wiggle: 4 optimized wiggle types (sine, ribbon, glow, orbit) selectable in Settings -> Player with legacy migration and endpoint tapering",
+    appJs.includes('const VALID_SEEK_WIGGLES = ["sine", "ribbon", "glow", "orbit"];') &&
+    appJs.includes('if (v === "pulse") return "ribbon";') &&
+    appJs.includes('if (v === "zigzag") return "glow";') &&
+    appJs.includes("Harmonic Ribbon") &&
+    appJs.includes("Laser Glow") &&
+    appJs.includes("function sampleSeekWiggleY(wiggle, x, t, amp, mid, span)") &&
+    appJs.includes("data-set-wiggle") &&
+    appJs.includes("Timestamp wiggle") &&
+    stylesCss.includes("footer#playerBar > div.controls > div.seek-row") &&
+    stylesCss.includes('html[data-wiggle="ribbon"]') &&
+    stylesCss.includes('html[data-wiggle="glow"]') &&
+    stylesCss.includes('html[data-wiggle="orbit"]')
+  );
+  ok("offline seek & MP4 stco integrity: MuchiMeta shifts stco/co64/tfhd offsets on moov expansion, rawAudioBytes stored in IDB, and Android readLong fixes seekTo",
+    readFileSync("public/meta.js", "utf8").includes("function shiftSampleTableOffsets(") &&
+    appJs.includes("const blob = new Blob([rawAudioBytes], { type: blobType });") &&
+    appJs.includes("const isUsingAudioEl = Boolean(t._playingViaAudio || (audio.src && audio.src.startsWith(\"blob:\")));") &&
+    appJs.includes("const scheduleReleaseCommit = () =>") &&
+    androidPlugin.includes("private static long readLong(PluginCall call, String key, long defaultValue)") &&
+    androidPlugin.includes('long position = readLong(call, "position", 0L);')
+  );
+  ok("offline lyrics movement: downloads persist lyrics to IDB & state.downloads, loadLyrics runs offline, and synthesizeSyncedLyrics + highlightLyric move lyrics offline",
+    appJs.includes("async function saveOfflineLyrics(t, data)") &&
+    appJs.includes("async function getOfflineLyrics(t)") &&
+    appJs.includes("async function ensureOfflineLyricsForTrack(t)") &&
+    appJs.includes("function synthesizeSyncedLyrics(plainText, durSec)") &&
+    appJs.includes("// Always load lyrics (uses IndexedDB / saved download cache when offline)\n    loadLyrics(t);")
+  );
+  // Real functional test of MuchiMeta MP4 stco chunk offset preservation on tag embedding
+  {
+    const vm = await import("node:vm");
+    const sandbox = { TextEncoder, TextDecoder };
+    vm.createContext(sandbox);
+    vm.runInContext(readFileSync("public/meta.js", "utf8"), sandbox);
+    const MM = sandbox.MuchiMeta;
+    // Build a synthetic MP4 with ftyp (16B) + moov containing trak->mdia->minf->stbl->stco (pointing to mdat at offset 80) + mdat (32B)
+    const u32 = (n) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+    const box = (type, payload) => {
+      const out = new Uint8Array(8 + payload.length);
+      out.set(u32(8 + payload.length), 0);
+      for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+      out.set(payload, 8);
+      return out;
+    };
+    const ftyp = box("ftyp", new Uint8Array([105, 115, 111, 109, 0, 0, 2, 0])); // 16B
+    // stco payload: version/flags (4B) + count=1 (4B) + offsetPlaceholder (4B) = 12B -> stco box = 20B
+    // stbl (28B) -> minf (36B) -> mdia (44B) -> trak (52B) -> moov (60B). Total before mdat = 16 + 60 = 76B. mdat payload starts at 84B.
+    const origChunkOffset = 84;
+    const stcoPayload = new Uint8Array([0, 0, 0, 0, 0, 0, 0, 1, ...u32(origChunkOffset)]);
+    const moov = box("moov", box("trak", box("mdia", box("minf", box("stbl", box("stco", stcoPayload))))));
+    const mdatPayload = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4]);
+    const mdat = box("mdat", mdatPayload);
+    const rawMp4 = new Uint8Array(ftyp.length + moov.length + mdat.length);
+    rawMp4.set(ftyp, 0);
+    rawMp4.set(moov, ftyp.length);
+    rawMp4.set(mdat, ftyp.length + moov.length);
+
+    const taggedMp4 = MM.embed(rawMp4, "m4a", { title: "Offline Seek Test", artist: "Muchi Artist", album: "Offline Album" });
+    const delta = taggedMp4.length - rawMp4.length;
+    // Locate 'stco' in taggedMp4 and verify the chunk offset shifted by +delta so it still points to 0xde 0xad 0xbe 0xef
+    let stcoPos = -1;
+    for (let i = 0; i < taggedMp4.length - 4; i++) {
+      if (taggedMp4[i] === 0x73 && taggedMp4[i + 1] === 0x74 && taggedMp4[i + 2] === 0x63 && taggedMp4[i + 3] === 0x6f) {
+        stcoPos = i;
+        break;
+      }
+    }
+    const newEntryOffset = stcoPos >= 0
+      ? ((taggedMp4[stcoPos + 12] << 24) | (taggedMp4[stcoPos + 13] << 16) | (taggedMp4[stcoPos + 14] << 8) | taggedMp4[stcoPos + 15]) >>> 0
+      : 0;
+    ok("functional test: MuchiMeta.embed shifts MP4 stco chunk offsets by exact moov growth delta so audio seeking never resets",
+      delta > 0 &&
+      newEntryOffset === origChunkOffset + delta &&
+      taggedMp4[newEntryOffset] === 0xde &&
+      taggedMp4[newEntryOffset + 1] === 0xad
+    );
+  }
   ok("offline downloads (1.7.3): ensureStreamForDownload & handleDownload strip preview/placeholder streams and resolve full-length audio", appJs.includes("function isPreviewOrPlaceholderStream(") && appJs.includes("allowPreview=0") && streamJs.includes("const isPreviewStreamUrl = (u) =>") && streamJs.includes("Never fall back to 30-second Deezer/iTunes previews"));
   ok("offline downloads (1.7.3): Android MuchiDownloadPlugin resolves residential stream on-device and uses 4 MB chunked range downloads", androidDownloadPlugin.includes("MuchiAudioService.resolveStreamForDownload") && androidDownloadPlugin.includes("downloadChunkedToMediaStore") && androidService.includes("public static ResolvedStream resolveStreamForDownload("));
   ok("offline playback (1.7.3): playCurrent prioritizes saved local file / IndexedDB blob and playAudio uses getOfflineAudioBlob before network", appJs.includes("const hasOfflinePlayback = Boolean(") && appJs.includes("offlineBlob = await getOfflineAudioBlob(t);"));
@@ -1090,9 +1209,9 @@ if (BASE) {
   ok("player UI: seek scrub touch/pointer handlers wired", appJsText.includes("beginSeekScrub") && appJsText.includes("commitSeekScrub"));
   ok("player UI: CSS native player Type looks high-specificity rules present",
     stylesText.includes('html[data-native="1"][data-player="pill"] .player') &&
-    stylesText.includes('html[data-native="1"][data-player="island"] .player') &&
     stylesText.includes('html[data-native="1"][data-player="wave"] .player') &&
-    stylesText.includes('html[data-native="1"][data-player="bar"] .player')
+    stylesText.includes('html[data-native="1"][data-player="vinyl"] .player') &&
+    stylesText.includes('html[data-native="1"][data-player="aura"] .player')
   );
   ok("player UI: CSS native player bar proportions & backdrop blur preserved",
     stylesText.includes('html[data-native="1"] .player .icon-btn') &&

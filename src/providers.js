@@ -123,17 +123,25 @@ export async function searchYouTube(query, gl, fast) {
   const extra = { limit: fast ? 24 : 60, musicOnly: true, loose: false };
   if (fast) {
     try {
+      // Prioritize YouTube Music (WEB_REMIX + YT_SONGS_PARAMS) studio masters;
+      // give web search a 350ms head-start delay so studio masters always win when available.
       const fastHit = await Promise.any([
-        youtubeMusicSearch(query, gl, 1500, { ...extra, params: YT_SONGS_PARAMS }).then((r) => {
+        youtubeMusicSearch(query, gl, 2000, { ...extra, params: YT_SONGS_PARAMS }).then((r) => {
           const rows = Array.isArray(r) ? r : (r && r.tracks) || [];
           if (!rows.length) throw new Error("empty music search");
           return r;
         }),
-        youtubeWebSearch(query, gl, 1500, { limit: 24, musicOnly: true, loose: false }).then((r) => {
-          const rows = Array.isArray(r) ? r : (r && r.tracks) || [];
-          if (!rows.length) throw new Error("empty web search");
-          return r;
-        }),
+        new Promise((res, rej) =>
+          setTimeout(() => {
+            youtubeWebSearch(query, gl, 1800, { limit: 24, musicOnly: true, loose: false })
+              .then((r) => {
+                const rows = Array.isArray(r) ? r : (r && r.tracks) || [];
+                if (!rows.length) throw new Error("empty web search");
+                return r;
+              })
+              .then(res, rej);
+          }, 350)
+        ),
       ]);
       add(fastHit);
     } catch (e) {
@@ -304,11 +312,14 @@ export function pickPipedStream(data) {
     .sort((a, b) => streamQualityScore(b) - streamQualityScore(a));
   const m4a = byType(/mp4|m4a|mpeg|aac/i);
   const opus = byType(/opus|webm|ogg|vorbis/i);
-  const best = m4a[0] || opus[0] || streams.find((s) => s && s.url);
+  const m4aTop = m4a[0] || null;
+  const opusTop = opus[0] || null;
+  const useM4a = m4aTop && (!opusTop || (streamQualityScore(m4aTop) >= 115000 && streamQualityScore(m4aTop) >= streamQualityScore(opusTop) * 0.75));
+  const best = (useM4a ? m4aTop : (opusTop || m4aTop)) || streams.find((s) => s && s.url);
   if (!best || !best.url) return null;
   return {
     url: best.url,
-    format: best.format || (m4a.length ? "m4a" : "opus"),
+    format: best.format || (best === m4aTop ? "m4a" : "opus"),
     mimeType: best.mimeType || "",
     quality: best.quality || "",
     // Expose the numeric bitrate so callers can surface/track it.
@@ -463,15 +474,21 @@ export function pickInnertubeStream(data) {
   const audio = formats.filter(isAudio);
   const m4a = audio.filter((f) => /mp4/i.test(String(f.mimeType))).sort((a, b) => score(b) - score(a));
   const opus = audio.filter((f) => /opus|webm/i.test(String(f.mimeType))).sort((a, b) => score(b) - score(a));
-  const best = m4a[0] || opus[0];
+  const m4aTop = m4a[0] || null;
+  const opusTop = opus[0] || null;
+  // Prefer high-bitrate AAC/m4a (>=115kbps, e.g. itag=140 128k / itag=141 256k),
+  // but never let a low-bitrate 48kbps itag=139 m4a beat a 160kbps itag=251 Opus stream.
+  const useM4a = m4aTop && (!opusTop || (score(m4aTop) >= 115000 && score(m4aTop) >= score(opusTop) * 0.75) || score(m4aTop) === 0);
+  const best = useM4a ? m4aTop : (opusTop || m4aTop);
   if (!best || !best.url) return null;
+  const isM4a = best === m4aTop;
   return {
     url: String(best.url),
-    format: m4a.length ? "m4a" : "opus",
-    mimeType: String(best.mimeType || (m4a.length ? "audio/mp4" : "audio/webm")),
+    format: isM4a ? "m4a" : "opus",
+    mimeType: String(best.mimeType || (isM4a ? "audio/mp4" : "audio/webm")),
     quality: String(best.itag || ""),
     bitrate: String(best.bitrate || ""),
-    duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || urlDuration(best.url),
+    duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || Number(data.videoDetails && data.videoDetails.lengthSeconds) || urlDuration(best.url),
   };
 }
 

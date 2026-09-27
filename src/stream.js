@@ -186,7 +186,7 @@ export async function handleStream(request, url) {
   const vId = (url.searchParams.get("v") || url.searchParams.get("videoId") || "").trim();
   const title = (url.searchParams.get("title") || "").trim();
   const artist = (url.searchParams.get("artist") || "").trim();
-  const allowPreview = url.searchParams.get("allowPreview") !== "0";
+  const allowPreview = url.searchParams.get("allowPreview") === "1";
   const q = `${title} ${artist}`.trim();
 
   if (vId) {

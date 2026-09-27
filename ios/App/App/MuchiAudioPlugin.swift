@@ -41,6 +41,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var currentItem: AVPlayerItem?
     private var ticker: Timer?
     private var errorSent = false
+    private var fallbackDurationMs: Double = 0
+    private var prefSpeed: Float = 1.0
 
     /* ── lifecycle ─────────────────────────────────────────────────── */
 
@@ -105,6 +107,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc public func play(_ call: CAPPluginCall) {
         let url = call.getString("url") ?? ""
+        if url.lowercased().hasPrefix("yt:") {
+            call.reject("MuchiAudio: yt scheme requires web stream resolution")
+            return
+        }
         guard !url.isEmpty, let streamUrl = URL(string: url) else {
             call.reject("MuchiAudio: missing url")
             return
@@ -113,11 +119,23 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
         let p: AVPlayer
         if let existing = player { p = existing } else { p = AVPlayer() }
+        p.automaticallyWaitsToMinimizeStalling = true
         player = p
 
         let item = AVPlayerItem(url: streamUrl)
+        item.audioTimePitchAlgorithm = .spectral
         currentItem = item
         errorSent = false
+
+        var durMs = call.getDouble("duration") ?? 0
+        if durMs <= 0 {
+            durMs = Self.extractDurationMsFromUrl(url)
+        }
+        fallbackDurationMs = max(0, durMs)
+
+        if let spd = call.getDouble("speed"), spd >= 0.25 && spd <= 3.0 {
+            prefSpeed = Float(spd)
+        }
 
         NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -129,6 +147,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
         p.replaceCurrentItem(with: item)
         p.play()
+        if prefSpeed != 1.0 {
+            p.rate = prefSpeed
+        }
 
         // NOTE: the web layer sends `duration` ALREADY IN MILLISECONDS
         // (app.js: Math.round(durationSec * 1000)) and updateNowPlaying()
@@ -139,10 +160,28 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             title: call.getString("title") ?? "Muchi",
             artist: call.getString("artist") ?? "",
             artwork: call.getString("artwork") ?? "",
-            durationMs: call.getDouble("duration") ?? 0
+            durationMs: fallbackDurationMs
         )
         startTicker()
         call.resolve()
+    }
+
+    private static func extractDurationMsFromUrl(_ rawUrl: String) -> Double {
+        var target = rawUrl
+        if let uRange = target.range(of: "url=") {
+            let sub = String(target[uRange.upperBound...])
+            let part = sub.components(separatedBy: "&").first ?? sub
+            if let decoded = part.removingPercentEncoding {
+                target = decoded
+            }
+        }
+        if let regex = try? NSRegularExpression(pattern: "(?:[?&]|%26)dur(?:=|%3D)([0-9]+(?:\\.[0-9]+)?)"),
+           let match = regex.firstMatch(in: target, range: NSRange(target.startIndex..., in: target)),
+           let r = Range(match.range(at: 1), in: target),
+           let sec = Double(target[r]), sec > 0 && sec < 86400 {
+            return sec * 1000.0
+        }
+        return 0
     }
 
     @objc public func pause(_ call: CAPPluginCall) {
@@ -196,6 +235,12 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let normGain = normalize ? 0.86 : 1.0
         let targetVol = Float(min(1.0, max(0.0, (volPct / 100.0) * normGain)))
         player?.volume = targetVol
+        if let spd = call.getDouble("speed"), spd >= 0.25 && spd <= 3.0 {
+            prefSpeed = Float(spd)
+            if (player?.rate ?? 0) > 0 {
+                player?.rate = prefSpeed
+            }
+        }
         call.resolve()
     }
 
@@ -248,7 +293,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default,
-                                    options: [.allowBluetooth, .allowBluetoothA2DP])
+                                    options: [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+            try? session.setPreferredSampleRate(48000.0)
             try session.setActive(true)
         } catch {
             // Foreground playback still works if session config fails.
@@ -257,7 +303,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private func startTicker() {
         stopTicker()
-        let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self = self, let p = self.player, let item = self.currentItem else { return }
             if item.status == .failed && !self.errorSent {
                 self.errorSent = true
@@ -265,14 +311,20 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 return
             }
             let pos = p.currentTime()
-            let dur = item.duration.isNumeric ? item.duration.seconds : 0
+            let posSec = pos.isNumeric && pos.seconds.isFinite && pos.seconds >= 0 ? pos.seconds : 0
+            let rawDurMs = (item.duration.isNumeric && item.duration.seconds.isFinite && item.duration.seconds > 0)
+                ? (item.duration.seconds * 1000.0)
+                : self.fallbackDurationMs
             self.notifyListeners("muchiProgress", data: [
-                "positionMs": Int(pos.seconds * 1000.0),
-                "durationMs": Int(dur * 1000.0),
+                "positionMs": Int(posSec * 1000.0),
+                "durationMs": Int(max(0, rawDurMs)),
                 "playing": p.rate > 0
             ])
             var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = pos.seconds
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = posSec
+            if rawDurMs > 0 {
+                info[MPMediaItemPropertyPlaybackDuration] = rawDurMs / 1000.0
+            }
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         }
         RunLoop.main.add(t, forMode: .common)
