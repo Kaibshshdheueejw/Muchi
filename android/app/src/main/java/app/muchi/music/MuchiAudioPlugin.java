@@ -154,6 +154,10 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     @PluginMethod
     public void play(PluginCall call) {
         String url = call.getString("url", "");
+        String videoId = call.getString("videoId", "");
+        if (url.isEmpty() && !videoId.isEmpty()) {
+            url = "yt:" + videoId;
+        }
         if (url.isEmpty()) {
             call.reject("MuchiAudio: missing url");
             return;
@@ -161,6 +165,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         Intent i = new Intent(getContext(), MuchiAudioService.class);
         i.setAction(MuchiAudioService.ACTION_PLAY);
         i.putExtra(MuchiAudioService.EXTRA_URL, url);
+        i.putExtra(MuchiAudioService.EXTRA_VIDEO_ID, videoId);
+        i.putExtra(MuchiAudioService.EXTRA_CANDIDATES, call.getString("candidates", ""));
         if (url.startsWith("content://")) {
             try {
                 i.setData(android.net.Uri.parse(url));
@@ -171,6 +177,21 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_ARTIST, call.getString("artist", ""));
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
         i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, call.getLong("duration", 0L));
+        if (call.hasOption("volume")) {
+            Double v = call.getDouble("volume", 100.0);
+            i.putExtra(MuchiAudioService.EXTRA_VOLUME, v != null ? v.floatValue() : 100f);
+        }
+        if (call.hasOption("normalize")) {
+            Boolean norm = call.getBoolean("normalize", false);
+            i.putExtra(MuchiAudioService.EXTRA_NORMALIZE, norm != null && norm);
+        }
+        if (call.hasOption("speed")) {
+            Double spd = call.getDouble("speed", 1.0);
+            i.putExtra(MuchiAudioService.EXTRA_SPEED, spd != null ? spd.floatValue() : 1.0f);
+        }
+        if (call.hasOption("spatial")) {
+            i.putExtra(MuchiAudioService.EXTRA_SPATIAL, call.getString("spatial", "phone"));
+        }
 
         // Always ensure the Foreground Service is started so its lifecycle is not
         // tied solely to activity binding. Background playback continues when swiped away.
@@ -205,6 +226,49 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             }
         };
         main.postDelayed(bindTimeout, BIND_TIMEOUT_MS);
+    }
+
+    @PluginMethod
+    public void syncSession(PluginCall call) {
+        Intent i = new Intent(getContext(), MuchiAudioService.class);
+        i.setAction(MuchiAudioService.ACTION_SESSION);
+        i.putExtra(MuchiAudioService.EXTRA_TITLE, call.getString("title", "Muchi"));
+        i.putExtra(MuchiAudioService.EXTRA_ARTIST, call.getString("artist", ""));
+        i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
+        i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, call.getLong("duration", 0L));
+        i.putExtra(MuchiAudioService.EXTRA_POSITION_MS, call.getLong("position", 0L));
+        Boolean playing = call.getBoolean("playing", true);
+        i.putExtra(MuchiAudioService.EXTRA_PLAYING, playing == null || playing);
+        startService(i);
+        ensureService(() -> {
+            if (service != null) service.sessionIntent(i);
+        });
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setAudioPrefs(PluginCall call) {
+        Intent i = new Intent(getContext(), MuchiAudioService.class);
+        i.setAction(MuchiAudioService.ACTION_PREFS);
+        if (call.hasOption("volume")) {
+            Double v = call.getDouble("volume", 100.0);
+            i.putExtra(MuchiAudioService.EXTRA_VOLUME, v != null ? v.floatValue() : 100f);
+        }
+        if (call.hasOption("normalize")) {
+            Boolean norm = call.getBoolean("normalize", false);
+            i.putExtra(MuchiAudioService.EXTRA_NORMALIZE, norm != null && norm);
+        }
+        if (call.hasOption("speed")) {
+            Double spd = call.getDouble("speed", 1.0);
+            i.putExtra(MuchiAudioService.EXTRA_SPEED, spd != null ? spd.floatValue() : 1.0f);
+        }
+        if (call.hasOption("spatial")) {
+            i.putExtra(MuchiAudioService.EXTRA_SPATIAL, call.getString("spatial", "phone"));
+        }
+        ensureService(() -> {
+            if (service != null) service.prefsIntent(i);
+        });
+        call.resolve();
     }
 
     @PluginMethod

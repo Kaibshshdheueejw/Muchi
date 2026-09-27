@@ -31,6 +31,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "seekTo", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "emit", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "syncSession", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setAudioPrefs", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setAppIcon", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getAppIcon", returnType: CAPPluginReturnPromise)
     ]
@@ -156,7 +158,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc public func stop(_ call: CAPPluginCall) {
-        doStop()
+        doStop(notifyJs: false)
         call.resolve()
     }
 
@@ -168,7 +170,32 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc public func emit(_ call: CAPPluginCall) {
         let action = call.getString("action") ?? ""
-        if action == "stop" { doStop() }
+        if action == "stop" { doStop(notifyJs: false) }
+        call.resolve()
+    }
+
+    @objc public func syncSession(_ call: CAPPluginCall) {
+        configureAudioSession()
+        let title = call.getString("title") ?? "Muchi"
+        let artist = call.getString("artist") ?? ""
+        let artwork = call.getString("artwork") ?? ""
+        let durationMs = call.getDouble("duration") ?? 0
+        let positionMs = call.getDouble("position") ?? 0
+        let playing = call.getBool("playing") ?? true
+        updateNowPlaying(title: title, artist: artist, artwork: artwork, durationMs: durationMs)
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = positionMs / 1000.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? 1 : 0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        call.resolve()
+    }
+
+    @objc public func setAudioPrefs(_ call: CAPPluginCall) {
+        let volPct = call.getDouble("volume") ?? 100.0
+        let normalize = call.getBool("normalize") ?? false
+        let normGain = normalize ? 0.86 : 1.0
+        let targetVol = Float(min(1.0, max(0.0, (volPct / 100.0) * normGain)))
+        player?.volume = targetVol
         call.resolve()
     }
 
@@ -204,7 +231,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     /* ── internals ─────────────────────────────────────────────────── */
 
-    private func doStop() {
+    private func doStop(notifyJs: Bool = false) {
         stopTicker()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
@@ -212,7 +239,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         currentItem = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        notifyListeners("muchiControls", data: ["message": "stop", "position": 0])
+        if notifyJs {
+            notifyListeners("muchiControls", data: ["message": "stop", "position": 0])
+        }
     }
 
     private func configureAudioSession() {

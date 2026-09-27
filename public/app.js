@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.0";
+  const APP_VERSION = "1.7.1";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -247,9 +247,13 @@
     if (!Number.isInteger(s.index) || s.index < 0 || s.index >= s.queue.length) return null;
     return s;
   }
-  if (state.prefs.soundV !== 2) {
-    if (!state.prefs.spatial || state.prefs.spatial === "off") state.prefs.spatial = "phone";
-    state.prefs.soundV = 2;
+  if (state.prefs.soundV !== 3) {
+    if (!state.prefs.spatial || state.prefs.spatial === "off" || !["phone", "bass", "spatial", "dynamic"].includes(state.prefs.spatial)) {
+      state.prefs.spatial = "phone";
+    }
+    state.prefs.bgPlay = true;
+    if (state.prefs.ytAudio === false) state.prefs.ytAudio = null;
+    state.prefs.soundV = 3;
     savePrefs();
   }
   if (state.prefs.bgPlay !== true && state.prefs.bgPlay !== false) {
@@ -3710,6 +3714,7 @@
     }
     hookSound();
     applyYtQuality();
+    nativeSyncAudioPrefs();
   }
 
   const QUALITY_NAMES = { low: "Low", standard: "Standard", high: "High", highest: "Highest" };
@@ -5212,6 +5217,7 @@
     t._playingViaAudio = false;
     if (reset) {
       t._nativeRefreshTried = false;
+      t._nativeOnDeviceTried = false;
       t._nativeYtFallbackTried = false;
       t._nativeFallbackTried = false;
       t._webYtFallbackTried = false;
@@ -5403,13 +5409,21 @@
         ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
         : "";
       try {
-        const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}`, 10000);
+        const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}`, 7500);
         if (data && data.url && !data.isPreview) {
           url = data.url;
           if (data.videoId) t.videoId = data.videoId;
           if (data.duration) dur = Number(data.duration);
         }
       } catch { url = ""; }
+    }
+    // If the Worker's datacenter IP was gated by YouTube (returned empty url),
+    // hand "yt:<videoId>" to the native foreground service so MuchiAudioService
+    // resolves the stream directly on the user's residential phone IP and
+    // plays it with full OS media notification + background playback.
+    if (!url && IS_NATIVE && nativePlayer() && !t._nativeOnDeviceTried) {
+      t._nativeOnDeviceTried = true;
+      url = `yt:${t.videoId}`;
     }
     if (!url) return false;
     t.streamUrl = url;
@@ -5542,8 +5556,10 @@
     // resolve them against API_BASE before handing over. On the web there is no
     // native plugin, so audio plays in the WebView <audio> element instead.
     if (url.startsWith("/")) url = API_BASE + url;
-    if (nativePlayer() && /^https?:\/\//i.test(url)) {
-      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
+    if (nativePlayer() && (/^https?:\/\//i.test(url) || /^yt:/i.test(url))) {
+      const cands = Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "";
+      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", cands)) {
+        if (/^yt:/i.test(url)) t.streamUrl = "";
         setWantPlay(true);
         state.playing = true;
         showEl($("eqBars"), true);
@@ -5553,6 +5569,10 @@
         startTimer();
         return;
       }
+    }
+    if (/^yt:/i.test(url)) {
+      t.streamUrl = "";
+      throw new Error("Native YouTube stream unavailable on web");
     }
     await playAudioWeb(url);
   }
@@ -6285,6 +6305,7 @@
       try { if (state.yt.unMute) state.yt.unMute(); } catch {}
     }
     hookSound();
+    nativeSyncAudioPrefs();
     syncAndroid();
   }
 
@@ -6368,6 +6389,9 @@
       if (e && typeof e.seekTime === "number") seekTo(e.seekTime);
     });
     updateMediaPosition();
+    if (IS_NATIVE && !npActive) {
+      nativeSyncSession();
+    }
   }
 
   function syncAndroid() {
@@ -6388,16 +6412,18 @@
     unlockSound();
     const t = current();
     if (!t) return;
-    if (t.videoId || t.source === "youtube") {
+    if (npActive) {
+      if (!npPlaying) nativeResumePlayback();
+    } else if ((t.videoId || t.source === "youtube") && !t._playingViaAudio) {
+      if (IS_NATIVE) nativeSyncSession();
       if (!state.yt || !state.yt.getPlayerState) return;
       let s = -1;
       try { s = state.yt.getPlayerState(); } catch {}
       if (s === 2 || s === -1 || s === 5) {
         try { state.yt.playVideo(); } catch {}
       }
-    } else if (npActive && !npPlaying) {
-      nativeResumePlayback();
     } else if (audio.paused && audio.src && !audio.ended) {
+      if (IS_NATIVE) nativeSyncSession();
       audio.play().catch(() => {});
     }
     updateMediaSession();
@@ -6499,7 +6525,37 @@
     const P = nativePlayer();
     if (P && P.emit) { try { P.emit(o); } catch {} }
   }
-  function nativePlayTrack(url, title, artist, artwork, durationSec) {
+  function nativeSyncAudioPrefs() {
+    const NP = nativePlayer();
+    if (!NP || typeof NP.setAudioPrefs !== "function") return;
+    try {
+      NP.setAudioPrefs({
+        volume: Number(state.volume ?? 100),
+        normalize: Boolean(state.prefs.normalize),
+        speed: Number(state.prefs.speed || 1),
+        spatial: String(spatialMode() || "phone"),
+      }).catch(() => {});
+    } catch {}
+  }
+  function nativeSyncSession() {
+    if (!IS_NATIVE || npActive) return;
+    const NP = nativePlayer();
+    const t = current();
+    if (!NP || !t || typeof NP.syncSession !== "function") return;
+    if (!wantPlay && !state.playing) return;
+    try {
+      nativeEnsureNotifyPermission();
+      NP.syncSession({
+        title: String(t.title || "Muchi"),
+        artist: String(artistName(t) || t.artist || ""),
+        artwork: String(absArt(t) || ""),
+        duration: Math.round((Number(duration()) || Number(t.duration) || 0) * 1000),
+        position: Math.round((Number(position()) || 0) * 1000),
+        playing: Boolean(wantPlay || state.playing),
+      }).catch(() => {});
+    } catch {}
+  }
+  function nativePlayTrack(url, title, artist, artwork, durationSec, videoId = "", candidates = "") {
     const NP = nativePlayer();
     if (!NP) return false;
     nativeEnsureNotifyPermission();
@@ -6513,14 +6569,25 @@
     npSeekGuardUntil = 0;
     NP.play({
       url: String(url),
+      videoId: String(videoId || ""),
+      candidates: String(candidates || ""),
       title: String(title || "Muchi"),
       artist: String(artist || ""),
       artwork: String(artwork || ""),
       duration: Math.round((Number(durationSec) || 0) * 1000),
+      volume: Number(state.volume ?? 100),
+      normalize: Boolean(state.prefs.normalize),
+      speed: Number(state.prefs.speed || 1),
+      spatial: String(spatialMode() || "phone"),
     }).catch(() => {
-      // Native playback failed — fall back to the WebView audio element.
+      // Native playback failed — fall back to the WebView audio element or YouTube player.
       if (npActive) npActive = false;
-      playAudioWeb(url);
+      if (!/^yt:/i.test(String(url))) {
+        playAudioWeb(url);
+      } else {
+        const cur = current();
+        if (cur && cur.videoId) playYouTube(cur).catch(() => {});
+      }
     });
     return true;
   }
@@ -6570,10 +6637,19 @@
     if (!action) return;
     const msg = action.message || action.action || action;
     if (msg === "music-controls-play" || msg === "play") {
-      npPlaying = true;
-      npSeenPlaying = true;
-      npPosAt = performance.now();
-      npCmdUntil = Date.now() + 1200;
+      if (npActive) {
+        npPlaying = true;
+        npSeenPlaying = true;
+        npPosAt = performance.now();
+        npCmdUntil = Date.now() + 1200;
+      } else {
+        const cur = current();
+        if (cur && (cur.source === "youtube" || !!cur.videoId) && !cur._playingViaAudio && state.yt && state.yt.playVideo) {
+          try { state.yt.playVideo(); } catch {}
+        } else if (audio.src) {
+          audio.play().catch(() => {});
+        }
+      }
       setWantPlay(true);
       state.playing = true;
       showEl($("eqBars"), true);
@@ -6581,9 +6657,18 @@
       updateMediaSession();
       renderChrome();
     } else if (msg === "music-controls-pause" || msg === "pause" || msg === "music-controls-headset-unplugged") {
-      npPlaying = false;
-      npPosAt = 0;
-      npCmdUntil = Date.now() + 1200;
+      if (npActive) {
+        npPlaying = false;
+        npPosAt = 0;
+        npCmdUntil = Date.now() + 1200;
+      } else {
+        const cur = current();
+        if (cur && (cur.source === "youtube" || !!cur.videoId) && !cur._playingViaAudio && state.yt && state.yt.pauseVideo) {
+          try { state.yt.pauseVideo(); } catch {}
+        } else {
+          try { audio.pause(); } catch {}
+        }
+      }
       setWantPlay(false);
       state.playing = false;
       showEl($("eqBars"), false);
