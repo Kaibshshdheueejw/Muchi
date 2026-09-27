@@ -2306,14 +2306,17 @@ img { max-width: 100%; display: block; }
 }
 .eq i {
   width: 3px;
+  height: 12px;
+  transform-origin: bottom;
+  will-change: transform;
   background: var(--md-sys-color-primary);
   animation: bounce 0.8s infinite ease-in-out;
 }
 .eq i:nth-child(2) { animation-delay: .15s; }
 .eq i:nth-child(3) { animation-delay: .28s; }
 @keyframes bounce {
-  0%, 100% { height: 3px; }
-  50% { height: 12px; }
+  0%, 100% { transform: scaleY(0.25); }
+  50% { transform: scaleY(1); }
 }
 .meta { min-width: 0; }
 .meta strong, .meta span, .meta .artist-link {
@@ -7585,6 +7588,42 @@ html[data-ui="autumn"] .home-hero .home-hero-copy p {
   .xmas-santa-track {
     animation: none !important;
     transform: translate3d(32%, 12px, 0) rotate(-8deg);
+  }
+}
+
+/* ── 5. PHONE THERMAL & BACKGROUND GPU FREEZE ────────────────────────── */
+/* When the screen is off or app is backgrounded, pause 100% of CSS animations
+   so WebView compositor uses 0% GPU/CPU while background audio plays. */
+html[data-hidden="1"] *,
+html[data-hidden="1"] *::before,
+html[data-hidden="1"] *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
+/* Pause homepage hero scene animations whenever the user is on another tab */
+body:not([data-view="home"]) .hero-scene *,
+body:not([data-view="home"]) .hero-orbs i {
+  animation-play-state: paused !important;
+}
+
+/* Mobile thermal guard: disable perpetual box-shadow / blur / sheen loops
+   on phones so playing music never heats up the GPU. */
+@media (max-width: 980px), (pointer: coarse) {
+  .hero-orbs i,
+  .cover-btn.live,
+  .cover-btn.live img,
+  .fab.live,
+  body[data-playing="1"] .cover-btn.live,
+  body[data-playing="1"] .now-actions .ly-icon.on,
+  html[data-ui="glass"] body[data-playing="1"] .player::before {
+    animation: none !important;
+  }
+  .xmas-sleigh-svg {
+    filter: none;
+  }
+  .winter-aurora {
+    filter: none;
   }
 }
 

@@ -649,8 +649,10 @@ export async function handleYoutubeSearch(url) {
   const yq = (url.searchParams.get("q") || url.searchParams.get("query") || "").trim();
   if (!yq) return json(400, { error: "Missing query" });
   const gl = regionCode(url.searchParams.get("gl"));
+  const fast = url.searchParams.get("fast") === "1";
+  const cacheKey = `ytsearch:${fast ? "fast" : "full"}:${yq.toLowerCase()}:${gl}`;
   try {
-    const tracks = await searchYouTube(yq, gl);
+    const tracks = await cached(cacheKey, 15 * 60 * 1000, () => searchYouTube(yq, gl, fast));
     return json(200, { tracks: Array.isArray(tracks) ? tracks.slice(0, 80) : [] });
   } catch (e) {
     return json(502, { tracks: [], error: String(e.message || e) });
@@ -677,6 +679,7 @@ export async function handleYtStream(url) {
   const artist = (url.searchParams.get("artist") || "").trim();
   const refresh = url.searchParams.get("refresh") === "1";
   const allowPreview = url.searchParams.get("allowPreview") === "1";
+  const fast = url.searchParams.get("fast") === "1";
   const rawCandidates = (url.searchParams.get("candidates") || "")
     .split(",")
     .map((s) => s.trim())
@@ -698,12 +701,17 @@ export async function handleYtStream(url) {
 
   if (id) {
     try {
-      const stream = await resolveForVideoId(id);
+      const fastRaces = [resolveForVideoId(id)];
+      for (const candId of rawCandidates.slice(0, 2)) {
+        fastRaces.push(new Promise((res, rej) => setTimeout(() => resolveForVideoId(candId).then(res, rej), 250)));
+      }
+      const stream = await Promise.any(fastRaces);
       if (stream && stream.url) {
-        const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}${buildMetaExtra(id)}`;
+        const useVid = stream.videoId || id;
+        const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}${buildMetaExtra(useVid)}`;
         return json(200, {
           url: proxied,
-          videoId: id,
+          videoId: useVid,
           format: stream.format || "",
           mimeType: stream.mimeType || "",
           quality: stream.quality || "",
@@ -715,10 +723,14 @@ export async function handleYtStream(url) {
     } catch {}
   }
 
+  if (fast) {
+    return json(200, { url: "", error: "fast tier exhausted" });
+  }
+
   // Tier 2: If the primary videoId was gated (e.g. VEVO / age-gated music video),
   // try candidate YouTube videoIds (provided by client or discovered via official audio / lyrics search).
   const searchQuery = `${title} ${artist}`.trim();
-  const candidateIds = [...rawCandidates];
+  const candidateIds = rawCandidates.slice(2);
   if (searchQuery && candidateIds.length < 3) {
     try {
       const [audioHits, lyricHits] = await Promise.allSettled([

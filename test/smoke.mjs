@@ -709,14 +709,15 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.1", APP_VERSION === "1.7.1" && appJs.includes('const APP_VERSION = "1.7.1"'));
-  ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || \"\")}&artist=${encodeURIComponent(t.artist || \"\")}${candParam}") && appJs.includes("url = `yt:${t.videoId}`"));
+  ok("version: APP_VERSION is 1.7.2", APP_VERSION === "1.7.2" && appJs.includes('const APP_VERSION = "1.7.2"'));
+  ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${candParam}${fastParam}") && appJs.includes("getWarmStream(t.videoId") && appJs.includes("url = `yt:${t.videoId}`"));
   ok("native playback: playYtWithAudio rejects 30s preview streams (!data.isPreview) so full song always plays", appJs.includes("if (data && data.url && !data.isPreview)") && !appJs.includes("resolveFallbackStreamUrl(t, true)"));
   ok("native background & notification: MuchiAudioService resolves yt: on-device, maintains MediaStyle foreground notification + WakeLock/WifiLock, and supports handleSessionIntent", androidService.includes("resolveYoutubeStreamOnDevice") && androidService.includes("handleSessionIntent") && androidService.includes("C.WAKE_MODE_NETWORK") && androidService.includes("WifiManager.WifiLock") && androidService.includes("stopPlaybackInternal(boolean notifyJs)"));
   ok("native background & notification: MuchiAudioPlugin exposes syncSession and setAudioPrefs and deduplicates loadTrack", androidPlugin.includes("public void syncSession(PluginCall call)") && androidPlugin.includes("public void setAudioPrefs(PluginCall call)") && androidService.includes("currentUrl.equals(url)"));
   ok("native background & notification: MainActivity keeps WebView media and JS timers alive in background (onPause/onStop/onWindowFocusChanged)", androidMainActivity.includes("keepWebViewAwake()") && androidMainActivity.includes("wv.onResume()") && androidMainActivity.includes("wv.resumeTimers()"));
   ok("native background & notification: app.js syncs native session notification on updateMediaSession and checks npActive first in keepBackgroundPlay", appJs.includes("nativeSyncSession();") && appJs.includes("function nativeSyncSession(") && /function keepBackgroundPlay\(\)\s*\{[\s\S]*?if\s*\(npActive\)/.test(appJs));
-  ok("sound quality (1.5.5): WebAudio DSP graph (5-band EQ, bass shelf + harmonic warmth shaper, Haas 3D spatial stereo widener, clarity/air loudness compressor) and native hardware DSP effects active by default", appJs.includes("state.prefs.soundV !== 3") && appJs.includes("function hookSound()") && appJs.includes("function spatialMode()") && appJs.includes("function nativeSyncAudioPrefs()") && androidService.includes("applyPlayerPrefsAndEffects") && androidService.includes("LoudnessEnhancer") && androidService.includes("BassBoost") && androidService.includes("Equalizer"));
+  ok("sound quality (1.5.5): WebAudio DSP graph (5-band EQ, bass shelf + harmonic warmth shaper, Haas 3D spatial stereo widener, clarity/air loudness compressor) and native hardware DSP effects active by default", appJs.includes("state.prefs.soundV !== 3") && appJs.includes("function hookSound()") && appJs.includes("function spatialMode()") && appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") && appJs.includes("Math.tanh(3.1 * x) * 0.52") && appJs.includes("out.gain.value = 1.55;") && appJs.includes("function nativeSyncAudioPrefs()") && androidService.includes("applyPlayerPrefsAndEffects") && androidService.includes("LoudnessEnhancer") && androidService.includes("BassBoost") && androidService.includes("Equalizer"));
+  ok("phone thermal optimization: disables continuous 60-120fps waveRaf/seekRaf loops on phones, pauses background CSS animations via data-hidden, and uses GPU scaleY for eqBars", appJs.includes("if (cheapPhone()) {\n      drawSeekWave();\n      return;\n    }") && appJs.includes("if (document.hidden && npActive) return;") && appJs.includes('document.documentElement.dataset.hidden = document.hidden ? "1" : "0"') && stylesCss.includes('html[data-hidden="1"] *') && stylesCss.includes("transform: scaleY(0.25)"));
   ok("native playback: /api/yt/stream resolves alternate official audio / candidate videoIds when primary videoId is gated and excludes 30s previews by default", aggregateJs.includes("const allowPreview = url.searchParams.get(\"allowPreview\") === \"1\";") && aggregateJs.includes("searchYouTube(`${searchQuery} official audio`") && aggregateJs.includes("isPreview: false"));
   ok("native playback: /api/stream handles c=ANDROID_VR & c=ANDROID_TESTSUITE User-Agent and auto-falls back when googlevideo returns 403/502", streamJs.includes("/c=ANDROID_VR/i.test(src)") && streamJs.includes("/c=ANDROID_TESTSUITE/i.test(src)") && streamJs.includes("if (primaryRes.status < 400) return primaryRes;"));
   ok("native app icon: syncNativeAppIcon calls NP.setAppIcon({ icon }) from applyAppIcon and setAppIcon", appJs.includes("function syncNativeAppIcon(") && appJs.includes("NP.setAppIcon({ icon: norm })") && appJs.includes("syncNativeAppIcon(ic.id);"));
@@ -959,14 +960,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=103");
+  const appJsRes = await fetch(BASE + "/app.js?v=104");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=103");
+  const stylesRes = await fetch(BASE + "/styles.css?v=104");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=103 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=103 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v103", swText.includes("muchi-shell-v103") && swText.includes("/app.js?v=103") && swText.includes("/styles.css?v=103"));
+  ok("client web: app.js?v=104 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=104 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v104", swText.includes("muchi-shell-v104") && swText.includes("/app.js?v=104") && swText.includes("/styles.css?v=104"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────

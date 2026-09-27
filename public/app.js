@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.1";
+  const APP_VERSION = "1.7.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -3332,10 +3332,10 @@
   }
 
   function spatialMode() {
-    const m = state.prefs.spatial || "off";
+    const m = state.prefs.spatial || "phone";
     if (m === "wide" || m === "motion") return "spatial";
     if (m === "phone" || m === "bass" || m === "spatial" || m === "dynamic" || m === "off") return m;
-    return "off";
+    return "phone";
   }
 
   function setAudioVec(node, xName, yName, zName, x, y, z, legacy) {
@@ -4998,6 +4998,48 @@
     });
   }
 
+  // In-flight & warm stream cache: videoId -> { promise, data, exp }
+  const warmStreamMap = new Map();
+  function getWarmStream(videoId, title = "", artist = "", candidates = [], timeoutMs = 4000, fast = false) {
+    const vid = String(videoId || "").trim();
+    if (!vid) return Promise.resolve(null);
+    const now = Date.now();
+    const hit = warmStreamMap.get(vid);
+    if (hit && hit.exp > now) {
+      if (hit.data) return Promise.resolve(hit.data);
+      if (hit.promise) {
+        return Promise.race([
+          hit.promise,
+          new Promise((res) => setTimeout(() => res(null), timeoutMs)),
+        ]);
+      }
+    }
+    const candParam = Array.isArray(candidates) && candidates.length
+      ? `&candidates=${encodeURIComponent(candidates.slice(0, 5).join(","))}`
+      : "";
+    const fastParam = fast ? "&fast=1" : "";
+    const p = api(
+      `/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || "")}&artist=${encodeURIComponent(artist || "")}${candParam}${fastParam}`,
+      timeoutMs
+    ).then((d) => {
+      if (d && d.url && !d.isPreview) {
+        warmStreamMap.set(vid, { data: d, promise: null, exp: Date.now() + 12 * 60 * 1000 });
+        return d;
+      }
+      warmStreamMap.delete(vid);
+      return null;
+    }).catch(() => {
+      warmStreamMap.delete(vid);
+      return null;
+    });
+    if (warmStreamMap.size > 200) {
+      const oldest = warmStreamMap.keys().next().value;
+      if (oldest) warmStreamMap.delete(oldest);
+    }
+    warmStreamMap.set(vid, { data: null, promise: p, exp: now + 30000 });
+    return p;
+  }
+
   function buildTrackPlayQueries(t) {
     const rawTitle = String((t && t.title) || "").trim();
     const rawArtist = String((t && t.artist) || "").replace(/^(unknown artist|various artists|artist|youtube)$/i, "").trim();
@@ -5094,50 +5136,71 @@
     }
 
     let rows = [];
-    // 1. Primary: /api/youtube/search with primary query (9s timeout so server 2-stage search never gets cut off)
+    const extractRows = (d) => {
+      const arr = (d && d.tracks) || (d && d.results) || (d && d.youtube) || (Array.isArray(d) ? d : []);
+      return Array.isArray(arr) ? arr.filter((x) => x && (x.videoId || x.streamUrl)) : [];
+    };
+
+    // 1. Race fast primary YouTube search with stripped secondary query (350ms head start)
     try {
-      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 9000);
-      rows = (data && data.tracks) || (data && data.results) || (Array.isArray(data) ? data : []);
+      const searchRaces = [
+        api(`/api/youtube/search?q=${encodeURIComponent(q)}&fast=1&${glq()}`, 3200).then((d) => {
+          const r = extractRows(d);
+          if (!r.length) throw new Error("empty");
+          return r;
+        }),
+      ];
+      if (queries[2] && queries[2] !== q) {
+        searchRaces.push(
+          new Promise((res, rej) =>
+            setTimeout(() => {
+              api(`/api/youtube/search?q=${encodeURIComponent(queries[2])}&fast=1&${glq()}`, 3000)
+                .then((d) => {
+                  const r = extractRows(d);
+                  if (!r.length) throw new Error("empty");
+                  return r;
+                })
+                .then(res, rej);
+            }, 350)
+          )
+        );
+      }
+      rows = await Promise.any(searchRaces);
     } catch {}
 
-    // 2. Secondary: if empty and we have a cleaner stripped query (e.g. without Deezer (feat...) / [Remastered] clutter)
-    if ((!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) && queries[2] && queries[2] !== q) {
-      try {
-        const data2 = await api(`/api/youtube/search?q=${encodeURIComponent(queries[2])}&${glq()}`, 8000);
-        rows = (data2 && data2.tracks) || (data2 && data2.results) || (Array.isArray(data2) ? data2 : []);
-      } catch {}
-    }
-
-    // 3. Tertiary: /api/search?source=youtube
+    // 2. Fallback: full /api/youtube/search + Piped browser search raced in parallel
     if (!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) {
       const qFallback = queries[3] || queries[2] || q;
+      const pipedAttempt = ( () => {
+        const qPiped = queries[3] || q;
+        return pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=music_songs`)
+          .catch(() => pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=all`))
+          .then((pData) => {
+            const pItems = (pData && (pData.items || pData)) || [];
+            const mapped = pItems
+              .map((it) => {
+                const vid = (it && it.url && (it.url.split("v=")[1] || it.url.replace("/watch?v=", "")).split("&")[0]) || (it && it.videoId) || "";
+                if (!vid) return null;
+                return {
+                  videoId: vid,
+                  title: it.title || t.title,
+                  artist: it.uploaderName || it.uploader || t.artist,
+                  duration: Number(it.duration || 0),
+                  artwork: it.thumbnail || ytThumb(vid),
+                };
+              })
+              .filter(Boolean);
+            if (!mapped.length) throw new Error("empty piped");
+            return mapped;
+          });
+      })();
+      const serverAttempt = api(`/api/youtube/search?q=${encodeURIComponent(qFallback)}&${glq()}`, 4500).then((d) => {
+        const r = extractRows(d);
+        if (!r.length) throw new Error("empty server");
+        return r;
+      });
       try {
-        const data3 = await api(`/api/search?q=${encodeURIComponent(qFallback)}&source=youtube&${glq()}`, 8000);
-        rows = (data3 && data3.youtube) || (data3 && data3.tracks) || [];
-      } catch {}
-    }
-
-    // 4. Browser-direct Piped search fallback if server YouTube search was blocked/empty
-    if (!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) {
-      const qPiped = queries[3] || q;
-      try {
-        const pData = await pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=music_songs`).catch(() =>
-          pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=all`)
-        );
-        const pItems = (pData && (pData.items || pData)) || [];
-        rows = pItems
-          .map((it) => {
-            const vid = (it && it.url && (it.url.split("v=")[1] || it.url.replace("/watch?v=", "")).split("&")[0]) || (it && it.videoId) || "";
-            if (!vid) return null;
-            return {
-              videoId: vid,
-              title: it.title || t.title,
-              artist: it.uploaderName || it.uploader || t.artist,
-              duration: Number(it.duration || 0),
-              artwork: it.thumbnail || ytThumb(vid),
-            };
-          })
-          .filter(Boolean);
+        rows = await Promise.any([serverAttempt, pipedAttempt]);
       } catch {}
     }
 
@@ -5242,9 +5305,8 @@
       if ($("durTime")) $("durTime").textContent = t.source === "radio" ? "LIVE" : fmt(t.duration || 0);
     }
     pushRecent(t);
-    // Listening shifts the taste profile — reorder "Made for you" so it adapts
-    // as the user keeps playing songs.
-    paintHomeSoon();
+    // Avoid rebuilding the entire Home DOM on phones right as playback starts
+    if (!cheapPhone() && !IS_NATIVE) paintHomeSoon();
     renderChrome();
     const isNetworkOff = Boolean(
       state.offlineMode ||
@@ -5405,11 +5467,10 @@
     let url = (!t._isPreviewStream && !t._nativeRefreshTried && t.streamUrl) ? t.streamUrl : "";
     let dur = t.duration || 0;
     if (!url) {
-      const candParam = Array.isArray(t._ytCandidates) && t._ytCandidates.length
-        ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
-        : "";
       try {
-        const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}`, 7500);
+        // Race the backend stream cache/fast-tier (1.5s budget) before handing off
+        // to on-device residential IP resolution inside MuchiAudioService.
+        const data = await getWarmStream(t.videoId, t.title || "", t.artist || "", t._ytCandidates || [], 1500, true);
         if (data && data.url && !data.isPreview) {
           url = data.url;
           if (data.videoId) t.videoId = data.videoId;
@@ -5417,10 +5478,10 @@
         }
       } catch { url = ""; }
     }
-    // If the Worker's datacenter IP was gated by YouTube (returned empty url),
+    // If the Worker's datacenter IP was gated by YouTube or timed out,
     // hand "yt:<videoId>" to the native foreground service so MuchiAudioService
-    // resolves the stream directly on the user's residential phone IP and
-    // plays it with full OS media notification + background playback.
+    // resolves the stream directly on the user's residential phone IP in parallel
+    // and plays it with full OS media notification + background playback.
     if (!url && IS_NATIVE && nativePlayer() && !t._nativeOnDeviceTried) {
       t._nativeOnDeviceTried = true;
       url = `yt:${t.videoId}`;
@@ -6053,7 +6114,7 @@
     renderChrome();
     const pb = $("playBtn");
     if (pb) triggerFabRipple(pb);
-    if (state.playing) burstHearts(pb);
+    if (state.playing && !cheapPhone() && !IS_NATIVE) burstHearts(pb);
   }
 
   async function next(force) {
@@ -6143,11 +6204,17 @@
   let waveLast = 0;
   let isSeekingUi = false;
   function cheapPhone() {
-    return !!(window.matchMedia && (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 980px)").matches));
+    return IS_NATIVE || !!(window.matchMedia && (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 980px)").matches));
   }
   function restartWaveLoop() {
     if (!state.playing || waveRaf || document.hidden) return;
-    const interval = cheapPhone() ? 140 : 80;
+    // On phones/native shells, updateProgress() drives drawSeekWave() directly
+    // at low frequency so we never hold a 60-120Hz rAF loop open during playback.
+    if (cheapPhone()) {
+      drawSeekWave();
+      return;
+    }
+    const interval = 80;
     const loop = (now) => {
       if (!state.playing) {
         waveRaf = 0;
@@ -6169,7 +6236,7 @@
   function startTimer() {
     stopTimer();
     const cheap = cheapPhone();
-    state.timer = setInterval(updateProgress, cheap ? 350 : 250);
+    state.timer = setInterval(updateProgress, cheap ? 600 : 250);
     restartWaveLoop();
     updateProgress();
     renderChrome();
@@ -6179,15 +6246,21 @@
     state.timer = null;
     if (waveRaf) cancelAnimationFrame(waveRaf);
     waveRaf = 0;
+    if (seekRaf) cancelAnimationFrame(seekRaf);
+    seekRaf = 0;
   }
 
   function updateProgress() {
+    // When screen is off and native service owns playback, skip redundant JS polling
+    if (document.hidden && npActive) return;
     const d = duration();
     const p = position();
     tickCrossfade(d, p);
-    updateMediaPosition();
-    msPosTick = (msPosTick || 0) + 1;
-    if (msPosTick % 5 === 0) updateMediaSession();
+    if (!document.hidden) {
+      updateMediaPosition();
+      msPosTick = (msPosTick || 0) + 1;
+      if (msPosTick % 5 === 0) updateMediaSession();
+    }
 
     // Adaptive buffering health check
     checkBufferResume();
@@ -6222,7 +6295,7 @@
       }
     }
 
-    if (document.hidden && cheapPhone()) return;
+    if (document.hidden) return;
     const seek = $("seek");
     const activeScrub = Boolean(isSeekingUi || (seek && seek.matches(":active")));
     if (!activeScrub) {
@@ -6234,7 +6307,7 @@
       if (activeScrub) {
         seekCur = -1; seekTgt = -1;
         if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
-      } else if (prefersReducedMotion()) {
+      } else if (cheapPhone() || prefersReducedMotion()) {
         seek.value = tv;
       } else {
         seekTgt = tv;
@@ -9038,6 +9111,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.7.2",
+      title: "Muchi 1.7.2",
+      notes: [
+        "Faster song start times across YouTube, Apple Music, Deezer, and Audius by racing InnerTube & Piped stream resolvers and search queries in parallel.",
+        "Parallelized on-device Android background audio stream resolution so locked-screen and background playback starts in under a second.",
+        "Added warm stream caching and instant fast-tier handoff between the cloud Worker and native media engine.",
+      ],
+    },
     {
       ver: "1.6.9",
       title: "Muchi 1.6.9",
@@ -13257,10 +13339,10 @@
 
   let homePaintT = 0;
   function paintHomeSoon() {
-    if (state.view !== "home") return;
+    if (state.view !== "home" || document.hidden) return;
     clearTimeout(homePaintT);
     homePaintT = setTimeout(() => {
-      if (state.view === "home") render();
+      if (state.view === "home" && !document.hidden) render();
       persistHomeCache();
     }, 160);
   }
@@ -14317,8 +14399,13 @@
     }
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
+    document.documentElement.dataset.hidden = document.hidden ? "1" : "0";
+    if (document.hidden) {
+      if (waveRaf) { cancelAnimationFrame(waveRaf); waveRaf = 0; }
+      if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
+    } else if (document.visibilityState === "visible") {
       updateWakeLock();
+      updateProgress();
       if (state.view === "now") restartWaveLoop();
     }
     keepBackgroundPlay();

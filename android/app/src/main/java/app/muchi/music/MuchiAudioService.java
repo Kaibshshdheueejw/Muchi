@@ -957,74 +957,99 @@ public class MuchiAudioService extends Service {
             }
         };
 
+        java.util.concurrent.CompletionService<ResolvedStream> ecs =
+                new java.util.concurrent.ExecutorCompletionService<>(resolveExecutor);
+        List<java.util.concurrent.Future<ResolvedStream>> futures = new ArrayList<>();
         for (String[] prof : profiles) {
-            String ua = prof[2];
-            String body = prof[3];
-            HttpURLConnection con = null;
-            try {
-                con = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/player?prettyPrint=false").openConnection();
-                con.setRequestMethod("POST");
-                con.setConnectTimeout(4500);
-                con.setReadTimeout(5500);
-                con.setDoOutput(true);
-                con.setRequestProperty("Content-Type", "application/json");
-                con.setRequestProperty("Origin", "https://www.youtube.com");
-                con.setRequestProperty("Referer", "https://www.youtube.com/");
-                con.setRequestProperty("User-Agent", ua);
-                byte[] outBytes = body.getBytes(StandardCharsets.UTF_8);
-                try (OutputStream os = con.getOutputStream()) {
-                    os.write(outBytes);
-                }
-                if (con.getResponseCode() == 200) {
-                    String jsonStr = readStreamString(con.getInputStream());
-                    JSONObject root = new JSONObject(jsonStr);
-                    JSONObject playability = root.optJSONObject("playabilityStatus");
-                    String status = playability != null ? playability.optString("status", "OK") : "OK";
-                    if (!"OK".equals(status)) continue;
-                    JSONObject streamingData = root.optJSONObject("streamingData");
-                    if (streamingData == null) continue;
-                    JSONArray adaptive = streamingData.optJSONArray("adaptiveFormats");
-                    if (adaptive == null || adaptive.length() == 0) continue;
+            final String ua = prof[2];
+            final String body = prof[3];
+            futures.add(ecs.submit(() -> {
+                HttpURLConnection con = null;
+                try {
+                    con = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/player?prettyPrint=false").openConnection();
+                    con.setRequestMethod("POST");
+                    con.setConnectTimeout(2500);
+                    con.setReadTimeout(3000);
+                    con.setDoOutput(true);
+                    con.setRequestProperty("Content-Type", "application/json");
+                    con.setRequestProperty("Origin", "https://www.youtube.com");
+                    con.setRequestProperty("Referer", "https://www.youtube.com/");
+                    con.setRequestProperty("User-Agent", ua);
+                    byte[] outBytes = body.getBytes(StandardCharsets.UTF_8);
+                    try (OutputStream os = con.getOutputStream()) {
+                        os.write(outBytes);
+                    }
+                    if (con.getResponseCode() == 200) {
+                        String jsonStr = readStreamString(con.getInputStream());
+                        JSONObject root = new JSONObject(jsonStr);
+                        JSONObject playability = root.optJSONObject("playabilityStatus");
+                        String status = playability != null ? playability.optString("status", "OK") : "OK";
+                        if (!"OK".equals(status)) return null;
+                        JSONObject streamingData = root.optJSONObject("streamingData");
+                        if (streamingData == null) return null;
+                        JSONArray adaptive = streamingData.optJSONArray("adaptiveFormats");
+                        if (adaptive == null || adaptive.length() == 0) return null;
 
-                    String bestM4aUrl = "";
-                    int bestM4aBitrate = -1;
-                    String bestOpusUrl = "";
-                    int bestOpusBitrate = -1;
+                        String bestM4aUrl = "";
+                        int bestM4aBitrate = -1;
+                        String bestOpusUrl = "";
+                        int bestOpusBitrate = -1;
 
-                    for (int i = 0; i < adaptive.length(); i++) {
-                        JSONObject fmt = adaptive.optJSONObject(i);
-                        if (fmt == null) continue;
-                        String u = fmt.optString("url", "");
-                        String mime = fmt.optString("mimeType", "").toLowerCase();
-                        int br = fmt.optInt("bitrate", 0);
-                        if (u.isEmpty() || !mime.startsWith("audio/")) continue;
-                        if (mime.contains("mp4") || mime.contains("m4a")) {
-                            if (br > bestM4aBitrate) {
-                                bestM4aBitrate = br;
-                                bestM4aUrl = u;
-                            }
-                        } else if (mime.contains("webm") || mime.contains("opus")) {
-                            if (br > bestOpusBitrate) {
-                                bestOpusBitrate = br;
-                                bestOpusUrl = u;
+                        for (int i = 0; i < adaptive.length(); i++) {
+                            JSONObject fmt = adaptive.optJSONObject(i);
+                            if (fmt == null) continue;
+                            String u = fmt.optString("url", "");
+                            String mime = fmt.optString("mimeType", "").toLowerCase();
+                            int br = fmt.optInt("bitrate", 0);
+                            if (u.isEmpty() || !mime.startsWith("audio/")) continue;
+                            if (mime.contains("mp4") || mime.contains("m4a")) {
+                                if (br > bestM4aBitrate) {
+                                    bestM4aBitrate = br;
+                                    bestM4aUrl = u;
+                                }
+                            } else if (mime.contains("webm") || mime.contains("opus")) {
+                                if (br > bestOpusBitrate) {
+                                    bestOpusBitrate = br;
+                                    bestOpusUrl = u;
+                                }
                             }
                         }
-                    }
 
-                    // 1.5.5 stream quality rule: prefer highest-bitrate AAC/m4a, then highest-bitrate Opus
-                    String chosen = !bestM4aUrl.isEmpty() ? bestM4aUrl : bestOpusUrl;
-                    if (!chosen.isEmpty()) {
-                        long durSec = 0L;
-                        JSONObject vd = root.optJSONObject("videoDetails");
-                        if (vd != null) {
-                            durSec = vd.optLong("lengthSeconds", 0L);
+                        // 1.5.5 stream quality rule: prefer highest-bitrate AAC/m4a, then highest-bitrate Opus
+                        String chosen = !bestM4aUrl.isEmpty() ? bestM4aUrl : bestOpusUrl;
+                        if (!chosen.isEmpty()) {
+                            long durSec = 0L;
+                            JSONObject vd = root.optJSONObject("videoDetails");
+                            if (vd != null) {
+                                durSec = vd.optLong("lengthSeconds", 0L);
+                            }
+                            return new ResolvedStream(chosen, ua, durSec * 1000L);
                         }
-                        return new ResolvedStream(chosen, ua, durSec * 1000L);
                     }
+                } catch (Exception ignored) {
+                } finally {
+                    if (con != null) con.disconnect();
                 }
-            } catch (Exception ignored) {
-            } finally {
-                if (con != null) con.disconnect();
+                return null;
+            }));
+        }
+
+        try {
+            for (int i = 0; i < profiles.length; i++) {
+                java.util.concurrent.Future<ResolvedStream> done =
+                        ecs.poll(3500, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (done == null) break;
+                try {
+                    ResolvedStream rs = done.get();
+                    if (rs != null && rs.url != null && !rs.url.isEmpty()) {
+                        return rs;
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {
+        } finally {
+            for (java.util.concurrent.Future<ResolvedStream> f : futures) {
+                f.cancel(true);
             }
         }
         return null;

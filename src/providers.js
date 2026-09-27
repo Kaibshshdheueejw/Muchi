@@ -120,17 +120,35 @@ export async function searchYouTube(query, gl, fast) {
     }
   };
   const errors = [];
-  const extra = { limit: fast ? 30 : 60, musicOnly: true, loose: false };
-  const jobs = fast
-    ? [youtubeMusicSearch(query, gl, 3000, { ...extra, params: YT_SONGS_PARAMS })]
-    : [
-        youtubeMusicSearch(query, gl, 3500, { ...extra, params: YT_SONGS_PARAMS }),
-        youtubeWebSearch(query, gl, 3200, { limit: 35, musicOnly: true, loose: false }),
-      ];
-  const settled = await Promise.allSettled(jobs);
-  for (const s of settled) {
-    if (s.status === "fulfilled") add(s.value);
-    else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
+  const extra = { limit: fast ? 24 : 60, musicOnly: true, loose: false };
+  if (fast) {
+    try {
+      const fastHit = await Promise.any([
+        youtubeMusicSearch(query, gl, 1500, { ...extra, params: YT_SONGS_PARAMS }).then((r) => {
+          const rows = Array.isArray(r) ? r : (r && r.tracks) || [];
+          if (!rows.length) throw new Error("empty music search");
+          return r;
+        }),
+        youtubeWebSearch(query, gl, 1500, { limit: 24, musicOnly: true, loose: false }).then((r) => {
+          const rows = Array.isArray(r) ? r : (r && r.tracks) || [];
+          if (!rows.length) throw new Error("empty web search");
+          return r;
+        }),
+      ]);
+      add(fastHit);
+    } catch (e) {
+      errors.push(String(e && e.message ? e.message : e));
+    }
+  } else {
+    const jobs = [
+      youtubeMusicSearch(query, gl, 3200, { ...extra, params: YT_SONGS_PARAMS }),
+      youtubeWebSearch(query, gl, 3000, { limit: 35, musicOnly: true, loose: false }),
+    ];
+    const settled = await Promise.allSettled(jobs);
+    for (const s of settled) {
+      if (s.status === "fulfilled") add(s.value);
+      else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
+    }
   }
   // If we have no songs or very few, try fallback query with a fast timeout
   if (out.length < 5 && !fast) {
@@ -139,13 +157,13 @@ export async function searchYouTube(query, gl, fast) {
       const fallbackQ = hasOfficial
         ? query.replace(/\b(?:official\s+audio|official\s+video|official)\b/gi, "").replace(/\s*[\[(][^)\]]*[)\]]/g, "").replace(/\s+/g, " ").trim()
         : `${query} official audio`;
-      const webRes = await youtubeWebSearch(fallbackQ || query, gl, 3000, { limit: 25, musicOnly: false, loose: true });
+      const webRes = await youtubeWebSearch(fallbackQ || query, gl, 2500, { limit: 25, musicOnly: false, loose: true });
       add(webRes);
     } catch (e) {
       errors.push(String(e.message || e));
     }
   }
-  if (!out.length) {
+  if (!out.length && !fast) {
     try {
       add(await pipedSearch(query));
     } catch (e) {
@@ -270,7 +288,7 @@ const PIPED_STREAM_INSTANCES = [
   "https://pipedapi.reallyaweso.me",
   "https://pipedapi.ducks.party",
 ];
-const PIPED_API_TIMEOUT = 2400;
+const PIPED_API_TIMEOUT = 1700;
 
 export function pickPipedStream(data) {
   const streams = (data && data.audioStreams) || [];
@@ -321,7 +339,7 @@ function streamQualityScore(s) {
 // If Google ever gates this endpoint too, this tier simply returns null and
 // the existing Piped fan-out (Tier 2) + the client's iframe fallback keep
 // working exactly as before — nothing regresses.
-const INNERTUBE_PLAYER_TIMEOUT = 2600;
+const INNERTUBE_PLAYER_TIMEOUT = 1900;
 const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
 // Multiple client profiles, raced in parallel. A single client version/IP can
 // be gated (LOGIN_REQUIRED / cipher-only) by Google while others still return
@@ -392,30 +410,33 @@ async function innertubeProbe(spec, videoId) {
 export async function youtubeAudioStream(videoId) {
   const id = String(videoId || "").trim();
   if (!id) return null;
-  // Tier 1 — innerTube, all client profiles RACED (direct URLs, no third-party hop).
   const gates = [];
-  const probes = INNERTUBE_PROFILES.map((spec) => new Promise((resolve, reject) => {
-    innertubeProbe(spec, id).then(resolve, (e) => { gates.push(String(e.message || e)); reject(e); });
-  }));
-  try {
-    return await Promise.any(probes);
-  } catch {
-    // every profile gated/failed → Tier 2
-  }
-  // Tier 2 — Piped instances (unchanged fallback; usually dead lately, but
-  // free to keep).
-  const attempts = PIPED_STREAM_INSTANCES.map((base) =>
-    fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, PIPED_API_TIMEOUT)
+  const tier1 = Promise.any(
+    INNERTUBE_PROFILES.map((spec) =>
+      innertubeProbe(spec, id).catch((e) => {
+        gates.push(String(e.message || e));
+        throw e;
+      })
+    )
   );
+  const tier2 = new Promise((resolve, reject) => {
+    setTimeout(() => {
+      Promise.any(
+        PIPED_STREAM_INSTANCES.map((base) =>
+          fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, PIPED_API_TIMEOUT).then((data) => {
+            const picked = pickPipedStream(data);
+            if (!picked) throw new Error("empty piped stream");
+            return picked;
+          })
+        )
+      ).then(resolve, reject);
+    }, 250);
+  });
   try {
-    const data = await Promise.any(attempts);
-    const picked = pickPipedStream(data);
-    if (picked) return picked;
+    return await Promise.any([tier1, tier2]);
   } catch {
-    // Promise.any rejects only if ALL instances failed.
-    throw new Error("all piped stream instances failed");
+    throw new Error(`no audio stream (innertube: ${gates.length ? [...new Set(gates)].join(", ") : "not attempted"}; all piped stream instances failed)`);
   }
-  throw new Error(`no audio stream (innertube: ${gates.length ? [...new Set(gates)].join(", ") : "not attempted"})`);
 }
 
 /**
