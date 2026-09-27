@@ -26,7 +26,8 @@ import {
   utcDay, LOCAL_CHARTS, MOODS_BY_COUNTRY,
 } from "../src/data.js";
 import { codecMatch, tidyTitle, tidyArtist } from "../src/util.js";
-import { parseLyricsHit, pickInnertubeStream } from "../src/providers.js";
+import { parseLyricsHit, pickInnertubeStream, lyricsFor } from "../src/providers.js";
+import { previewHome, previewShelf, previewDiscover } from "../src/preview-seed.js";
 import { APP_VERSION } from "../src/config.js";
 import { createHmac as nodeHmac } from "node:crypto";
 import {
@@ -583,6 +584,106 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
   ok("meta: webm passes through untagged", Buffer.from(passthrough).equals(Buffer.from(webm)));
 }
 
+// ── 5b2. Lyrics resolution & 3-API shelf/playlist mixing ───────────────────
+{
+  ok("lyrics tidyTitle: strips feat, official video, and tags",
+    tidyTitle("Die With A Smile (feat. Bruno Mars) [Official Music Video] #shorts") === "Die With A Smile"
+  );
+  ok("lyrics tidyArtist: strips VEVO, Topic, and channel labels",
+    tidyArtist("LadyGagaVEVO") === "LadyGaga" && tidyArtist("T-Series") === "" && tidyArtist("The Weeknd - Topic") === "The Weeknd"
+  );
+
+  // Test lyricsFor multi-stage resolution with mocked fetch (handles "Artist - Title" + channel uploader + lyrics.ovh fallback)
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (u) => {
+      const url = String(u);
+      if (url.includes("lrclib.net/api/get") && url.includes("duration=250")) {
+        return new Response("Not Found", { status: 404 });
+      }
+      if (url.includes("lrclib.net/api/search") && url.includes("Blinding+Lights")) {
+        return new Response(JSON.stringify([
+          { trackName: "Blinding Lights", artistName: "The Weeknd", duration: 200, syncedLyrics: "[00:10.00] I've been tryna call\n[00:15.00] I've been on my own for long enough", plainLyrics: "I've been tryna call" }
+        ]), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("api.lyrics.ovh/v1/Coldplay/Yellow")) {
+        return new Response(JSON.stringify({ lyrics: "Look at the stars\nLook how they shine for you" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const lrcRes = await lyricsFor("The Weeknd - Blinding Lights (Official Video)", "T-Series", 250);
+    ok("lyricsFor: resolves synced lyrics from noisy YouTube 'Artist - Song' title and channel uploader",
+      lrcRes && Array.isArray(lrcRes.synced) && lrcRes.synced.length === 2 && lrcRes.synced[0].text.includes("tryna call")
+    );
+
+    const ovhRes = await lyricsFor("Yellow (Official Audio)", "ColdplayVEVO", 269);
+    ok("lyricsFor: falls back to lyrics.ovh when LRCLIB returns no hits",
+      ovhRes && ovhRes.lyrics.includes("Look at the stars")
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // Verify previewHome, previewShelf, and previewDiscover mix all 3 APIs (youtube, apple, deezer)
+  const hasAll3Sources = (tracks) => {
+    const srcs = new Set((tracks || []).map((t) => (t && (t.source === "itunes" ? "apple" : t.source)) || ""));
+    return srcs.has("youtube") && srcs.has("apple") && srcs.has("deezer");
+  };
+  const ph = previewHome("US");
+  ok("home shelves: all shelves mix youtube + apple + deezer",
+    Array.isArray(ph.shelves) && ph.shelves.length > 0 && ph.shelves.every((s) => hasAll3Sources(s.tracks))
+  );
+  ok("home forYouPlaylists: all playlists mix youtube + apple + deezer",
+    Array.isArray(ph.forYouPlaylists) && ph.forYouPlaylists.length === 10 && ph.forYouPlaylists.every((p) => hasAll3Sources(p.tracks))
+  );
+  ok("home viralPlaylists: all playlists mix youtube + apple + deezer",
+    Array.isArray(ph.viralPlaylists) && ph.viralPlaylists.length === 10 && ph.viralPlaylists.every((p) => hasAll3Sources(p.tracks))
+  );
+  ok("home countryPlaylists & globalPlaylists: all playlists mix youtube + apple + deezer",
+    ph.countryPlaylists.every((p) => hasAll3Sources(p.tracks)) && ph.globalPlaylists.every((p) => hasAll3Sources(p.tracks))
+  );
+  const ps = previewShelf("pop", "pop hits", "US");
+  ok("previewShelf: mixes youtube + apple + deezer", hasAll3Sources(ps.tracks));
+  const pMood = previewShelf("", "chill vibes", "US");
+  ok("previewShelf playlist query: mixes youtube + apple + deezer", hasAll3Sources(pMood.tracks));
+  const pDisc = previewDiscover("US");
+  ok("previewDiscover: mixes youtube + apple + deezer", hasAll3Sources(pDisc.tracks));
+
+  const appJsCheck = readFileSync("public/app.js", "utf8");
+  const stylesCssCheck = readFileSync("public/styles.css", "utf8");
+  ok("client app.js: includes mixThreeSourcesClient and fetchLyricsBrowserFallback",
+    appJsCheck.includes("function mixThreeSourcesClient(") &&
+    appJsCheck.includes("function fetchLyricsBrowserFallback(") &&
+    appJsCheck.includes("function cleanLyricsMeta(")
+  );
+  ok("settings UI: every option in Settings and subpages has phone-settings-style .set-ico icon badges",
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="violet">dashboard_customize</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="pink">apps</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="cyan">equalizer</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="emerald">tune</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="purple">headphones</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="blue">language</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="orange">notifications_active</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="teal">cloud_off</span>') &&
+    appJsCheck.includes('class="material-symbols-outlined set-ico" data-ico="indigo">folder_special</span>') &&
+    stylesCssCheck.includes(".set-ico") &&
+    stylesCssCheck.includes(".set-label")
+  );
+  ok("player & lyrics UI: song title renders in a continuous straight-line marquee loop in both compact/docked player (#trackTitle) and opened lyrics view (.ly-meta strong)",
+    appJsCheck.includes("function buildMarqueeTitleHTML(") &&
+    appJsCheck.includes("function syncMarqueeTitleEl(") &&
+    appJsCheck.includes('class="marquee-track"') &&
+    stylesCssCheck.includes("@keyframes songTitleMarquee") &&
+    stylesCssCheck.includes(".player .meta #trackTitle.is-marquee .marquee-track") &&
+    stylesCssCheck.includes(".ly-meta strong.is-marquee .marquee-track")
+  );
+}
+
 // ── 5c. Google OAuth Branding Verification & Site Verification ─────────────
 (() => {
   const indexHtml = readFileSync("public/index.html", "utf8");
@@ -643,7 +744,9 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
   ok("settings: Following page provides direct artist follow input", appJs.includes('id="newFollowArtistInput"'));
   ok("settings: checkFollowReleases notifies user on new songs", appJs.includes("Notification") && appJs.includes("checkFollowReleases"));
 
-  // 3. Dedicated Data section
+  // 3. Dedicated Data & Offline sections
+  ok("settings: Offline & Downloads has dedicated opener #openOffline", settingsBody.includes('id="openOffline"'));
+  ok("settings: renderOfflinePage combines Offline Mode and Downloads on disk", appJs.includes("function renderOfflinePage()") && !settingsBody.includes('id="toggleOfflineMode"') && appJs.includes('id="toggleOfflineMode"') && appJs.includes("Downloads on disk"));
   ok("settings: Data has dedicated opener #openData", settingsBody.includes('id="openData"'));
   ok("settings: renderDataPage is defined", appJs.includes("function renderDataPage()"));
   ok("settings: Data page provides storage measurement", appJs.includes("id=\"cacheHint\""));
@@ -705,11 +808,15 @@ await (async () => {
   const androidPlugin = readFileSync("android/app/src/main/java/app/muchi/music/MuchiAudioPlugin.java", "utf8");
   const androidService = readFileSync("android/app/src/main/java/app/muchi/music/MuchiAudioService.java", "utf8");
   const androidMainActivity = readFileSync("android/app/src/main/java/app/muchi/music/MainActivity.java", "utf8");
+  const androidDownloadPlugin = readFileSync("android/app/src/main/java/app/muchi/music/MuchiDownloadPlugin.java", "utf8");
   const iosPlist = readFileSync("ios/App/App/Info.plist", "utf8");
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.2", APP_VERSION === "1.7.2" && appJs.includes('const APP_VERSION = "1.7.2"'));
+  ok("version: APP_VERSION is 1.7.3", APP_VERSION === "1.7.3" && appJs.includes('const APP_VERSION = "1.7.3"'));
+  ok("offline downloads (1.7.3): ensureStreamForDownload & handleDownload strip preview/placeholder streams and resolve full-length audio", appJs.includes("function isPreviewOrPlaceholderStream(") && appJs.includes("allowPreview=0") && streamJs.includes("const isPreviewStreamUrl = (u) =>") && streamJs.includes("Never fall back to 30-second Deezer/iTunes previews"));
+  ok("offline downloads (1.7.3): Android MuchiDownloadPlugin resolves residential stream on-device and uses 4 MB chunked range downloads", androidDownloadPlugin.includes("MuchiAudioService.resolveStreamForDownload") && androidDownloadPlugin.includes("downloadChunkedToMediaStore") && androidService.includes("public static ResolvedStream resolveStreamForDownload("));
+  ok("offline playback (1.7.3): playCurrent prioritizes saved local file / IndexedDB blob and playAudio uses getOfflineAudioBlob before network", appJs.includes("const hasOfflinePlayback = Boolean(") && appJs.includes("offlineBlob = await getOfflineAudioBlob(t);"));
   ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${candParam}${fastParam}") && appJs.includes("getWarmStream(t.videoId") && appJs.includes("url = `yt:${t.videoId}`"));
   ok("native playback: playYtWithAudio rejects 30s preview streams (!data.isPreview) so full song always plays", appJs.includes("if (data && data.url && !data.isPreview)") && !appJs.includes("resolveFallbackStreamUrl(t, true)"));
   ok("native background & notification: MuchiAudioService resolves yt: on-device, maintains MediaStyle foreground notification + WakeLock/WifiLock, and supports handleSessionIntent", androidService.includes("resolveYoutubeStreamOnDevice") && androidService.includes("handleSessionIntent") && androidService.includes("C.WAKE_MODE_NETWORK") && androidService.includes("WifiManager.WifiLock") && androidService.includes("stopPlaybackInternal(boolean notifyJs)"));
@@ -960,14 +1067,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=104");
+  const appJsRes = await fetch(BASE + "/app.js?v=105");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=104");
+  const stylesRes = await fetch(BASE + "/styles.css?v=105");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=104 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=104 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v104", swText.includes("muchi-shell-v104") && swText.includes("/app.js?v=104") && swText.includes("/styles.css?v=104"));
+  ok("client web: app.js?v=105 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=105 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v105", swText.includes("muchi-shell-v105") && swText.includes("/app.js?v=105") && swText.includes("/styles.css?v=105"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────

@@ -883,18 +883,33 @@ public class MuchiAudioService extends Service {
 
     /* ── On-device YouTube InnerTube + Piped resolver ──────────────── */
 
-    private static class ResolvedStream {
-        final String url;
-        final String userAgent;
-        final long durationMs;
-        ResolvedStream(String url, String userAgent, long durationMs) {
+    private static final ExecutorService sharedResolvePool = Executors.newCachedThreadPool();
+
+    public static class ResolvedStream {
+        public final String url;
+        public final String userAgent;
+        public final long durationMs;
+        public final String mimeType;
+        public ResolvedStream(String url, String userAgent, long durationMs) {
+            this(url, userAgent, durationMs, "audio/mp4");
+        }
+        public ResolvedStream(String url, String userAgent, long durationMs, String mimeType) {
             this.url = url;
             this.userAgent = userAgent;
             this.durationMs = durationMs;
+            this.mimeType = mimeType != null && !mimeType.isEmpty() ? mimeType : "audio/mp4";
         }
     }
 
+    public static ResolvedStream resolveStreamForDownload(String primaryVid, String candidatesCsv, String title, String artist) {
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, sharedResolvePool);
+    }
+
     private ResolvedStream resolveYoutubeStreamOnDevice(String primaryVid, String candidatesCsv, String title, String artist) {
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, resolveExecutor);
+    }
+
+    private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist, ExecutorService pool) {
         List<String> vids = new ArrayList<>();
         if (primaryVid != null && !primaryVid.trim().isEmpty()) {
             vids.add(primaryVid.trim());
@@ -906,29 +921,29 @@ public class MuchiAudioService extends Service {
             }
         }
         for (String vid : vids) {
-            ResolvedStream rs = probeInnertubeForVideo(vid);
+            ResolvedStream rs = probeInnertubeForVideoStatic(vid, pool);
             if (rs != null) return rs;
         }
         // If primary + passed candidates were gated (e.g. VEVO clip), search InnerTube
         // for "<title> <artist> official audio" directly from the phone's IP.
         if (title != null && !title.isEmpty()) {
             String q = (title + " " + (artist != null ? artist : "") + " official audio").trim();
-            List<String> searched = searchInnertubeVideoIds(q);
+            List<String> searched = searchInnertubeVideoIdsStatic(q);
             for (String svid : searched) {
                 if (vids.contains(svid)) continue;
-                ResolvedStream rs = probeInnertubeForVideo(svid);
+                ResolvedStream rs = probeInnertubeForVideoStatic(svid, pool);
                 if (rs != null) return rs;
             }
         }
         // Final fallback: Piped stream instances from the phone's IP
         for (String vid : vids) {
-            ResolvedStream rs = probePipedForVideo(vid);
+            ResolvedStream rs = probePipedForVideoStatic(vid);
             if (rs != null) return rs;
         }
         return null;
     }
 
-    private ResolvedStream probeInnertubeForVideo(String videoId) {
+    private static ResolvedStream probeInnertubeForVideoStatic(String videoId, ExecutorService pool) {
         if (videoId == null || videoId.isEmpty()) return null;
         String[][] profiles = new String[][] {
             {
@@ -958,7 +973,7 @@ public class MuchiAudioService extends Service {
         };
 
         java.util.concurrent.CompletionService<ResolvedStream> ecs =
-                new java.util.concurrent.ExecutorCompletionService<>(resolveExecutor);
+                new java.util.concurrent.ExecutorCompletionService<>(pool != null ? pool : sharedResolvePool);
         List<java.util.concurrent.Future<ResolvedStream>> futures = new ArrayList<>();
         for (String[] prof : profiles) {
             final String ua = prof[2];
@@ -1017,13 +1032,14 @@ public class MuchiAudioService extends Service {
 
                         // 1.5.5 stream quality rule: prefer highest-bitrate AAC/m4a, then highest-bitrate Opus
                         String chosen = !bestM4aUrl.isEmpty() ? bestM4aUrl : bestOpusUrl;
+                        String chosenMime = !bestM4aUrl.isEmpty() ? "audio/mp4" : "audio/webm";
                         if (!chosen.isEmpty()) {
                             long durSec = 0L;
                             JSONObject vd = root.optJSONObject("videoDetails");
                             if (vd != null) {
                                 durSec = vd.optLong("lengthSeconds", 0L);
                             }
-                            return new ResolvedStream(chosen, ua, durSec * 1000L);
+                            return new ResolvedStream(chosen, ua, durSec * 1000L, chosenMime);
                         }
                     }
                 } catch (Exception ignored) {
@@ -1055,7 +1071,7 @@ public class MuchiAudioService extends Service {
         return null;
     }
 
-    private List<String> searchInnertubeVideoIds(String query) {
+    private static List<String> searchInnertubeVideoIdsStatic(String query) {
         List<String> out = new ArrayList<>();
         HttpURLConnection con = null;
         try {
@@ -1088,7 +1104,7 @@ public class MuchiAudioService extends Service {
         return out;
     }
 
-    private ResolvedStream probePipedForVideo(String videoId) {
+    private static ResolvedStream probePipedForVideoStatic(String videoId) {
         String[] hosts = new String[] {
             "https://api.piped.private.coffee",
             "https://pipedapi.kavin.rocks",
@@ -1106,20 +1122,23 @@ public class MuchiAudioService extends Service {
                     JSONArray streams = root.optJSONArray("audioStreams");
                     if (streams == null || streams.length() == 0) continue;
                     String bestUrl = "";
+                    String bestMime = "audio/mp4";
                     int bestBr = -1;
                     for (int i = 0; i < streams.length(); i++) {
                         JSONObject s = streams.optJSONObject(i);
                         if (s == null) continue;
                         String u = s.optString("url", "");
+                        String m = s.optString("mimeType", "audio/mp4");
                         int br = s.optInt("bitrate", 0);
                         if (!u.isEmpty() && br > bestBr) {
                             bestBr = br;
                             bestUrl = u;
+                            bestMime = m;
                         }
                     }
                     if (!bestUrl.isEmpty()) {
                         long dur = root.optLong("duration", 0L) * 1000L;
-                        return new ResolvedStream(bestUrl, DEFAULT_UA, dur);
+                        return new ResolvedStream(bestUrl, DEFAULT_UA, dur, bestMime);
                     }
                 }
             } catch (Exception ignored) {

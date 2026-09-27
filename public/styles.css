@@ -3062,6 +3062,89 @@ html[data-ui="glass"] .now-actions .ly-icon {
   box-sizing: border-box;
   min-width: 0;
 }
+.set-label {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.set-label > div {
+  min-width: 0;
+  flex: 1;
+}
+.set-ico {
+  --ico-c: var(--md-sys-color-primary);
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 20px;
+  background: color-mix(in srgb, var(--ico-c) 16%, var(--md-sys-color-surface-container-highest));
+  color: var(--ico-c);
+  border: 1px solid color-mix(in srgb, var(--ico-c) 26%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--ico-c) 12%, transparent);
+}
+.set-ico[data-ico="violet"] { --ico-c: #a78bfa; }
+.set-ico[data-ico="amber"] { --ico-c: #fbbf24; }
+.set-ico[data-ico="pink"] { --ico-c: #f472b6; }
+.set-ico[data-ico="cyan"] { --ico-c: #22d3ee; }
+.set-ico[data-ico="emerald"] { --ico-c: #34d399; }
+.set-ico[data-ico="purple"] { --ico-c: #c084fc; }
+.set-ico[data-ico="blue"] { --ico-c: #60a5fa; }
+.set-ico[data-ico="orange"] { --ico-c: #fb923c; }
+.set-ico[data-ico="teal"] { --ico-c: #2dd4bf; }
+.set-ico[data-ico="rose"] { --ico-c: #fb7185; }
+.set-ico[data-ico="indigo"] { --ico-c: #818cf8; }
+html[data-theme="light"] .set-ico[data-ico="violet"] { --ico-c: #7c3aed; }
+html[data-theme="light"] .set-ico[data-ico="amber"] { --ico-c: #d97706; }
+html[data-theme="light"] .set-ico[data-ico="pink"] { --ico-c: #db2777; }
+html[data-theme="light"] .set-ico[data-ico="cyan"] { --ico-c: #0891b2; }
+html[data-theme="light"] .set-ico[data-ico="emerald"] { --ico-c: #059669; }
+html[data-theme="light"] .set-ico[data-ico="purple"] { --ico-c: #9333ea; }
+html[data-theme="light"] .set-ico[data-ico="blue"] { --ico-c: #2563eb; }
+html[data-theme="light"] .set-ico[data-ico="orange"] { --ico-c: #ea580c; }
+html[data-theme="light"] .set-ico[data-ico="teal"] { --ico-c: #0d9488; }
+html[data-theme="light"] .set-ico[data-ico="rose"] { --ico-c: #e11d48; }
+html[data-theme="light"] .set-ico[data-ico="indigo"] { --ico-c: #4f46e5; }
+.set-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.set-card h3 .material-symbols-outlined {
+  font-size: 17px;
+  color: var(--md-sys-color-primary);
+}
+/* Lock outer viewport on Now Playing / Lyrics so active lyric scrolling never shifts the UI upwards */
+html:has(body[data-view="now"]),
+body[data-view="now"] {
+  overflow: hidden !important;
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  overscroll-behavior: none !important;
+}
+body[data-view="now"] #app {
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  padding-bottom: 0 !important;
+}
+body[data-view="now"] .view {
+  padding: 0 !important;
+  overflow: hidden !important;
+  height: calc(100dvh - var(--player) - var(--dock)) !important;
+  max-height: calc(100dvh - var(--player) - var(--dock)) !important;
+}
+html[data-native="1"] .ly-mode-toggle,
+html[data-native="1"] .ly-video-stage,
+html[data-native="1"] #nowVideoBtn,
+html[data-native="1"] body[data-view="now"] #ytWrap {
+  display: none !important;
+}
 .set-row p { margin: 4px 0 0; color: var(--md-sys-color-on-surface-variant); font-size: 13px; }
 .set-row select, .set-row input[type="range"] { min-width: 160px; }
 .set-row select {
@@ -3147,7 +3230,7 @@ html[data-ui="glass"] .now-actions .ly-icon {
   text-align: left;
   cursor: pointer;
 }
-.set-go .material-symbols-outlined { color: var(--md-sys-color-on-surface-variant); }
+.set-go > .material-symbols-outlined { color: var(--md-sys-color-on-surface-variant); }
 .theme-card.custom-use {
   width: calc(100% - 24px);
   margin: 4px 12px 12px;
@@ -7626,6 +7709,87 @@ body:not([data-view="home"]) .hero-orbs i {
     filter: none;
   }
 }
+
+/* ── 6. CONTINUOUS STRAIGHT-LINE MARQUEE LOOP FOR PLAYER & LYRICS SONG TITLES ── */
+.player .now {
+  min-width: 0;
+  overflow: hidden;
+}
+.player .meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+.player .title-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+.player .title-row #likeBtn {
+  flex: 0 0 auto;
+}
+.ly-meta > div {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > strong:nth-of-type(1),
+.player .meta #trackTitle.is-marquee,
+.ly-meta strong.is-marquee {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+  position: relative;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 4%, #000 94%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0%, #000 4%, #000 94%, transparent 100%);
+}
+
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > strong:nth-of-type(1) .marquee-track,
+.player .meta #trackTitle.is-marquee .marquee-track,
+.ly-meta strong.is-marquee .marquee-track {
+  display: inline-block !important;
+  width: max-content !important;
+  max-width: none !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: nowrap !important;
+  color: inherit !important;
+  font: inherit !important;
+  line-height: inherit !important;
+  letter-spacing: inherit !important;
+  will-change: transform;
+  animation: songTitleMarquee var(--marquee-dur, 11s) linear infinite !important;
+}
+
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > strong:nth-of-type(1) .marquee-track::after,
+.player .meta #trackTitle.is-marquee .marquee-track::after,
+.ly-meta strong.is-marquee .marquee-track::after {
+  content: attr(data-marquee);
+  display: inline-block;
+  padding-inline: 2.25rem;
+}
+
+html[data-hidden="1"] .marquee-track {
+  animation-play-state: paused !important;
+}
+
+@keyframes songTitleMarquee {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
 
 
 

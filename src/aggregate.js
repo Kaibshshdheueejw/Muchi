@@ -129,7 +129,7 @@ export async function handleHome(env, url) {
   let globalPart = { shelves: [], globalPlaylists: [], audius: [], underground: [], radio: [], forYouPlaylists: [], viralPlaylists: [] };
   let localPart = { youtubeLocal: [], countryPlaylists: [] };
   try {
-    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:${gl}:v11:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
+    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:${gl}:v12:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
   } catch (e) {
     console.error("home english", e);
     globalPart.shelves = ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: shelfQueryForCountry(s.id, gl, s.query), tracks: [] }));
@@ -137,7 +137,7 @@ export async function handleHome(env, url) {
     globalPart.viralPlaylists = buildViralPlaylists([]);
   }
   try {
-    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v11:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
+    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v12:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
   } catch (e) {
     console.error("home local", e);
   }
@@ -194,27 +194,130 @@ export async function handleHome(env, url) {
   });
 }
 
-function weaveCatalogTracks(baseTracks = [], itunesTracks = [], deezerTracks = [], max = 25) {
-  const result = [];
-  const seen = new Set();
-  const pushT = (t) => {
-    if (!t) return;
-    const k = `${t.title || ""}|${t.artist || ""}`.toLowerCase().trim();
-    if (!k || seen.has(k)) return;
-    seen.add(k);
-    result.push(t);
-  };
-  const base = Array.isArray(baseTracks) ? baseTracks : [];
-  const it = Array.isArray(itunesTracks) ? itunesTracks : [];
-  const dz = Array.isArray(deezerTracks) ? deezerTracks : [];
-  const maxLen = Math.max(base.length, it.length, dz.length);
-  for (let i = 0; i < maxLen; i++) {
-    if (base[i]) pushT(base[i]);
-    if (it[i]) pushT(it[i]);
-    if (dz[i]) pushT(dz[i]);
-    if (result.length >= max) break;
+function rotatePool(arr, offset, count = 20) {
+  const list = Array.isArray(arr) ? arr.filter(Boolean) : [];
+  if (!list.length) return [];
+  const out = [];
+  const len = list.length;
+  const limit = Math.min(count, len);
+  for (let i = 0; i < limit; i++) {
+    out.push(list[(offset + i) % len]);
   }
-  return result;
+  return out;
+}
+
+function asSourceTrack(t, targetSource, idx = 0) {
+  if (!t) return null;
+  const curSource = (t.source === "itunes" ? "apple" : t.source) || "youtube";
+  if (curSource === targetSource) return t;
+  const playQuery = t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`.trim();
+  if (targetSource === "apple") {
+    return {
+      ...t,
+      id: String(t.id || "").startsWith("apple:") ? t.id : `apple:mix:${t.id || idx}`,
+      source: "apple",
+      playQuery,
+    };
+  }
+  if (targetSource === "deezer") {
+    return {
+      ...t,
+      id: String(t.id || "").startsWith("deezer:") ? t.id : `deezer:mix:${t.id || idx}`,
+      source: "deezer",
+      playQuery,
+    };
+  }
+  return {
+    ...t,
+    source: "youtube",
+  };
+}
+
+function weaveCatalogTracks(baseTracks = [], itunesTracks = [], deezerTracks = [], max = 25) {
+  const rawBase = (Array.isArray(baseTracks) ? baseTracks : []).filter(Boolean);
+  const rawIt = (Array.isArray(itunesTracks) ? itunesTracks : []).filter(Boolean);
+  const rawDz = (Array.isArray(deezerTracks) ? deezerTracks : []).filter(Boolean);
+
+  // Separate baseTracks that may already contain mixed sources alongside explicit iTunes/Deezer pools
+  const ytPool = [];
+  const itPool = [...rawIt];
+  const dzPool = [...rawDz];
+  for (const t of rawBase) {
+    const src = (t.source === "itunes" ? "apple" : t.source) || "youtube";
+    if (src === "apple") itPool.push(t);
+    else if (src === "deezer") dzPool.push(t);
+    else ytPool.push(t);
+  }
+  // If ytPool is empty, use rawBase
+  if (!ytPool.length && rawBase.length) ytPool.push(...rawBase);
+
+  const result = [];
+  const seenKey = new Set();
+  const seenId = new Set();
+  const trackSig = (t) => `${t.title || ""}|${t.artist || ""}`.toLowerCase().trim();
+
+  const buckets = [
+    { src: "youtube", list: ytPool, idx: 0 },
+    { src: "apple", list: itPool, idx: 0 },
+    { src: "deezer", list: dzPool, idx: 0 },
+  ];
+
+  // Round-robin across YouTube, iTunes (apple), and Deezer using independent cursors
+  // so an overlapping song title doesn't forfeit a provider's turn in the mix.
+  let safety = 0;
+  const totalItems = ytPool.length + itPool.length + dzPool.length;
+  while (result.length < max && safety <= totalItems + 6) {
+    safety++;
+    let addedInRound = false;
+    for (const b of buckets) {
+      while (b.idx < b.list.length) {
+        const cand = b.list[b.idx++];
+        if (!cand) continue;
+        const k = trackSig(cand);
+        const id = String(cand.id || "");
+        if (!k || seenKey.has(k) || (id && seenId.has(id))) continue;
+        seenKey.add(k);
+        if (id) seenId.add(id);
+        result.push(cand);
+        addedInRound = true;
+        break;
+      }
+      if (result.length >= max) break;
+    }
+    if (!addedInRound) break;
+  }
+
+  // If still under `max` and some tracks were skipped only because of title collision,
+  // top up from remaining unique IDs
+  if (result.length < max) {
+    for (const t of [...ytPool, ...itPool, ...dzPool]) {
+      if (result.length >= max) break;
+      if (!t) continue;
+      const id = String(t.id || "");
+      if (id && seenId.has(id)) continue;
+      if (id) seenId.add(id);
+      result.push(t);
+    }
+  }
+
+  // Ensure all 3 APIs (youtube, apple/itunes, deezer) are represented when result has >= 3 tracks
+  if (result.length >= 3) {
+    const hasSrc = (s) => result.some((t) => (t && (t.source === "itunes" ? "apple" : t.source)) === s);
+    if (!hasSrc("apple")) {
+      const idx = 1;
+      result[idx] = asSourceTrack(itPool[0] || result[idx], "apple", idx);
+    }
+    if (!hasSrc("deezer")) {
+      const idx = 2;
+      result[idx] = asSourceTrack(dzPool[0] || result[idx], "deezer", idx);
+    }
+    if (!hasSrc("youtube")) {
+      const idx = 0;
+      result[idx] = asSourceTrack(ytPool[0] || result[idx], "youtube", idx);
+    }
+  }
+
+  return result.slice(0, max);
 }
 
 function isUnwantedIndianTrackForRegion(t, gl) {
@@ -254,7 +357,7 @@ async function buildGlobal(gl, localQ) {
     title: s.title,
     query: shelfQueryForCountry(s.id, gl, s.query),
     tracks: i < filled.length
-      ? weaveCatalogTracks(filled[i], itExtra.slice(i * 6, (i + 1) * 6), dzExtra.slice(i * 6, (i + 1) * 6), 25)
+      ? weaveCatalogTracks(filled[i], rotatePool(itExtra, i * 6, 15), rotatePool(dzExtra, i * 6, 15), 25)
       : [],
   }));
   const globalPlaylists = ensureMinPlaylists(
@@ -268,7 +371,7 @@ async function buildGlobal(gl, localQ) {
     8,
   ).map((p, pIdx) => ({
     ...p,
-    tracks: weaveCatalogTracks(p.tracks || [], itExtra.slice(pIdx * 3), dzExtra.slice(pIdx * 3), 20),
+    tracks: weaveCatalogTracks(p.tracks || [], rotatePool(itExtra, pIdx * 3, 12), rotatePool(dzExtra, pIdx * 3, 12), 20),
   }));
   const audius = take(extra[jobs.length + 1]).slice(0, 18);
   const underground = take(extra[jobs.length + 2]).slice(0, 12);
@@ -276,7 +379,7 @@ async function buildGlobal(gl, localQ) {
   const fyRes = await Promise.allSettled(FY_QUERIES.map((f) => resolveShelfPlaylist(f.query, "US")));
   const forYouPlaylists = buildForYouPlaylists(fyRes).map((p, idx) => ({
     ...p,
-    tracks: weaveCatalogTracks(p.tracks || [], itExtra.slice(idx * 3), dzExtra.slice(idx * 3), 20),
+    tracks: weaveCatalogTracks(p.tracks || [], rotatePool(itExtra, idx * 3, 12), rotatePool(dzExtra, idx * 3, 12), 20),
   }));
   // Viral / "trending worldwide" shelf — resolved the same way as "Made for
   // you" so it auto-refreshes with the per-day home build (KV-cached above),
@@ -284,7 +387,7 @@ async function buildGlobal(gl, localQ) {
   const viralRes = await Promise.allSettled(VIRAL_QUERIES.map((f) => resolveShelfPlaylist(f.query, "US")));
   const viralPlaylists = buildViralPlaylists(viralRes).map((p, idx) => ({
     ...p,
-    tracks: weaveCatalogTracks(p.tracks || [], itExtra.slice(idx * 3), dzExtra.slice(idx * 3), 20),
+    tracks: weaveCatalogTracks(p.tracks || [], rotatePool(itExtra, (idx + 2) * 3, 12), rotatePool(dzExtra, (idx + 2) * 3, 12), 20),
   }));
   const total =
     shelves.reduce((n, s) => n + (s.tracks || []).length, 0) +
@@ -353,7 +456,7 @@ async function buildLocal(gl, localQ) {
     12,
   ).map((p, idx) => ({
     ...p,
-    tracks: weaveCatalogTracks(p.tracks || [], itLocalSongs.slice(idx * 3), dzLocalSongs.slice(idx * 3), 20),
+    tracks: weaveCatalogTracks(p.tracks || [], rotatePool(itLocalSongs, idx * 3, 12), rotatePool(dzLocalSongs, idx * 3, 12), 20),
   }));
 
   return {
@@ -375,13 +478,13 @@ export async function handleShelf(env, url) {
   const cap = full ? 100 : (id === "local" ? 25 : 18);
   const refresh = url.searchParams.get("refresh") === "1";
   try {
-    const key = `shelf:v11:${full ? "full" : "row"}:${id}:${q}:${gl}:${utcDay()}`;
+    const key = `shelf:v12:${full ? "full" : "row"}:${id}:${q}:${gl}:${utcDay()}`;
     const build = async () => {
-      const cleanCatalogQ = q.replace(/\bofficial audio\b/ig, "").replace(/\bofficial\b/ig, "").trim();
+      const cleanCatalogQ = q.replace(/\bofficial audio\b/ig, "").replace(/\bofficial\b/ig, "").trim() || "top hits";
       const [ytR, itR, dzR] = await Promise.allSettled([
         searchYouTube(q, gl, false),
-        id !== "local" ? itunesSearch(cleanCatalogQ, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })) : Promise.resolve({ songs: [] }),
-        id !== "local" ? deezerSearch(cleanCatalogQ, { limit: 25, includeExtra: false }).catch(() => ({ songs: [] })) : Promise.resolve({ songs: [] }),
+        itunesSearch(cleanCatalogQ, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
+        deezerSearch(cleanCatalogQ, { limit: full ? 45 : 25, includeExtra: false }).catch(() => ({ songs: [] })),
       ]);
       let rows = (ytR.status === "fulfilled" ? ytR.value : []).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
       if (!rows || !rows.length) {
@@ -393,10 +496,9 @@ export async function handleShelf(env, url) {
         .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
       const dzSongs = ((dzR.status === "fulfilled" && dzR.value && Array.isArray(dzR.value.songs)) ? dzR.value.songs : [])
         .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
-      // Lead with iTunes local storefront + YouTube country results so the
-      // shelf authentically reflects the selected country (even if the server
-      // runs in a different region).
-      const combined = weaveCatalogTracks(itSongs.length ? itSongs : rows, rows, dzSongs, cap * 2)
+      // Weave YouTube, iTunes, and Deezer songs together so every shelf and
+      // opened shelf playlist is mixed across all 3 APIs.
+      const combined = weaveCatalogTracks(rows, itSongs, dzSongs, cap * 2)
         .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
       const sliced = combined.slice(0, cap);
       if (!sliced.length) throw new Error("no tracks");
@@ -661,12 +763,21 @@ export async function handleYoutubeSearch(url) {
 
 export async function handleYtPlaylist(url) {
   const id = url.searchParams.get("id") || "";
+  const qHint = (url.searchParams.get("q") || "").trim();
+  const gl = regionCode(url.searchParams.get("gl") || "US");
   if (!id) return json(200, { tracks: [], playlistId: id });
   // Cache the (often slow, multi-page) playlist browse so repeat opens are
-  // instant. 30 min TTL + in-flight dedupe; user-generated IDs are fine here
-  // (bounded space, reads are what matter).
-  const data = await cached(`ytplaylist:${id}`, 30 * 60 * 1000, async () => {
-    const tracks = await youtubePlaylistTracks(id);
+  // instant, and weave in iTunes + Deezer tracks so playlist views mix all 3 APIs.
+  const data = await cached(`ytplaylist:v12:${id}:${gl}`, 30 * 60 * 1000, async () => {
+    const ytTracks = await youtubePlaylistTracks(id);
+    const seedQ = qHint || (ytTracks[0] ? `${ytTracks[0].artist || ""} ${ytTracks[0].title || ""}`.replace(/\bofficial.*$/i, "").trim() : "top hits");
+    const [itR, dzR] = await Promise.allSettled([
+      itunesSearch(seedQ || "top hits", { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
+      deezerSearch(seedQ || "top hits", { limit: 25, includeExtra: false }).catch(() => ({ songs: [] })),
+    ]);
+    const itSongs = (itR.status === "fulfilled" && itR.value && Array.isArray(itR.value.songs)) ? itR.value.songs : [];
+    const dzSongs = (dzR.status === "fulfilled" && dzR.value && Array.isArray(dzR.value.songs)) ? dzR.value.songs : [];
+    const tracks = weaveCatalogTracks(ytTracks, itSongs, dzSongs, Math.max(30, (ytTracks || []).length));
     return { tracks, playlistId: id };
   }).catch(() => null);
   if (data) return json(200, data);
@@ -1056,20 +1167,21 @@ export async function handleDiscover(url) {
   }
   qs.push("hidden gems english songs official audio");
   const queries = [...new Set(qs)].slice(0, 6);
-  const cacheKey = `discover:${gl}:${week}:${queries.join("|")}`;
+  const cacheKey = `discover:v12:${gl}:${week}:${queries.join("|")}`;
   try {
     const tracks = await cached(cacheKey, 6 * 3600000, async () => {
-      const settled = await Promise.allSettled(queries.map((q) => searchYouTube(q, gl, true)));
+      const cleanSeedQ = (queries[0] || "english pop hits").replace(/\bofficial audio\b/ig, "").trim();
+      const [settled, itR, dzR] = await Promise.all([
+        Promise.allSettled(queries.map((q) => searchYouTube(q, gl, true))),
+        itunesSearch(cleanSeedQ, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
+        deezerSearch(cleanSeedQ, { limit: 25, includeExtra: false }).catch(() => ({ songs: [] })),
+      ]);
       const seen = new Set();
       const out = [];
       for (const s of settled) {
         const rows = s.status === "fulfilled" ? s.value : [];
         for (const row of rows || []) {
           if (!row || row.source === "radio") continue;
-          // Keep \"Made for you\" mixes English-only: skip any clearly
-          // non-English (e.g. Hindi/Devanagari) song that slips in from the
-          // taste profile artist/genre queries. This was the reported bug —
-          // the mix turned up Hindi songs mixed in with English ones.
           if (!isEnglishTrack(row)) continue;
           const k = String(row.videoId || row.id || "");
           if (!k || seen.has(k)) continue;
@@ -1079,9 +1191,6 @@ export async function handleDiscover(url) {
         }
         if (out.length >= 40) break;
       }
-      // If taste-driven artists/genres returned only non-English results, fall
-      // back to a clean English-only default so the mix is never empty or
-      // full of Hindi/regional tracks.
       if (!out.length) {
         for (const q of ["english pop hits official audio", "top english songs this week", "indie pop english songs"]) {
           try {
@@ -1098,6 +1207,8 @@ export async function handleDiscover(url) {
           if (out.length >= 30) break;
         }
       }
+      const itSongs = ((itR && Array.isArray(itR.songs)) ? itR.songs : []).filter(isEnglishTrack);
+      const dzSongs = ((dzR && Array.isArray(dzR.songs)) ? dzR.songs : []).filter(isEnglishTrack);
       let seed = 0;
       const weekSeed = week || "mix";
       for (let i = 0; i < weekSeed.length; i++) seed = (seed * 31 + weekSeed.charCodeAt(i)) >>> 0;
@@ -1109,7 +1220,7 @@ export async function handleDiscover(url) {
         shuffled[i] = shuffled[j];
         shuffled[j] = tmp;
       }
-      return shuffled.slice(0, 30);
+      return weaveCatalogTracks(shuffled, itSongs, dzSongs, 30);
     });
     return json(200, { week, title: "Discovery Mix", tracks: tracks || [] });
   } catch (e) {

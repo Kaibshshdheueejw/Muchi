@@ -509,6 +509,7 @@ export function previewHome(gl, taste) {
     }),
     // 10 curated "Made for you" cards, each with its first song's art + 20 songs.
     forYouPlaylists: cards,
+    viralPlaylists: cards.map((c) => ({ ...c, tracks: withMixedSources(c.tracks) })),
     audius: [],
     underground: mixedPool.slice(0, 8),
     radio: [],
@@ -519,16 +520,16 @@ export function previewHome(gl, taste) {
 export function previewShelf(id, q, gl) {
   if (id && SHELF_BY_ID[id]) {
     const s = SHELF_BY_ID[id];
-    return { id, title: s.title, query: s.tags.join(" "), tracks: tracksForShelf(id) };
+    return { id, title: s.title, query: s.tags.join(" "), tracks: withMixedSources(tracksForShelf(id)) };
   }
   const mood = FY_MOODS.find((m) =>
     String(q || "").toLowerCase() === m.tags[0] ||
     String(q || "").toLowerCase().includes(m.title.toLowerCase().split(" ")[0])
   );
-  const tracks = (mood ? moodTracks(mood.tags, mood.count) : playlistTracks(q)).map((t) => ({
+  const tracks = withMixedSources((mood ? moodTracks(mood.tags, mood.count) : playlistTracks(q)).map((t) => ({
     ...t,
     artwork: (mood && mood.cover) || ARTWORK,
-  }));
+  })));
   return { id: "", title: (mood && mood.title) || q || "Songs", query: q || "", tracks };
 }
 
@@ -649,7 +650,7 @@ export function previewArtist(name) {
 export function previewRelated(title) {
   const base = matchTracks(title);
   const tracks = base.length ? base : allTracks().slice(0, 24);
-  return { tracks: tracks.slice(0, 24) };
+  return { tracks: withMixedSources(tracks.slice(0, 24)) };
 }
 
 // Taste-adaptive discovery / "for you" mix. We use the same English catalog and
@@ -666,7 +667,7 @@ export function previewDiscover(gl, taste) {
       return bm - am;
     });
   }
-  return { week: "preview", title: "Discovery Mix", tracks: tracks.slice(0, 30) };
+  return { week: "preview", title: "Discovery Mix", tracks: withMixedSources(tracks.slice(0, 30)) };
 }
 
 // ── /api/radio ───────────────────────────────────────────────────────────

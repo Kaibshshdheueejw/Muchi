@@ -138,17 +138,27 @@ export async function fetchJSON(url, opts = {}, timeoutMs = 14000) {
 
 export function tidyTitle(title) {
   return String(title || "")
-    .replace(/\s*[\[(][^)\]]*(official|audio|video|lyric|visualizer|hd|4k|remaster|topic)[^)\]]*[)\]]/gi, "")
-    .replace(/\s*[-–—]\s*(official|audio|lyrics?|video).*$/i, "")
-    .replace(/\b(official audio|official video|lyrics? video|visualizer|audio only)\b/gi, "")
+    .replace(/\s*[\[(][^)\]]*(official|audio|video|lyric|visualizer|hd|4k|hq|remaster|topic|feat\.?|ft\.?|with\s|prod\.?|from\s|full\s+song|full\s+video|music\s+video|live|acoustic\s+version|radio\s+edit|bonus\s+track|explicit|clean)[^)\]]*[)\]]/gi, "")
+    .replace(/\s*[-–—|]\s*(official|audio|lyrics?|video|visualizer|full\s+song|full\s+video|remaster(ed)?|hd|4k|hq|from\s+["']?.*).*$/i, "")
+    .replace(/\b(official\s+music\s+video|official\s+audio|official\s+video|lyrics?\s+video|visualizer|audio\s+only|full\s+audio|full\s+video)\b/gi, "")
+    .replace(/\s*\b(feat\.?|ft\.?)\s+[^-–—|(\[]+$/i, "")
+    .replace(/#[a-z0-9_]+/gi, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
 export function tidyArtist(artist) {
-  let s = String(artist || "").split("·")[0].split("|")[0].split(",")[0];
-  s = s.replace(/\s*-\s*Topic$/i, "").replace(/VEVO/gi, "").trim();
-  if (/^(youtube|various artists|unknown)$/i.test(s)) return "";
+  let s = String(artist || "").split("·")[0].split("|")[0];
+  s = s
+    .replace(/\s*-\s*Topic$/i, "")
+    .replace(/VEVO$/i, "")
+    .replace(/\bVEVO\b/gi, "")
+    .replace(/\s*\b(official|music|channel|records|recordings|entertainment)\b$/i, "")
+    .replace(/\s*\b(feat\.?|ft\.?|with|x|&|,)\s+.*$/i, "")
+    .trim();
+  if (/^(youtube|various artists|unknown|unknown artist|topic|t-series|zee music company|sony music india|yash raj films|yrf|saregama|tips official|speed records|desi melodies)$/i.test(s)) {
+    return "";
+  }
   return s;
 }
 

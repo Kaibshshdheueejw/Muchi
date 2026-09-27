@@ -16,7 +16,6 @@ import { assertPublicUrl } from "./ssrf.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
 import { audiusStreamUrl, youtubeAudioStream, searchYouTube, audiusSearch, itunesSearch } from "./providers.js";
 import { deezerSearch } from "./deezer.js";
-import { previewAudioWav } from "./preview-seed.js";
 
 const PROXY_ACCEPT = "audio/*,*/*";
 
@@ -299,11 +298,22 @@ export async function handleAudiusStream(url) {
  * storable file.
  */
 export async function handleDownload(request, url) {
-  const videoId = url.searchParams.get("videoId") || url.searchParams.get("v") || "";
-  const trackId = url.searchParams.get("trackId") || "";
-  const streamUrl = url.searchParams.get("streamUrl") || "";
-  const query = url.searchParams.get("query") || url.searchParams.get("q") || "";
-  const name = sanitizeForFilename(url.searchParams.get("name") || "");
+  const videoId = (url.searchParams.get("videoId") || url.searchParams.get("v") || "").trim();
+  const trackId = (url.searchParams.get("trackId") || "").trim();
+  const rawStreamUrl = (url.searchParams.get("streamUrl") || url.searchParams.get("url") || "").trim();
+  const isPreviewStreamUrl = (u) =>
+    !u ||
+    /^yt:/i.test(u) ||
+    /\/api\/preview\/audio|dzcdn\.net|mzstatic\.com|itunes\.apple\.com|allowPreview=1/i.test(u);
+  const streamUrl = isPreviewStreamUrl(rawStreamUrl) ? "" : rawStreamUrl;
+  const title = (url.searchParams.get("title") || "").trim();
+  const artist = (url.searchParams.get("artist") || "").trim();
+  const query = (url.searchParams.get("query") || url.searchParams.get("q") || `${title} ${artist}`.trim()).trim();
+  const name = sanitizeForFilename(url.searchParams.get("name") || title || "");
+  const rawCands = (url.searchParams.get("candidates") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^[a-zA-Z0-9_-]{6,20}$/.test(s) && s !== videoId);
 
   if (!videoId && !trackId && !streamUrl && !query) {
     return json(400, { error: "Missing videoId or trackId" });
@@ -312,97 +322,64 @@ export async function handleDownload(request, url) {
   let src = "";
   let mime = url.searchParams.get("mime") || (trackId ? "audio/mpeg" : "audio/mp4");
 
+  const resolveYtCandidates = async (seedId) => {
+    const ids = [];
+    if (seedId) ids.push(seedId);
+    for (const c of rawCands.slice(0, 4)) {
+      if (!ids.includes(c)) ids.push(c);
+    }
+    if (query && ids.length < 4) {
+      try {
+        const res = await searchYouTube(`${query} official audio`.trim());
+        for (const h of res || []) {
+          if (h && h.videoId && !ids.includes(h.videoId)) {
+            ids.push(h.videoId);
+            if (ids.length >= 4) break;
+          }
+        }
+      } catch {}
+    }
+    for (const vid of ids) {
+      try {
+        const s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid));
+        if (s && s.url) return s;
+      } catch {
+        try {
+          const s = await youtubeAudioStream(vid);
+          if (s && s.url) return s;
+        } catch {}
+      }
+    }
+    return null;
+  };
+
   if (streamUrl) {
-    // The client may already know a working stream URL (e.g. it resolved one
-    // for playback via /api/yt/stream). Proxying it directly avoids re-hitting
-    // Piped, whose instance endpoints are volatile — so downloads land even
-    // when the Piped resolver is down. SSRF-guarded like every other fetch.
     src = streamUrl;
     try {
       if (src.includes("/api/stream") && src.includes("url=")) {
         const parsed = new URL(src, "http://localhost");
         const inner = parsed.searchParams.get("url");
-        if (inner) src = inner;
+        if (inner) src = isPreviewStreamUrl(inner) ? "" : inner;
       }
     } catch {}
-  } else if (trackId) {
+  }
+  if (!src && trackId) {
     try {
       src = await audiusStreamUrl(trackId);
       mime = "audio/mpeg";
     } catch (e) {
       return json(502, { error: String((e && e.message) || e) });
     }
-  } else if (videoId) {
-    // Resolve the audio URL via the SAME `ytstream:<id>` cache that
-    // /api/yt/stream uses.
-    try {
-      const s = await cached(`ytstream:${videoId}`, 15 * 60 * 1000, () => youtubeAudioStream(videoId));
-      if (s && s.url) {
-        src = s.url;
-        if (s.mimeType) mime = s.mimeType;
-      }
-    } catch {
-      for (let attempt = 0; attempt < 2 && !src; attempt++) {
-        try {
-          const s = await youtubeAudioStream(videoId);
-          if (s && s.url) {
-            src = s.url;
-            if (s.mimeType) mime = s.mimeType;
-          }
-        } catch {}
-      }
+  } else if (!src && (videoId || rawCands.length || query)) {
+    const s = await resolveYtCandidates(videoId);
+    if (s && s.url) {
+      src = s.url;
+      if (s.mimeType) mime = s.mimeType;
     }
-  } else if (query) {
-    try {
-      const res = await searchYouTube(query);
-      const hit = (res || []).find((x) => x && x.videoId);
-      if (hit) {
-        const s = await youtubeAudioStream(hit.videoId);
-        if (s && s.url) {
-          src = s.url;
-          if (s.mimeType) mime = s.mimeType;
-        }
-      }
-    } catch {}
   }
 
-  if (!src && videoId) {
-    try {
-      const s = await youtubeAudioStream(videoId);
-      if (s && s.url) {
-        src = s.url;
-        if (s.mimeType) mime = s.mimeType;
-      }
-    } catch {}
-  }
-
-  if (!src && trackId) {
-    try {
-      src = await audiusStreamUrl(trackId);
-      mime = "audio/mpeg";
-    } catch {}
-  }
-
-  // Cross-provider resolution: if YouTube / streamUrl failed or was blocked,
-  // query Audius for the track title/artist (returns full 320kbps MP3s).
   const cleanName = sanitizeForFilename(name) || "track";
   const searchQuery = query || name || "";
-  if (!src && searchQuery) {
-    try {
-      const audHits = await audiusSearch(searchQuery);
-      if (Array.isArray(audHits) && audHits.length) {
-        const topAud = audHits[0];
-        const audId = String(topAud.trackId || topAud.id || "").replace(/^audius:/, "");
-        if (audId) {
-          const audUrl = await audiusStreamUrl(audId);
-          if (audUrl) {
-            src = audUrl;
-            mime = "audio/mpeg";
-          }
-        }
-      }
-    } catch {}
-  }
 
   let orig = src ? await pipeUrl(request, src, PROXY_ACCEPT, mime) : { status: 502 };
 
@@ -413,7 +390,7 @@ export async function handleDownload(request, url) {
   }
 
   // If the stream failed (e.g. 403 on expired/IP-mismatched Googlevideo URL, 410, or 502)
-  // resolve a fresh stream URL directly and retry!
+  // resolve a fresh stream URL directly across candidate videoIds and retry!
   if (orig.status === 403 || orig.status === 410 || orig.status >= 500 || !src) {
     try {
       let vId = videoId;
@@ -430,15 +407,35 @@ export async function handleDownload(request, url) {
         mime = "audio/mpeg";
         orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
       } else {
-        if (!vId && searchQuery) {
-          const res = await searchYouTube(searchQuery);
-          vId = (res || []).find((x) => x && x.videoId)?.videoId || "";
+        if (vId) invalidateCached(`ytstream:${vId}`);
+        const fresh = await resolveYtCandidates(vId);
+        if (fresh && fresh.url) {
+          src = fresh.url;
+          if (fresh.mimeType) mime = fresh.mimeType;
+          orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
         }
-        if (vId) {
-          const fresh = await youtubeAudioStream(vId);
-          if (fresh && fresh.url) {
-            src = fresh.url;
-            if (fresh.mimeType) mime = fresh.mimeType;
+      }
+    } catch {}
+  }
+
+  // Strict full-song Audius fallback ONLY if both title and artist genuinely match
+  if ((!src || orig.status >= 400) && title && artist) {
+    try {
+      const audHits = await audiusSearch(`${title} ${artist}`.trim());
+      if (Array.isArray(audHits) && audHits.length) {
+        const cleanT = title.toLowerCase().replace(/[^\w\s]/g, "").trim();
+        const cleanA = artist.toLowerCase().replace(/[^\w\s]/g, "").trim();
+        const matchedAud = audHits.find((a) => {
+          const ht = String(a.title || "").toLowerCase().replace(/[^\w\s]/g, "").trim();
+          const ha = String(a.artist || "").toLowerCase().replace(/[^\w\s]/g, "").trim();
+          return cleanT && cleanA && (ht.includes(cleanT) || cleanT.includes(ht)) && (ha.includes(cleanA) || cleanA.includes(ha)) && (a.duration || 0) >= 60;
+        });
+        const audId = matchedAud ? String(matchedAud.trackId || matchedAud.id || "").replace(/^audius:/, "") : "";
+        if (audId) {
+          const audUrl = await audiusStreamUrl(audId);
+          if (audUrl) {
+            src = audUrl;
+            mime = "audio/mpeg";
             orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
           }
         }
@@ -446,54 +443,8 @@ export async function handleDownload(request, url) {
     } catch {}
   }
 
-  // Cross-provider preview fallback: Deezer & iTunes 320k/256k previews
-  if (!src || orig.status === 403 || orig.status === 410 || orig.status >= 500) {
-    if (searchQuery) {
-      try {
-        const dzRes = await deezerSearch(searchQuery);
-        const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
-        const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
-        if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
-          src = dzHit.previewUrl || dzHit.preview;
-          mime = "audio/mpeg";
-          orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
-        }
-      } catch {}
-      if (!src || orig.status >= 400) {
-        try {
-          const itRes = await itunesSearch(searchQuery);
-          const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
-          const itHit = itList.find((x) => x && x.previewUrl);
-          if (itHit && itHit.previewUrl) {
-            src = itHit.previewUrl;
-            mime = "audio/mp4";
-            orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
-          }
-        } catch {}
-      }
-    }
-  }
-
-  // Final fallback: generate high-fidelity WAV so download never fails or breaks for valid song queries
-  if (orig.status !== 404 && (!src || orig.status >= 400)) {
-    if (searchQuery) {
-      try {
-        const wav = previewAudioWav(30);
-        const ext = "wav";
-        const asciiName = cleanName.replace(/[^\x20-\x7E]/g, "_");
-        const encodedName = encodeURIComponent(`${cleanName}.${ext}`).replace(/['()]/g, escape).replace(/\*/g, "%2A");
-        const disposition = `attachment; filename="${asciiName}.${ext}"; filename*=UTF-8''${encodedName}`;
-        return new Response(wav, {
-          status: 200,
-          headers: {
-            "Content-Type": "audio/wav",
-            "Content-Disposition": disposition,
-            "Content-Length": String(wav.byteLength),
-            "Access-Control-Allow-Origin": "*",
-          },
-        });
-      } catch {}
-    }
+  // Never fall back to 30-second Deezer/iTunes previews or synthetic previewAudioWav tunes!
+  if (!src || orig.status >= 400) {
     return orig instanceof Response ? orig : json(orig.status || 502, { error: "download failed" });
   }
   const ext = extFor(mime);

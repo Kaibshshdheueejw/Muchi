@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.2";
+  const APP_VERSION = "1.7.3";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -2591,13 +2591,14 @@
   // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
   // a stale IndexedDB/payload from the previous deployment (which is exactly
   // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
-  const API_CACHE_V = "v11-sync-166";
+  const API_CACHE_V = "v12-sync-167";
   // Never cache an "empty" catalog payload. If a provider is temporarily
   // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
   // tracks); caching that would freeze the shelf empty for the whole TTL.
   // A miss just re-fetches — the safe direction.
   function apiCacheIsUsable(data) {
     if (!data || typeof data !== "object") return false;
+    if ("lyrics" in data && !data.lyrics && (!Array.isArray(data.synced) || !data.synced.length)) return false;
     let s = "";
     try { s = JSON.stringify(data); } catch { return false; }
     if (s.length < 40) return false; // trivial/empty object
@@ -2830,9 +2831,25 @@
     if (t.artwork) s.artwork = t.artwork;
     return s;
   }
+  function isPreviewOrPlaceholderStream(u, t) {
+    const s = String(u || "").trim();
+    if (!s) return true;
+    if (/^yt:/i.test(s)) return true;
+    if (t && t._isPreviewStream) return true;
+    if (/\/api\/preview\/audio|dzcdn\.net|mzstatic\.com|itunes\.apple\.com|allowPreview=1/i.test(s)) return true;
+    return false;
+  }
+
   async function ensureStreamForDownload(t) {
     if (!t) return t;
     const out = { ...t };
+    if (isPreviewOrPlaceholderStream(out.streamUrl, out)) {
+      if (!out.videoId && /^yt:([a-zA-Z0-9_-]{6,20})$/i.test(String(out.streamUrl || "").trim())) {
+        out.videoId = String(out.streamUrl).trim().slice(3);
+      }
+      out.streamUrl = "";
+      out._isPreviewStream = false;
+    }
     // Audius: resolve active stream url if missing or unverified
     if (out.source === "audius" && out.trackId) {
       out.streamMime = "audio/mpeg";
@@ -2841,24 +2858,31 @@
       }
       return out;
     }
-    // Apple / iTunes / Deezer: resolve via YouTube search or fallback to previewUrl
-    if ((out.source === "apple" || out.source === "itunes" || out.source === "deezer") && !out.videoId) {
+    // Apple / iTunes / Deezer / unresolved catalog tracks: resolve via YouTube search first
+    if (!out.videoId && !out.streamUrl && out.source !== "audius" && out.source !== "radio") {
       try {
         await resolveYouTubePlay(out);
+        if (isPreviewOrPlaceholderStream(out.streamUrl, out)) {
+          out.streamUrl = "";
+          out._isPreviewStream = false;
+        }
       } catch {}
     }
-    // Already resolved (played / audius / radio carries a streamUrl): keep it.
-    if (out.streamUrl) return out;
-    // YouTube: resolve via the same /api/yt/stream endpoint playback uses.
-    // The server caches the resolved URL for 15 min and tries the InnerTube
-    // Tier-1 resolver first (Piped fan-out as fallback), so the download
-    // reuses a URL that playback just proved works instead of doing its own
-    // (un-cached) resolution at download time.
+    // Already resolved to a full, real stream (played / audius / radio): keep it.
+    if (out.streamUrl && !isPreviewOrPlaceholderStream(out.streamUrl, out)) return out;
+    // YouTube: resolve via the same /api/yt/stream endpoint playback uses with allowPreview=0.
     if (out.videoId) {
       try {
-        const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 20000);
-        if (d && d.url) {
+        const cands = Array.isArray(out._ytCandidates) && out._ytCandidates.length
+          ? `&candidates=${encodeURIComponent(out._ytCandidates.slice(0, 5).join(","))}`
+          : "";
+        const d = await api(
+          `/api/yt/stream?v=${encodeURIComponent(out.videoId)}&title=${encodeURIComponent(out.title || "")}&artist=${encodeURIComponent(out.artist || "")}${cands}&allowPreview=0`,
+          20000
+        );
+        if (d && d.url && !d.isPreview && !isPreviewOrPlaceholderStream(d.url, out)) {
           out.streamUrl = d.url;
+          if (d.videoId) out.videoId = d.videoId;
           if (d.mimeType) out.streamMime = d.mimeType;
           if (d.duration) out.duration = Number(d.duration) || out.duration;
         }
@@ -2884,16 +2908,22 @@
     }
   }
   function downloadFilePath(t) {
-    const sid = String((t && t.streamUrl) || "");
+    const rawSid = String((t && t.streamUrl) || "");
+    const sid = isPreviewOrPlaceholderStream(rawSid, t) ? "" : rawSid;
     const nm = encodeURIComponent(t.title || "track");
+    const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
+    const artistParam = t && t.artist ? `&artist=${encodeURIComponent(t.artist)}` : "";
+    const candParam = t && Array.isArray(t._ytCandidates) && t._ytCandidates.length
+      ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+      : "";
     if (t && t.videoId) {
-      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}${titleParam}${artistParam}${candParam}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
     if (t && t.source === "audius" && t.trackId) {
-      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=audio%2Fmpeg`;
+      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}${titleParam}${artistParam}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=audio%2Fmpeg`;
     }
     if (t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer")) {
-      return `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${nm}`;
+      return `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${nm}${titleParam}${artistParam}${candParam}`;
     }
     if (sid) {
       let resolvedSid = sid;
@@ -2904,7 +2934,10 @@
         if (!/^https?:\/\//i.test(resolvedSid) && API_BASE) resolvedSid = API_BASE.replace(/\/$/, "") + "/" + resolvedSid;
         return resolvedSid;
       }
-      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}${titleParam}${artistParam}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+    }
+    if (t && (t.title || t.artist)) {
+      return `${API_BASE}/api/download?query=${encodeURIComponent(`${t.title || ""} ${t.artist || ""}`.trim())}&name=${nm}${titleParam}${artistParam}${candParam}`;
     }
     return "";
   }
@@ -2970,6 +3003,8 @@
       const res = await ND.startDownload({
         id: job.id,
         url: meta.url,
+        videoId: t.videoId || "",
+        candidates: Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "",
         filename: meta.filename,
         title: t.title || "",
         artist: t.artist || "",
@@ -2985,31 +3020,29 @@
     // Web / PWA — File System Access API, then blob+<a download> fallback.
     let res = await fetch(meta.url, { credentials: "same-origin" }).catch(() => null);
     if (!res || !res.ok) {
+      const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
+      const artistParam = t && t.artist ? `&artist=${encodeURIComponent(t.artist)}` : "";
+      const candParam = t && Array.isArray(t._ytCandidates) && t._ytCandidates.length
+        ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+        : "";
       // Fallback 1: If direct streamUrl failed (e.g. expired or 403), retry through /api/download?videoId=...
       const fallbackUrl = (t && t.videoId)
-        ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`
+        ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
         : ((t && t.source === "audius" && t.trackId)
-          ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`
+          ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}`
           : ((t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer"))
-            ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}`
+            ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
             : ""));
       if (fallbackUrl && meta.url !== fallbackUrl) {
         const retryRes = await fetch(fallbackUrl, { credentials: "same-origin" }).catch(() => null);
         if (retryRes && retryRes.ok) res = retryRes;
       }
-      // Fallback 2: Direct preview URL if available
-      if ((!res || !res.ok) && t && t.previewUrl) {
-        try {
-          const prevRes = await fetch(t.previewUrl).catch(() => null);
-          if (prevRes && prevRes.ok) res = prevRes;
-        } catch {}
-      }
-      // Fallback 3: Query-based server download resolution
+      // Fallback 2: Query-based server full-song download resolution (never fall back to 30s previewUrl)
       if (!res || !res.ok) {
         try {
           const qName = `${t && t.title || ""} ${t && t.artist || ""}`.trim();
           if (qName) {
-            const qUrl = `${API_BASE}/api/download?query=${encodeURIComponent(qName)}&name=${encodeURIComponent(t && t.title || "track")}`;
+            const qUrl = `${API_BASE}/api/download?query=${encodeURIComponent(qName)}&name=${encodeURIComponent(t && t.title || "track")}${titleParam}${artistParam}${candParam}`;
             const qRes = await fetch(qUrl, { credentials: "same-origin" }).catch(() => null);
             if (qRes && qRes.ok) res = qRes;
           }
@@ -3150,6 +3183,7 @@
     // /api/yt/stream endpoint playback uses (the server caches the resolved URL
     // for 15 min), so a download on a never-played YouTube track still lands.
     const resolved = await ensureStreamForDownload(t);
+    if (resolved && t && t.id) resolved.id = t.id;
     const path = downloadFilePath(resolved);
     if (!path) {
       toast("This track can't be saved offline");
@@ -3163,7 +3197,7 @@
     };
     const job = {
       id: jid,
-      track: slimTrack(t),
+      track: slimTrack(resolved),
       filename: meta.filename,
       progress: 0, bytes: 0, total: 0,
       status: "downloading", cancel: false,
@@ -3175,11 +3209,11 @@
     try {
       const onProgress = (p) => { job.bytes = p.bytes || 0; job.total = p.total || 0; job.progress = p.progress || 0; saveDlJob(job); };
       job.status = "downloading"; saveDlJob(job);
-      const uri = await saveDownloadToDisk(meta, t, job, onProgress);
+      const uri = await saveDownloadToDisk(meta, resolved, job, onProgress);
       if (job.status === "cancelled" || !uri) throw new Error("cancelled");
       job.status = "done"; job.progress = 1; saveDlJob(job);
       // Record metadata + the local uri so it can replay offline.
-      const dl = { ...slimTrack(t), uri, streamMime: meta.mime, savedAt: Date.now() };
+      const dl = { ...slimTrack(resolved), uri, streamMime: meta.mime, savedAt: Date.now() };
       delete dl.streamUrl;
       state.downloads = [dl, ...state.downloads.filter((d) => d.id !== dl.id)];
       save("aura.downloads", state.downloads);
@@ -7275,6 +7309,133 @@
     return true;
   }
 
+  function parseBrowserLyricsHit(hit) {
+    if (!hit) return null;
+    const synced = [];
+    if (hit.syncedLyrics) {
+      for (const line of String(hit.syncedLyrics).split("\n")) {
+        const m = line.match(/\[(\d+):(\d+(?:\.\d+)?)\](.*)/);
+        if (m) synced.push({ t: Number(m[1]) * 60 + Number(m[2]), text: m[3].trim() });
+      }
+    }
+    const lyrics = String(hit.plainLyrics || "").trim();
+    if (!lyrics && !synced.length) return null;
+    return { lyrics, synced };
+  }
+
+  function cleanLyricsMeta(t) {
+    const rawTitle = String((t && t.title) || "").trim();
+    const rawArtist = String(artistName(t) || (t && t.artist) || "").trim();
+    let cleanTitle = rawTitle
+      .replace(/\s*[\[(][^)\]]*(official|audio|video|lyric|visualizer|hd|4k|hq|remaster|topic|feat\.?|ft\.?|with\s|prod\.?|from\s|full\s+song|full\s+video|music\s+video|live|radio\s+edit)[^)\]]*[)\]]/gi, "")
+      .replace(/\s*[-–—|]\s*(official|audio|lyrics?|video|visualizer|full\s+song|full\s+video|remaster(ed)?|hd|4k|hq|from\s+["']?.*).*$/i, "")
+      .replace(/\b(official\s+music\s+video|official\s+audio|official\s+video|lyrics?\s+video|visualizer|audio\s+only|full\s+audio|full\s+video)\b/gi, "")
+      .replace(/\s*\b(feat\.?|ft\.?)\s+[^-–—|(\[]+$/i, "")
+      .replace(/#[a-z0-9_]+/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim() || rawTitle;
+
+    let cleanArtist = rawArtist
+      .split("·")[0]
+      .split("|")[0]
+      .replace(/\s*-\s*Topic$/i, "")
+      .replace(/\bVEVO\b/gi, "")
+      .replace(/\s*\b(official|music|channel|records|recordings|entertainment)\b$/i, "")
+      .replace(/\s*\b(feat\.?|ft\.?|with|x|&|,)\s+.*$/i, "")
+      .trim();
+
+    if (/^(youtube|various artists|unknown|unknown artist|topic|t-series|zee music company|sony music india|yash raj films|yrf|saregama|tips official|speed records|desi melodies)$/i.test(cleanArtist)) {
+      cleanArtist = "";
+    }
+
+    // If title is "Artist - Song Title" (common on YouTube), extract both candidates
+    const dashParts = cleanTitle.split(/\s+[-–—]\s+/).map((s) => s.trim()).filter(Boolean);
+    let altTitle = "";
+    let altArtist = "";
+    if (dashParts.length >= 2) {
+      const left = dashParts[0];
+      const right = dashParts.slice(1).join(" - ");
+      if (!cleanArtist || left.toLowerCase() === cleanArtist.toLowerCase() || cleanArtist.toLowerCase().includes(left.toLowerCase())) {
+        cleanTitle = right;
+        if (!cleanArtist) cleanArtist = left;
+      } else {
+        altTitle = right;
+        altArtist = left;
+      }
+    }
+    const coreTitle = cleanTitle.replace(/\s*[\[(][^)\]]*[)\]]/g, " ").replace(/\s{2,}/g, " ").trim() || cleanTitle;
+    return { cleanTitle, coreTitle, cleanArtist, altTitle, altArtist };
+  }
+
+  async function fetchLyricsBrowserFallback(meta, dur) {
+    const pairs = [];
+    const addP = (tr, ar) => {
+      const t = String(tr || "").trim();
+      const a = String(ar || "").trim();
+      if (!t) return;
+      if (!pairs.some((p) => p.t.toLowerCase() === t.toLowerCase() && p.a.toLowerCase() === a.toLowerCase())) {
+        pairs.push({ t, a });
+      }
+    };
+    addP(meta.coreTitle, meta.cleanArtist);
+    addP(meta.cleanTitle, meta.cleanArtist);
+    if (meta.altTitle) addP(meta.altTitle, meta.altArtist);
+
+    const urls = [];
+    for (const p of pairs) {
+      if (p.a && p.t) {
+        if (dur > 0) {
+          urls.push(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(p.a)}&track_name=${encodeURIComponent(p.t)}&duration=${dur}`);
+        }
+        urls.push(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(p.a)}&track_name=${encodeURIComponent(p.t)}`);
+        urls.push(`https://lrclib.net/api/search?track_name=${encodeURIComponent(p.t)}&artist_name=${encodeURIComponent(p.a)}`);
+        urls.push(`https://lrclib.net/api/search?q=${encodeURIComponent(`${p.a} ${p.t}`)}`);
+      }
+    }
+    if (meta.coreTitle) {
+      urls.push(`https://lrclib.net/api/search?track_name=${encodeURIComponent(meta.coreTitle)}`);
+      urls.push(`https://lrclib.net/api/search?q=${encodeURIComponent(meta.coreTitle)}`);
+    }
+
+    for (const u of urls) {
+      try {
+        const res = await fetch(u, {
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(6500),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          const hit = data.find((x) => x && x.syncedLyrics) || data.find((x) => x && x.plainLyrics);
+          const parsed = parseBrowserLyricsHit(hit);
+          if (parsed) return parsed;
+        } else {
+          const parsed = parseBrowserLyricsHit(data);
+          if (parsed) return parsed;
+        }
+      } catch {}
+    }
+
+    for (const p of pairs) {
+      if (!p.a || !p.t) continue;
+      try {
+        const res = await fetch(
+          `https://api.lyrics.ovh/v1/${encodeURIComponent(p.a)}/${encodeURIComponent(p.t)}`,
+          { signal: AbortSignal.timeout(6000) }
+        );
+        if (!res.ok) continue;
+        const ovh = await res.json();
+        if (ovh && typeof ovh.lyrics === "string" && ovh.lyrics.trim()) {
+          return {
+            lyrics: ovh.lyrics.replace(/^Paroles de la chanson .*?\r?\n/i, "").trim(),
+            synced: [],
+          };
+        }
+      } catch {}
+    }
+    return null;
+  }
+
   async function loadLyrics(t) {
     if (!t || t.source === "radio") {
       state.lyrics = { lyrics: "", synced: [], key: lyricsKey(t) };
@@ -7289,17 +7450,46 @@
     const gen = ++lyricsGen;
     lyActive = -1;
     state.lyrics = { key, lyrics: "", synced: [] };
-    const cleanTitle = String(t.title || "").replace(/\s*[\[(][^)\]]*(official|audio|video|lyric|visualizer)[^)\]]*[)\]]/gi, "").trim() || t.title;
-    const artist = artistName(t) || String(t.artist || "").split("·")[0].replace(/youtube/ig, "").trim();
+    const meta = cleanLyricsMeta(t);
+    const dur = Math.round(Number(t.duration || duration() || 0)) || 0;
+    let found = null;
     try {
-      const dur = Math.round(Number(t.duration || 0)) || 0;
-      const data = await api(`/api/lyrics?title=${encodeURIComponent(cleanTitle)}&artist=${encodeURIComponent(artist)}${dur ? `&duration=${dur}` : ""}`, 14000);
+      const data = await api(
+        `/api/lyrics?title=${encodeURIComponent(meta.cleanTitle)}&artist=${encodeURIComponent(meta.cleanArtist)}${dur ? `&duration=${dur}` : ""}`,
+        12000
+      );
       if (gen !== lyricsGen) return;
-      state.lyrics = { lyrics: (data && data.lyrics) || "", synced: (data && data.synced) || [], key };
+      if (data && (data.lyrics || (Array.isArray(data.synced) && data.synced.length))) {
+        found = { lyrics: data.lyrics || "", synced: data.synced || [] };
+      }
     } catch {
       if (gen !== lyricsGen) return;
-      state.lyrics = { lyrics: "", synced: [], key };
     }
+    // If primary call came back empty and we have an alternate title/artist split, try that on server too
+    if (!found && meta.altTitle) {
+      try {
+        const data2 = await api(
+          `/api/lyrics?title=${encodeURIComponent(meta.altTitle)}&artist=${encodeURIComponent(meta.altArtist)}${dur ? `&duration=${dur}` : ""}`,
+          10000
+        );
+        if (gen !== lyricsGen) return;
+        if (data2 && (data2.lyrics || (Array.isArray(data2.synced) && data2.synced.length))) {
+          found = { lyrics: data2.lyrics || "", synced: data2.synced || [] };
+        }
+      } catch {}
+    }
+    // Client-side direct fallback (LRCLIB + lyrics.ovh) if server returned empty or timed out
+    if (!found) {
+      try {
+        found = await fetchLyricsBrowserFallback(meta, dur);
+      } catch {}
+      if (gen !== lyricsGen) return;
+    }
+    state.lyrics = {
+      lyrics: (found && found.lyrics) || "",
+      synced: (found && found.synced) || [],
+      key,
+    };
     if (state.view === "now") paintLyricsBox() || render();
   }
 
@@ -7423,6 +7613,32 @@
     syncPlayerVisibility();
   }
 
+  function buildMarqueeTitleHTML(title) {
+    const clean = String(title || "Untitled");
+    return `<span class="marquee-track" data-marquee="${escapeAttr(clean)}">${escapeHTML(clean)}</span>`;
+  }
+
+  function marqueeDurationForTitle(title) {
+    return `${Math.max(8, Math.min(20, Math.round(String(title || "").length * 0.32)))}s`;
+  }
+
+  function syncMarqueeTitleEl(el, titleText, active) {
+    if (!el) return;
+    const nextTitle = String(titleText || "Nothing playing");
+    const isTrack = Boolean(active && titleText);
+    if (el.dataset.marqueeTitle !== nextTitle || el.classList.contains("is-marquee") !== isTrack) {
+      el.dataset.marqueeTitle = nextTitle;
+      el.classList.toggle("is-marquee", isTrack);
+      if (isTrack) {
+        el.style.setProperty("--marquee-dur", marqueeDurationForTitle(nextTitle));
+        el.innerHTML = buildMarqueeTitleHTML(nextTitle);
+      } else {
+        el.style.removeProperty("--marquee-dur");
+        el.textContent = nextTitle;
+      }
+    }
+  }
+
   function renderChrome() {
     const t = current();
     const coverImg = $("coverArt");
@@ -7434,7 +7650,15 @@
       coverImg.classList.add("art-swap");
     }
     themeFromTrack(t);
-    $("trackTitle").textContent = t ? t.title : "Nothing playing";
+    syncMarqueeTitleEl($("trackTitle"), t ? t.title : "Nothing playing", Boolean(t && t.title));
+    if (state.view === "now" && t) {
+      const nowStrong = viewEl && viewEl.querySelector(".ly-meta strong");
+      if (nowStrong) syncMarqueeTitleEl(nowStrong, t.title, true);
+      const nowArtBtn = viewEl && viewEl.querySelector("#nowArtist");
+      if (nowArtBtn) nowArtBtn.textContent = artistName(t) || t.artist || "";
+      const nowImg = viewEl && viewEl.querySelector(".ly-meta img");
+      if (nowImg && nowImg.getAttribute("src") !== artSrc) nowImg.setAttribute("src", artSrc);
+    }
     const artEl = $("trackArtist");
     if (artEl) {
       const label = t ? (artistName(t) || t.artist || t.source) : "Pick a song to begin";
@@ -8133,6 +8357,9 @@
       const key = String(card.title).toLowerCase().trim();
       if (seenTitles.has(key)) return;
       seenTitles.add(key);
+      if (Array.isArray(card.tracks) && card.tracks.length) {
+        card.tracks = mixThreeSourcesClient(card.tracks, homePool, card.tracks.length);
+      }
       cards.push(card);
     }
 
@@ -9112,6 +9339,15 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.7.3",
+      title: "Muchi 1.7.3",
+      notes: [
+        "Fixed offline song downloads across Android, iOS, and Web so full-length audio tracks are always saved (never 30-second previews or incomplete clips).",
+        "Added on-device residential IP stream resolution and 4 MB chunked range downloading in MuchiDownloadPlugin to prevent YouTube throttling or datacenter IP blocks.",
+        "Guaranteed instant offline playback of downloaded songs from local storage and IndexedDB even with no internet connection.",
+      ],
+    },
+    {
       ver: "1.7.2",
       title: "Muchi 1.7.2",
       notes: [
@@ -9653,7 +9889,7 @@
       </div>
       <div class="settings">
         <div class="set-card">
-          <h3>Light / Dark / System</h3>
+          <h3><span class="material-symbols-outlined">contrast</span>Light / Dark / System</h3>
           <p class="set-lead">Choose how MUCHI appears. System follows this device — and keeps following it live, without a restart.</p>
           <div class="seg" role="radiogroup" aria-label="Appearance">
             ${apBtn("light", "Light")}
@@ -9662,12 +9898,12 @@
           </div>
         </div>
         <div class="set-card">
-          <h3>Theme skins</h3>
+          <h3><span class="material-symbols-outlined">palette</span>Theme skins</h3>
           <p class="set-lead">Optional color skins on top of the appearance above. ${color.length} colorful + classic skins.</p>
           <div class="theme-grid">${skins.map((th) => themeCardHTML(th, p.theme === th.id)).join("")}</div>
         </div>
         <div class="set-card">
-          <h3>Custom theme</h3>
+          <h3><span class="material-symbols-outlined">brush</span>Custom theme</h3>
           <p class="set-lead">Build your own. Colors apply live; they’re saved on this device.</p>
           <button type="button" class="theme-card custom-use ${customOn ? "on" : ""}" data-set-theme="custom">
             <div class="theme-preview" style="background:${c.surface};--tp-a:${c.primary};--tp-b:${c.accent}">
@@ -9676,39 +9912,39 @@
             <span><strong>${escapeHTML(c.name || "My theme")}</strong><em>${customOn ? "In use" : "Tap to use this mix"}</em></span>
           </button>
           <label class="set-row">
-            <div><strong>Name</strong><p>Shown on the Settings row.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="violet">badge</span><div><strong>Name</strong><p>Shown on the Settings row.</p></div></div>
             <input id="customName" type="text" maxlength="24" value="${escapeAttr(c.name)}" />
           </label>
           <div class="set-row">
-            <div><strong>Base</strong><p>Dark or light starting point.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span><div><strong>Base</strong><p>Dark or light starting point.</p></div></div>
             <div class="chip-row">
               <button type="button" class="chip ${c.mode === "dark" ? "active" : ""}" data-custom-mode="dark">Dark</button>
               <button type="button" class="chip ${c.mode === "light" ? "active" : ""}" data-custom-mode="light">Light</button>
             </div>
           </div>
           ${[
-            ["surface", "Background", "Page color"],
-            ["card", "Cards", "Tiles, menus, player"],
-            ["primary", "Accent", "Buttons and highlights"],
-            ["accent", "Glow", "Second color and wash"],
-            ["text", "Text", "Titles and labels"],
-          ].map(([key, title, hint]) => `
+            ["surface", "Background", "Page color", "wallpaper", "blue"],
+            ["card", "Cards", "Tiles, menus, player", "layers", "cyan"],
+            ["primary", "Accent", "Buttons and highlights", "palette", "pink"],
+            ["accent", "Glow", "Second color and wash", "flare", "amber"],
+            ["text", "Text", "Titles and labels", "text_fields", "emerald"],
+          ].map(([key, title, hint, ico, colorAttr]) => `
             <label class="set-row color-row">
-              <div><strong>${title}</strong><p>${hint}</p></div>
+              <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="${colorAttr}">${ico}</span><div><strong>${title}</strong><p>${hint}</p></div></div>
               <span class="color-field">
                 <input type="color" data-custom-color="${key}" value="${c[key]}" />
                 <code>${c[key]}</code>
               </span>
             </label>`).join("")}
           <div class="set-row">
-            <div><strong>Reset mix</strong><p>Back to the starter purple.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset mix</strong><p>Back to the starter purple.</p></div></div>
             <button class="chip-btn" id="resetCustom" type="button">Reset</button>
           </div>
         </div>
         <div class="set-card">
-          <h3>App Icon</h3>
+          <h3><span class="material-symbols-outlined">apps</span>App Icon</h3>
           <button type="button" class="set-row set-go" id="openAppIconFromAppearance">
-            <div><strong>Customize App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">apps</span><div><strong>Customize App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div></div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
@@ -9972,7 +10208,7 @@
       </div>
       <div class="settings">
         <div class="set-card">
-          <h3>Interface size</h3>
+          <h3><span class="material-symbols-outlined">format_size</span>Interface size</h3>
           <p class="set-lead">Scales the whole app — text, spacing, buttons and icons.</p>
           <div class="chip-row icon-size-row">
             ${[["small", "Small"], ["default", "Default"], ["medium", "Medium"], ["large", "Large"]].map(([id, label]) =>
@@ -9981,7 +10217,7 @@
           </div>
         </div>
         <div class="set-card">
-          <h3>Layout</h3>
+          <h3><span class="material-symbols-outlined">dashboard_customize</span>Layout</h3>
           <p class="set-lead">Pick one. Saved on this device.</p>
           <div class="ui-pick-list">
             ${card("material", "Material 3", "Default — filled cards, You-style player.", `<i></i><i></i><i></i>`)}
@@ -10002,12 +10238,12 @@
 
   function accountCardHTML() {
     const a = state.auth;
-    if (!a) return `<div class="set-card"><h3>Account</h3><div class="ly-wait">Checking…</div></div>`;
+    if (!a) return `<div class="set-card"><h3><span class="material-symbols-outlined">account_circle</span>Account</h3><div class="ly-wait">Checking…</div></div>`;
     if (a.configured === false) return "";
     if (!a.signedIn) {
       return `
         <div class="set-card">
-          <h3>Account</h3>
+          <h3><span class="material-symbols-outlined">account_circle</span>Account</h3>
           <p class="set-hint">Sign in with Google to bring your YouTube likes and playlists into your Library. By continuing, you agree to the <a href="/terms.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Terms of Service</a> and <a href="/privacy.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Privacy Policy</a>.</p>
           <button type="button" class="filled-btn" id="gSignInBtn" style="width:100%;justify-content:center">
             <span class="material-symbols-outlined filled">login</span> Continue with Google
@@ -10021,26 +10257,26 @@
     const yt = a.youtube && a.youtube.connected;
     return `
       <div class="set-card">
-        <h3>Account</h3>
+        <h3><span class="material-symbols-outlined">account_circle</span>Account</h3>
         <div class="set-row">
           <div class="acct-user">${pic}<div><strong>${escapeHTML(pr.name || pr.email || "Google user")}</strong><p>${escapeHTML(pr.email || "")}</p></div></div>
         </div>
         ${yt ? `
         <div class="set-row">
-          <div><strong>YouTube</strong><p>Likes and playlists sync to your Library.</p></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong><p>Likes and playlists sync to your Library.</p></div></div>
           <button type="button" class="chip-btn" id="gYtRefresh">Refresh</button>
           <button type="button" class="chip-btn" id="gYtDisconnect">Disconnect</button>
         </div>` : `
         <div class="set-row">
-          <div><strong>YouTube</strong><p>Authorize MUCHI to read your liked videos and playlists.</p></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong><p>Authorize MUCHI to read your liked videos and playlists.</p></div></div>
           <button type="button" class="chip-btn" id="gYtConnect">Connect</button>
         </div>`}
         <div class="set-row">
-          <div><strong>Cloud Library Sync</strong><p>Your liked tracks, playlists, and follows sync automatically.</p></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">cloud_sync</span><div><strong>Cloud Library Sync</strong><p>Your liked tracks, playlists, and follows sync automatically.</p></div></div>
           <button type="button" class="chip-btn" id="syncLibraryBtn">Sync now</button>
         </div>
         <div class="set-row">
-          <div><strong>Sign out</strong><p>Removes your Google session and YouTube data from this device.</p></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">logout</span><div><strong>Sign out</strong><p>Removes your Google session and YouTube data from this device.</p></div></div>
           <button type="button" class="chip-btn" id="gSignOut">Sign out</button>
         </div>
       </div>`;
@@ -10073,7 +10309,7 @@
       ${settingsSubChrome("Player", "Four looks for the bar, crossfading, and the seek line.")}
       <div class="settings">
         <div class="set-card">
-          <h3>Type</h3>
+          <h3><span class="material-symbols-outlined">dock_to_bottom</span>Type</h3>
           <div class="ui-pick-list">
             ${types.map(([id, name, blurb]) => `
               <button type="button" class="ui-pick ${cur === id ? "on" : ""}" data-set-player="${id}">
@@ -10086,7 +10322,7 @@
         <div class="set-card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
             <div>
-              <h3 style="margin:0">Crossfade</h3>
+              <h3 style="margin:0"><span class="material-symbols-outlined">linear_scale</span>Crossfade</h3>
               <p class="set-lead" style="margin:4px 0 0">Smoothly blend songs together without silence between tracks.</p>
             </div>
             <span class="chip active" id="playerFadeBadge">${fade ? fade + "s" : "Off"}</span>
@@ -10109,27 +10345,27 @@
       <div class="settings">
         <div class="set-card">
           <div class="set-row">
-            <div><strong>Autoplay</strong><p>Play the next song when one ends.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">playlist_play</span><div><strong>Autoplay</strong><p>Play the next song when one ends.</p></div></div>
             <button class="switch ${p.autoplay ? "on" : ""}" data-pref="autoplay" type="button"><i></i></button>
           </div>
           <label class="set-row">
-            <div><strong>Crossfade</strong><p>Audius only. YouTube is skipped.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="cyan">linear_scale</span><div><strong>Crossfade</strong><p>Audius only. YouTube is skipped.</p></div></div>
             <select id="setFade">
               ${[0, 3, 6, 12].map((n) => `<option value="${n}" ${Number(p.crossfade) === n ? "selected" : ""}>${n ? n + "s" : "Off"}</option>`).join("")}
             </select>
           </label>
           <div class="set-row">
-            <div><strong>Even volume</strong><p>Consistent headroom so loud tracks don't clip.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">graphic_eq</span><div><strong>Even volume</strong><p>Consistent headroom so loud tracks don't clip.</p></div></div>
             <button class="switch ${p.normalize ? "on" : ""}" data-pref="normalize" type="button"><i></i></button>
           </div>
           <label class="set-row">
-            <div><strong>Speed</strong><p>Audius, radio, and YouTube when allowed.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">speed</span><div><strong>Speed</strong><p>Audius, radio, and YouTube when allowed.</p></div></div>
             <select id="setSpeed">
               ${[0.75, 1, 1.25, 1.5].map((n) => `<option value="${n}" ${Number(p.speed) === n ? "selected" : ""}>${n}×</option>`).join("")}
             </select>
           </label>
           <label class="set-row">
-            <div><strong>Sound stage</strong><p>Speakers, bass, or headphone spatial. YouTube stays in Google’s player.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">surround_sound</span><div><strong>Sound stage</strong><p>Speakers, bass, or headphone spatial. YouTube stays in Google’s player.</p></div></div>
             <select id="setSpatial">
               <option value="phone" ${spatialMode() === "phone" ? "selected" : ""}>Phone · feel it</option>
               <option value="bass" ${spatialMode() === "bass" ? "selected" : ""}>Super Bass</option>
@@ -10139,7 +10375,7 @@
             </select>
           </label>
           <div class="set-row">
-            <div><strong>Stream quality</strong><p>YouTube resolution + radio bitrate. Audius is always 320 kbps.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">high_quality</span><div><strong>Stream quality</strong><p>YouTube resolution + radio bitrate. Audius is always 320 kbps.</p></div></div>
           </div>
           <div class="chip-row quality-row">
             ${[["auto", "Auto · network"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["highest", "Highest"]].map(([id, label]) =>
@@ -10147,7 +10383,7 @@
             ).join("")}
           </div>
           <label class="set-row">
-            <div><strong>Audio codec</strong><p>Radio only.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="teal">audio_file</span><div><strong>Audio codec</strong><p>Radio only.</p></div></div>
             <select id="setCodec">
               <option value="auto" ${(p.codec || "auto") === "auto" ? "selected" : ""}>Any</option>
               <option value="mp3" ${p.codec === "mp3" ? "selected" : ""}>MP3</option>
@@ -10166,7 +10402,7 @@
       <div class="settings">
         <div class="set-card">
           <label class="set-row">
-            <div><strong>Sleep timer</strong><p>${sleepLabel()}. Also on the moon button in the player.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="indigo">bedtime</span><div><strong>Sleep timer</strong><p>${sleepLabel()}. Also on the moon button in the player.</p></div></div>
             <select id="setSleep">
               <option value="off" ${state.sleep.mode === "off" ? "selected" : ""}>Off</option>
               <option value="15">15 min</option>
@@ -10177,15 +10413,15 @@
             </select>
           </label>
           <div class="set-row">
-            <div><strong>Resume last song</strong><p>Load the last queue when you open Muchi. Won’t auto-play.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">restore</span><div><strong>Resume last song</strong><p>Load the last queue when you open Muchi. Won’t auto-play.</p></div></div>
             <button class="switch ${p.resume ? "on" : ""}" data-pref="resume" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div><strong>Keep screen on</strong><p>While something is playing.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">light_mode</span><div><strong>Keep screen on</strong><p>While something is playing.</p></div></div>
             <button class="switch ${p.wake ? "on" : ""}" data-pref="wake" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div><strong>Show YouTube video</strong><p>Pop the official player when a YouTube track starts.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>Show YouTube video</strong><p>Pop the official player when a YouTube track starts.</p></div></div>
             <button class="switch ${p.autoVideo ? "on" : ""}" data-pref="autoVideo" type="button"><i></i></button>
           </div>
         </div>
@@ -10291,21 +10527,21 @@
         <div class="set-card">
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
             <div>
-              <h3 style="margin:0">Release Notifications</h3>
+              <h3 style="margin:0"><span class="material-symbols-outlined">notifications_active</span>Release Notifications</h3>
               <p class="set-lead" style="margin:4px 0 0">Get notified when any followed artist releases new songs.</p>
             </div>
             <div>${permBadge}</div>
           </div>
           <div class="set-row">
-            <div><strong>New-release notifications</strong><p>System notification when a followed artist releases a new track.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">notifications</span><div><strong>New-release notifications</strong><p>System notification when a followed artist releases a new track.</p></div></div>
             <button class="switch ${p.notifyFollows ? "on" : ""}" data-pref="notifyFollows" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div><strong>In-app release banners</strong><p>Show a toast notification inside Muchi when new tracks are detected.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">campaign</span><div><strong>In-app release banners</strong><p>Show a toast notification inside Muchi when new tracks are detected.</p></div></div>
             <button class="switch ${p.notifyInApp !== false ? "on" : ""}" data-pref="notifyInApp" type="button"><i></i></button>
           </div>
           <div class="set-row" style="padding-top:12px">
-            <div><strong>Check for new releases</strong><p>Scan all followed artists now for their latest tracks.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">sync</span><div><strong>Check for new releases</strong><p>Scan all followed artists now for their latest tracks.</p></div></div>
             <button class="chip-btn" id="checkNewReleasesBtn" type="button">
               <span class="material-symbols-outlined">sync</span>
               Check Now
@@ -10314,7 +10550,7 @@
         </div>
 
         <div class="set-card">
-          <h3>Follow an Artist</h3>
+          <h3><span class="material-symbols-outlined">person_add</span>Follow an Artist</h3>
           <p class="set-lead">Search for any artist to follow and start tracking their new releases.</p>
           <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
             <div class="search-wrap" style="flex:1">
@@ -10342,7 +10578,7 @@
 
         <div class="set-card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <h3 style="margin:0">Followed Artists (${state.following.length})</h3>
+            <h3 style="margin:0"><span class="material-symbols-outlined">group</span>Followed Artists (${state.following.length})</h3>
           </div>
           <div class="list">
             ${state.following.map((f) => `
@@ -10374,10 +10610,10 @@
       ${settingsSubChrome("Data & Storage", "Storage usage, offline files, cache management, and library backups.")}
       <div class="settings">
         <div class="set-card">
-          <h3>Storage Usage</h3>
+          <h3><span class="material-symbols-outlined">pie_chart</span>Storage Usage</h3>
           <p class="set-lead">Disk space used on this device for offline playback and cached audio streams.</p>
           <div class="set-row">
-            <div><strong>Browser storage estimate</strong><p id="cacheHint">Measuring…</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">hard_drive</span><div><strong>Browser storage estimate</strong><p id="cacheHint">Measuring…</p></div></div>
           </div>
           <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(110px, 1fr));gap:8px;margin-top:12px">
             <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
@@ -10400,33 +10636,33 @@
         </div>
 
         <div class="set-card">
-          <h3>Cache & Offline Data</h3>
+          <h3><span class="material-symbols-outlined">cleaning_services</span>Cache & Offline Data</h3>
           <div class="set-row">
-            <div><strong>App shell & cache</strong><p>Cached web assets, search hits, and home feed. Likes and mixes stay safe.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">cached</span><div><strong>App shell & cache</strong><p>Cached web assets, search hits, and home feed. Likes and mixes stay safe.</p></div></div>
             <button class="chip-btn" data-clear="sw" type="button">Clear Cache</button>
           </div>
           <div class="set-row">
-            <div><strong>Listening history</strong><p>Recently played tracks list (${recentsCount} songs).</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">history</span><div><strong>Listening history</strong><p>Recently played tracks list (${recentsCount} songs).</p></div></div>
             <button class="chip-btn" data-clear="recents" type="button">Clear History</button>
           </div>
           <div class="set-row">
-            <div><strong>Offline downloads</strong><p>Saved audio files on disk (${dls.length} songs).</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">download_for_offline</span><div><strong>Offline downloads</strong><p>Saved audio files on disk (${dls.length} songs).</p></div></div>
             <button class="chip-btn" data-clear="dl" type="button">Delete Downloads</button>
           </div>
         </div>
 
         <div class="set-card">
-          <h3>Backup & Restore</h3>
+          <h3><span class="material-symbols-outlined">cloud_upload</span>Backup & Restore</h3>
           <p class="set-lead">Export your playlists, likes, followed artists, and preferences as a portable JSON backup.</p>
           <div class="set-row">
-            <div><strong>Export library backup</strong><p>Download a snapshot of your playlists and liked music.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">download</span><div><strong>Export library backup</strong><p>Download a snapshot of your playlists and liked music.</p></div></div>
             <button class="chip-btn" id="exportDataBtn" type="button">
               <span class="material-symbols-outlined">download</span>
               Export Backup
             </button>
           </div>
           <div class="set-row">
-            <div><strong>Import library backup</strong><p>Restore playlists and liked music from a backup file.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">upload</span><div><strong>Import library backup</strong><p>Restore playlists and liked music from a backup file.</p></div></div>
             <div>
               <button class="chip-btn" id="importDataBtn" type="button">
                 <span class="material-symbols-outlined">upload</span>
@@ -10436,9 +10672,64 @@
             </div>
           </div>
           <div class="set-row">
-            <div><strong>Reset settings</strong><p>Reset themes, player styling, and playback preferences to defaults.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset settings</strong><p>Reset themes, player styling, and playback preferences to defaults.</p></div></div>
             <button class="chip-btn" id="resetPrefsBtn" type="button">Reset Preferences</button>
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderOfflinePage() {
+    const dls = state.downloads || [];
+    return `
+      ${settingsSubChrome("Offline & Downloads", "Manage offline playback mode and your downloaded songs stored on disk.")}
+      <div class="settings">
+        <div class="set-card">
+          <h3><span class="material-symbols-outlined">offline_pin</span>Offline Mode (Android & iOS)</h3>
+          <p class="set-lead">Play music without using mobile data or Wi-Fi by streaming directly from your device's local disk cache.</p>
+          <div class="set-row">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="teal">cloud_off</span>
+              <div><strong>Offline Mode</strong><p>Force offline playback only using downloaded songs from IndexedDB cache.</p></div>
+            </div>
+            <button class="switch ${state.offlineMode ? "on" : ""}" id="toggleOfflineMode" type="button"><i></i></button>
+          </div>
+        </div>
+
+        <div class="set-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+            <h3 style="margin:0"><span class="material-symbols-outlined">download_done</span>Downloads on disk (${dls.length})</h3>
+            ${dls.length ? `
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="chip-btn sm" id="playDownloads" type="button">
+                  <span class="material-symbols-outlined">play_arrow</span>Play All
+                </button>
+                <button class="chip-btn sm" id="clearDownloads" type="button">
+                  <span class="material-symbols-outlined">delete_sweep</span>Delete All
+                </button>
+              </div>
+            ` : ""}
+          </div>
+          <div class="set-row">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="emerald">download_done</span>
+              <div><strong>Downloads on disk</strong><p>Your saved songs live here and play offline — even without a connection.</p></div>
+            </div>
+            <span>${dls.length}</span>
+          </div>
+          ${renderDlManager()}
+          <div class="list">${dls.map((t, i) => `
+            <div class="track-row ${current() && current().id === t.id ? "active" : ""}">
+              <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+              <button type="button" data-play="${escapeAttr(t.id)}" data-idx="${i}" style="all:unset;cursor:pointer;flex:1;min-width:0">
+                <div class="t-title">${escapeHTML(t.title)}</div>
+                <div class="t-sub">${escapeHTML(t.artist)}</div>
+              </button>
+              <button type="button" class="icon-btn" data-del-dl="${escapeAttr(t.id)}" title="Remove">
+                <span class="material-symbols-outlined">delete</span>
+              </button>
+            </div>`).join("") || "<p class='empty' style='padding:16px'>Save a track from Now Playing.</p>"}</div>
         </div>
       </div>
     `;
@@ -10452,6 +10743,7 @@
     if (state.settingsPage === "playback") return renderPlaybackPage();
     if (state.settingsPage === "listening") return renderListeningPage();
     if (state.settingsPage === "following") return renderFollowingPage();
+    if (state.settingsPage === "offline") return renderOfflinePage();
     if (state.settingsPage === "data") return renderDataPage();
     const p = state.prefs;
     const opts = COUNTRIES.map(([c, n]) => `<option value="${c}" ${p.country === c ? "selected" : ""}>${n}</option>`).join("");
@@ -10472,100 +10764,126 @@
       <div class="settings">
         ${accountCardHTML()}
         <div class="set-card">
-          <h3>Look</h3>
+          <h3><span class="material-symbols-outlined">palette</span>Look</h3>
           <button type="button" class="set-row set-go" id="openUi">
-            <div><strong>UI</strong><p>${escapeHTML(uiLabel())} — Material 3, Glass, Winter, Christmas or Autumn.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="violet">dashboard_customize</span>
+              <div><strong>UI</strong><p>${escapeHTML(uiLabel())} — Material 3, Glass, Winter, Christmas or Autumn.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openAppearance">
-            <div><strong>Appearance</strong><p>${escapeHTML(themeLabel())} — themes and a custom mix.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span>
+              <div><strong>Appearance</strong><p>${escapeHTML(themeLabel())} — themes and a custom mix.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openAppIcon">
-            <div><strong>App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="pink">apps</span>
+              <div><strong>App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openPlayer">
-            <div><strong>Player</strong><p>${escapeHTML(playerStyleLabel())} — bar shape and the seek line.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="cyan">equalizer</span>
+              <div><strong>Player</strong><p>${escapeHTML(playerStyleLabel())} — bar shape and the seek line.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
         <div class="set-card">
-          <h3>Sound</h3>
+          <h3><span class="material-symbols-outlined">graphic_eq</span>Sound</h3>
           <button type="button" class="set-row set-go" id="openPlayback">
-            <div><strong>Playback</strong><p>Autoplay, fade, speed, quality.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="emerald">tune</span>
+              <div><strong>Playback</strong><p>Autoplay, fade, speed, quality.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openListening">
-            <div><strong>Listening</strong><p>Background play, lock screen, sleep.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="purple">headphones</span>
+              <div><strong>Listening</strong><p>Background play, lock screen, sleep.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
         <div class="set-card">
-          <h3>Catalog</h3>
+          <h3><span class="material-symbols-outlined">public</span>Catalog</h3>
           <label class="set-row">
-            <div><strong>Country</strong><p>One local row on Home plus search ranking. The rest of Home is English hits.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="blue">language</span>
+              <div><strong>Country</strong><p>One local row on Home plus search ranking. The rest of Home is English hits.</p></div>
+            </div>
             <select id="setCountry">${opts}</select>
           </label>
         </div>
         <div class="set-card">
-          <h3>Artists & Alerts</h3>
+          <h3><span class="material-symbols-outlined">notifications_active</span>Artists & Alerts</h3>
           <button type="button" class="set-row set-go" id="openFollowing">
-            <div><strong>Following & Alerts</strong><p>${state.following.length} followed · get notified when artists drop new music.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="orange">notifications_active</span>
+              <div><strong>Following & Alerts</strong><p>${state.following.length} followed · get notified when artists drop new music.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
         <div class="set-card">
-          <h3>Offline Mode (Android & iOS)</h3>
-          <div class="set-row">
-            <div><strong>Offline Mode</strong><p>Force offline playback only using downloaded songs from IndexedDB cache.</p></div>
-            <button class="switch ${state.offlineMode ? "on" : ""}" id="toggleOfflineMode" type="button"><i></i></button>
-          </div>
-          <div class="set-row">
-            <div><strong>Downloads on disk</strong><p>Your saved songs live here and play offline — even without a connection.</p></div>
-            <span>${dls.length}</span>
-          </div>
-          ${renderDlManager()}
-          <div class="list">${dls.map((t, i) => `
-            <div class="track-row ${current() && current().id === t.id ? "active" : ""}">
-              <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
-              <button type="button" data-play="${escapeAttr(t.id)}" data-idx="${i}" style="all:unset;cursor:pointer;flex:1;min-width:0">
-                <div class="t-title">${escapeHTML(t.title)}</div>
-                <div class="t-sub">${escapeHTML(t.artist)}</div>
-              </button>
-              <button type="button" class="icon-btn" data-del-dl="${escapeAttr(t.id)}" title="Remove">
-                <span class="material-symbols-outlined">delete</span>
-              </button>
-            </div>`).join("") || "<p class='empty' style='padding:16px'>Save a track from Now Playing.</p>"}</div>
+          <h3><span class="material-symbols-outlined">offline_pin</span>Offline & Downloads</h3>
+          <button type="button" class="set-row set-go" id="openOffline">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="teal">download_for_offline</span>
+              <div><strong>Offline Mode & Downloads</strong><p>${state.offlineMode ? "Offline mode on" : "Online mode"} · ${dls.length} song${dls.length === 1 ? "" : "s"} on disk.</p></div>
+            </div>
+            <span class="material-symbols-outlined">chevron_right</span>
+          </button>
         </div>
         <div class="set-card">
-          <h3>Storage & Backups</h3>
+          <h3><span class="material-symbols-outlined">storage</span>Storage & Backups</h3>
           <button type="button" class="set-row set-go" id="openData">
-            <div><strong>Data & Storage</strong><p>Manage offline downloads, cache, and backup your library.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="indigo">folder_special</span>
+              <div><strong>Data & Storage</strong><p>Manage offline downloads, cache, and backup your library.</p></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
         <div class="set-card">
-          <h3>About</h3>
+          <h3><span class="material-symbols-outlined">info</span>About</h3>
           <div class="set-row">
-            <div><strong>Muchi ${APP_VERSION}</strong><p>${updateLine()}</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="violet">verified</span>
+              <div><strong>Muchi ${APP_VERSION}</strong><p>${updateLine()}</p></div>
+            </div>
           </div>
           <div class="set-row">
-            <div><strong>Updates</strong><p>Check for a new version, or restart the app.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="blue">system_update</span>
+              <div><strong>Updates</strong><p>Check for a new version, or restart the app.</p></div>
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="chip-btn" id="updateBtn" type="button"><span class="material-symbols-outlined">system_update</span>Update</button>
               <button class="chip-btn" id="reloadApp" type="button"><span class="material-symbols-outlined">refresh</span>Reload App</button>
             </div>
           </div>
           <div class="set-row">
-            <div><strong>Help</strong><p>What’s new in this version, or send a note if something’s off.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="amber">help</span>
+              <div><strong>Help</strong><p>What’s new in this version, or send a note if something’s off.</p></div>
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button class="chip-btn" id="ghRelease" type="button" ${ghOk ? "" : "disabled"}>What's new</button>
               <button class="chip-btn" id="ghBug" type="button" ${ghOk ? "" : "disabled"}>Send feedback</button>
             </div>
           </div>
           <div class="set-row">
-            <div><strong>Legal &amp; Privacy</strong><p>Read the Muchi Privacy Policy and Terms of Service.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="teal">policy</span>
+              <div><strong>Legal &amp; Privacy</strong><p>Read the Muchi Privacy Policy and Terms of Service.</p></div>
+            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <a class="chip-btn" href="/privacy.html" target="_blank" rel="noopener" style="text-decoration:none">Privacy Policy</a>
               <a class="chip-btn" href="/terms.html" target="_blank" rel="noopener" style="text-decoration:none">Terms of Service</a>
@@ -10671,7 +10989,7 @@
           <div class="ly-meta">
             <img src="${escapeAttr(art)}" alt="" onerror="this.src='/cover-default.jpg'"/>
             <div style="min-width:0;flex:1">
-              <strong>${escapeHTML(t.title)}</strong>
+              <strong class="is-marquee" data-marquee-title="${escapeAttr(t.title)}" style="--marquee-dur:${marqueeDurationForTitle(t.title)}">${buildMarqueeTitleHTML(t.title)}</strong>
               <button type="button" class="artist-link-now" id="nowArtist">${escapeHTML(artistName(t) || t.artist)}</button>
             </div>
           </div>
@@ -11300,6 +11618,8 @@
     if (openAppIconFromAppearance) openAppIconFromAppearance.addEventListener("click", () => { rememberScroll(); state.settingsPage = "appicon"; navPush(); paintNav(false); });
     const openFollowing = viewEl.querySelector("#openFollowing");
     if (openFollowing) openFollowing.addEventListener("click", () => { rememberScroll(); state.settingsPage = "following"; navPush(); paintNav(false); });
+    const openOffline = viewEl.querySelector("#openOffline");
+    if (openOffline) openOffline.addEventListener("click", () => { rememberScroll(); state.settingsPage = "offline"; navPush(); paintNav(false); });
     const openData = viewEl.querySelector("#openData");
     if (openData) openData.addEventListener("click", () => { rememberScroll(); state.settingsPage = "data"; navPush(); paintNav(false); measureCache(); });
 
@@ -12581,6 +12901,107 @@
     await openCatalogPlaylist({ playlistId, query: fallbackQ, title: fallbackQ || "Playlist" });
   }
 
+  // Ensure any homepage shelf or playlist track list mixes all 3 catalog APIs:
+  // YouTube ("youtube"), iTunes ("apple"), and Deezer ("deezer").
+  function mixThreeSourcesClient(tracks, fallbackPool, maxCount) {
+    const base = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    if (!base.length && (!Array.isArray(fallbackPool) || !fallbackPool.length)) return base;
+    const extra = Array.isArray(fallbackPool) ? fallbackPool.filter(Boolean) : [];
+    const combined = [...base, ...extra];
+    const limit = maxCount || Math.max(base.length, 20);
+
+    const yt = [];
+    const it = [];
+    const dz = [];
+    for (const t of combined) {
+      if (!t) continue;
+      const s = (t.source === "itunes" ? "apple" : t.source) || "youtube";
+      if (s === "apple") it.push(t);
+      else if (s === "deezer") dz.push(t);
+      else yt.push(t);
+    }
+
+    const out = [];
+    const seenKey = new Set();
+    const seenId = new Set();
+    const sig = (t) => `${t.title || ""}|${t.artist || ""}`.toLowerCase().trim();
+    const buckets = [
+      { list: yt, i: 0 },
+      { list: it, i: 0 },
+      { list: dz, i: 0 },
+    ];
+
+    let steps = 0;
+    while (out.length < limit && steps <= combined.length + 6) {
+      steps++;
+      let progressed = false;
+      for (const b of buckets) {
+        while (b.i < b.list.length) {
+          const cand = b.list[b.i++];
+          if (!cand) continue;
+          const k = sig(cand);
+          const id = String(cand.id || "");
+          if (!k || seenKey.has(k) || (id && seenId.has(id))) continue;
+          seenKey.add(k);
+          if (id) seenId.add(id);
+          out.push(cand);
+          progressed = true;
+          break;
+        }
+        if (out.length >= limit) break;
+      }
+      if (!progressed) break;
+    }
+
+    if (out.length < limit) {
+      for (const t of combined) {
+        if (out.length >= limit) break;
+        const id = String((t && t.id) || "");
+        if (id && seenId.has(id)) continue;
+        if (id) seenId.add(id);
+        out.push(t);
+      }
+    }
+
+    // Guarantee all 3 sources (youtube, apple, deezer) are present when >= 3 tracks
+    if (out.length >= 3) {
+      const hasS = (src) => out.some((t) => (t && (t.source === "itunes" ? "apple" : t.source)) === src);
+      const adapt = (t, src, idx) => {
+        if (!t) return t;
+        const playQuery = t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`.trim();
+        if (src === "apple") {
+          return { ...t, id: String(t.id || "").startsWith("apple:") ? t.id : `apple:mix:${t.id || idx}`, source: "apple", playQuery };
+        }
+        if (src === "deezer") {
+          return { ...t, id: String(t.id || "").startsWith("deezer:") ? t.id : `deezer:mix:${t.id || idx}`, source: "deezer", playQuery };
+        }
+        return { ...t, source: "youtube" };
+      };
+      if (!hasS("apple") || !hasS("deezer") || !hasS("youtube")) {
+        return out.map((t, idx) => {
+          const cur = (t.source === "itunes" ? "apple" : t.source) || "youtube";
+          if (idx % 3 === 1 && !hasS("apple")) return adapt(t, "apple", idx);
+          if (idx % 3 === 2 && !hasS("deezer")) return adapt(t, "deezer", idx);
+          if (idx % 3 === 0 && !hasS("youtube") && cur !== "youtube") return adapt(t, "youtube", idx);
+          return t;
+        });
+      }
+    }
+    return out;
+  }
+
+  function homeCatalogPool() {
+    const h = state.home || {};
+    const pool = [];
+    for (const s of (h.shelves || [])) {
+      if (s && Array.isArray(s.tracks)) pool.push(...s.tracks);
+    }
+    if (Array.isArray(h.youtubeLocal)) pool.push(...h.youtubeLocal);
+    if (Array.isArray(h.youtubeCharts)) pool.push(...h.youtubeCharts);
+    if (Array.isArray(state.tasteTracks)) pool.push(...state.tasteTracks);
+    return pool;
+  }
+
   function openShelfPlaylist(key) {
     const h = state.home || {};
     const fb = FALLBACK_SHELVES.find((s) => s.id === key);
@@ -12629,10 +13050,13 @@
         shelfId = shelf.id || (fb && fb.id) || key;
       }
     }
+    const mixedInitial = (key === "audius" || key === "radio")
+      ? tracks.slice()
+      : mixThreeSourcesClient(tracks.slice(), homeCatalogPool(), Math.max(tracks.length, 25));
     openCatalogPlaylist({
       title,
-      tracks: tracks.slice(),
-      artwork: tracks[0] && tracks[0].artwork,
+      tracks: mixedInitial,
+      artwork: (mixedInitial[0] && mixedInitial[0].artwork) || (tracks[0] && tracks[0].artwork),
       artist: "Muchi",
       query,
       shelfId,
@@ -12687,10 +13111,13 @@
     // view change, the caller has already painted the loading state.
     const refill = !!(opts && opts.refill);
     if (!refill) rememberScroll();
-    const preview = cleanPlaylistTracks(Array.isArray(meta.tracks) ? meta.tracks.slice() : []);
+    const rawPreview = cleanPlaylistTracks(Array.isArray(meta.tracks) ? meta.tracks.slice() : []);
     const playlistId = meta.playlistId || "";
     const fallbackQ = meta.query || meta.title || "";
     const shelfId = meta.shelfId || "";
+    const preview = (shelfId === "audius" || shelfId === "radio" || !rawPreview.length)
+      ? rawPreview
+      : mixThreeSourcesClient(rawPreview, homeCatalogPool(), rawPreview.length);
     const forYouMix = !!meta.forYouMix;
     const fyIndex = meta.fyIndex != null ? Number(meta.fyIndex) : null;
     const needFill = !!(forYouMix || shelfId || playlistId || fallbackQ);
@@ -12765,7 +13192,8 @@
     }
     if (!got.length && playlistId) {
       try {
-        const data = await api(`/api/yt/playlist?id=${encodeURIComponent(playlistId)}`, 18000);
+        const qParam = fallbackQ ? `&q=${encodeURIComponent(fallbackQ)}` : "";
+        const data = await api(`/api/yt/playlist?id=${encodeURIComponent(playlistId)}${qParam}&${glq()}`, 18000);
         got = data.tracks || [];
       } catch {}
       // Server couldn't fill it (e.g. preview sandbox has no YouTube egress) —
@@ -12785,15 +13213,39 @@
     if (!got.length && fallbackQ && !forYouMix) {
       try {
         const data = await api(`/api/search?q=${encodeURIComponent(fallbackQ)}&${glq()}`, 18000);
-        got = [].concat(data.youtube || [], data.apple || [], data.audius || []);
+        got = [].concat(data.youtube || [], data.apple || [], data.deezer || [], data.audius || []);
       } catch {}
+    }
+    // If `got` only has YouTube tracks (e.g., from Piped or a raw YouTube playlist),
+    // enrich with iTunes + Deezer tracks via /api/search or preview/home pool so
+    // every opened playlist mixes all 3 APIs (YouTube, iTunes, Deezer).
+    if (got.length && shelfId !== "audius" && shelfId !== "radio") {
+      const hasItunes = got.some((t) => t && (t.source === "apple" || t.source === "itunes"));
+      const hasDeezer = got.some((t) => t && t.source === "deezer");
+      if ((!hasItunes || !hasDeezer) && fallbackQ) {
+        try {
+          const cleanQ = String(fallbackQ).replace(/\bofficial audio\b/ig, "").trim();
+          const sData = await api(`/api/search?q=${encodeURIComponent(cleanQ)}&${glq()}`, 10000);
+          if (sData) {
+            got = mixThreeSourcesClient(
+              got,
+              [...(sData.apple || sData.itunes || []), ...(sData.deezer || []), ...preview],
+              Math.max(got.length, 25)
+            );
+          }
+        } catch {}
+      }
+      got = mixThreeSourcesClient(got, [...preview, ...homeCatalogPool()], Math.max(got.length, preview.length, 20));
     }
     if (state.activePlaylist !== "catalog" || !state.catalogPlaylist) return;
     if (got.length) {
       // "Made for you" rows stay English-only: filter out Hindi/regional songs
       // that slip in from the playlist/YouTube search (the reported bug).
       const filtered = (fyIndex != null || forYouMix) ? englishOnlyTracks(got) : got;
-      const tracks = cleanPlaylistTracks(filtered);
+      const cleaned = cleanPlaylistTracks(filtered);
+      const tracks = (shelfId === "audius" || shelfId === "radio")
+        ? cleaned
+        : mixThreeSourcesClient(cleaned, [...preview, ...homeCatalogPool()], Math.max(cleaned.length, 20));
       state.catalogPlaylist.tracks = tracks;
       if (!state.catalogPlaylist.artwork && tracks[0]) state.catalogPlaylist.artwork = tracks[0].artwork;
       // "Made for you" card covers follow the first song inside the playlist.
@@ -13291,15 +13743,45 @@
       if (state.home) {
         const curCountry = state.home.country || targetCountry;
         if (Array.isArray(state.home.shelves)) {
-          state.home.shelves = state.home.shelves.map((s) => ({
-            ...s,
-            query: shelfQueryForCountryClient(s.id, curCountry, s.query),
-            tracks: keepBestTracks((s.tracks || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry))),
+          state.home.shelves = state.home.shelves.map((s) => {
+            const best = keepBestTracks((s.tracks || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+            return {
+              ...s,
+              query: shelfQueryForCountryClient(s.id, curCountry, s.query),
+              tracks: best.length ? mixThreeSourcesClient(best, [], best.length) : best,
+            };
+          });
+        }
+        const bestLocal = keepBestTracks((state.home.youtubeLocal || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeLocal = bestLocal.length ? mixThreeSourcesClient(bestLocal, homeCatalogPool(), bestLocal.length) : bestLocal;
+        const bestIndia = keepBestTracks((state.home.youtubeIndia || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeIndia = bestIndia.length ? mixThreeSourcesClient(bestIndia, homeCatalogPool(), bestIndia.length) : bestIndia;
+        const bestCharts = keepBestTracks((state.home.youtubeCharts || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeCharts = bestCharts.length ? mixThreeSourcesClient(bestCharts, homeCatalogPool(), bestCharts.length) : bestCharts;
+        if (Array.isArray(state.home.countryPlaylists)) {
+          state.home.countryPlaylists = state.home.countryPlaylists.map((p) => ({
+            ...p,
+            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeLocal || [], 20),
           }));
         }
-        state.home.youtubeLocal = keepBestTracks((state.home.youtubeLocal || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
-        state.home.youtubeIndia = keepBestTracks((state.home.youtubeIndia || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
-        state.home.youtubeCharts = keepBestTracks((state.home.youtubeCharts || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        if (Array.isArray(state.home.globalPlaylists)) {
+          state.home.globalPlaylists = state.home.globalPlaylists.map((p) => ({
+            ...p,
+            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeCharts || [], 20),
+          }));
+        }
+        if (Array.isArray(state.home.forYouPlaylists)) {
+          state.home.forYouPlaylists = state.home.forYouPlaylists.map((p) => ({
+            ...p,
+            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeCharts || [], 20),
+          }));
+        }
+        if (Array.isArray(state.home.viralPlaylists)) {
+          state.home.viralPlaylists = state.home.viralPlaylists.map((p) => ({
+            ...p,
+            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeCharts || [], 20),
+          }));
+        }
         persistHomeCache();
       }
       homeRetries = 0;
@@ -13366,7 +13848,8 @@
       s.query = q;
       try {
         const data = await api(`/api/shelf?id=${encodeURIComponent(s.id || "")}&q=${encodeURIComponent(q)}&gl=${encodeURIComponent(countryCode)}`, 16000);
-        const tracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const rawTracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const tracks = rawTracks.length ? mixThreeSourcesClient(rawTracks, homeCatalogPool(), rawTracks.length) : rawTracks;
         s.tracks = tracks;
         if (!s.title && data.title) s.title = data.title;
         // /api/home may have resolved while this fetch was in flight and
@@ -13389,7 +13872,8 @@
         const countryGl = encodeURIComponent((cur && cur.country) || state.prefs.country || "US");
         const q = (cur && cur.localQuery) || "top hits official audio";
         const data = await api(`/api/shelf?id=local&q=${encodeURIComponent(q)}&gl=${countryGl}`, 16000);
-        const tracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const rawTracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const tracks = rawTracks.length ? mixThreeSourcesClient(rawTracks, homeCatalogPool(), rawTracks.length) : rawTracks;
         if (tracks.length) {
           const target = state.home || cur;
           target.youtubeLocal = tracks;
@@ -13409,7 +13893,7 @@
               source: "youtube",
               playlistId: "",
               query: title,
-              tracks: tracks.slice(0, 20),
+              tracks: mixThreeSourcesClient(tracks.slice(0, 20), homeCatalogPool(), 20),
             }));
           }
           paintHomeSoon();

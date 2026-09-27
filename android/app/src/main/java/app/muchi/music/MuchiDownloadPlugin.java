@@ -123,6 +123,11 @@ public class MuchiDownloadPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void downloadTrack(PluginCall call) {
+        startDownload(call);
+    }
+
+    @PluginMethod
     public void startDownload(PluginCall call) {
         String id = call.getString("id", UUID.randomUUID().toString());
         final String url = call.getString("url", "");
@@ -132,8 +137,10 @@ public class MuchiDownloadPlugin extends Plugin {
         final String album = call.getString("album", "");
         final String genre = call.getString("genre", "");
         final String mime = call.getString("mime", "");
+        final String videoId = call.getString("videoId", "");
+        final String candidates = call.getString("candidates", "");
 
-        if (url.isEmpty()) {
+        if (url.isEmpty() && videoId.isEmpty() && title.isEmpty()) {
             call.reject("MuchiDownload: missing url");
             return;
         }
@@ -151,11 +158,13 @@ public class MuchiDownloadPlugin extends Plugin {
         calls.put(id, call);
         final Future<?> f = io.submit(() -> {
             try {
-                Uri uri = downloadFile(finalId, url, filename, title, artist, album, genre, mime);
-                uris.put(finalId, uri.toString());
+                DownloadOutcome out = downloadFile(finalId, url, videoId, candidates, filename, title, artist, album, genre, mime);
+                uris.put(finalId, out.uri.toString());
                 JSObject done = new JSObject();
                 done.put("id", finalId);
-                done.put("uri", uri.toString());
+                done.put("uri", out.uri.toString());
+                done.put("bytes", out.bytes);
+                done.put("mime", out.mime);
                 notifyListeners("done", done);
                 call.resolve(done);
             } catch (Exception e) {
@@ -545,62 +554,271 @@ public class MuchiDownloadPlugin extends Plugin {
 
     /* ── internals ─────────────────────────────────────────────────── */
 
-    private Uri downloadFile(String id, String url, String filename,
-                             String title, String artist, String album, String genre,
-                             String mime) throws IOException {
-        HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+    private static class DownloadOutcome {
+        final Uri uri;
+        final long bytes;
+        final String mime;
+        DownloadOutcome(Uri uri, long bytes, String mime) {
+            this.uri = uri;
+            this.bytes = bytes;
+            this.mime = mime;
+        }
+    }
+
+    private static String extractQueryParam(String url, String key) {
+        if (url == null || key == null) return "";
+        try {
+            int qIdx = url.indexOf('?');
+            if (qIdx < 0) return "";
+            String qs = url.substring(qIdx + 1);
+            for (String part : qs.split("&")) {
+                int eq = part.indexOf('=');
+                if (eq > 0 && key.equals(part.substring(0, eq))) {
+                    return java.net.URLDecoder.decode(part.substring(eq + 1), "UTF-8");
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
+    private DownloadOutcome downloadFile(String id, String url, String videoId, String candidates,
+                                         String filename, String title, String artist, String album,
+                                         String genre, String mime) throws IOException {
+        String vid = videoId != null ? videoId.trim() : "";
+        if (vid.isEmpty() && id != null && id.startsWith("yt:")) {
+            vid = id.substring(3).trim();
+        }
+        if (vid.isEmpty() && url != null && url.startsWith("yt:")) {
+            vid = url.substring(3).trim();
+        }
+        if (vid.isEmpty()) {
+            vid = extractQueryParam(url, "v");
+            if (vid.isEmpty()) vid = extractQueryParam(url, "videoId");
+        }
+
+        String targetUrl = url != null ? url : "";
+        String userAgent = "Muchi/1.7.3";
+        String resolvedMime = mime != null && !mime.isEmpty() ? mime : "audio/mp4";
+
+        // Resolve YouTube/catalog tracks directly on the user's residential phone IP
+        // via MuchiAudioService so downloads never hit datacenter IP blocks or preview fallbacks.
+        boolean isYtOrProxy = !vid.isEmpty()
+                || targetUrl.isEmpty()
+                || targetUrl.startsWith("yt:")
+                || targetUrl.contains("/api/download")
+                || targetUrl.contains("/api/stream")
+                || targetUrl.contains("googlevideo.com");
+        if (isYtOrProxy && (!vid.isEmpty() || !title.isEmpty())) {
+            MuchiAudioService.ResolvedStream rs =
+                    MuchiAudioService.resolveStreamForDownload(vid, candidates, title, artist);
+            if (rs != null && rs.url != null && !rs.url.isEmpty()) {
+                targetUrl = rs.url;
+                if (rs.userAgent != null && !rs.userAgent.isEmpty()) {
+                    userAgent = rs.userAgent;
+                }
+                if (rs.mimeType != null && !rs.mimeType.isEmpty()) {
+                    resolvedMime = rs.mimeType;
+                }
+            }
+        }
+
+        if (targetUrl.isEmpty() || targetUrl.startsWith("yt:")) {
+            throw new IOException("Could not resolve full audio stream for download");
+        }
+
+        // For googlevideo.com adaptive streams, download in 4 MB byte-range chunks
+        // so YouTube never throttles or truncates the download mid-song.
+        if (targetUrl.contains("googlevideo.com")) {
+            return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+        }
+
+        HttpURLConnection con = (HttpURLConnection) new URL(targetUrl).openConnection();
         con.setConnectTimeout(20000);
         con.setReadTimeout(30000);
         con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "Muchi/1.5.6");
+        con.setRequestProperty("User-Agent", userAgent);
         con.setRequestProperty("Accept", "audio/*,*/*");
-        // We need the whole file, not a video-dash stream.
         con.setRequestProperty("Range", "bytes=0-");
         try {
             int code = con.getResponseCode();
             if (code >= 400) throw new IOException("download failed (" + code + ")");
+            String muchiSrc = con.getHeaderField("X-Muchi-Source");
+            if (muchiSrc != null && (muchiSrc.contains("preview") || muchiSrc.contains("seed"))) {
+                throw new IOException("Refusing preview stream for full song download");
+            }
             long total = con.getContentLengthLong();
             if (total < 0 && con.getHeaderField("Content-Range") != null) {
                 String cr = con.getHeaderField("Content-Range");
                 int slash = cr.indexOf('/');
-                if (slash >= 0) total = Long.parseLong(cr.substring(slash + 1).trim());
+                if (slash >= 0) {
+                    try { total = Long.parseLong(cr.substring(slash + 1).trim()); } catch (Exception ignored) {}
+                }
             }
             String contentType = con.getContentType();
-            return writeToMediaStore(id, con, total, filename, title, artist, album, genre, contentType);
+            if (contentType != null && contentType.toLowerCase().contains("audio/wav")) {
+                throw new IOException("Refusing synthetic WAV stream for song download");
+            }
+            return writeToMediaStore(id, con, total, filename, title, artist, album, genre, contentType != null ? contentType : resolvedMime);
         } finally {
             con.disconnect();
         }
     }
 
-    private Uri writeToMediaStore(String id, HttpURLConnection con, long total,
-                                  String filename, String title, String artist, String album,
-                                  String genre, String contentType) throws IOException {
-        ContentResolver resolver = getContext().getContentResolver();
-        // The server returns the real audio Content-Type; use it to pick the
-        // correct extension + MIME so m4a/webm/mp3 are saved as what they are.
-        String realMime = contentType == null || contentType.isEmpty() ? "audio/webm" : contentType.split(";")[0].trim();
+    private DownloadOutcome downloadChunkedToMediaStore(String id, String targetUrl, String userAgent,
+                                                        String filename, String title, String artist,
+                                                        String album, String genre, String fallbackMime) throws IOException {
+        long clen = -1L;
+        String clenStr = extractQueryParam(targetUrl, "clen");
+        if (!clenStr.isEmpty()) {
+            try { clen = Long.parseLong(clenStr); } catch (Exception ignored) {}
+        }
+        String realMime = fallbackMime != null && !fallbackMime.isEmpty() ? fallbackMime.split(";")[0].trim() : "audio/mp4";
         String ext = extensionFor(realMime);
         String safeName = filename;
-        // Fix a mismatched/guessed extension (JS often says webm for a m4a
-        // Piped stream). If the name's extension differs from the real one,
-        // trust the upstream Content-Type.
         String nameExt = extForName(safeName);
         if (safeName.indexOf('.') <= 0 || !nameExt.equals(ext)) {
             safeName = stripExt(safeName) + "." + ext;
         }
-        String mimeType = realMime;
-
-        Uri outputUri = null;
-        OutputStream out = null;
-        File plainFile = null;
 
         File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_MUSIC), "Muchi");
         if (!dir.exists() && !dir.mkdirs()) {
             dir = new File(getContext().getFilesDir(), "music");
             if (!dir.exists()) dir.mkdirs();
         }
-        plainFile = new File(dir, safeName);
-        out = new FileOutputStream(plainFile);
+        File plainFile = new File(dir, safeName);
+        long done = 0L;
+        final long chunkSize = 4L * 1024L * 1024L; // 4 MB range chunks
+
+        try (OutputStream out = new FileOutputStream(plainFile)) {
+            while (true) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new IOException("Download cancelled");
+                }
+                long end = (clen > 0) ? Math.min(clen - 1, done + chunkSize - 1) : (done + chunkSize - 1);
+                HttpURLConnection con = (HttpURLConnection) new URL(targetUrl).openConnection();
+                con.setConnectTimeout(15000);
+                con.setReadTimeout(25000);
+                con.setInstanceFollowRedirects(true);
+                con.setRequestProperty("User-Agent", userAgent);
+                con.setRequestProperty("Origin", "https://www.youtube.com");
+                con.setRequestProperty("Referer", "https://www.youtube.com/");
+                con.setRequestProperty("Accept", "*/*");
+                con.setRequestProperty("Range", "bytes=" + done + "-" + end);
+                long chunkRead = 0L;
+                try {
+                    int code = con.getResponseCode();
+                    if (code >= 400) {
+                        throw new IOException("Stream chunk failed (" + code + ")");
+                    }
+                    if (clen <= 0) {
+                        String cr = con.getHeaderField("Content-Range");
+                        if (cr != null && cr.indexOf('/') >= 0) {
+                            try {
+                                clen = Long.parseLong(cr.substring(cr.indexOf('/') + 1).trim());
+                            } catch (Exception ignored) {}
+                        }
+                        if (clen <= 0 && code == 200) {
+                            clen = con.getContentLengthLong();
+                        }
+                    }
+                    try (InputStream in = con.getInputStream()) {
+                        byte[] buf = new byte[64 * 1024];
+                        int n;
+                        while ((n = in.read(buf)) > 0) {
+                            if (Thread.currentThread().isInterrupted()) {
+                                throw new IOException("Download cancelled");
+                            }
+                            out.write(buf, 0, n);
+                            done += n;
+                            chunkRead += n;
+                            if (done % (256 * 1024) == 0 || (clen > 0 && done >= clen)) {
+                                JSObject p = new JSObject();
+                                p.put("id", id);
+                                p.put("bytes", done);
+                                p.put("total", clen <= 0 ? done : clen);
+                                p.put("progress", clen <= 0 ? 0f : (float) done / (float) clen);
+                                notifyListeners("progress", p);
+                            }
+                        }
+                    }
+                    // If server returned 200 OK (ignored Range and sent full stream), we are done
+                    if (code == 200) break;
+                } finally {
+                    con.disconnect();
+                }
+                if (chunkRead <= 0) break;
+                if (clen > 0 && done >= clen) break;
+            }
+        } catch (Exception e) {
+            if (plainFile.exists()) plainFile.delete();
+            throw (e instanceof IOException) ? (IOException) e : new IOException(e);
+        }
+
+        if (!plainFile.exists() || plainFile.length() < 64 * 1024) {
+            if (plainFile.exists()) plainFile.delete();
+            throw new IOException("Downloaded audio file is incomplete (<64 KB)");
+        }
+
+        publishFileToMediaStore(plainFile, safeName, realMime, title, artist, album);
+        return new DownloadOutcome(Uri.fromFile(plainFile), plainFile.length(), realMime);
+    }
+
+    private void publishFileToMediaStore(File plainFile, String safeName, String mimeType,
+                                         String title, String artist, String album) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                ContentResolver resolver = getContext().getContentResolver();
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Audio.Media.DISPLAY_NAME, safeName);
+                values.put(MediaStore.Audio.Media.MIME_TYPE, mimeType);
+                values.put(MediaStore.Audio.Media.TITLE, title.isEmpty() ? stripExt(safeName) : title);
+                if (!artist.isEmpty()) values.put(MediaStore.Audio.Media.ARTIST, artist);
+                if (!album.isEmpty()) values.put(MediaStore.Audio.Media.ALBUM, album);
+                values.put(MediaStore.Audio.Media.IS_MUSIC, 1);
+                values.put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Muchi");
+                values.put(MediaStore.Audio.Media.BUCKET_DISPLAY_NAME, "Muchi");
+                values.put(MediaStore.Audio.Media.IS_PENDING, 1);
+                values.put(MediaStore.Audio.Media.DATE_ADDED, System.currentTimeMillis() / 1000);
+                values.put(MediaStore.Audio.Media.DATE_TAKEN, System.currentTimeMillis());
+                Uri outputUri = resolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+                if (outputUri != null) {
+                    try (OutputStream mediaOut = resolver.openOutputStream(outputUri);
+                         InputStream fileIn = new FileInputStream(plainFile)) {
+                        if (mediaOut != null) {
+                            byte[] copyBuf = new byte[64 * 1024];
+                            int r;
+                            while ((r = fileIn.read(copyBuf)) > 0) {
+                                mediaOut.write(copyBuf, 0, r);
+                            }
+                        }
+                    }
+                    ContentValues doneValues = new ContentValues();
+                    doneValues.put(MediaStore.Audio.Media.IS_PENDING, 0);
+                    resolver.update(outputUri, doneValues, null, null);
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private DownloadOutcome writeToMediaStore(String id, HttpURLConnection con, long total,
+                                              String filename, String title, String artist, String album,
+                                              String genre, String contentType) throws IOException {
+        String realMime = contentType == null || contentType.isEmpty() ? "audio/mp4" : contentType.split(";")[0].trim();
+        String ext = extensionFor(realMime);
+        String safeName = filename;
+        String nameExt = extForName(safeName);
+        if (safeName.indexOf('.') <= 0 || !nameExt.equals(ext)) {
+            safeName = stripExt(safeName) + "." + ext;
+        }
+        String mimeType = realMime;
+
+        File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_MUSIC), "Muchi");
+        if (!dir.exists() && !dir.mkdirs()) {
+            dir = new File(getContext().getFilesDir(), "music");
+            if (!dir.exists()) dir.mkdirs();
+        }
+        File plainFile = new File(dir, safeName);
+        OutputStream out = new FileOutputStream(plainFile);
 
         try (InputStream in = con.getInputStream()) {
             byte[] buf = new byte[64 * 1024];
@@ -620,7 +838,6 @@ public class MuchiDownloadPlugin extends Plugin {
                 }
             }
         } catch (Exception e) {
-            // Cancelled or network error mid-stream → clean up the partial file.
             try { out.close(); } catch (Exception ignored) {}
             if (plainFile != null) plainFile.delete();
             throw e;
@@ -628,40 +845,13 @@ public class MuchiDownloadPlugin extends Plugin {
             try { out.close(); } catch (Exception ignored) {}
         }
 
-        // Publish to MediaStore so other apps and system players can index the song as well
-        if (Build.VERSION.SDK_INT >= 29) {
-            try {
-                ContentValues values = new ContentValues();
-                values.put(MediaStore.Audio.Media.DISPLAY_NAME, safeName);
-                values.put(MediaStore.Audio.Media.MIME_TYPE, mimeType);
-                values.put(MediaStore.Audio.Media.TITLE, title.isEmpty() ? stripExt(safeName) : title);
-                if (!artist.isEmpty()) values.put(MediaStore.Audio.Media.ARTIST, artist);
-                if (!album.isEmpty()) values.put(MediaStore.Audio.Media.ALBUM, album);
-                values.put(MediaStore.Audio.Media.IS_MUSIC, 1);
-                values.put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Muchi");
-                values.put(MediaStore.Audio.Media.BUCKET_DISPLAY_NAME, "Muchi");
-                values.put(MediaStore.Audio.Media.IS_PENDING, 1);
-                values.put(MediaStore.Audio.Media.DATE_ADDED, System.currentTimeMillis() / 1000);
-                values.put(MediaStore.Audio.Media.DATE_TAKEN, System.currentTimeMillis());
-                outputUri = resolver.insert(MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
-                if (outputUri != null) {
-                    try (OutputStream mediaOut = resolver.openOutputStream(outputUri);
-                         InputStream fileIn = new FileInputStream(plainFile)) {
-                        byte[] copyBuf = new byte[64 * 1024];
-                        int r;
-                        while ((r = fileIn.read(copyBuf)) > 0) {
-                            mediaOut.write(copyBuf, 0, r);
-                        }
-                    }
-                    ContentValues doneValues = new ContentValues();
-                    doneValues.put(MediaStore.Audio.Media.IS_PENDING, 0);
-                    resolver.update(outputUri, doneValues, null, null);
-                }
-            } catch (Exception ignored) {}
+        if (!plainFile.exists() || plainFile.length() < 64 * 1024) {
+            if (plainFile.exists()) plainFile.delete();
+            throw new IOException("Downloaded audio file is incomplete (<64 KB)");
         }
 
-        // Always return the direct local file URI so Muchi plays it completely offline with zero permissions
-        return Uri.fromFile(plainFile);
+        publishFileToMediaStore(plainFile, safeName, mimeType, title, artist, album);
+        return new DownloadOutcome(Uri.fromFile(plainFile), plainFile.length(), mimeType);
     }
 
     private void destError(String id, String msg) {

@@ -857,64 +857,230 @@ export function parseLyricsHit(hit) {
       if (m) synced.push({ t: Number(m[1]) * 60 + Number(m[2]), text: m[3].trim() });
     }
   }
-  const lyrics = hit.plainLyrics || "";
+  const lyrics = String(hit.plainLyrics || "").trim();
   if (!lyrics && !synced.length) return null;
   return { lyrics, synced, title: hit.trackName, artist: hit.artistName };
 }
 
+function normLyricToken(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\u0900-\u097f\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]+/g, " ")
+    .trim();
+}
+
+function pickBestLyricsHit(list, wantTitle, wantArtist, wantDur) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const wt = normLyricToken(wantTitle);
+  const wa = normLyricToken(wantArtist);
+  let best = null;
+  let bestScore = -1;
+  for (const item of list) {
+    const parsed = parseLyricsHit(item);
+    if (!parsed) continue;
+    let score = 0;
+    if (parsed.synced && parsed.synced.length) score += 25;
+    if (parsed.lyrics) score += 10;
+    const it = normLyricToken(item.trackName);
+    const ia = normLyricToken(item.artistName);
+    if (wt && it) {
+      if (it === wt) score += 40;
+      else if (it.startsWith(wt) || wt.startsWith(it)) score += 28;
+      else if (it.includes(wt) || wt.includes(it)) score += 18;
+    }
+    if (wa && ia) {
+      if (ia === wa) score += 35;
+      else if (ia.includes(wa) || wa.includes(ia)) score += 24;
+      else {
+        const waFirst = wa.split(" ")[0];
+        if (waFirst && waFirst.length > 2 && ia.includes(waFirst)) score += 12;
+      }
+    }
+    if (wantDur > 0 && item.duration) {
+      const diff = Math.abs(Number(item.duration) - wantDur);
+      if (diff <= 3) score += 18;
+      else if (diff <= 10) score += 10;
+      else if (diff <= 25) score += 4;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = parsed;
+    }
+  }
+  return best;
+}
+
 export async function lyricsFor(title, artist, duration) {
-  const t = tidyTitle(title);
-  const a = tidyArtist(artist);
-  const dur = Math.max(1, Math.round(Number(duration) || 0));
-  // LRCLIB requires a User-Agent identifying the client; otherwise it may
-  // throttle/block. The `/api/get` endpoint matches much more precisely when
-  // the track's `duration` is supplied (LRCLIB only returns lyrics when the
-  // duration matches within ±2 s) — without it many songs return 404, which
-  // is exactly the "no lyrics" bug. We set both here and fall back to search.
+  const rawTitle = String(title || "").trim();
+  const rawArtist = String(artist || "").trim();
+  const t = tidyTitle(rawTitle);
+  const a = tidyArtist(rawArtist);
+  const dur = Math.max(0, Math.round(Number(duration) || 0));
+
+  // Build candidate (track, artist) pairs to handle YouTube "Artist - Title",
+  // "Title - Artist", "Title | Movie", and parenthetical suffixes.
+  const stripParens = (s) =>
+    String(s || "")
+      .replace(/\s*[\[(][^)\]]*[)\]]/g, " ")
+      .replace(/\s*["'“”‘’]/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+  const coreTitle = stripParens(t) || t;
+  const candidatePairs = [];
+  const seenPairs = new Set();
+  const addPair = (tr, ar) => {
+    const ct = tidyTitle(tr).replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").trim();
+    const ca = tidyArtist(ar).trim();
+    if (!ct) return;
+    const k = `${ct.toLowerCase()}|${ca.toLowerCase()}`;
+    if (seenPairs.has(k)) return;
+    seenPairs.add(k);
+    candidatePairs.push({ track: ct, artist: ca });
+  };
+
+  // If title contains " - " / " – " / " — " (common in YouTube videos like "Artist - Song")
+  const dashParts = t.split(/\s+[-–—]\s+/).map((x) => x.trim()).filter(Boolean);
+  if (dashParts.length >= 2) {
+    const left = dashParts[0];
+    const right = dashParts.slice(1).join(" - ");
+    // If artist is missing or matches left, prefer right as the song title
+    if (!a || normLyricToken(left) === normLyricToken(a) || normLyricToken(a).includes(normLyricToken(left))) {
+      addPair(right, a || left);
+      addPair(stripParens(right), a || left);
+    }
+    addPair(t, a);
+    addPair(right, left);
+    addPair(left, right);
+  }
+
+  addPair(t, a);
+  if (coreTitle && coreTitle !== t) addPair(coreTitle, a);
+  if (a) {
+    // Also strip leading "Artist - " if still attached
+    const escapedA = a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const strippedLead = coreTitle.replace(new RegExp(`^${escapedA}\\s*[-–—:|]\\s*`, "i"), "").trim();
+    if (strippedLead && strippedLead !== coreTitle) addPair(strippedLead, a);
+  }
+
   const UA = `${APP_NAME}/${APP_VERSION} (https://github.com/Kaibshshdheueejw/Muchi)`;
   const lrcHeaders = {
     "User-Agent": UA,
     "X-User-Agent": UA,
     "Lrclib-Client": `${APP_NAME}/${APP_VERSION}`,
-    "Accept": "application/json",
+    Accept: "application/json",
   };
+
   const tries = [];
-  if (a && t) {
-    const get = new URLSearchParams({ artist_name: a, track_name: t });
-    if (dur) get.set("duration", String(dur));
-    tries.push({ url: `https://lrclib.net/api/get?${get.toString()}`, headers: lrcHeaders });
+  const seenUrls = new Set();
+  const pushTry = (url) => {
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    tries.push({ url, headers: lrcHeaders });
+  };
+
+  const primary = candidatePairs[0] || { track: coreTitle || t, artist: a };
+
+  for (const pair of candidatePairs.slice(0, 4)) {
+    if (pair.artist && pair.track) {
+      if (dur > 0) {
+        const getWithDur = new URLSearchParams({
+          artist_name: pair.artist,
+          track_name: pair.track,
+          duration: String(dur),
+        });
+        pushTry(`https://lrclib.net/api/get?${getWithDur.toString()}`);
+      }
+      const getNoDur = new URLSearchParams({
+        artist_name: pair.artist,
+        track_name: pair.track,
+      });
+      pushTry(`https://lrclib.net/api/get?${getNoDur.toString()}`);
+
+      const searchStructured = new URLSearchParams({
+        track_name: pair.track,
+        artist_name: pair.artist,
+      });
+      pushTry(`https://lrclib.net/api/search?${searchStructured.toString()}`);
+      pushTry(`https://lrclib.net/api/search?q=${encodeURIComponent(`${pair.artist} ${pair.track}`)}`);
+    }
   }
-  const q = [a, t].filter(Boolean).join(" ");
-  if (q) tries.push({ url: `https://lrclib.net/api/search?q=${encodeURIComponent(q)}`, headers: lrcHeaders });
-  if (t) {
-    const search = new URLSearchParams({ track_name: t });
-    if (a) search.set("artist_name", a);
-    tries.push({ url: `https://lrclib.net/api/search?${search.toString()}`, headers: lrcHeaders });
+
+  // Title-focused searches in case the artist was a YouTube channel or collab string
+  if (primary.track) {
+    const searchTitleOnly = new URLSearchParams({ track_name: primary.track });
+    pushTry(`https://lrclib.net/api/search?${searchTitleOnly.toString()}`);
+    pushTry(`https://lrclib.net/api/search?q=${encodeURIComponent(primary.track)}`);
   }
+
   for (const { url, headers } of tries) {
     try {
-      const data = await fetchJSON(url, { headers }, 10000);
+      const data = await fetchJSON(url, { headers }, 7500);
       if (Array.isArray(data)) {
-        const hit = data.find((x) => x.plainLyrics || x.syncedLyrics) || data[0];
-        const parsed = parseLyricsHit(hit);
-        if (parsed) return parsed;
+        const best = pickBestLyricsHit(data, primary.track, primary.artist, dur);
+        if (best) return best;
       } else {
         const parsed = parseLyricsHit(data);
         if (parsed) return parsed;
       }
     } catch {}
   }
-  // Fallback: a second, request-hosted lyrics mirror keeps the feature useful
-  // when LRCLIB is throttling/overloaded. Best-effort only.
-  if (q) {
+
+  // Stage 2: Canonicalize via iTunes Search API when YouTube/uploader metadata is noisy
+  const lookupQ = [primary.track, primary.artist].filter(Boolean).join(" ").trim();
+  if (lookupQ) {
     try {
-      const data = await fetchJSON(`https://lrclib.net/api/search?q=${encodeURIComponent(q)}`, { headers: lrcHeaders }, 8000);
-      const arr = Array.isArray(data) ? data : [data];
-      const hit = arr.find((x) => x.plainLyrics || x.syncedLyrics) || arr[0];
-      const parsed = parseLyricsHit(hit);
-      if (parsed) return parsed;
+      const it = await itunesSearch(lookupQ, { includeExtra: false });
+      const topSong = it && Array.isArray(it.songs) && it.songs[0];
+      if (topSong && topSong.title) {
+        const canonT = tidyTitle(topSong.title);
+        const canonA = tidyArtist(topSong.artist);
+        const canonUrls = [];
+        if (canonA && canonT) {
+          const s1 = new URLSearchParams({ track_name: canonT, artist_name: canonA });
+          canonUrls.push(`https://lrclib.net/api/search?${s1.toString()}`);
+          canonUrls.push(`https://lrclib.net/api/search?q=${encodeURIComponent(`${canonA} ${canonT}`)}`);
+        }
+        for (const u of canonUrls) {
+          if (seenUrls.has(u)) continue;
+          seenUrls.add(u);
+          try {
+            const data = await fetchJSON(u, { headers: lrcHeaders }, 7000);
+            const best = Array.isArray(data)
+              ? pickBestLyricsHit(data, canonT, canonA, topSong.duration || dur)
+              : parseLyricsHit(data);
+            if (best) return best;
+          } catch {}
+        }
+        if (canonA && canonT) {
+          addPair(canonT, canonA);
+        }
+      }
     } catch {}
   }
+
+  // Stage 3: Fallback to lyrics.ovh for plain lyrics when LRCLIB doesn't have the song
+  for (const pair of candidatePairs.slice(0, 3)) {
+    if (!pair.artist || !pair.track) continue;
+    try {
+      const ovh = await fetchJSON(
+        `https://api.lyrics.ovh/v1/${encodeURIComponent(pair.artist)}/${encodeURIComponent(pair.track)}`,
+        {},
+        6500
+      );
+      if (ovh && typeof ovh.lyrics === "string" && ovh.lyrics.trim()) {
+        const cleaned = ovh.lyrics
+          .replace(/^Paroles de la chanson .*?\r?\n/i, "")
+          .trim();
+        if (cleaned) {
+          return { lyrics: cleaned, synced: [], title: pair.track, artist: pair.artist };
+        }
+      }
+    } catch {}
+  }
+
   return { lyrics: "", synced: [] };
 }
 
