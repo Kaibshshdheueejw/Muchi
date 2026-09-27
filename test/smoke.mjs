@@ -813,7 +813,58 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.4", APP_VERSION === "1.7.4" && appJs.includes('const APP_VERSION = "1.7.4"'));
+  ok("version: APP_VERSION is 1.7.5", APP_VERSION === "1.7.5" && appJs.includes('const APP_VERSION = "1.7.5"'));
+  {
+    const javaFiles = [
+      ["MainActivity.java", androidMainActivity],
+      ["MuchiAudioPlugin.java", androidPlugin],
+      ["MuchiAudioService.java", androidService],
+      ["MuchiDownloadPlugin.java", androidDownloadPlugin],
+    ];
+    let javaErrors = [];
+    for (const [fname, raw] of javaFiles) {
+      // Single-pass strip of comments and string literals so "https://..." never triggers // comment stripping
+      const stripped = raw.replace(
+        /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g,
+        (m) => (m.startsWith('"') ? '""' : m.startsWith("'") ? "''" : "")
+      );
+      let depth = 0;
+      const scopeMethods = new Map();
+      const lines = stripped.split("\n");
+      for (let idx = 0; idx < lines.length; idx++) {
+        const line = lines[idx];
+        // Match top-level or nested class method declarations at current brace depth
+        const m = line.match(/^\s*(?:(?:public|protected|private|static|final|synchronized)\s+)+[\w<>\[\].,\s]+\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)\s*(?:throws\s+[\w.,\s]+)?\{/);
+        if (m && !["if", "for", "while", "switch", "catch", "synchronized"].includes(m[1])) {
+          const paramTypes = m[2]
+            .split(",")
+            .map((p) => p.trim().replace(/^final\s+/, "").replace(/@\w+\s+/g, "").split(/\s+/)[0] || "")
+            .join(",");
+          const sig = `${depth}:${m[1]}(${paramTypes})`;
+          if (scopeMethods.has(sig)) {
+            javaErrors.push(`${fname}:${idx + 1} duplicate method ${sig}`);
+          }
+          scopeMethods.set(sig, idx + 1);
+        }
+        for (const ch of line) {
+          if (ch === "{") depth++;
+          else if (ch === "}") {
+            // Clear inner scope methods when exiting a block
+            for (const k of scopeMethods.keys()) {
+              if (k.startsWith(`${depth}:`)) scopeMethods.delete(k);
+            }
+            depth--;
+          }
+        }
+      }
+      if (depth !== 0) javaErrors.push(`${fname} unbalanced braces (depth=${depth})`);
+    }
+    const loadMatches = androidPlugin.match(/public\s+void\s+load\s*\(\s*\)/g) || [];
+    ok("android java: all 4 Java files have balanced braces, zero duplicate method signatures, and single load() in MuchiAudioPlugin",
+      javaErrors.length === 0 && loadMatches.length === 1,
+      javaErrors.join("; ")
+    );
+  }
   ok("player timer bar (1.7.4): dual-layer seek-wave-bg & seek-wave-fg paths, 250ms native+web progress ticks, URL duration parser, and non-sticky activeScrub",
     appJs.includes('bgPath.setAttribute("class", "seek-wave-bg")') &&
     appJs.includes('fgPath.setAttribute("class", "seek-wave-fg")') &&

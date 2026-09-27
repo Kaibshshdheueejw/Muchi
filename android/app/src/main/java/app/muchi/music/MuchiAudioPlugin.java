@@ -50,12 +50,6 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     public static final String NOTIFICATIONS_ALIAS = "notifications";
     private static final long BIND_TIMEOUT_MS = 8000;
 
-    @Override
-    public void load() {
-        super.load();
-        ensureService(null);
-    }
-
     private MuchiAudioService.LocalBinder service;
     private boolean bound = false;
 
@@ -102,6 +96,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     public void load() {
         super.load();
         MuchiAudioService.setStaticListener(this);
+        ensureService(null);
     }
 
     @Override

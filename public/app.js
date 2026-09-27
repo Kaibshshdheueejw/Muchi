@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.4";
+  const APP_VERSION = "1.7.5";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -9645,6 +9645,16 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.7.5",
+      title: "Muchi 1.7.5",
+      notes: [
+        "New Timestamp Wiggle styles in Settings → Player: replaced Beat Pulse and Electric Zigzag with Harmonic Ribbon and Laser Glow alongside Sine Wave and Double Helix, with smooth endpoint tapering.",
+        "Fixed offline downloaded song seeking across Android, iOS, and Web by shifting MP4 stco/co64/tfhd sample table chunk offsets on metadata tag embedding and fixing Capacitor Android seekTo long coercion.",
+        "Offline lyrics now persist automatically when downloading songs and move/highlight in real time during offline playback.",
+        "Resolved duplicate load() method in MuchiAudioPlugin.java for clean Android release APK compilation.",
+      ],
+    },
     {
       ver: "1.7.4",
       title: "Muchi 1.7.4",
