@@ -145,14 +145,68 @@
     return box("meta", concat(new Uint8Array(u32be(0)), hdlr, ilst));
   }
   function buildUdta(m) { return box("udta", buildMeta(m)); }
+  function shiftSampleTableOffsets(bytes, start, end, thresholdOffset, delta) {
+    if (!delta) return;
+    var boxes = parseBoxes(bytes, start, end);
+    for (var i = 0; i < boxes.length; i++) {
+      var b = boxes[i];
+      if (b.type === "trak" || b.type === "mdia" || b.type === "minf" || b.type === "stbl" || b.type === "moof" || b.type === "traf") {
+        shiftSampleTableOffsets(bytes, b.payloadStart, b.payloadEnd, thresholdOffset, delta);
+      } else if (b.type === "stco") {
+        if (b.payloadStart + 8 <= b.payloadEnd) {
+          var count = ((bytes[b.payloadStart + 4] << 24) | (bytes[b.payloadStart + 5] << 16) | (bytes[b.payloadStart + 6] << 8) | bytes[b.payloadStart + 7]) >>> 0;
+          var pos = b.payloadStart + 8;
+          for (var j = 0; j < count && pos + 4 <= b.payloadEnd; j++, pos += 4) {
+            var off = ((bytes[pos] << 24) | (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3]) >>> 0;
+            if (off >= thresholdOffset) {
+              var nextOff = (off + delta) >>> 0;
+              bytes.set(u32be(nextOff), pos);
+            }
+          }
+        }
+      } else if (b.type === "co64") {
+        if (b.payloadStart + 8 <= b.payloadEnd) {
+          var count64 = ((bytes[b.payloadStart + 4] << 24) | (bytes[b.payloadStart + 5] << 16) | (bytes[b.payloadStart + 6] << 8) | bytes[b.payloadStart + 7]) >>> 0;
+          var pos64 = b.payloadStart + 8;
+          for (var k = 0; k < count64 && pos64 + 8 <= b.payloadEnd; k++, pos64 += 8) {
+            var hi = ((bytes[pos64] << 24) | (bytes[pos64 + 1] << 16) | (bytes[pos64 + 2] << 8) | bytes[pos64 + 3]) >>> 0;
+            var lo = ((bytes[pos64 + 4] << 24) | (bytes[pos64 + 5] << 16) | (bytes[pos64 + 6] << 8) | bytes[pos64 + 7]) >>> 0;
+            var val = hi * 4294967296 + lo;
+            if (val >= thresholdOffset) {
+              var nextVal = val + delta;
+              var nextHi = Math.floor(nextVal / 4294967296) >>> 0;
+              var nextLo = (nextVal >>> 0);
+              bytes.set(u32be(nextHi), pos64);
+              bytes.set(u32be(nextLo), pos64 + 4);
+            }
+          }
+        }
+      } else if (b.type === "tfhd") {
+        if (b.payloadStart + 16 <= b.payloadEnd) {
+          var flags = ((bytes[b.payloadStart + 1] << 16) | (bytes[b.payloadStart + 2] << 8) | bytes[b.payloadStart + 3]) >>> 0;
+          if (flags & 0x000001) {
+            var pTf = b.payloadStart + 8;
+            var hiTf = ((bytes[pTf] << 24) | (bytes[pTf + 1] << 16) | (bytes[pTf + 2] << 8) | bytes[pTf + 3]) >>> 0;
+            var loTf = ((bytes[pTf + 4] << 24) | (bytes[pTf + 5] << 16) | (bytes[pTf + 6] << 8) | bytes[pTf + 7]) >>> 0;
+            var baseOff = hiTf * 4294967296 + loTf;
+            if (baseOff >= thresholdOffset) {
+              var nextBase = baseOff + delta;
+              bytes.set(u32be(Math.floor(nextBase / 4294967296) >>> 0), pTf);
+              bytes.set(u32be(nextBase >>> 0), pTf + 4);
+            }
+          }
+        }
+      }
+    }
+  }
   function rebuildWithTags(bytes, moov, m) {
     var inner = parseBoxes(bytes, moov.payloadStart, moov.payloadEnd);
     var udta = null, i;
     for (i = 0; i < inner.length; i++) if (inner[i].type === "udta") { udta = inner[i]; break; }
     var before = u8slice(bytes, 0, moov.start);
-    var after = u8slice(bytes, moov.payloadEnd);
+    var after = new Uint8Array(u8slice(bytes, moov.payloadEnd));
     var rawInner = [];
-    for (i = 0; i < inner.length; i++) rawInner.push(u8slice(bytes, inner[i].start, inner[i].start + inner[i].size));
+    for (i = 0; i < inner.length; i++) rawInner.push(new Uint8Array(u8slice(bytes, inner[i].start, inner[i].start + inner[i].size)));
     var newInner;
     if (udta) {
       var udtaInner = parseBoxes(bytes, udta.payloadStart, udta.payloadEnd);
@@ -169,7 +223,13 @@
     } else {
       newInner = rawInner.concat([buildUdta(m)]);
     }
-    return concat(before, box("moov", concat.apply(null, newInner)), after);
+    var newMoov = box("moov", concat.apply(null, newInner));
+    var delta = newMoov.length - moov.size;
+    if (delta !== 0 && after.length > 0) {
+      shiftSampleTableOffsets(newMoov, 8, newMoov.length, moov.payloadEnd, delta);
+      shiftSampleTableOffsets(after, 0, after.length, moov.payloadEnd, delta);
+    }
+    return concat(before, newMoov, after);
   }
   function mp4IlstTag(audio, meta) {
     var top = parseBoxes(audio, 0, audio.length), moov = null, i;

@@ -247,6 +247,16 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     }
 
     @PluginMethod
+    public void preload(PluginCall call) {
+        String videoId = call.getString("videoId", "");
+        String candidates = call.getString("candidates", "");
+        String title = call.getString("title", "");
+        String artist = call.getString("artist", "");
+        MuchiAudioService.preloadStream(videoId, candidates, title, artist);
+        call.resolve();
+    }
+
+    @PluginMethod
     public void syncSession(PluginCall call) {
         Intent i = new Intent(getContext(), MuchiAudioService.class);
         i.setAction(MuchiAudioService.ACTION_SESSION);

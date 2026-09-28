@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.6.8";
+  const APP_VERSION = "1.7.6";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -171,7 +171,7 @@
     if (icon) icon.classList.add("spin");
     toast("Checking connection to server…");
     try {
-      const res = await fetch("/api/version", { cache: "no-store", signal: AbortSignal.timeout(4500) });
+      const res = await fetch(`${API_BASE}/api/version`, { cache: "no-store", signal: AbortSignal.timeout(4500) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       state.isNetworkOffline = false;
       state.offlineMode = false;
@@ -247,9 +247,13 @@
     if (!Number.isInteger(s.index) || s.index < 0 || s.index >= s.queue.length) return null;
     return s;
   }
-  if (state.prefs.soundV !== 2) {
-    if (!state.prefs.spatial || state.prefs.spatial === "off") state.prefs.spatial = "phone";
-    state.prefs.soundV = 2;
+  if (state.prefs.soundV !== 3) {
+    if (!state.prefs.spatial || state.prefs.spatial === "off" || !["phone", "bass", "spatial", "dynamic"].includes(state.prefs.spatial)) {
+      state.prefs.spatial = "phone";
+    }
+    state.prefs.bgPlay = true;
+    if (state.prefs.ytAudio === false) state.prefs.ytAudio = null;
+    state.prefs.soundV = 3;
     savePrefs();
   }
   if (state.prefs.bgPlay !== true && state.prefs.bgPlay !== false) {
@@ -545,6 +549,16 @@
     return cur.title;
   }
 
+  function syncNativeAppIcon(iconId) {
+    const norm = normalizeAppIconId(iconId || (state.prefs && state.prefs.appIcon));
+    const NP = nativePlayer();
+    if (NP && typeof NP.setAppIcon === "function") {
+      try {
+        NP.setAppIcon({ icon: norm }).catch(() => {});
+      } catch {}
+    }
+  }
+
   function applyAppIcon() {
     const url = activeAppIconUrl();
     const imgs = document.querySelectorAll(".brand img, .home-brand img, #sidebarBrandIcon, #homeBrandIcon");
@@ -557,6 +571,7 @@
     if (shortcutLink) shortcutLink.href = url;
     const appleLink = document.querySelector('link[rel="apple-touch-icon"]');
     if (appleLink) appleLink.href = url;
+    syncNativeAppIcon(state.prefs && state.prefs.appIcon);
   }
 
   function setAppIcon(id) {
@@ -565,6 +580,7 @@
     state.prefs.appIcon = ic.id;
     savePrefs();
     applyAppIcon();
+    syncNativeAppIcon(ic.id);
     toast(`App icon changed to "${ic.title}"`, true, "success");
     playAppOpeningAnimation(ic.id, true);
     render();
@@ -941,11 +957,27 @@
   function normalizeUiMode(v) {
     return VALID_UI_MODES.includes(v) ? v : "glass";
   }
+  const VALID_PLAYER_STYLES = ["pill", "wave", "vinyl", "aura"];
+  function normalizePlayerStyle(v) {
+    return VALID_PLAYER_STYLES.includes(v) ? v : "pill";
+  }
+  const VALID_SEEK_WIGGLES = ["sine", "ribbon", "glow", "orbit"];
+  function normalizeSeekWiggle(v) {
+    if (v === "pulse") return "ribbon";
+    if (v === "zigzag") return "glow";
+    return VALID_SEEK_WIGGLES.includes(v) ? v : "sine";
+  }
+  function isBatterySaver() {
+    return Boolean(state.prefs && state.prefs.batterySaver);
+  }
   function applyUi() {
     const ui = normalizeUiMode(state.prefs.ui);
     document.documentElement.dataset.ui = ui;
-    const ps = state.prefs.playerStyle;
-    document.documentElement.dataset.player = ["pill", "island", "wave", "bar"].includes(ps) ? ps : "pill";
+    const ps = normalizePlayerStyle(state.prefs.playerStyle);
+    document.documentElement.dataset.player = ps;
+    const wg = normalizeSeekWiggle(state.prefs.seekWiggle);
+    document.documentElement.dataset.wiggle = wg;
+    document.documentElement.dataset.batterySaver = isBatterySaver() ? "1" : "0";
     const icons = ["small", "default", "medium", "large"].includes(state.prefs.iconSize) ? state.prefs.iconSize : "default";
     document.documentElement.dataset.icons = icons;
     // "Interface size" drives the WHOLE app, not just icon glyphs: pick a
@@ -964,7 +996,10 @@
       document.documentElement.style.zoom = "";
     }
     const bar = $("playerBar");
-    if (bar) bar.dataset.player = document.documentElement.dataset.player;
+    if (bar) {
+      bar.dataset.player = ps;
+      bar.dataset.wiggle = wg;
+    }
     syncPlayerVisibility();
   }
   function uiLabel() {
@@ -986,11 +1021,11 @@
   }
   function themeCardHTML(th, on) {
     const bg = th.surface || (window.matchMedia("(prefers-color-scheme: light)").matches ? "#e6eae6" : "#101413");
-    return `<button type="button" class="theme-card ${on ? "on" : ""}" data-set-theme="${th.id}">
+    return `<button type="button" class="theme-card ${on ? "on" : ""}" data-set-theme="${th.id}" style="--mood:${th.a};--tp-bg:${bg};--tp-a:${th.a};--tp-b:${th.b}">
       <div class="theme-preview" style="background:${bg};--tp-a:${th.a};--tp-b:${th.b}">
         <i class="tp-bar"></i><i class="tp-row"></i><i class="tp-row dim"></i><i class="tp-pill"></i>
       </div>
-      <span><strong>${th.name}</strong><em>${th.blurb}</em></span>
+      <span><strong>${th.name}</strong></span>
     </button>`;
   }
 
@@ -1651,9 +1686,128 @@
     if (state.view === "library") render();
   }
 
+  // Session-level anti-repeat & shuffle tracking so the queue and recommendations
+  // never play the same song twice in a row or repeat songs too often.
+  const _sessionPlayedKeys = [];
+  const _sessionPlayedSet = new Set();
+  const _sessionAutoQueuedKeys = [];
+  const _sessionAutoQueuedSet = new Set();
+  const _shuffleVisitedKeys = new Set();
+
+  function normalizeKeyText(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function canonicalSongTitleClient(rawTitle, rawArtist = "") {
+    let s = String(rawTitle || "").toLowerCase().trim();
+    if (!s) return "";
+    let mod = "";
+    if (/\b(remix|vip\s*mix|club\s*mix|extended\s*mix)\b/i.test(s)) mod = "remix";
+    else if (/\b(acoustic|unplugged|stripped)\b/i.test(s)) mod = "acoustic";
+    else if (/\b(live)\b/i.test(s)) mod = "live";
+    else if (/\b(slowed|sped\s*up|nightcore)\b/i.test(s)) mod = "edit";
+    const aNorm = String(rawArtist || "").toLowerCase().replace(/\s*-\s*topic\b/gi, "").trim();
+    if (aNorm && s.includes(" - ")) {
+      const parts = s.split(/\s+-\s+/);
+      if (parts.length >= 2) {
+        const p0 = parts[0].trim();
+        const pLast = parts[parts.length - 1].trim();
+        if (p0 === aNorm || p0.includes(aNorm)) s = parts.slice(1).join(" ").trim();
+        else if (pLast === aNorm || pLast.includes(aNorm)) s = parts.slice(0, -1).join(" ").trim();
+      }
+    }
+    s = s
+      .replace(/\((?:official|lyric|lyrics|audio|video|music\s*video|visualizer|hd|hq|4k|remaster(?:ed)?|explicit|clean|version|edit|feat\.?|ft\.?|with|prod\.?)[^)]*\)/gi, " ")
+      .replace(/\[(?:official|lyric|lyrics|audio|video|music\s*video|visualizer|hd|hq|4k|remaster(?:ed)?|explicit|clean|version|edit|feat\.?|ft\.?|with|prod\.?)[^\]]*\]/gi, " ")
+      .replace(/\b(?:feat\.?|ft\.?|featuring)\s+[^-–—()[\]]+/gi, " ")
+      .replace(/\b(?:official\s+(?:music\s+)?(?:video|audio|lyric\s+video|visualizer)|full\s+song|lyric\s+video|lyrics|audio|hd|hq|4k|remastered\s*\d*)\b/gi, " ")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return mod ? `${s} ${mod}`.trim() : s;
+  }
+
+  function canonicalPrimaryArtistClient(tOrArtist) {
+    const raw = typeof tOrArtist === "string"
+      ? tOrArtist
+      : (tOrArtist && (tOrArtist.artist || (tOrArtist.user && tOrArtist.user.name) || tOrArtist.author)) || "";
+    let s = String(raw || "").toLowerCase().trim();
+    if (!s) return "";
+    s = s
+      .replace(/\s*-\s*topic\b/gi, "")
+      .replace(/\bvevo\b/gi, "")
+      .replace(/\bofficial\b/gi, "")
+      .split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bfeaturing\b|\bx\b|\bwith\b|\/|;|\band\b)\s*/i)[0]
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return s;
+  }
+
+  function canonicalSongKey(t) {
+    if (!t) return "";
+    const titleNorm = canonicalSongTitleClient(t.title || "", t.artist || "");
+    const artistNorm = canonicalPrimaryArtistClient(t);
+    if (titleNorm && artistNorm) return `${titleNorm}__${artistNorm}`;
+    if (titleNorm) return `${titleNorm}__`;
+    return String(t.id || t.videoId || t.trackId || "").toLowerCase().trim();
+  }
+
+  function isSameSongClient(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (a.id && b.id && String(a.id) === String(b.id)) return true;
+    if (a.videoId && b.videoId && String(a.videoId) === String(b.videoId)) return true;
+    if (a.trackId && b.trackId && String(a.trackId) === String(b.trackId) && a.source === b.source) return true;
+    const ka = canonicalSongKey(a);
+    const kb = canonicalSongKey(b);
+    if (ka && kb && ka === kb) return true;
+    const ta = canonicalSongTitleClient(a.title || "", a.artist || "");
+    const tb = canonicalSongTitleClient(b.title || "", b.artist || "");
+    if (ta && tb && ta === tb) {
+      const aa = canonicalPrimaryArtistClient(a);
+      const ab = canonicalPrimaryArtistClient(b);
+      if (!aa || !ab || aa === ab || aa.includes(ab) || ab.includes(aa)) return true;
+    }
+    return false;
+  }
+
+  function recordSessionPlayed(t) {
+    const k = canonicalSongKey(t);
+    if (!k) return;
+    _shuffleVisitedKeys.add(k);
+    if (!_sessionPlayedSet.has(k)) {
+      _sessionPlayedSet.add(k);
+      _sessionPlayedKeys.unshift(k);
+      while (_sessionPlayedKeys.length > 80) {
+        const old = _sessionPlayedKeys.pop();
+        if (old) _sessionPlayedSet.delete(old);
+      }
+    }
+  }
+
+  function recordSessionAutoQueued(t) {
+    const k = canonicalSongKey(t);
+    if (!k) return;
+    if (!_sessionAutoQueuedSet.has(k)) {
+      _sessionAutoQueuedSet.add(k);
+      _sessionAutoQueuedKeys.unshift(k);
+      while (_sessionAutoQueuedKeys.length > 90) {
+        const old = _sessionAutoQueuedKeys.pop();
+        if (old) _sessionAutoQueuedSet.delete(old);
+      }
+    }
+  }
+
   function pushRecent(track) {
+    if (!track) return;
+    recordSessionPlayed(track);
     const item = { ...track, playedAt: Date.now() };
-    state.recents = [item, ...state.recents.filter((t) => t.id !== track.id)].slice(0, 200);
+    state.recents = [item, ...state.recents.filter((t) => !isSameSongClient(t, track))].slice(0, 200);
     save("aura.recents", state.recents);
     // Taste-adaptive "Made for you": a fresh play shifts the taste profile, so
     // re-render the home row to reorder the mood cards around the listener.
@@ -2380,8 +2534,14 @@
       const a = artistName(t);
       if (a && a !== "YouTube" && a !== "Live radio") artists[a] = (artists[a] || 0) + 1;
       sources[t.source || "other"] = (sources[t.source || "other"] || 0) + 1;
-      const g = t.genre || t._tag || t.mood || (t.album && t.source === "audius" ? t.album : "");
-      if (g) genres[g] = (genres[g] || 0) + 1;
+      const tag = String(t._tag || t.mood || t.genre || (t.album && t.source === "audius" ? t.album : "") || "").toLowerCase();
+      if (tag) {
+        genres[tag] = (genres[tag] || 0) + 1;
+      } else {
+        const v = inferTrackVibeClient(t);
+        if (v && v.genre) genres[v.genre] = (genres[v.genre] || 0) + 1;
+        if (v && v.mood) genres[v.mood] = (genres[v.mood] || 0) + 1;
+      }
     }
     const rank = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
     const hasTaste = Boolean(
@@ -2493,8 +2653,12 @@
       toast("Playing now", true, "success");
       return;
     }
-    const rest = state.queue.filter((t, i) => i !== state.index && t.id !== track.id);
     const cur = current();
+    if (cur && isSameSongClient(cur, track)) {
+      toast("Already playing this song");
+      return;
+    }
+    const rest = state.queue.filter((t, i) => i !== state.index && !isSameSongClient(t, track));
     state.queue = [cur, track, ...rest].filter(Boolean);
     state.index = 0;
     renderQueue();
@@ -2506,7 +2670,7 @@
       playFromList([track], 0);
       return;
     }
-    if (state.queue.some((t) => t.id === track.id)) {
+    if (state.queue.some((t) => isSameSongClient(t, track))) {
       toast("Already in queue");
       return;
     }
@@ -2575,13 +2739,14 @@
   // you" went from 6 to 10 playlists). The cache key is namespaced with it, so
   // a stale IndexedDB/payload from the previous deployment (which is exactly
   // why some users kept seeing the OLD 6 playlists) is ignored and re-fetched.
-  const API_CACHE_V = "v11-sync-166";
+  const API_CACHE_V = "v12-sync-167";
   // Never cache an "empty" catalog payload. If a provider is temporarily
   // unreachable the worker may return `{tracks: [], ...}` (or shelves with no
   // tracks); caching that would freeze the shelf empty for the whole TTL.
   // A miss just re-fetches — the safe direction.
   function apiCacheIsUsable(data) {
     if (!data || typeof data !== "object") return false;
+    if ("lyrics" in data && !data.lyrics && (!Array.isArray(data.synced) || !data.synced.length)) return false;
     let s = "";
     try { s = JSON.stringify(data); } catch { return false; }
     if (s.length < 40) return false; // trivial/empty object
@@ -2806,17 +2971,36 @@
     return "m4a";
   }
   function slimTrack(t) {
-    const s = { id: t.id, title: t.title, artist: t.artist, source: t.source, duration: t.duration };
+    const dur = Math.round(Number(t.duration) || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0);
+    const s = { id: t.id, title: t.title, artist: t.artist, source: t.source, duration: dur };
     if (t.videoId) s.videoId = t.videoId;
     if (t.trackId) s.trackId = t.trackId;
     if (t.album) s.album = t.album;
     if (t.genre) s.genre = t.genre;
     if (t.artwork) s.artwork = t.artwork;
+    if (t.lyrics) s.lyrics = t.lyrics;
+    if (Array.isArray(t.synced) && t.synced.length) s.synced = t.synced;
     return s;
   }
+  function isPreviewOrPlaceholderStream(u, t) {
+    const s = String(u || "").trim();
+    if (!s) return true;
+    if (/^yt:/i.test(s)) return true;
+    if (t && t._isPreviewStream) return true;
+    if (/\/api\/preview\/audio|dzcdn\.net|mzstatic\.com|itunes\.apple\.com|allowPreview=1/i.test(s)) return true;
+    return false;
+  }
+
   async function ensureStreamForDownload(t) {
     if (!t) return t;
     const out = { ...t };
+    if (isPreviewOrPlaceholderStream(out.streamUrl, out)) {
+      if (!out.videoId && /^yt:([a-zA-Z0-9_-]{6,20})$/i.test(String(out.streamUrl || "").trim())) {
+        out.videoId = String(out.streamUrl).trim().slice(3);
+      }
+      out.streamUrl = "";
+      out._isPreviewStream = false;
+    }
     // Audius: resolve active stream url if missing or unverified
     if (out.source === "audius" && out.trackId) {
       out.streamMime = "audio/mpeg";
@@ -2825,24 +3009,31 @@
       }
       return out;
     }
-    // Apple / iTunes / Deezer: resolve via YouTube search or fallback to previewUrl
-    if ((out.source === "apple" || out.source === "itunes" || out.source === "deezer") && !out.videoId) {
+    // Apple / iTunes / Deezer / unresolved catalog tracks: resolve via YouTube search first
+    if (!out.videoId && !out.streamUrl && out.source !== "audius" && out.source !== "radio") {
       try {
         await resolveYouTubePlay(out);
+        if (isPreviewOrPlaceholderStream(out.streamUrl, out)) {
+          out.streamUrl = "";
+          out._isPreviewStream = false;
+        }
       } catch {}
     }
-    // Already resolved (played / audius / radio carries a streamUrl): keep it.
-    if (out.streamUrl) return out;
-    // YouTube: resolve via the same /api/yt/stream endpoint playback uses.
-    // The server caches the resolved URL for 15 min and tries the InnerTube
-    // Tier-1 resolver first (Piped fan-out as fallback), so the download
-    // reuses a URL that playback just proved works instead of doing its own
-    // (un-cached) resolution at download time.
+    // Already resolved to a full, real stream (played / audius / radio): keep it.
+    if (out.streamUrl && !isPreviewOrPlaceholderStream(out.streamUrl, out)) return out;
+    // YouTube: resolve via the same /api/yt/stream endpoint playback uses with allowPreview=0.
     if (out.videoId) {
       try {
-        const d = await api(`/api/yt/stream?v=${encodeURIComponent(out.videoId)}`, 20000);
-        if (d && d.url) {
+        const cands = Array.isArray(out._ytCandidates) && out._ytCandidates.length
+          ? `&candidates=${encodeURIComponent(out._ytCandidates.slice(0, 5).join(","))}`
+          : "";
+        const d = await api(
+          `/api/yt/stream?v=${encodeURIComponent(out.videoId)}&title=${encodeURIComponent(out.title || "")}&artist=${encodeURIComponent(out.artist || "")}${cands}&allowPreview=0`,
+          20000
+        );
+        if (d && d.url && !d.isPreview && !isPreviewOrPlaceholderStream(d.url, out)) {
           out.streamUrl = d.url;
+          if (d.videoId) out.videoId = d.videoId;
           if (d.mimeType) out.streamMime = d.mimeType;
           if (d.duration) out.duration = Number(d.duration) || out.duration;
         }
@@ -2868,16 +3059,22 @@
     }
   }
   function downloadFilePath(t) {
-    const sid = String((t && t.streamUrl) || "");
+    const rawSid = String((t && t.streamUrl) || "");
+    const sid = isPreviewOrPlaceholderStream(rawSid, t) ? "" : rawSid;
     const nm = encodeURIComponent(t.title || "track");
+    const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
+    const artistParam = t && t.artist ? `&artist=${encodeURIComponent(t.artist)}` : "";
+    const candParam = t && Array.isArray(t._ytCandidates) && t._ytCandidates.length
+      ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+      : "";
     if (t && t.videoId) {
-      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+      return `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${nm}${titleParam}${artistParam}${candParam}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
     if (t && t.source === "audius" && t.trackId) {
-      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=audio%2Fmpeg`;
+      return `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${nm}${titleParam}${artistParam}${sid ? `&streamUrl=${encodeURIComponent(sid)}` : ""}&mime=audio%2Fmpeg`;
     }
     if (t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer")) {
-      return `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${nm}`;
+      return `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${nm}${titleParam}${artistParam}${candParam}`;
     }
     if (sid) {
       let resolvedSid = sid;
@@ -2888,7 +3085,10 @@
         if (!/^https?:\/\//i.test(resolvedSid) && API_BASE) resolvedSid = API_BASE.replace(/\/$/, "") + "/" + resolvedSid;
         return resolvedSid;
       }
-      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}${titleParam}${artistParam}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+    }
+    if (t && (t.title || t.artist)) {
+      return `${API_BASE}/api/download?query=${encodeURIComponent(`${t.title || ""} ${t.artist || ""}`.trim())}&name=${nm}${titleParam}${artistParam}${candParam}`;
     }
     return "";
   }
@@ -2954,6 +3154,8 @@
       const res = await ND.startDownload({
         id: job.id,
         url: meta.url,
+        videoId: t.videoId || "",
+        candidates: Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "",
         filename: meta.filename,
         title: t.title || "",
         artist: t.artist || "",
@@ -2969,31 +3171,29 @@
     // Web / PWA — File System Access API, then blob+<a download> fallback.
     let res = await fetch(meta.url, { credentials: "same-origin" }).catch(() => null);
     if (!res || !res.ok) {
+      const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
+      const artistParam = t && t.artist ? `&artist=${encodeURIComponent(t.artist)}` : "";
+      const candParam = t && Array.isArray(t._ytCandidates) && t._ytCandidates.length
+        ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+        : "";
       // Fallback 1: If direct streamUrl failed (e.g. expired or 403), retry through /api/download?videoId=...
       const fallbackUrl = (t && t.videoId)
-        ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}`
+        ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
         : ((t && t.source === "audius" && t.trackId)
-          ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}`
+          ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}`
           : ((t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer"))
-            ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}`
+            ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
             : ""));
       if (fallbackUrl && meta.url !== fallbackUrl) {
         const retryRes = await fetch(fallbackUrl, { credentials: "same-origin" }).catch(() => null);
         if (retryRes && retryRes.ok) res = retryRes;
       }
-      // Fallback 2: Direct preview URL if available
-      if ((!res || !res.ok) && t && t.previewUrl) {
-        try {
-          const prevRes = await fetch(t.previewUrl).catch(() => null);
-          if (prevRes && prevRes.ok) res = prevRes;
-        } catch {}
-      }
-      // Fallback 3: Query-based server download resolution
+      // Fallback 2: Query-based server full-song download resolution (never fall back to 30s previewUrl)
       if (!res || !res.ok) {
         try {
           const qName = `${t && t.title || ""} ${t && t.artist || ""}`.trim();
           if (qName) {
-            const qUrl = `${API_BASE}/api/download?query=${encodeURIComponent(qName)}&name=${encodeURIComponent(t && t.title || "track")}`;
+            const qUrl = `${API_BASE}/api/download?query=${encodeURIComponent(qName)}&name=${encodeURIComponent(t && t.title || "track")}${titleParam}${artistParam}${candParam}`;
             const qRes = await fetch(qUrl, { credentials: "same-origin" }).catch(() => null);
             if (qRes && qRes.ok) res = qRes;
           }
@@ -3040,7 +3240,8 @@
       collect.push(new Uint8Array(ab));
       onProgress({ bytes: ab.byteLength, total: total || ab.byteLength, progress: 1 });
     }
-    let audioBytes = concatBytes(collect);
+    const rawAudioBytes = concatBytes(collect);
+    let taggedBytes = rawAudioBytes;
     if (MM) {
       try {
         // Best-effort artwork bytes (CORS-permitting); title/artist/album always embed.
@@ -3052,16 +3253,19 @@
             if (ar.ok) picture = { mime: (ar.headers.get("content-type") || "image/jpeg").split(";")[0], data: new Uint8Array(await ar.arrayBuffer()) };
           } catch {}
         }
-        audioBytes = MM.embed(audioBytes, ext, {
+        taggedBytes = MM.embed(rawAudioBytes, ext, {
           title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
         });
       } catch (metaErr) {
         console.warn("MuchiMeta embed failed, keeping raw audio bytes:", metaErr);
+        taggedBytes = rawAudioBytes;
       }
     }
     const blobType = ctype || "audio/webm";
-    // Always persist raw Blob into IndexedDB first under all candidate keys so offline playback works immediately.
-    const blob = new Blob([audioBytes], { type: blobType });
+    // Always persist untouched raw audio bytes into IndexedDB first under all candidate keys
+    // so in-app offline playback and timestamp seeking work with 100% original sample offsets.
+    const blob = new Blob([rawAudioBytes], { type: blobType });
+    const exportBlob = new Blob([taggedBytes], { type: blobType });
     const keysToPersist = [
       t.id,
       trackKey(t),
@@ -3081,7 +3285,7 @@
       try {
         const handle = await w.showSaveFilePicker({ suggestedName: fname, types: [{ description: "Audio", accept: { [blobType]: ["." + ext] } }] });
         const writable = await handle.createWritable();
-        await writable.write(audioBytes);
+        await writable.write(taggedBytes);
         await writable.close();
         // IMPORTANT: preserve { blob, handle, fname } so offline playback works
         // even if browser revokes file handle permission on page reload / offline!
@@ -3098,7 +3302,7 @@
     }
     // Standard browser download fallback via temporary anchor
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    a.href = URL.createObjectURL(exportBlob);
     a.download = fname;
     document.body.appendChild(a);
     a.click();
@@ -3134,6 +3338,7 @@
     // /api/yt/stream endpoint playback uses (the server caches the resolved URL
     // for 15 min), so a download on a never-played YouTube track still lands.
     const resolved = await ensureStreamForDownload(t);
+    if (resolved && t && t.id) resolved.id = t.id;
     const path = downloadFilePath(resolved);
     if (!path) {
       toast("This track can't be saved offline");
@@ -3147,7 +3352,7 @@
     };
     const job = {
       id: jid,
-      track: slimTrack(t),
+      track: slimTrack(resolved),
       filename: meta.filename,
       progress: 0, bytes: 0, total: 0,
       status: "downloading", cancel: false,
@@ -3159,11 +3364,24 @@
     try {
       const onProgress = (p) => { job.bytes = p.bytes || 0; job.total = p.total || 0; job.progress = p.progress || 0; saveDlJob(job); };
       job.status = "downloading"; saveDlJob(job);
-      const uri = await saveDownloadToDisk(meta, t, job, onProgress);
+      const uri = await saveDownloadToDisk(meta, resolved, job, onProgress);
       if (job.status === "cancelled" || !uri) throw new Error("cancelled");
       job.status = "done"; job.progress = 1; saveDlJob(job);
-      // Record metadata + the local uri so it can replay offline.
-      const dl = { ...slimTrack(t), uri, streamMime: meta.mime, savedAt: Date.now() };
+      // Pre-fetch and persist synced lyrics alongside the offline download so lyrics move offline.
+      let dlLyrics = null;
+      try {
+        dlLyrics = await ensureOfflineLyricsForTrack(resolved);
+      } catch {}
+      // Record metadata + the local uri + cached lyrics so it can replay offline with moving lyrics.
+      const dl = {
+        ...slimTrack(resolved),
+        uri,
+        streamMime: meta.mime,
+        savedAt: Date.now(),
+        ...(dlLyrics && (dlLyrics.lyrics || (dlLyrics.synced && dlLyrics.synced.length))
+          ? { lyrics: dlLyrics.lyrics || "", synced: dlLyrics.synced || [] }
+          : {}),
+      };
       delete dl.streamUrl;
       state.downloads = [dl, ...state.downloads.filter((d) => d.id !== dl.id)];
       save("aura.downloads", state.downloads);
@@ -3316,10 +3534,10 @@
   }
 
   function spatialMode() {
-    const m = state.prefs.spatial || "off";
+    const m = state.prefs.spatial || "phone";
     if (m === "wide" || m === "motion") return "spatial";
     if (m === "phone" || m === "bass" || m === "spatial" || m === "dynamic" || m === "off") return m;
-    return "off";
+    return "phone";
   }
 
   function setAudioVec(node, xName, yName, zName, x, y, z, legacy) {
@@ -3547,6 +3765,7 @@
     audio.setAttribute("playsinline", "");
     audio.setAttribute("webkit-playsinline", "");
     audio.preload = "auto";
+    audio.crossOrigin = "anonymous";
   } catch {}
 
   // ── Adaptive Audio Buffering Strategy ─────────────────────────────────
@@ -3698,6 +3917,7 @@
     }
     hookSound();
     applyYtQuality();
+    nativeSyncAudioPrefs();
   }
 
   const QUALITY_NAMES = { low: "Low", standard: "Standard", high: "High", highest: "Highest" };
@@ -3732,7 +3952,7 @@
   function tickCrossfade(d, p) {
     const fade = Number(state.prefs.crossfade || 0);
     const t = current();
-    if (!fade || !t || t.source === "youtube" || t.source === "radio") return;
+    if (npActive || !fade || !t || t.source === "youtube" || t.source === "radio") return;
     if (!d || d < fade + 1.5) return;
     const left = d - p;
     if (left <= fade && left > 0) {
@@ -3770,12 +3990,15 @@
   function pauseForSleep() {
     if (state.sleep.timer) clearTimeout(state.sleep.timer);
     state.sleep = { mode: "off", until: 0, timer: null };
+    setWantPlay(false);
     state.playing = false;
+    showEl($("eqBars"), false);
     audio.pause();
     nativePausePlayback();
     if (state.yt && state.yt.pauseVideo) {
       try { state.yt.pauseVideo(); } catch {}
     }
+    updateMediaSession();
     updateWakeLock();
     renderChrome();
     toast("Sleep timer — paused");
@@ -3857,10 +4080,9 @@
     const t = current();
     const saved = !!(t && isSaved(t));
     hookSound();
-    // Same gate as the library cards: a real download needs an Audius
-    // trackId or a YouTube videoId — Apple *preview* streamUrls are 30 s
-    // clips and must never be offered as "downloads".
-    const canDl = !!t && t.source !== "radio" && !!(t.videoId || t.trackId || saved);
+    const canDl = !!t && t.source !== "radio" && !!(t.videoId || t.trackId || t.source === "youtube" || t.source === "apple" || t.source === "itunes" || t.source === "deezer" || saved);
+    const canFollow = !!(t && t.source !== "radio");
+    const followingNow = !!(canFollow && isFollowing(t));
     const ytChip = ytConnected() && t && t.videoId
       ? `<div class="po-row"><div><strong>YouTube</strong><p>Add the current song to your account.</p></div>
           <div class="po-yt-actions">
@@ -3874,10 +4096,6 @@
       body: `
         <div class="set-card">
           <div class="po-row">
-            <div><strong>Sleep timer</strong><p>${escapeHTML(sleepStatusLabel())}</p></div>
-            <button type="button" class="chip-btn" id="poSleep">Choose…</button>
-          </div>
-          <div class="po-row">
             <div><strong>${saved ? "Saved offline" : "Download song"}</strong><p>${
               saved ? "Already on this device — it plays without internet."
               : canDl ? "Keep this track on the device (real audio file with cover art)."
@@ -3886,6 +4104,19 @@
             ${canDl
               ? `<button type="button" class="chip-btn" id="poDl">${saved ? "✓ Saved" : "Download"}</button>`
               : ""}
+          </div>
+          ${t && t.source !== "radio" ? `
+          <div class="po-row">
+            <div><strong>Playlist &amp; Artist</strong><p>${escapeHTML(artistName(t) || t.artist || "Artist")}</p></div>
+            <div class="po-yt-actions">
+              <button type="button" class="chip-btn" id="poAddPl">+ Playlist</button>
+              ${canFollow ? `<button type="button" class="chip-btn" id="poFollow">${followingNow ? "✓ Following" : "Follow"}</button>` : ""}
+              <button type="button" class="chip-btn" id="poDetails">Details</button>
+            </div>
+          </div>` : ""}
+          <div class="po-row">
+            <div><strong>Sleep timer</strong><p>${escapeHTML(sleepStatusLabel())}</p></div>
+            <button type="button" class="chip-btn" id="poSleep">Choose…</button>
           </div>
         </div>
         ${ytChip}`,
@@ -3896,6 +4127,12 @@
     $("poSleep").addEventListener("click", () => { hideModal(); openSleepTimerSheet(); });
     const poDl = $("poDl");
     if (poDl) poDl.addEventListener("click", () => { hideModal(); downloadTrack(t); });
+    const poAddPl = $("poAddPl");
+    if (poAddPl) poAddPl.addEventListener("click", () => { hideModal(); addToPlaylist(t); });
+    const poFollow = $("poFollow");
+    if (poFollow) poFollow.addEventListener("click", () => { hideModal(); toggleFollow(t); });
+    const poDetails = $("poDetails");
+    if (poDetails) poDetails.addEventListener("click", () => { hideModal(); openTrackDetail(t); });
     const poYtLike = $("poYtLike");
     if (poYtLike) poYtLike.addEventListener("click", () => { hideModal(); ytToggleLike(t); });
     const poYtPl = $("poYtPl");
@@ -3906,15 +4143,82 @@
     if (!img) return;
     const src = img.getAttribute("src") || "";
     if (src && !src.startsWith("data:") && !src.includes("/cover-default.jpg") && !src.includes("/api/img?url=")) {
-      img.onerror = function() { this.src = "/cover-default.jpg"; };
+      img.onerror = function() {
+        const el = this;
+        el.onerror = null;
+        const holder = el.closest("[data-title]");
+        const title = (holder && holder.getAttribute("data-title")) || "";
+        const artist = (holder && holder.getAttribute("data-artist")) || "";
+        el.src = "/cover-default.jpg";
+        if (title) {
+          resolveRealSongCoverClient(title, artist).then((art) => {
+            if (art) el.src = art;
+          }).catch(() => {});
+        }
+      };
       img.src = `${API_BASE}/api/img?url=${encodeURIComponent(src)}`;
     } else {
+      img.onerror = null;
       img.src = "/cover-default.jpg";
     }
   };
 
   function artUrl(t) {
-    return t && t.artwork ? t.artwork : "/cover-default.jpg";
+    if (!t || !t.artwork) return "/cover-default.jpg";
+    const a = String(t.artwork);
+    if (a.startsWith("/") && API_BASE && !a.includes("/cover-default.jpg")) {
+      return `${API_BASE}${a}`;
+    }
+    return a;
+  }
+
+  const _songCoverMemCache = new Map();
+  async function resolveRealSongCoverClient(title, artist) {
+    const cleanTitle = String(title || "").trim();
+    const cleanArtist = String(artist || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0].trim();
+    const q = `${cleanTitle} ${cleanArtist}`.trim();
+    if (!q) return "";
+    const key = q.toLowerCase();
+    if (_songCoverMemCache.has(key)) return _songCoverMemCache.get(key);
+    let art = "";
+    try {
+      const r = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=2&country=US`, { signal: AbortSignal.timeout(4500) });
+      if (r.ok) {
+        const d = await r.json();
+        const hit = d && d.results && d.results[0];
+        if (hit && hit.artworkUrl100) art = String(hit.artworkUrl100).replace("100x100bb", "400x400bb");
+      }
+    } catch {}
+    if (!art) {
+      try {
+        const d = await api(`/api/deezer/search?q=${encodeURIComponent(q)}&limit=2`, 4500);
+        const rows = (d && (d.songs || d.data)) || [];
+        const hit = rows[0];
+        if (hit) {
+          art = hit.artwork || (hit.album && (hit.album.cover_big || hit.album.cover_medium)) || "";
+        }
+      } catch {}
+    }
+    if (art && /^https?:\/\//i.test(art)) {
+      _songCoverMemCache.set(key, art);
+      return art;
+    }
+    return "";
+  }
+
+  async function hydrateMissingTrackCovers(tracks, onUpdated) {
+    if (!Array.isArray(tracks) || !tracks.length) return;
+    const targets = tracks.filter((t) => t && t.title && (!t.artwork || String(t.artwork).startsWith("/cover")));
+    if (!targets.length) return;
+    let changed = false;
+    await Promise.all(targets.slice(0, 20).map(async (t) => {
+      const art = await resolveRealSongCoverClient(t.title, artistName(t) || t.artist);
+      if (art) {
+        t.artwork = art;
+        changed = true;
+      }
+    }));
+    if (changed && typeof onUpdated === "function") onUpdated();
   }
 
   function cardHTML(t) {
@@ -3932,7 +4236,7 @@
           <h3>${escapeHTML(t.title)}</h3>
           <p>${escapeHTML(t.artist)}</p>
         </button>
-        <button type="button" class="play-fab" data-play="${escapeAttr(t.id)}" title="Play">
+        <button type="button" class="play-fab" data-play="${escapeAttr(t.id)}" data-source="${escapeAttr(t.source || "")}" data-title="${escapeAttr(t.title || "")}" data-artist="${escapeAttr(t.artist || "")}" title="Play">
           <span class="material-symbols-outlined filled">play_arrow</span>
         </button>
       </div>
@@ -3942,7 +4246,7 @@
 
   function rowHTML(t, i, extra = "") {
     return `
-      <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}">
+      <button class="track-row ${current() && current().id === t.id ? "active" : ""}" data-play="${escapeAttr(t.id)}" data-idx="${i}" data-source="${escapeAttr(t.source || "")}" data-title="${escapeAttr(t.title || "")}" data-artist="${escapeAttr(t.artist || "")}">
         <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
         <div>
           <div class="t-title">${escapeHTML(t.title)}</div>
@@ -3957,7 +4261,7 @@
     const isDl = Boolean(opt.isDownload || opt.where === "downloads" || state.activePlaylist === "downloads" || (state.view === "library" && state.libFilter === "downloaded") || isSaved(t));
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
-        <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}">
+        <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}" data-source="${escapeAttr(t.source || "")}" data-title="${escapeAttr(t.title || "")}" data-artist="${escapeAttr(t.artist || "")}">
           <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
           <div>
             <div class="t-title">${escapeHTML(t.title)}</div>
@@ -3986,6 +4290,9 @@
     const h = state.home;
     if (!h) return [];
     const shelves = (h.shelves || []).flatMap((s) => s.tracks || []);
+    const plTracks = []
+      .concat(h.globalPlaylists || [], h.countryPlaylists || [], h.forYouPlaylists || [], h.viralPlaylists || [])
+      .flatMap((p) => (p && p.tracks) || []);
     return [].concat(
       shelves,
       h.youtubeCharts || [],
@@ -3994,12 +4301,13 @@
       h.audius || [],
       h.underground || [],
       h.radio || [],
+      plTracks,
       state.forYou || [],
       state.recents || []
     );
   }
 
-  function findTrack(id) {
+  function findTrack(id, fallbackMeta = null) {
     try {
       const pools = [
         state.queue,
@@ -4010,18 +4318,35 @@
         state.downloads,
         homeTrackPool(),
         (state.catalogPlaylist && state.catalogPlaylist.tracks) || [],
+        (state.discovery && state.discovery.tracks) || [],
+        state.queueRecs || [],
         state.search ? [].concat(
           state.search.youtube || [],
           state.search.deezer || [],
           state.search.apple || [],
+          state.search.itunes || [],
           state.search.audius || [],
-          state.search.radio || []
+          state.search.radio || [],
+          state.search.offline || []
         ) : [],
+        (state.artistPage && state.artistPage.popular) || [],
         (state.artistPage && state.artistPage.songs) || [],
       ];
       for (const arr of pools) {
         const hit = (arr || []).find((t) => t && t.id === id);
         if (hit) return hit;
+      }
+      if (fallbackMeta && fallbackMeta.title) {
+        const wantT = String(fallbackMeta.title || "").toLowerCase().trim();
+        const wantA = String(fallbackMeta.artist || "").toLowerCase().trim();
+        for (const arr of pools) {
+          const hit = (arr || []).find((t) =>
+            t &&
+            String(t.title || "").toLowerCase().trim() === wantT &&
+            (!wantA || String(t.artist || "").toLowerCase().trim() === wantA)
+          );
+          if (hit) return hit;
+        }
       }
     } catch {}
     return null;
@@ -4030,36 +4355,58 @@
   function playFromList(list, index) {
     hapticFeedback("light");
     const next = list && list[index];
-    const same = !!(next && current() && current().id === next.id);
+    const cur = current();
+    const same = !!(next && cur && cur.id === next.id);
     let src = Array.isArray(list) ? list.slice() : [];
     let idx = Number.isInteger(index) ? index : 0;
+    const wanted = src[idx];
     // Queue hygiene: keep mixes/compilations/podcasts out of the queue so it
-    // lists real songs (Spotify-style) — but never drop the track the user
-    // actually tapped.
-    if (src.some((t) => !looksLikeSong(t))) {
-      const wanted = src[idx];
+    // lists real songs (Spotify-style) and strip any accidental consecutive duplicate
+    // songs so the same song never plays twice in a row.
+    if (src.length > 0) {
       const clean = [];
       for (let i = 0; i < src.length; i++) {
-        if (i === idx || looksLikeSong(src[i])) clean.push(src[i]);
+        const item = src[i];
+        if (!item) continue;
+        if (i !== idx && !looksLikeSong(item)) continue;
+        // Never allow the exact same song twice in a row in the queue
+        if (clean.length > 0 && isSameSongClient(clean[clean.length - 1], item) && i !== idx) {
+          continue;
+        }
+        if (clean.length > 0 && isSameSongClient(clean[clean.length - 1], item) && i === idx) {
+          clean[clean.length - 1] = item;
+          continue;
+        }
+        clean.push(item);
       }
       if (clean.length) {
         src = clean;
-        idx = wanted ? Math.max(0, src.findIndex((t) => t && t.id === wanted.id)) : 0;
-        // The rest of the context was all junk — line up good similar songs
-        // after the one the user tapped (Spotify-style "up next").
-        if (clean.length === 1 && list.length > 1 && wanted && wanted.source !== "radio") {
-          fillRelatedQueue(wanted);
-        }
+        idx = wanted ? Math.max(0, src.findIndex((t) => t && (t === wanted || t.id === wanted.id))) : 0;
       }
     }
+    _shuffleVisitedKeys.clear();
+    if (wanted) _shuffleVisitedKeys.add(canonicalSongKey(wanted));
     state.queue = src.slice();
     state.index = idx;
     state.playerReady = true;
+    // If the user played a single track or the last track of a list, immediately
+    // line up Spotify-style similar songs after it so Up Next is ready.
+    if (wanted && wanted.source !== "radio" && state.index + 1 >= state.queue.length) {
+      fillRelatedQueue(wanted);
+    }
     if (same) {
-      if (!state.playing) togglePlay();
-      renderQueue();
-      syncPlayerVisibility();
-      return;
+      const hasResolvedMedia = Boolean(
+        cur.videoId || cur.streamUrl || cur.url || cur.source === "audius" || cur.source === "radio"
+      );
+      const ytState = (state.yt && typeof state.yt.getPlayerState === "function") ? state.yt.getPlayerState() : -1;
+      const ytActivelyLoaded = Boolean(cur.videoId && !cur._playingViaAudio && (ytState === 1 || ytState === 2 || ytState === 3));
+      const audioActivelyLoaded = Boolean((cur._playingViaAudio || !cur.videoId) && audio.src && audio.networkState !== HTMLMediaElement.NETWORK_EMPTY && !audio.error);
+      if (hasResolvedMedia && (ytActivelyLoaded || audioActivelyLoaded || npActive)) {
+        if (!state.playing) togglePlay();
+        renderQueue();
+        syncPlayerVisibility();
+        return;
+      }
     }
     playCurrent(true);
     renderQueue();
@@ -4097,18 +4444,22 @@
       fallbackArt ||
       "/cover-default.jpg"
     ).trim();
+    const slug = `${title.toLowerCase().replace(/[^a-z0-9]/g, "")}_${artist.toLowerCase().replace(/[^a-z0-9]/g, "")}` || "track";
+    const inferredVideoId = t.videoId || (/^yt:/i.test(String(t.id || "")) && /^[A-Za-z0-9_-]{11}$/.test(cleanId) ? cleanId : "");
     return {
-      id: cleanId ? `deezer:${cleanId}` : `deezer:${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      rawId: cleanId,
+      id: cleanId ? `deezer:${cleanId}` : `deezer:${slug}`,
+      rawId: cleanId || slug,
       source: "deezer",
       title,
       artist,
       album,
       duration,
       artwork,
-      previewUrl: t.preview || t.previewUrl || "",
+      streamUrl: t.streamUrl || "",
+      previewUrl: "",
+      preview: "",
       playQuery: t.playQuery || `${title} ${artist} official audio`.trim(),
-      videoId: t.videoId || "",
+      videoId: inferredVideoId,
     };
   }
 
@@ -4262,21 +4613,7 @@
     const artist = { name: a.name || name, artwork: a.picture_medium || "" };
     const dzSong = (t, srcArt) => {
       if (!t || (!t.title && !t.trackName)) return null;
-      const cleanId = String(t.id || t.trackId || t.rawId || "").replace(/^deezer:/, "");
-      const title = t.title || t.trackName || "Song";
-      const artName = (t.artist && (t.artist.name || t.artist)) || t.artistName || artist.name;
-      const albName = (t.album && (t.album.title || t.album)) || t.collectionName || "";
-      const art = (t.album && (t.album.cover_medium || t.album.cover_big)) || t.artwork || srcArt || "";
-      return {
-        id: `deezer:${cleanId}`,
-        source: "deezer",
-        title,
-        artist: artName,
-        album: albName,
-        duration: Number(t.duration || 0) || Math.round((t.trackTimeMillis || 0) / 1000) || 0,
-        artwork: art,
-        playQuery: `${title} ${artName} official audio`.trim(),
-      };
+      return normalizeClientDeezerTrack(t, artist.name, srcArt || artist.artwork);
     };
     // 1) Most popular tracks
     const top = [];
@@ -4354,7 +4691,7 @@
       album,
       duration,
       artwork,
-      previewUrl: item.previewUrl || "",
+      previewUrl: "",
       playQuery: `${title} ${artist} official audio`.trim(),
       trackId: cleanId || item.trackId,
       trackName: title,
@@ -4593,21 +4930,462 @@
     return true;
   }
 
+  // ── Spotify-Style Vibe, Genre, Mood, Tempo & Style Engine (Client) ────────
+  const CLIENT_GENRE_CLUSTERS = {
+    pop: ["pop", "dance pop", "synthpop", "electropop", "indie pop", "teen pop", "disco", "funk", "new wave"],
+    hiphop: ["hip-hop", "hip hop", "rap", "trap", "drill", "melodic rap", "boom bap", "r&b", "rnb", "contemporary r&b"],
+    rnb: ["r&b", "rnb", "soul", "neo-soul", "funk", "contemporary r&b", "afrobeats", "alt r&b", "pop"],
+    electronic: ["electronic", "edm", "house", "tech house", "deep house", "techno", "trance", "drum and bass", "dnb", "dubstep", "future bass", "synthwave", "dance", "phonk"],
+    rock: ["rock", "alt rock", "alternative", "indie rock", "classic rock", "hard rock", "punk", "pop punk", "grunge", "metal", "post-punk", "emo"],
+    indie: ["indie", "indie pop", "indie rock", "bedroom pop", "dream pop", "shoegaze", "lo-fi", "folk", "singer-songwriter", "alternative"],
+    latin: ["latin", "reggaeton", "urbano", "bachata", "salsa", "corridos", "latin pop", "afrobeats", "dancehall"],
+    afro: ["afrobeats", "amapiano", "afropop", "dancehall", "reggae", "r&b"],
+    kpop: ["k-pop", "kpop", "j-pop", "jpop", "dance pop", "pop"],
+    desi: ["bollywood", "hindi", "punjabi", "desi", "indian pop", "sufi", "tamil", "telugu"],
+    chill: ["lo-fi", "lofi", "ambient", "chill", "chillhop", "downtempo", "acoustic", "jazz", "classical", "instrumental", "indie"],
+    country: ["country", "americana", "folk", "bluegrass", "singer-songwriter", "soft rock"],
+  };
+
+  function inferTrackVibeClient(t = {}) {
+    const rawGenre = String(t.genre || "").toLowerCase().trim();
+    const rawTitle = String(t.title || "").toLowerCase().trim();
+    const rawArtist = String(artistName(t) || t.artist || "").toLowerCase().trim();
+    const blob = `${rawTitle} ${rawArtist} ${rawGenre} ${String(t.album || "").toLowerCase()}`;
+
+    let cluster = "pop";
+    let genre = rawGenre || "pop";
+    if (/\b(bollywood|hindi|punjabi|arijit|pritam|diljit|ap dhillon|karan aujla|shreya|atif|anuv jain|rahman|tamil|telugu|desi)\b/i.test(blob)) {
+      cluster = "desi";
+      genre = /\bpunjabi|diljit|ap dhillon|karan aujla\b/i.test(blob) ? "punjabi" : "bollywood";
+    } else if (/\b(k-pop|kpop|bts|blackpink|newjeans|stray kids|twice|aespa|seventeen|jungkook|le sserafim|ive|illit|ateez|enhypen)\b/i.test(blob)) {
+      cluster = "kpop";
+      genre = "k-pop";
+    } else if (/\b(afrobeats|amapiano|burna boy|wizkid|rema|tem|tems|ayra starr|davido|asake|tyla|omah lay)\b/i.test(blob)) {
+      cluster = "afro";
+      genre = "afrobeats";
+    } else if (/\b(reggaeton|latin|bad bunny|karol g|feid|peso pluma|rauw alejandro|j balvin|ozuna|maluma|shakira|rosalia|romeo santos)\b/i.test(blob)) {
+      cluster = "latin";
+      genre = "latin";
+    } else if (/\b(hip[\s-]?hop|rap|trap|drill|drake|kendrick|travis scott|kanye|eminem|future|metro boomin|21 savage|j\.?\s*cole|playboi carti|central cee|nicki minaj|cardi b|lil |gunna|don toliver|asap rocky|tyler, the creator)\b/i.test(blob)) {
+      cluster = "hiphop";
+      genre = /\b(drill)\b/i.test(blob) ? "drill" : /\b(trap)\b/i.test(blob) ? "trap" : "hip-hop";
+    } else if (/\b(r&b|rnb|soul|neo[\s-]?soul|sza|the weeknd|frank ocean|daniel caesar|brent faiyaz|usher|chris brown|alicia keys|kehlani|summer walker|h\.e\.r\.|giveon|bryson tiller|khalid)\b/i.test(blob)) {
+      cluster = "rnb";
+      genre = "r&b";
+    } else if (/\b(edm|electronic|house|techno|trance|dubstep|dnb|drum and bass|phonk|synthwave|calvin harris|david guetta|tiesto|martin garrix|avicii|marshmello|skrillex|fred again|kygo|zedd|alesso|daft punk|odesza|flume|alan walker|chainsmokers|disclosure|peggy gou)\b/i.test(blob)) {
+      cluster = "electronic";
+      genre = /\b(phonk)\b/i.test(blob) ? "phonk" : /\b(house)\b/i.test(blob) ? "house" : "electronic";
+    } else if (/\b(rock|metal|punk|grunge|alternative|nirvana|linkin park|queen|ac\/dc|metallica|arctic monkeys|green day|foo fighters|red hot chili peppers|oasis|coldplay|imagine dragons|radiohead|the killers|muse|blink-182|paramore|bring me the horizon|slipknot|deftones|strokes|fleetwood mac)\b/i.test(blob)) {
+      cluster = "rock";
+      genre = /\b(metal|slipknot|metallica|deftones)\b/i.test(blob) ? "metal" : /\b(indie|arctic monkeys|strokes)\b/i.test(blob) ? "indie rock" : "rock";
+    } else if (/\b(indie|bedroom pop|dream pop|shoegaze|tame impala|lana del rey|mitski|clairo|beabadoobee|cigars? after sex|phoebe bridgers|hozier|bon iver|mac demarco|wallows|men i trust|laufey|conan gray|girl in red|boygenius|the 1975|glass animals|vampire weekend)\b/i.test(blob)) {
+      cluster = "indie";
+      genre = "indie pop";
+    } else if (/\b(country|americana|folk|morgan wallen|luke combs|zach bryan|chris stapleton|kacey musgraves|dolly parton|johnny cash|shania twain|taylor swift.*fearless|noah kahan)\b/i.test(blob)) {
+      cluster = "country";
+      genre = "country";
+    } else if (/\b(lo[\s-]?fi|lofi|chillhop|ambient|study|sleep|meditation|piano|classical|jazz|instrumental|rain)\b/i.test(blob)) {
+      cluster = "chill";
+      genre = "lo-fi";
+    } else {
+      cluster = "pop";
+      genre = rawGenre && rawGenre !== "music" ? rawGenre : "pop";
+    }
+
+    let mood = "upbeat";
+    let tempo = "mid";
+    if (/\b(sad|heartbreak|cry|tears|lonely|broken|hurt|miss you|goodbye|alone|melanchol|grief|blue)\b/i.test(blob)) {
+      mood = "melancholic";
+      tempo = "slow";
+    } else if (/\b(chill|lofi|lo-fi|relax|calm|peace|dream|soft|sunday|coffee|sunset|late night|midnight|sleep|ambient|acoustic)\b/i.test(blob) || cluster === "chill") {
+      mood = "chill";
+      tempo = "slow";
+    } else if (/\b(love|romantic|romance|kiss|heart|baby|darling|forever|yours|valentine|slow dance)\b/i.test(blob)) {
+      mood = "romantic";
+      tempo = "slow";
+    } else if (/\b(gym|workout|hype|beast|phonk|rage|hard|pump|power|energy|banger|turnt|club|party|dance|festival|rave|fast)\b/i.test(blob) || genre === "phonk" || genre === "drill") {
+      mood = "hype";
+      tempo = "fast";
+    } else if (/\b(dark|night|shadow|afterhours|after hours|toxic|sin|devil|villain|obsess)\b/i.test(blob)) {
+      mood = "dark";
+      tempo = "mid";
+    } else if (/\b(focus|study|coding|work|instrumental|deep)\b/i.test(blob)) {
+      mood = "focus";
+      tempo = "slow";
+    } else if (cluster === "electronic" || cluster === "kpop" || cluster === "latin" || cluster === "afro") {
+      mood = "upbeat";
+      tempo = "fast";
+    } else if (cluster === "indie" || cluster === "rnb") {
+      mood = "chill";
+      tempo = "mid";
+    }
+
+    let style = "modern";
+    if (/\b(acoustic|unplugged|stripped|piano|guitar|singer[\s-]?songwriter|folk)\b/i.test(blob)) {
+      style = "acoustic";
+      if (tempo === "fast") tempo = "mid";
+    } else if (/\b(remix|club|synth|electronic|edm|house|techno|bass|phonk|beat)\b/i.test(blob) || cluster === "electronic") {
+      style = "electronic";
+    } else if (/\b(live|concert|session|mtv unplugged)\b/i.test(blob)) {
+      style = "live";
+    } else if (/\b(80s|90s|70s|retro|classic|throwback|oldies|vintage|disco)\b/i.test(blob)) {
+      style = "retro";
+    } else if (/\b(soundtrack|ost|score|cinematic|orchestra|theme)\b/i.test(blob)) {
+      style = "cinematic";
+    }
+
+    return { genre, cluster, mood, tempo, style };
+  }
+
+  function areClustersCompatibleClient(c1, c2) {
+    if (!c1 || !c2) return false;
+    if (c1 === c2) return true;
+    const compat = {
+      pop: ["rnb", "indie", "electronic", "kpop", "latin", "afro"],
+      hiphop: ["rnb", "afro", "latin", "electronic"],
+      rnb: ["hiphop", "pop", "afro", "chill", "indie"],
+      electronic: ["pop", "hiphop", "kpop", "latin"],
+      rock: ["indie", "pop", "country"],
+      indie: ["rock", "pop", "chill", "rnb", "country"],
+      latin: ["pop", "afro", "hiphop", "electronic"],
+      afro: ["rnb", "hiphop", "latin", "pop"],
+      kpop: ["pop", "electronic", "rnb", "hiphop"],
+      desi: ["pop", "chill", "indie"],
+      chill: ["indie", "rnb", "pop", "country"],
+      country: ["indie", "rock", "pop", "chill"],
+    };
+    return (compat[c1] || []).includes(c2);
+  }
+
+  function areMoodsCompatibleClient(m1, m2) {
+    if (!m1 || !m2) return false;
+    if (m1 === m2) return true;
+    const adj = {
+      chill: ["romantic", "melancholic", "focus", "dark"],
+      melancholic: ["chill", "romantic", "dark"],
+      romantic: ["chill", "melancholic", "upbeat"],
+      upbeat: ["hype", "romantic", "chill"],
+      hype: ["upbeat", "dark"],
+      dark: ["hype", "melancholic", "chill", "upbeat"],
+      focus: ["chill", "melancholic"],
+    };
+    return (adj[m1] || []).includes(m2);
+  }
+
+  function areTemposSmoothClient(t1, t2) {
+    if (!t1 || !t2 || t1 === t2) return 2;
+    if (t1 === "mid" || t2 === "mid") return 1;
+    return 0;
+  }
+
+  // Sequences candidate songs like a human-made Spotify playlist:
+  // 1) Phase 1 (first ~35%): close similarity (same vibe, genre, mood, tempo, style, related/seed artists)
+  // 2) Phase 2 (middle ~40%): core vibe & style continuation across varied artists
+  // 3) Phase 3 (final ~25%): gradual exploration into compatible genres/moods
+  // Strictly prevents duplicate songs, recently played repeats, and back-to-back same artist.
+  function scoreAndSequenceSpotifyStyle(seedTrack, candidates, opts = {}) {
+    const max = opts.max || 20;
+    const maxPerArtist = opts.maxPerArtist || 2;
+    const seedVibe = seedTrack ? inferTrackVibeClient(seedTrack) : (opts.vibe || { genre: "pop", cluster: "pop", mood: "upbeat", tempo: "mid", style: "modern" });
+    const seedArtist = seedTrack ? canonicalPrimaryArtistClient(seedTrack) : "";
+    const seedKey = seedTrack ? canonicalSongKey(seedTrack) : "";
+    const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
+    const prefGenres = Array.isArray(state.prefs && state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
+    const allowIndian =
+      countryCode === "IN" || countryCode === "PK" || countryCode === "BD" ||
+      seedVibe.cluster === "desi" ||
+      prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
+
+    const taste = tasteProfile();
+    const favArtistSet = new Set([
+      ...(taste.artists || []).map((x) => canonicalPrimaryArtistClient(Array.isArray(x) ? x[0] : x)),
+      ...((state.following || []).map((f) => canonicalPrimaryArtistClient(f && f.name))),
+    ].filter(Boolean));
+    const relatedArtistSet = new Set(
+      Array.isArray(opts.relatedArtists) ? opts.relatedArtists.map((a) => canonicalPrimaryArtistClient(a)).filter(Boolean) : []
+    );
+
+    const excludeKeys = new Set();
+    const excludeIds = new Set();
+    if (seedKey) excludeKeys.add(seedKey);
+    if (seedTrack && seedTrack.id) excludeIds.add(String(seedTrack.id));
+    if (seedTrack && seedTrack.videoId) excludeIds.add(String(seedTrack.videoId));
+    for (const ex of (opts.excludeTracks || [])) {
+      if (!ex) continue;
+      const k = canonicalSongKey(ex);
+      if (k) excludeKeys.add(k);
+      if (ex.id) excludeIds.add(String(ex.id));
+      if (ex.videoId) excludeIds.add(String(ex.videoId));
+    }
+
+    const recentPlayKeys = new Set(_sessionPlayedKeys.slice(0, 25));
+    const recentAutoKeys = new Set(_sessionAutoQueuedKeys.slice(0, 35));
+
+    const seenKeys = new Set();
+    const seenIds = new Set();
+    const scored = [];
+
+    for (let i = 0; i < (candidates || []).length; i++) {
+      const t = candidates[i];
+      if (!t || !t.title || !looksLikeSong(t)) continue;
+      if (!allowIndian && isUnwantedIndianTrackClient(t, countryCode)) continue;
+      if (seedTrack && isSameSongClient(t, seedTrack)) continue;
+
+      const key = canonicalSongKey(t);
+      const idStr = String(t.id || "");
+      const vidStr = String(t.videoId || "");
+      if (!key) continue;
+      if (excludeKeys.has(key) || (idStr && excludeIds.has(idStr)) || (vidStr && excludeIds.has(vidStr))) continue;
+      if (seenKeys.has(key) || (idStr && seenIds.has(idStr)) || (vidStr && seenIds.has(vidStr))) continue;
+      seenKeys.add(key);
+      if (idStr) seenIds.add(idStr);
+      if (vidStr) seenIds.add(vidStr);
+
+      const artistNorm = canonicalPrimaryArtistClient(t);
+      const tv = inferTrackVibeClient(t);
+      let score = 0;
+      let tier = 2;
+
+      const isSameArtist = Boolean(seedArtist && artistNorm && (artistNorm === seedArtist || artistNorm.includes(seedArtist) || seedArtist.includes(artistNorm)));
+      const isRelArtist = Boolean(artistNorm && relatedArtistSet.has(artistNorm));
+      const isFavArtist = Boolean(artistNorm && favArtistSet.has(artistNorm));
+
+      if (isSameArtist) {
+        score += 32;
+        tier = 1;
+      } else if (isRelArtist) {
+        score += 30;
+        tier = 1;
+      } else if (isFavArtist) {
+        score += 16;
+      }
+
+      if (tv.genre === seedVibe.genre) {
+        score += 28;
+        if (tier > 1 && (isRelArtist || tv.mood === seedVibe.mood)) tier = 1;
+      } else if (tv.cluster === seedVibe.cluster) {
+        score += 22;
+        if (tier > 2) tier = 2;
+      } else if (areClustersCompatibleClient(seedVibe.cluster, tv.cluster)) {
+        score += 10;
+        tier = 3;
+      } else {
+        score -= 14;
+        tier = 3;
+      }
+
+      if (tv.mood === seedVibe.mood) score += 16;
+      else if (areMoodsCompatibleClient(seedVibe.mood, tv.mood)) score += 9;
+      else score -= 5;
+
+      const tempoFit = areTemposSmoothClient(seedVibe.tempo, tv.tempo);
+      if (tempoFit === 2) score += 12;
+      else if (tempoFit === 1) score += 6;
+      else score -= 6;
+
+      if (tv.style === seedVibe.style) score += 10;
+
+      if (recentPlayKeys.has(key)) score -= 45;
+      else if (recentAutoKeys.has(key)) score -= 22;
+
+      score += Math.max(0, 12 - Math.floor(i / 4));
+
+      scored.push({
+        track: t,
+        key,
+        artistNorm: artistNorm || `unknown_${i}`,
+        vibe: tv,
+        tier,
+        score,
+      });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+
+    const sequenced = [];
+    const artistCounts = new Map();
+    const artistLastSlot = new Map();
+    if (seedArtist) {
+      artistCounts.set(seedArtist, 1);
+      artistLastSlot.set(seedArtist, -1);
+    }
+
+    const remaining = scored.slice();
+    let prevVibe = seedVibe;
+    let prevArtist = seedArtist;
+
+    while (sequenced.length < max && remaining.length > 0) {
+      const slot = sequenced.length;
+      const progress = max > 1 ? slot / (max - 1) : 0;
+      const targetTier = progress < 0.35 ? 1 : progress < 0.75 ? 2 : 3;
+
+      let bestIdx = -1;
+      let bestSlotScore = -Infinity;
+
+      for (let i = 0; i < remaining.length; i++) {
+        const cand = remaining[i];
+        const aCount = artistCounts.get(cand.artistNorm) || 0;
+        const capForArtist = (seedArtist && cand.artistNorm === seedArtist) ? Math.min(2, maxPerArtist) : maxPerArtist;
+        if (aCount >= capForArtist) continue;
+        if (cand.artistNorm && cand.artistNorm === prevArtist) continue;
+        const lastIdx = artistLastSlot.get(cand.artistNorm);
+        if (lastIdx !== undefined && slot - lastIdx < 3) continue;
+
+        let slotScore = cand.score;
+        const tierDiff = Math.abs(cand.tier - targetTier);
+        if (tierDiff === 0) slotScore += 18;
+        else if (tierDiff === 1) slotScore += 6;
+        else slotScore -= 8;
+
+        const tFit = areTemposSmoothClient(prevVibe.tempo, cand.vibe.tempo);
+        if (tFit === 2) slotScore += 10;
+        else if (tFit === 1) slotScore += 5;
+        else slotScore -= 8;
+
+        if (cand.vibe.mood === prevVibe.mood) slotScore += 8;
+        else if (areMoodsCompatibleClient(prevVibe.mood, cand.vibe.mood)) slotScore += 4;
+
+        if (aCount === 0) slotScore += 9;
+
+        if (slotScore > bestSlotScore) {
+          bestSlotScore = slotScore;
+          bestIdx = i;
+        }
+      }
+
+      if (bestIdx < 0) {
+        bestIdx = remaining.findIndex(
+          (c) => c.artistNorm !== prevArtist && (artistCounts.get(c.artistNorm) || 0) < maxPerArtist + 1
+        );
+      }
+      if (bestIdx < 0) {
+        bestIdx = remaining.findIndex((c) => c.artistNorm !== prevArtist);
+      }
+      if (bestIdx < 0) bestIdx = 0;
+
+      const [picked] = remaining.splice(bestIdx, 1);
+      sequenced.push(picked.track);
+      artistCounts.set(picked.artistNorm, (artistCounts.get(picked.artistNorm) || 0) + 1);
+      artistLastSlot.set(picked.artistNorm, slot);
+      prevArtist = picked.artistNorm;
+      prevVibe = picked.vibe;
+    }
+
+    return sequenced;
+  }
+
+  function localRelatedTracks(t, max = 24) {
+    const pool = [].concat(
+      homeTrackPool(),
+      (state.discovery && state.discovery.tracks) || [],
+      state.tasteTracks || [],
+      state.followedArtistTracks || [],
+      state.liked || [],
+      state.recents || []
+    );
+    return pool
+      .filter((cand) => cand && cand.id && cand.title && cand.source !== "radio" && looksLikeSong(cand) && (!t || !isSameSongClient(cand, t)))
+      .slice(0, max * 4);
+  }
+
   async function fetchRelated(seed, extraSkip) {
     if (!seed || seed.source === "radio") return [];
     const artist = artistName(seed);
     const title = seed.title || "";
-    const skip = [relatedSkip(seed), extraSkip || ""].filter(Boolean).join(",");
-    const data = await api(
-      `/api/related?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}&skip=${encodeURIComponent(skip)}&${glq()}`,
-      14000
-    );
+    const vibe = inferTrackVibeClient(seed);
+    const taste = tasteProfile();
+    const skipParts = [
+      relatedSkip(seed),
+      canonicalSongKey(seed),
+      extraSkip || "",
+      ..._sessionPlayedKeys.slice(0, 20),
+      ..._sessionAutoQueuedKeys.slice(0, 20),
+    ].filter(Boolean);
+    const skip = [...new Set(skipParts)].slice(0, 35).join(",");
+    const qs = new URLSearchParams({
+      title,
+      artist,
+      genre: seed.genre || vibe.genre || "",
+      mood: vibe.mood || "",
+      tempo: vibe.tempo || "",
+      style: vibe.style || "",
+      artists: taste.artists.slice(0, 4).map((x) => x[0]).join(","),
+      genres: taste.genres.slice(0, 3).map((x) => x[0]).join(","),
+      skip,
+    });
+    const data = await api(`/api/related?${qs}&${glq()}`, 14000);
     return (data && data.tracks) || [];
+  }
+
+  // Supplements related candidates with artist catalog + Deezer related artists + iTunes
+  // and sequences them through the Spotify-style similarity -> gradual exploration engine.
+  async function gatherSmartRelatedCandidates(seed, excludeTracks = [], max = 18) {
+    if (!seed || seed.source === "radio") return [];
+    const skipKeys = [];
+    for (const ex of excludeTracks) {
+      if (!ex) continue;
+      const k = canonicalSongKey(ex);
+      if (k) skipKeys.push(k);
+      if (ex.id) skipKeys.push(String(ex.id));
+    }
+    let raw = await fetchRelated(seed, skipKeys.slice(0, 25).join(",")).catch(() => []);
+    const relatedArtists = [];
+    const art = artistName(seed);
+
+    if (raw.length < 10 && art && !/^(various artists|unknown)$/i.test(art)) {
+      try {
+        const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
+        const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
+        raw = raw.concat(artTracks.slice(0, 12));
+      } catch {}
+    }
+
+    if (raw.length < 10) {
+      const searchQ = art || seed.title || "";
+      if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
+        try {
+          const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
+          const itList = (itRes && itRes.results) || [];
+          raw = raw.concat(itList);
+        } catch {}
+        if (raw.length < 10) {
+          try {
+            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
+            const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
+            for (const t of dzList) {
+              const s = normalizeClientDeezerTrack(t);
+              if (s) raw.push(s);
+            }
+          } catch {}
+        }
+      }
+    }
+
+    if (raw.length < 10) {
+      try {
+        const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
+        const discTracks = (disc && disc.tracks) || [];
+        raw = raw.concat(discTracks);
+      } catch {}
+    }
+
+    if (raw.length < 12) {
+      raw = raw.concat(localRelatedTracks(seed, 24));
+    }
+
+    return scoreAndSequenceSpotifyStyle(seed, raw, {
+      max,
+      maxPerArtist: 2,
+      relatedArtists,
+      excludeTracks,
+    });
   }
 
   let isQueueRecsLoading = false;
   async function loadQueueRecs(force = false) {
-    const cur = current() || (state.recent && state.recent[0]) || (state.queue && state.queue[0]) || (state.liked && state.liked[0]);
+    const isSeedTrack = force && typeof force === "object" && force.title;
+    const forceRefresh = force === true;
+    const cur = (isSeedTrack ? force : null) || current() || (state.recents && state.recents[0]) || (state.queue && state.queue[0]) || (state.liked && state.liked[0]);
     if (!cur || cur.source === "radio") {
       if (!cur) {
         state.queueRecs = [];
@@ -4615,8 +5393,8 @@
       }
       return;
     }
-    const seedKey = `${cur.id || cur.videoId || ""}:${cur.title || ""}:${cur.artist || ""}`;
-    if (!force && state._queueRecsSeed === seedKey && Array.isArray(state.queueRecs) && state.queueRecs.length > 0) {
+    const seedKey = canonicalSongKey(cur);
+    if (!forceRefresh && state._queueRecsSeed === seedKey && Array.isArray(state.queueRecs) && state.queueRecs.length >= 4) {
       return;
     }
     if (isQueueRecsLoading) return;
@@ -4625,104 +5403,15 @@
     if (refBtn) refBtn.classList.add("rotating");
     renderQueue();
     try {
-      const skipSet = new Set();
-      (state.queue || []).forEach((t) => {
-        if (!t) return;
-        if (t.id) skipSet.add(t.id);
-        if (t.videoId) skipSet.add(t.videoId);
-      });
-      (state.recent || []).slice(0, 20).forEach((t) => {
-        if (!t) return;
-        if (t.id) skipSet.add(t.id);
-        if (t.videoId) skipSet.add(t.videoId);
-      });
-      const extraSkip = Array.from(skipSet).slice(0, 25).join(",");
-      let tracks = await fetchRelated(cur, extraSkip).catch(() => []);
-      const filtered = [];
-      const seenIds = new Set(skipSet);
-
-      const addTrack = (t) => {
-        if (!t || !looksLikeSong(t)) return false;
-        const k = t.id || t.videoId;
-        if (!k || seenIds.has(k)) return false;
-        // Skip identical title matching seed song
-        const cleanT = String(t.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
-        const cleanCur = String(cur.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
-        if (cleanT && cleanCur && cleanT === cleanCur) return false;
-        seenIds.add(k);
-        filtered.push(t);
-        return true;
-      };
-
-      for (const t of tracks || []) {
-        addTrack(t);
-        if (filtered.length >= 15) break;
+      const excludeTracks = [
+        ...(state.queue || []),
+        ...(state.recents || []).slice(0, 12),
+      ];
+      if (forceRefresh && Array.isArray(state.queueRecs)) {
+        excludeTracks.push(...state.queueRecs);
       }
-
-      // If related returned fewer than 6 songs, fetch artist catalog recommendations
-      if (filtered.length < 6 && cur.artist) {
-        const art = artistName(cur);
-        if (art && !/^(various artists|unknown)$/i.test(art)) {
-          try {
-            const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
-            const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
-            for (const t of artTracks) {
-              addTrack(t);
-              if (filtered.length >= 15) break;
-            }
-          } catch {}
-        }
-      }
-
-      // If still fewer than 6, supplement from iTunes / Apple Music catalog
-      if (filtered.length < 6) {
-        const art = artistName(cur);
-        const searchQ = art || cur.title || "";
-        if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
-          try {
-            const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
-            const itList = (itRes && itRes.results) || [];
-            for (const t of itList) {
-              addTrack(t);
-              if (filtered.length >= 15) break;
-            }
-          } catch {}
-          if (filtered.length < 6) {
-            try {
-              const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
-              const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
-              for (const t of dzList) {
-                const s = {
-                  id: `deezer:${t.id}`,
-                  source: "deezer",
-                  title: t.title || t.trackName || "Song",
-                  artist: (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist",
-                  album: (t.album && (t.album.title || t.album)) || t.collectionName || "",
-                  duration: Number(t.duration || 0),
-                  artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg",
-                  playQuery: `${t.title || ""} ${(t.artist && (t.artist.name || t.artist)) || ""} official audio`.trim(),
-                };
-                addTrack(s);
-                if (filtered.length >= 15) break;
-              }
-            } catch {}
-          }
-        }
-      }
-
-      // If still fewer than 6, pull from discovery / shelf
-      if (filtered.length < 6) {
-        try {
-          const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
-          const discTracks = (disc && disc.tracks) || [];
-          for (const t of discTracks) {
-            addTrack(t);
-            if (filtered.length >= 15) break;
-          }
-        } catch {}
-      }
-
-      state.queueRecs = filtered;
+      const sequenced = await gatherSmartRelatedCandidates(cur, excludeTracks, 15);
+      state.queueRecs = sequenced.filter((t) => !isSameSongClient(t, cur) && !(state.queue || []).some((q) => isSameSongClient(q, t)));
       state._queueRecsSeed = seedKey;
     } catch (err) {
       console.warn("loadQueueRecs failed:", err);
@@ -4737,79 +5426,49 @@
   let isRefillingQueue = false;
   async function ensureQueueRefill(seed) {
     if (isRefillingQueue) return false;
-    const targetSeed = seed || current() || (state.queue && state.queue[state.queue.length - 1]) || (state.recent && state.recent[0]);
+    const targetSeed = seed || current() || (state.queue && state.queue[state.queue.length - 1]) || (state.recents && state.recents[0]);
     if (!targetSeed || targetSeed.source === "radio") return false;
     isRefillingQueue = true;
     try {
-      // 1. If we already have fresh Spotify-style recommendations, use them first for instantaneous queue extension!
+      // 1. If we already have fresh Spotify-style recommendations matching the current vibe,
+      // filter out any song already in the queue or identical to the current song, and append!
       if (Array.isArray(state.queueRecs) && state.queueRecs.length >= 4) {
-        const toAdd = state.queueRecs.slice(0, 8);
-        state.queueRecs = state.queueRecs.slice(8);
-        state.queue = state.queue.concat(toAdd);
-        renderQueue();
-        renderChrome();
-        // Background refresh next batch
-        loadQueueRecs(true);
-        return true;
+        const validRecs = state.queueRecs.filter(
+          (r) => r && !isSameSongClient(r, targetSeed) && !(state.queue || []).some((q) => isSameSongClient(q, r))
+        );
+        if (validRecs.length >= 4) {
+          const toAdd = validRecs.slice(0, 10);
+          for (const f of toAdd) recordSessionAutoQueued(f);
+          state.queueRecs = state.queueRecs.filter((r) => !toAdd.some((a) => isSameSongClient(a, r)));
+          state.queue = state.queue.concat(toAdd);
+          renderQueue();
+          renderChrome();
+          loadQueueRecs(true);
+          return true;
+        }
       }
-      const rows = await fetchRelated(targetSeed);
-      const have = new Set();
-      (state.queue || []).forEach((t) => {
-        if (!t) return;
-        if (t.id) have.add(t.id);
-        if (t.videoId) have.add(t.videoId);
-        if (t.trackId) have.add(String(t.trackId));
-      });
-      (state.recent || []).slice(0, 20).forEach((t) => {
-        if (!t) return;
-        if (t.id) have.add(t.id);
-        if (t.videoId) have.add(t.videoId);
-        if (t.trackId) have.add(String(t.trackId));
-      });
 
-      let candidates = Array.isArray(rows) ? [...rows] : [];
+      const excludeTracks = [
+        ...(state.queue || []),
+        ...(state.recents || []).slice(0, 15),
+      ];
+      let extra = await gatherSmartRelatedCandidates(targetSeed, excludeTracks, 16);
 
-      // If target seed is Audius, also add trending/popular Audius tracks to candidate pool
-      if (targetSeed.source === "audius") {
+      // If target seed is Audius and extra is sparse, also blend Audius tracks
+      if (extra.length < 6 && targetSeed.source === "audius") {
         try {
           const gData = await api(`/api/home?${glq()}`, 4000);
           const audList = (gData && gData.audius) || [];
-          for (const a of audList) {
-            if (a && (a.id || a.trackId)) candidates.push(a);
-          }
+          extra = scoreAndSequenceSpotifyStyle(targetSeed, [...extra, ...audList], {
+            max: 16,
+            excludeTracks,
+          });
         } catch {}
       }
 
-      // If candidates are sparse, query search for more songs by the same artist or title genre
-      if (candidates.length < 8) {
-        try {
-          const a = artistName(targetSeed) || targetSeed.artist;
-          if (a) {
-            const sData = await api(`/api/search?q=${encodeURIComponent(a)}&${glq()}`, 4000);
-            if (sData && Array.isArray(sData.youtube)) {
-              candidates = candidates.concat(sData.youtube);
-            }
-          }
-        } catch {}
-      }
-
-      const extra = [];
-      for (const t of candidates) {
-        if (!t || !looksLikeSong(t)) continue;
-        const tid = t.id;
-        const vid = t.videoId;
-        const trk = t.trackId ? String(t.trackId) : "";
-        if (tid && have.has(tid)) continue;
-        if (vid && have.has(vid)) continue;
-        if (trk && have.has(trk)) continue;
-        if (tid) have.add(tid);
-        if (vid) have.add(vid);
-        if (trk) have.add(trk);
-        extra.push(t);
-        if (extra.length >= 20) break;
-      }
-
+      extra = extra.filter((t) => t && !isSameSongClient(t, targetSeed) && !(state.queue || []).some((q) => isSameSongClient(q, t)));
       if (!extra.length) return false;
+      for (const f of extra) recordSessionAutoQueued(f);
       state.queue = state.queue.concat(extra);
       renderQueue();
       renderChrome();
@@ -4834,30 +5493,25 @@
     const key = `${plIndex}:${p.tracks.map((t) => t.id).slice(0, 10).join("|")}`;
     if (plRecs.key === key) return;
     plRecs = { key, tracks: [], loading: true };
-    const have = new Set(p.tracks.map((t) => t.id).filter(Boolean));
-    p.tracks.forEach((t) => { if (t && t.videoId) have.add(t.videoId); });
-    const seeds = [];
     const ts = p.tracks;
-    seeds.push(ts[ts.length - 1]);
-    if (ts[0] && ts[0].id !== seeds[0].id) seeds.push(ts[0]);
+    const seeds = [ts[ts.length - 1]];
+    if (ts[0] && !isSameSongClient(ts[0], seeds[0])) seeds.push(ts[0]);
     if (ts.length > 2) {
       const mid = ts[Math.floor(ts.length / 2)];
-      if (mid && !seeds.some((s) => s.id === mid.id)) seeds.push(mid);
+      if (mid && !seeds.some((s) => isSameSongClient(s, mid))) seeds.push(mid);
     }
-    const out = [];
+    let raw = [];
     for (const seed of seeds.slice(0, 3)) {
       try {
-        const rows = await fetchRelated(seed, [...have].join(","));
-        for (const t of rows) {
-          if (!t || !looksLikeSong(t) || have.has(t.id) || (t.videoId && have.has(t.videoId))) continue;
-          have.add(t.id);
-          if (t.videoId) have.add(t.videoId);
-          out.push(t);
-          if (out.length >= 10) break;
-        }
+        const rows = await fetchRelated(seed, ts.map((t) => canonicalSongKey(t)).filter(Boolean).slice(0, 25).join(","));
+        raw = raw.concat(rows || []);
       } catch {}
-      if (out.length >= 10) break;
     }
+    const out = scoreAndSequenceSpotifyStyle(seeds[0], raw, {
+      max: 10,
+      maxPerArtist: 2,
+      excludeTracks: ts,
+    });
     if (plRecs.key !== key) return;
     plRecs = { key, tracks: out, loading: false };
     if (state.view === "library" && state.activePlaylist === plIndex) render();
@@ -4881,26 +5535,135 @@
     setTimeout(() => next(true), 600);
   }
 
-  // In-memory resolution cache: playQuery -> {videoId, artwork, duration}.
+  // In-memory resolution cache: playQuery -> {videoId, candidates, artwork, duration, streamUrl}.
   const ytResolveCache = new Map();
   const YT_RESOLVE_CACHE_MAX = 500;
-  function ytResolveStore(q, videoId, artwork, duration) {
+  function ytResolveStore(q, videoId, artwork, duration, candidates = [], streamUrl = "") {
     if (ytResolveCache.size >= YT_RESOLVE_CACHE_MAX) {
       const first = ytResolveCache.keys().next().value;
       if (first !== undefined) ytResolveCache.delete(first);
     }
-    ytResolveCache.set(q, { videoId: videoId || "", artwork: artwork || "", duration: duration || 0 });
+    ytResolveCache.set(q, {
+      videoId: videoId || "",
+      candidates: Array.isArray(candidates) ? candidates.slice(0, 10) : [],
+      artwork: artwork || "",
+      duration: duration || 0,
+      streamUrl: streamUrl || "",
+    });
   }
+
+  // In-flight & warm stream cache: videoId -> { promise, data, exp }
+  const warmStreamMap = new Map();
+  function getWarmStream(videoId, title = "", artist = "", candidates = [], timeoutMs = 4000, fast = false) {
+    const vid = String(videoId || "").trim();
+    if (!vid) return Promise.resolve(null);
+    const now = Date.now();
+    const hit = warmStreamMap.get(vid);
+    if (hit && hit.exp > now) {
+      if (hit.data) return Promise.resolve(hit.data);
+      if (hit.promise) {
+        return Promise.race([
+          hit.promise,
+          new Promise((res) => setTimeout(() => res(null), timeoutMs)),
+        ]);
+      }
+    }
+    const candParam = Array.isArray(candidates) && candidates.length
+      ? `&candidates=${encodeURIComponent(candidates.slice(0, 5).join(","))}`
+      : "";
+    const fastParam = fast ? "&fast=1" : "";
+    const p = api(
+      `/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || "")}&artist=${encodeURIComponent(artist || "")}${candParam}${fastParam}`,
+      timeoutMs
+    ).then((d) => {
+      if (d && d.url && !d.isPreview) {
+        if (d.url.startsWith("/")) d.url = API_BASE + d.url;
+        warmStreamMap.set(vid, { data: d, promise: null, exp: Date.now() + 12 * 60 * 1000 });
+        return d;
+      }
+      warmStreamMap.delete(vid);
+      return null;
+    }).catch(() => {
+      warmStreamMap.delete(vid);
+      return null;
+    });
+    if (warmStreamMap.size > 200) {
+      const oldest = warmStreamMap.keys().next().value;
+      if (oldest) warmStreamMap.delete(oldest);
+    }
+    warmStreamMap.set(vid, { data: null, promise: p, exp: now + 30000 });
+    return p;
+  }
+
+  function buildTrackPlayQueries(t) {
+    const rawTitle = String((t && t.title) || "").trim();
+    const rawArtist = String((t && t.artist) || "").replace(/^(unknown artist|various artists|artist|youtube)$/i, "").trim();
+    const cleanTitle = rawTitle
+      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|with|remaster|live|radio edit|explicit|clean|version|deluxe|bonus|soundtrack|from\s)[^)\]]*[)\]]/gi, "")
+      .replace(/\s+-\s+.*?(?:remaster|version|edit|live|mono|stereo|deluxe).*$/i, "")
+      .trim() || rawTitle;
+    const bareTitle = rawTitle.replace(/\s*[\[(][^)\]]*[)\]]/g, "").trim() || cleanTitle;
+    const primaryArtist = rawArtist.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\swith\s|\/)\s*/i)[0].trim() || rawArtist;
+    const list = [
+      String(t && t.playQuery || "").trim(),
+      `${rawTitle} ${rawArtist} official audio`.trim(),
+      `${cleanTitle} ${primaryArtist} official audio`.trim(),
+      `${bareTitle} ${primaryArtist}`.trim(),
+      cleanTitle,
+    ].filter(Boolean);
+    return [...new Set(list)];
+  }
+
+  async function resolveFallbackStreamUrl(t, skipYtStream = false) {
+    if (!t) return "";
+    if (!skipYtStream && t.streamUrl && !t._isPreviewStream) return t.streamUrl;
+    const candParam = Array.isArray(t._ytCandidates) && t._ytCandidates.length
+      ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+      : "";
+    if (!skipYtStream && (t.videoId || t.title)) {
+      try {
+        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0`, 10000);
+        if (sData && sData.url && !sData.isPreview) {
+          t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
+          t._isPreviewStream = false;
+          if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
+          if (sData.duration && !t.duration) t.duration = Number(sData.duration);
+          return t.streamUrl;
+        }
+      } catch {}
+    }
+    // Try secondary stripped query via /api/yt/stream (1.6.6 full-track resolution, never 30s preview clips)
+    const queries = buildTrackPlayQueries(t);
+    for (let i = 0; i < Math.min(queries.length, 2); i++) {
+      const q = queries[i];
+      if (!q) continue;
+      try {
+        const sData = await api(`/api/yt/stream?title=${encodeURIComponent(q)}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0&refresh=1`, 9000);
+        if (sData && sData.url && !sData.isPreview) {
+          t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
+          t._isPreviewStream = false;
+          if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
+          if (sData.duration && !t.duration) t.duration = Number(sData.duration);
+          return t.streamUrl;
+        }
+      } catch {}
+    }
+    return "";
+  }
+
   async function resolveYouTubePlay(t) {
     if (!t) return t;
     if (t.videoId) return t;
-    const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
+    const queries = buildTrackPlayQueries(t);
+    const q = queries[0] || "";
     if (!q) throw new Error("No playable version");
 
     // Instant path: already resolved this exact query this session.
     const cachedHit = ytResolveCache.get(q);
-    if (cachedHit && cachedHit.videoId) {
-      t.videoId = cachedHit.videoId;
+    if (cachedHit && (cachedHit.videoId || cachedHit.streamUrl)) {
+      if (cachedHit.videoId) t.videoId = cachedHit.videoId;
+      if (cachedHit.candidates && cachedHit.candidates.length) t._ytCandidates = cachedHit.candidates.slice();
+      if (cachedHit.streamUrl && !t.streamUrl) t.streamUrl = cachedHit.streamUrl;
       if (!t.origSource) t.origSource = t.source;
       if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
       if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
@@ -4909,24 +5672,132 @@
     }
 
     let rows = [];
+    const extractRows = (d) => {
+      const arr = (d && d.tracks) || (d && d.results) || (d && d.youtube) || (Array.isArray(d) ? d : []);
+      return Array.isArray(arr) ? arr.filter((x) => x && (x.videoId || x.streamUrl)) : [];
+    };
+
+    // 1. Race fast primary YouTube search with stripped secondary query (350ms head start)
     try {
-      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 6000);
-      rows = (data && data.tracks) || (data && data.results) || data || [];
-    } catch {
+      const searchRaces = [
+        api(`/api/youtube/search?q=${encodeURIComponent(q)}&fast=1&${glq()}`, 3200).then((d) => {
+          const r = extractRows(d);
+          if (!r.length) throw new Error("empty");
+          return r;
+        }),
+      ];
+      if (queries[2] && queries[2] !== q) {
+        searchRaces.push(
+          new Promise((res, rej) =>
+            setTimeout(() => {
+              api(`/api/youtube/search?q=${encodeURIComponent(queries[2])}&fast=1&${glq()}`, 3000)
+                .then((d) => {
+                  const r = extractRows(d);
+                  if (!r.length) throw new Error("empty");
+                  return r;
+                })
+                .then(res, rej);
+            }, 350)
+          )
+        );
+      }
+      rows = await Promise.any(searchRaces);
+    } catch {}
+
+    // 2. Fallback: full /api/youtube/search + Piped browser search raced in parallel
+    if (!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) {
+      const qFallback = queries[3] || queries[2] || q;
+      const pipedAttempt = ( () => {
+        const qPiped = queries[3] || q;
+        return pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=music_songs`)
+          .catch(() => pipedJson(`/search?q=${encodeURIComponent(qPiped)}&filter=all`))
+          .then((pData) => {
+            const pItems = (pData && (pData.items || pData)) || [];
+            const mapped = pItems
+              .map((it) => {
+                const vid = (it && it.url && (it.url.split("v=")[1] || it.url.replace("/watch?v=", "")).split("&")[0]) || (it && it.videoId) || "";
+                if (!vid) return null;
+                return {
+                  videoId: vid,
+                  title: it.title || t.title,
+                  artist: it.uploaderName || it.uploader || t.artist,
+                  duration: Number(it.duration || 0),
+                  artwork: it.thumbnail || ytThumb(vid),
+                };
+              })
+              .filter(Boolean);
+            if (!mapped.length) throw new Error("empty piped");
+            return mapped;
+          });
+      })();
+      const serverAttempt = api(`/api/youtube/search?q=${encodeURIComponent(qFallback)}&${glq()}`, 4500).then((d) => {
+        const r = extractRows(d);
+        if (!r.length) throw new Error("empty server");
+        return r;
+      });
       try {
-        const data = await api(`/api/search?q=${encodeURIComponent(q)}&source=youtube&${glq()}`, 6000);
-        rows = (data && data.youtube) || [];
+        rows = await Promise.any([serverAttempt, pipedAttempt]);
       } catch {}
     }
-    const hit = (Array.isArray(rows) ? rows : []).find((x) => x && x.videoId);
-    if (!hit) throw new Error("No playable version");
-    t.videoId = hit.videoId;
-    if (!t.origSource) t.origSource = t.source;
-    if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
-    if (hit.duration && !t.duration) t.duration = hit.duration;
-    if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
-    ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0);
-    return t;
+
+    const validRows = (Array.isArray(rows) ? rows : []).filter((x) => x && (x.videoId || x.streamUrl));
+    const blockedSet = t._blockedVideoIds instanceof Set ? t._blockedVideoIds : new Set();
+    const candidates = validRows.map((x) => x.videoId).filter((vid) => vid && !blockedSet.has(vid));
+    if (candidates.length) {
+      t._ytCandidates = [...new Set(candidates)];
+    }
+
+    const hit = validRows.find((x) => x.videoId && !blockedSet.has(x.videoId)) || validRows[0];
+    if (hit && hit.videoId) {
+      t.videoId = hit.videoId;
+      if (!t.origSource) t.origSource = t.source;
+      if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
+      if (hit.duration && !t.duration) t.duration = hit.duration;
+      if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
+      ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0, t._ytCandidates || [], t.streamUrl || "");
+      return t;
+    }
+
+    if (hit && hit.streamUrl) {
+      t.streamUrl = hit.streamUrl;
+      if (!t.origSource) t.origSource = t.source;
+      if (hit.duration && !t.duration) t.duration = hit.duration;
+      if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
+      ytResolveStore(q, "", t.artwork, hit.duration || 0, [], t.streamUrl);
+      return t;
+    }
+
+    // 5. Direct full-quality audio stream fallback via /api/yt/stream so a clicked catalog song ALWAYS plays
+    const fallbackUrl = await resolveFallbackStreamUrl(t);
+    if (fallbackUrl) {
+      t.streamUrl = fallbackUrl;
+      ytResolveStore(q, "", t.artwork, t.duration || 0, [], fallbackUrl);
+      return t;
+    }
+
+    throw new Error("No playable version");
+  }
+
+  async function playFallbackAudioForTrack(t, skipYtStream = false) {
+    if (!t) return false;
+    try {
+      const url = await resolveFallbackStreamUrl(t, skipYtStream);
+      if (!url) return false;
+      t.streamUrl = url;
+      t._playingViaAudio = true;
+      await playAudio(t);
+      failSkip = 0;
+      state.playing = true;
+      setWantPlay(true);
+      showEl($("eqBars"), true);
+      updateMediaSession();
+      updateWakeLock();
+      startTimer();
+      renderChrome();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async function playCurrent(reset) {
@@ -4942,10 +5813,36 @@
       _resumeTrackId = null;
     }
     const gen = ++playGen;
+    t._playingViaAudio = false;
+    if (reset) {
+      t._nativeRefreshTried = false;
+      t._nativeOnDeviceTried = false;
+      t._nativeYtFallbackTried = false;
+      t._nativeFallbackTried = false;
+      t._webYtFallbackTried = false;
+      if (t._isPreviewStream) {
+        t.streamUrl = "";
+        t._isPreviewStream = false;
+      }
+    }
+    state._xfading = false;
+    state.playing = true;
+    setWantPlay(true);
+    if (reset) {
+      npPos = 0;
+      npPosAt = 0;
+      const seekEl = $("seek");
+      if (seekEl && !isSeekingUi) {
+        seekCur = 0;
+        seekTgt = 0;
+        seekEl.value = 0;
+      }
+      if ($("curTime")) $("curTime").textContent = "0:00";
+      if ($("durTime")) $("durTime").textContent = t.source === "radio" ? "LIVE" : fmt(t.duration || 0);
+    }
     pushRecent(t);
-    // Listening shifts the taste profile — reorder "Made for you" so it adapts
-    // as the user keeps playing songs.
-    paintHomeSoon();
+    // Avoid rebuilding the entire Home DOM on phones right as playback starts
+    if (!cheapPhone() && !IS_NATIVE) paintHomeSoon();
     renderChrome();
     const isNetworkOff = Boolean(
       state.offlineMode ||
@@ -4953,11 +5850,27 @@
       (typeof navigator !== "undefined" && navigator.onLine === false)
     );
 
+    // Pre-warm the YouTube IFrame player synchronously on the user click
+    // gesture BEFORE awaiting network resolution (resolveYouTubePlay) so mobile
+    // & desktop browsers don't block autoplay after the async resolve finishes.
+    // On native Android/iOS shells using MuchiAudio background playback, skip
+    // pre-warming the iframe so it doesn't compete with native audio.
+    const useNativeAudioPipe = IS_NATIVE && !!nativePlayer() && state.prefs.ytAudio !== false && !state.showVideo;
+    if (!isNetworkOff && !useNativeAudioPipe && !state.yt && typeof YT !== "undefined" && YT.Player) {
+      try { ensureYT(t.videoId || ""); } catch {}
+    }
+
+    // Strip any accidental duplicate of the current song sitting right next in the queue
+    // so MUCHI never plays the same song twice in a row.
+    while (state.index + 1 < state.queue.length && isSameSongClient(state.queue[state.index + 1], t)) {
+      state.queue.splice(state.index + 1, 1);
+    }
+    // Always load lyrics (uses IndexedDB / saved download cache when offline)
+    loadLyrics(t);
     if (!isNetworkOff) {
-      loadLyrics(t);
-      loadQueueRecs();
-      const hasQueueFollowers = Array.isArray(state.queue) && (state.queueIdx + 1 < state.queue.length);
-      if (!hasQueueFollowers && t.source !== "radio") {
+      loadQueueRecs(t);
+      const remainingUpcoming = Array.isArray(state.queue) ? (state.queue.length - 1 - state.index) : 0;
+      if (remainingUpcoming <= 2 && t.source !== "radio") {
         fillRelatedQueue(t);
       }
     }
@@ -4973,6 +5886,7 @@
       // Never attempt to load YouTube iframe or remote stream over internet!
       if (hasOfflinePlayback || isNetworkOff) {
         if (hasOfflinePlayback) {
+          t._playingViaAudio = true;
           await playAudio(t);
           if (gen !== playGen) return;
           failSkip = 0;
@@ -4981,9 +5895,15 @@
           showEl($("eqBars"), true);
           updateMediaSession();
           updateWakeLock();
+          startTimer();
+          renderChrome();
+          updateProgress();
           if (state.view === "now" && gen === playGen) render();
           return;
         } else {
+          state.playing = false;
+          setWantPlay(false);
+          renderChrome();
           toast(`"${t.title}" is not available offline`);
           skipFailed("Song not downloaded for offline playback");
           return;
@@ -4997,11 +5917,19 @@
         !t.videoId && !t.streamUrl && !t.url &&
         t.source !== "audius" && t.source !== "radio";
       if (needsResolve) {
-        await resolveYouTubePlay(t);
+        renderBufferState(true);
+        try {
+          await resolveYouTubePlay(t);
+        } finally {
+          if (gen === playGen) {
+            renderBufferState(false);
+            renderChrome();
+          }
+        }
       }
       if (gen !== playGen) return;
 
-      if (t.videoId) {
+      if (t.videoId && !t._playingViaAudio) {
         // On native shells, play YouTube as a background audio stream when
         // possible so the OS media notification + lock-screen controls work
         // and music keeps playing with the screen off. Falls back to the
@@ -5011,11 +5939,20 @@
         if (usedNative) {
           // resolved + handed to native player; nothing more to do here
         } else {
-          await playYouTube(t, reset);
+          try {
+            await playYouTube(t, reset);
+          } catch (ytErr) {
+            if (gen !== playGen) return;
+            const okFallback = await playFallbackAudioForTrack(t);
+            if (!okFallback) throw ytErr;
+          }
         }
       }
-      else if (t.source === "youtube") throw new Error("No video");
-      else await playAudio(t);
+      else if (t.source === "youtube" && !t.streamUrl && !t.url) throw new Error("No video");
+      else {
+        t._playingViaAudio = true;
+        await playAudio(t);
+      }
 
       if (gen !== playGen) return;
       failSkip = 0;
@@ -5024,16 +5961,30 @@
       showEl($("eqBars"), true);
       updateMediaSession();
       updateWakeLock();
+      startTimer();
+      renderChrome();
+      updateProgress();
     } catch (err) {
       if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) {
         return;
       }
       console.error(err);
+      // Try secondary full-quality audio stream resolution before giving up on a metadata track
+      if (gen === playGen && (t.source === "deezer" || t.source === "apple" || t.source === "itunes")) {
+        try {
+          const okAudio = await playFallbackAudioForTrack(t);
+          if (okAudio) {
+            if (state.view === "now" && gen === playGen) render();
+            return;
+          }
+        } catch {}
+      }
       // Last-chance offline fallback if network failed unexpectedly (e.g. data turned off)
       try {
         const fallbackBlob = await getOfflineAudioBlob(t);
         if (fallbackBlob) {
           const fallbackUrl = URL.createObjectURL(fallbackBlob);
+          t._playingViaAudio = true;
           await playAudioWeb(fallbackUrl);
           if (gen !== playGen) return;
           failSkip = 0;
@@ -5042,6 +5993,7 @@
           showEl($("eqBars"), true);
           updateMediaSession();
           updateWakeLock();
+          startTimer();
           if (state.view === "now" && gen === playGen) render();
           return;
         }
@@ -5057,20 +6009,43 @@
     if (!IS_NATIVE || !nativePlayer()) return false;
     if (state.prefs.ytAudio === false) return false;
     if (state.showVideo) return false;
-    let url = "";
+    let url = (!t._isPreviewStream && !t._nativeRefreshTried && t.streamUrl) ? t.streamUrl : "";
     let dur = t.duration || 0;
-    try {
-      const data = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}`, 6000);
-      if (data && data.url) {
-        url = data.url;
-        if (data.duration) dur = Number(data.duration);
+    if (!url) {
+      const warmHit = warmStreamMap.get(String(t.videoId || "").trim());
+      if (warmHit && warmHit.data && warmHit.data.url && warmHit.exp > Date.now()) {
+        url = warmHit.data.url;
+        if (warmHit.data.videoId) t.videoId = warmHit.data.videoId;
+        if (warmHit.data.duration) dur = Number(warmHit.data.duration);
       }
-    } catch { url = ""; }
+    }
+    // Hand "yt:<videoId>" immediately to the native player (Android MuchiAudioService /
+    // iOS MuchiAudioPlugin) so it resolves the stream directly on the user's residential
+    // phone IP in parallel (~250ms, or 0ms if preloaded) with zero datacenter-IP delay,
+    // and plays with full OS media notification + background playback.
+    if (!url && nativePlayer() && !t._nativeOnDeviceTried) {
+      t._nativeOnDeviceTried = true;
+      url = `yt:${t.videoId}`;
+    }
+    if (!url) {
+      try {
+        const data = await getWarmStream(t.videoId, t.title || "", t.artist || "", t._ytCandidates || [], 6500, false);
+        if (data && data.url && !data.isPreview) {
+          url = data.url;
+          if (data.videoId) t.videoId = data.videoId;
+          if (data.duration) dur = Number(data.duration);
+        }
+      } catch {}
+    }
     if (!url) return false;
+    const urlDur = parseStreamUrlDuration(url);
+    if (!dur && urlDur > 0) dur = urlDur;
     t.streamUrl = url;
-    t.duration = dur;
+    t._isPreviewStream = false;
+    if (dur > 0) t.duration = dur;
+    t._playingViaAudio = true;
     await playAudio(t);
-    return !!nativePlayer() && npActive;
+    return (!!nativePlayer() && npActive) || !audio.paused;
   }
 
   function stopOthers(keep) {
@@ -5131,9 +6106,17 @@
     }
 
     if (offlineBlob) {
-      url = URL.createObjectURL(offlineBlob);
+      if (activeOfflineBlobUrl && activeOfflineBlobTrackKey !== trackKey(t)) {
+        try { URL.revokeObjectURL(activeOfflineBlobUrl); } catch {}
+        activeOfflineBlobUrl = "";
+      }
+      if (!activeOfflineBlobUrl || activeOfflineBlobTrackKey !== trackKey(t)) {
+        activeOfflineBlobUrl = URL.createObjectURL(offlineBlob);
+        activeOfflineBlobTrackKey = trackKey(t);
+      }
+      url = activeOfflineBlobUrl;
     } else if (!isNetworkOff) {
-      url = t.streamUrl || "";
+      url = t.streamUrl || t.url || "";
     }
 
     if (!url && t.source === "audius" && t.trackId) {
@@ -5172,13 +6155,16 @@
     if (!url && !isNetworkOff) {
       if (t.videoId) {
         try {
-          const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}`, 6000);
+          const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(artistName(t) || t.artist || "")}`, 6000);
           if (sData && sData.url) {
             url = sData.url;
             t.streamUrl = url;
             if (sData.duration && !t.duration) t.duration = Number(sData.duration);
           }
         } catch {}
+      }
+      if (!url) {
+        url = await resolveFallbackStreamUrl(t);
       }
     }
     if (!url) {
@@ -5192,8 +6178,10 @@
     // resolve them against API_BASE before handing over. On the web there is no
     // native plugin, so audio plays in the WebView <audio> element instead.
     if (url.startsWith("/")) url = API_BASE + url;
-    if (nativePlayer() && /^https?:\/\//i.test(url)) {
-      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
+    if (nativePlayer() && (/^https?:\/\//i.test(url) || /^yt:/i.test(url))) {
+      const cands = Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "";
+      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", cands)) {
+        if (/^yt:/i.test(url)) t.streamUrl = "";
         setWantPlay(true);
         state.playing = true;
         showEl($("eqBars"), true);
@@ -5204,18 +6192,28 @@
         return;
       }
     }
+    if (/^yt:/i.test(url)) {
+      t.streamUrl = "";
+      throw new Error("Native YouTube stream unavailable on web");
+    }
     await playAudioWeb(url);
   }
 
   let audioPlaySeq = 0;
+  let activeOfflineBlobUrl = "";
+  let activeOfflineBlobTrackKey = "";
+  let _webSeekTarget = -1;
   async function playAudioWeb(url) {
     const t = current();
     if (!t || !url) return;
+    if (url.startsWith("/")) url = API_BASE + url;
+    t._playingViaAudio = true;
     const seq = ++audioPlaySeq;
     adaptiveBuffer.buffering = false;
     adaptiveBuffer.startTime = performance.now();
     renderBufferState(false);
     if (audio.src !== url) {
+      _webSeekTarget = -1;
       audio.src = url;
     }
     applyPlaybackPrefs();
@@ -5246,10 +6244,12 @@
           audio.src = proxied;
           const p2 = audio.play();
           if (p2 !== undefined) await p2;
-          return;
-        } catch {}
+        } catch {
+          throw err;
+        }
+      } else {
+        throw err;
       }
-      throw err;
     }
     if (seq !== audioPlaySeq) return;
     // Resume the restored track's saved position once metadata is loaded.
@@ -5304,6 +6304,8 @@
         }
       },
       onStateChange: (e) => {
+        const curTrack = current();
+        if (npActive || (curTrack && curTrack._playingViaAudio)) return;
         const st = e && e.data;
         if (st === YT.PlayerState.PLAYING) {
           ytSwitching = false;
@@ -5348,6 +6350,8 @@
         }
       },
       onError: (e) => {
+        const curTrack = current();
+        if (npActive || (curTrack && curTrack._playingViaAudio)) return;
         onYouTubeError(e && e.data);
       },
     };
@@ -5357,7 +6361,7 @@
     if (typeof YT === "undefined" || !YT.Player) return null;
     const host = $("ytPlayer");
     if (!host) return null;
-    const isCapacitorOrLocal = !location.origin || location.origin === "null" || location.origin.startsWith("file:") || location.origin.startsWith("capacitor:");
+    const isCapacitorOrLocal = IS_NATIVE || !location.origin || location.origin === "null" || /^(file:|capacitor:|https?:\/\/localhost)/i.test(location.origin);
     const ytOrigin = isCapacitorOrLocal ? "https://www.youtube.com" : location.origin;
     const opts = {
       width: "360",
@@ -5435,25 +6439,56 @@
       recoverYouTubeAlt(cur);
       return;
     }
-    if (ytRetry < 3) {
+    if (ytRetry < 2) {
       ytRetry += 1;
       setTimeout(() => retryYouTube(want, ytToken), 220 * ytRetry);
+    } else {
+      recoverYouTubeAlt(cur);
     }
   }
 
   async function recoverYouTubeAlt(t) {
-    if (!t) return;
-    const blocked = String(t.videoId || "");
-    const q = String(t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`).trim();
-    if (!q) return;
-    try {
-      const data = await api(`/api/youtube/search?q=${encodeURIComponent(q)}&${glq()}`, 12000);
-      const hit = (data.tracks || []).find((x) => x && x.videoId && x.videoId !== blocked);
-      if (!hit || current() !== t) return;
-      t.videoId = hit.videoId;
-      ytRetry = 0;
-      await playYouTube(t);
-    } catch {}
+    if (!t || current() !== t) return;
+    if (!(t._blockedVideoIds instanceof Set)) t._blockedVideoIds = new Set();
+    if (t.videoId) t._blockedVideoIds.add(String(t.videoId));
+
+    // 1. Try already-fetched candidate videoIds first (zero network wait, no ping-pong loop)
+    if (Array.isArray(t._ytCandidates) && t._blockedVideoIds.size <= 3) {
+      const nextCand = t._ytCandidates.find((vid) => vid && !t._blockedVideoIds.has(String(vid)));
+      if (nextCand && current() === t) {
+        t.videoId = nextCand;
+        ytRetry = 0;
+        try {
+          await playYouTube(t);
+          return;
+        } catch {}
+      }
+    }
+
+    // 2. Search for an embeddable lyric/audio upload if we haven't exhausted attempts
+    if (t._blockedVideoIds.size <= 3) {
+      const queries = buildTrackPlayQueries(t);
+      const baseQ = queries[3] || queries[2] || `${t.title || ""} ${t.artist || ""}`.trim();
+      const altQ = `${baseQ} lyrics audio`.trim();
+      if (altQ) {
+        try {
+          const data = await api(`/api/youtube/search?q=${encodeURIComponent(altQ)}&${glq()}`, 8000);
+          const rows = (data && data.tracks) || (data && data.results) || [];
+          const hit = rows.find((x) => x && x.videoId && !t._blockedVideoIds.has(String(x.videoId)));
+          if (hit && current() === t) {
+            t.videoId = hit.videoId;
+            ytRetry = 0;
+            await playYouTube(t);
+            return;
+          }
+        } catch {}
+      }
+    }
+
+    // 3. Fallback to direct audio stream (<audio>) so blocked YouTube embeds never break Deezer/catalog playback
+    if (current() === t) {
+      await playFallbackAudioForTrack(t);
+    }
   }
 
   function retryYouTube(id, token) {
@@ -5489,9 +6524,30 @@
     applyYtQuality();
   }
 
+  let ytWatchdogTimer = 0;
+  function scheduleYtWatchdog(t, id, token) {
+    if (ytWatchdogTimer) clearTimeout(ytWatchdogTimer);
+    ytWatchdogTimer = setTimeout(() => {
+      if (token !== ytToken || current() !== t || !wantPlay || t._playingViaAudio) return;
+      const st = (state.yt && typeof state.yt.getPlayerState === "function") ? state.yt.getPlayerState() : -1;
+      // If YouTube iframe is stuck in UNSTARTED (-1) or CUED (5) after async resolution:
+      if (st === -1 || st === 5) {
+        try { if (state.yt && state.yt.playVideo) state.yt.playVideo(); } catch {}
+        ytWatchdogTimer = setTimeout(() => {
+          if (token !== ytToken || current() !== t || !wantPlay || t._playingViaAudio) return;
+          const st2 = (state.yt && typeof state.yt.getPlayerState === "function") ? state.yt.getPlayerState() : -1;
+          if (st2 === -1 || st2 === 5) {
+            playFallbackAudioForTrack(t);
+          }
+        }, 1800);
+      }
+    }, 3200);
+  }
+
   async function playYouTube(t) {
     if (!t || !t.videoId) throw new Error("No video");
     const id = String(t.videoId);
+    t._playingViaAudio = false;
     ytToken += 1;
     const token = ytToken;
     ytWanted = id;
@@ -5506,10 +6562,12 @@
       if (ytPlayingId() === id) {
         try { state.yt.playVideo(); } catch {}
         startTimer();
+        scheduleYtWatchdog(t, id, token);
         return;
       }
       kickYouTube(id);
       startTimer();
+      scheduleYtWatchdog(t, id, token);
       return;
     }
     const player = await ensureYT(id);
@@ -5517,6 +6575,7 @@
     if (!player) throw new Error("YouTube player missing");
     kickYouTube(id);
     startTimer();
+    scheduleYtWatchdog(t, id, token);
   }
 
   function setQueueOpen(open) {
@@ -5559,7 +6618,13 @@
       else testPlay();
       return;
     }
-    const isYt = (t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getPlayerState === "function";
+    // If the current track is an unresolved catalog track (e.g. Deezer/iTunes) that hasn't loaded a stream yet, resolve & play it
+    if (!t.videoId && !t.streamUrl && !t.url && t.source !== "audius" && t.source !== "radio") {
+      setWantPlay(true);
+      playCurrent(true);
+      return;
+    }
+    const isYt = (t.source === "youtube" || !!t.videoId) && !t._playingViaAudio && state.yt && typeof state.yt.getPlayerState === "function";
     if (isYt) {
       const s = state.yt.getPlayerState();
       if (s === 1 || s === 3) {
@@ -5576,7 +6641,7 @@
         return;
       }
     } else if (npActive && nativePlayer()) {
-      if (npPlaying) {
+      if (state.playing) {
         setWantPlay(false);
         nativePausePlayback();
         state.playing = false;
@@ -5585,6 +6650,14 @@
         nativeResumePlayback();
         state.playing = true;
       }
+    } else if (IS_NATIVE && nativePlayer() && !npActive && (t._playingViaAudio || !audio.src)) {
+      if (npPos > 0) {
+        _pendingSeek = npPos;
+        _pendingSeekApplied = false;
+      }
+      setWantPlay(true);
+      playCurrent(false);
+      return;
     } else if (audio.paused) {
       if (!audio.src || audio.networkState === HTMLMediaElement.NETWORK_EMPTY) {
         setWantPlay(true);
@@ -5610,7 +6683,7 @@
     renderChrome();
     const pb = $("playBtn");
     if (pb) triggerFabRipple(pb);
-    if (state.playing) burstHearts(pb);
+    if (state.playing && !cheapPhone() && !IS_NATIVE) burstHearts(pb);
   }
 
   async function next(force) {
@@ -5626,24 +6699,96 @@
       return;
     }
     if (state.repeat === "one" && !force) return playCurrent(true);
+
+    const cur = current();
+    const curArtist = cur ? canonicalPrimaryArtistClient(cur) : "";
+    const curVibe = cur ? inferTrackVibeClient(cur) : null;
+
     if (state.shuffle) {
-      state.index = Math.floor(Math.random() * state.queue.length);
-    } else if (state.index + 1 < state.queue.length) {
-      state.index += 1;
-    } else if (state.repeat === "all") {
-      state.index = 0;
-    } else {
-      const refilled = await ensureQueueRefill();
-      if (refilled && state.index + 1 < state.queue.length) {
-        state.index += 1;
+      // Smart Spotify-like shuffle: never pick the current song, avoid songs already
+      // visited in this shuffle cycle, avoid back-to-back same artist when possible,
+      // and prefer smooth vibe/tempo continuation.
+      let candidates = [];
+      for (let i = 0; i < state.queue.length; i++) {
+        const cand = state.queue[i];
+        if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+        const k = canonicalSongKey(cand);
+        if (!_shuffleVisitedKeys.has(k)) candidates.push({ idx: i, track: cand, key: k });
+      }
+      if (!candidates.length && state.repeat !== "all" && cur && cur.source !== "radio") {
+        const refilled = await ensureQueueRefill(cur);
+        if (refilled) {
+          for (let i = 0; i < state.queue.length; i++) {
+            const cand = state.queue[i];
+            if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+            const k = canonicalSongKey(cand);
+            if (!_shuffleVisitedKeys.has(k)) candidates.push({ idx: i, track: cand, key: k });
+          }
+        }
+      }
+      if (!candidates.length) {
+        _shuffleVisitedKeys.clear();
+        if (cur) _shuffleVisitedKeys.add(canonicalSongKey(cur));
+        for (let i = 0; i < state.queue.length; i++) {
+          const cand = state.queue[i];
+          if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+          candidates.push({ idx: i, track: cand, key: canonicalSongKey(cand) });
+        }
+      }
+      if (candidates.length) {
+        const diffArtist = candidates.filter((c) => canonicalPrimaryArtistClient(c.track) !== curArtist);
+        const pool = diffArtist.length ? diffArtist : candidates;
+        // Weight toward smooth vibe/tempo continuation while keeping natural shuffle variety
+        const scoredPool = pool.map((c) => {
+          const v = inferTrackVibeClient(c.track);
+          let w = 10 + Math.random() * 12;
+          if (curVibe) {
+            if (v.cluster === curVibe.cluster) w += 10;
+            else if (areClustersCompatibleClient(curVibe.cluster, v.cluster)) w += 5;
+            if (areTemposSmoothClient(curVibe.tempo, v.tempo) >= 1) w += 6;
+          }
+          return { ...c, w };
+        });
+        scoredPool.sort((a, b) => b.w - a.w);
+        const topPickCount = Math.min(3, scoredPool.length);
+        const chosen = scoredPool[Math.floor(Math.random() * topPickCount)];
+        state.index = chosen.idx;
+        _shuffleVisitedKeys.add(chosen.key);
         playCurrent(true);
         return;
       }
-      state.playing = false;
-      renderChrome();
+    }
+
+    // Sequential mode: skip any accidental consecutive duplicate of the current song
+    while (state.index + 1 < state.queue.length && cur && isSameSongClient(state.queue[state.index + 1], cur)) {
+      state.queue.splice(state.index + 1, 1);
+    }
+
+    if (state.index + 1 < state.queue.length) {
+      state.index += 1;
+      playCurrent(true);
       return;
     }
-    playCurrent(true);
+
+    if (state.repeat === "all") {
+      if (state.queue.length > 1 && cur && isSameSongClient(state.queue[0], cur)) {
+        state.index = 1;
+      } else {
+        state.index = 0;
+      }
+      playCurrent(true);
+      return;
+    }
+
+    // End of queue reached: seamlessly continue the current song's vibe, genre, mood, tempo & style
+    const refilled = await ensureQueueRefill(cur);
+    if (refilled && state.index + 1 < state.queue.length) {
+      state.index += 1;
+      playCurrent(true);
+      return;
+    }
+    state.playing = false;
+    renderChrome();
   }
 
   function prev() {
@@ -5654,12 +6799,46 @@
     playCurrent(true);
   }
 
+  function parseStreamUrlDuration(u) {
+    if (!u || typeof u !== "string") return 0;
+    try {
+      let target = u;
+      if (target.includes("url=")) {
+        const m = target.match(/[?&]url=([^&]+)/);
+        if (m && m[1]) target = decodeURIComponent(m[1]);
+      }
+      const dm = target.match(/[?&]dur=([0-9]+(?:\.[0-9]+)?)/);
+      if (dm && dm[1]) {
+        const sec = Math.round( parseFloat(dm[1]) );
+        if (sec > 0 && isFinite(sec)) return sec;
+      }
+    } catch {}
+    return 0;
+  }
+
   function position() {
     const t = current();
     if (!t) return 0;
-    if (npActive) return npPos || 0;
-    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getCurrentTime === "function") {
+    if (npActive) {
+      if (state.playing && npPlaying && npPosAt > 0 && Date.now() >= npSeekGuardUntil) {
+        const rate = Number(state.prefs.speed || 1) || 1;
+        const elapsed = Math.max(0, Math.min(12.0, ((performance.now() - npPosAt) / 1000) * rate));
+        // Only extrapolate from 0 once native player has confirmed playing or after initial buffer
+        const basePos = npPos || 0;
+        if (basePos > 0 || npSeenPlaying) {
+          const est = basePos + elapsed;
+          const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+          return d > 0 ? Math.min(d, est) : est;
+        }
+      }
+      return npPos || 0;
+    }
+    const isUsingAudioEl = Boolean(t._playingViaAudio || (audio.src && audio.src.startsWith("blob:")));
+    if ((t.source === "youtube" || !!t.videoId) && !isUsingAudioEl && state.yt && typeof state.yt.getCurrentTime === "function") {
       return state.yt.getCurrentTime() || 0;
+    }
+    if (_webSeekTarget >= 0 && audio.readyState < 1) {
+      return _webSeekTarget;
     }
     return audio.currentTime || 0;
   }
@@ -5668,44 +6847,85 @@
     const t = current();
     if (!t) return 0;
     if (t.source === "radio") return 0;
-    if (npActive) return npDur || t.duration || 0;
-    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.getDuration === "function") {
-      return state.yt.getDuration() || t.duration || 0;
+    if (npActive) {
+      const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+      if (d > 0 && !t.duration) t.duration = d;
+      return d;
     }
-    return audio.duration && isFinite(audio.duration) ? audio.duration : t.duration || 0;
+    const isUsingAudioEl = Boolean(t._playingViaAudio || (audio.src && audio.src.startsWith("blob:")));
+    if ((t.source === "youtube" || !!t.videoId) && !isUsingAudioEl && state.yt && typeof state.yt.getDuration === "function") {
+      const d = state.yt.getDuration() || t.duration || 0;
+      if (d > 0 && !t.duration) t.duration = Math.round(d);
+      return d;
+    }
+    if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
+      if (!t.duration) t.duration = Math.round(audio.duration);
+      return audio.duration;
+    }
+    const saved = findSavedTrack(t);
+    const fallbackDur = t.duration || (saved && saved.duration) || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+    if (fallbackDur > 0 && !t.duration) t.duration = fallbackDur;
+    return fallbackDur;
   }
 
   function seekTo(sec) {
     const t = current();
     if (!t || t.source === "radio") return;
-    const at = Math.max(0, Number(sec) || 0);
-    if (npActive && nativeSeekTo(at)) { updateProgress(); return; }
-    if ((t.source === "youtube" || !!t.videoId) && state.yt && typeof state.yt.seekTo === "function") {
+    const d = duration();
+    const at = d > 0 ? Math.max(0, Math.min(Number(sec) || 0, Math.max(0, d - 0.05))) : Math.max(0, Number(sec) || 0);
+    seekCur = -1;
+    seekTgt = -1;
+    if (seekRaf) {
+      cancelAnimationFrame(seekRaf);
+      seekRaf = 0;
+    }
+    if (npActive && nativeSeekTo(at)) {
+      updateProgress();
+      highlightLyric(at, true);
+      return;
+    }
+    const isUsingAudioEl = Boolean(t._playingViaAudio || (audio.src && audio.src.startsWith("blob:")));
+    if ((t.source === "youtube" || !!t.videoId) && !isUsingAudioEl && state.yt && typeof state.yt.seekTo === "function") {
       state.yt.seekTo(at, true);
     } else {
-      audio.currentTime = at;
+      _webSeekTarget = at;
+      try {
+        audio.currentTime = at;
+        if (audio.readyState >= 1 && Math.abs((audio.currentTime || 0) - at) < 1.5) {
+          _webSeekTarget = -1;
+        }
+      } catch {}
     }
     updateProgress();
+    highlightLyric(at, true);
   }
 
   let waveRaf = 0;
   let waveLast = 0;
+  let isSeekingUi = false;
   function cheapPhone() {
-    return !!(window.matchMedia && (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 980px)").matches));
+    return IS_NATIVE || !!(window.matchMedia && (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 980px)").matches));
   }
   function restartWaveLoop() {
-    if (cheapPhone() || !state.playing || waveRaf || document.hidden || state.view !== "now") return;
+    if (!state.playing || waveRaf || document.hidden) return;
+    // On phones/native shells or in Battery Saver, updateProgress() drives
+    // drawSeekWave() directly so we never hold a rAF loop open during playback.
+    if (cheapPhone() || isBatterySaver()) {
+      drawSeekWave();
+      return;
+    }
+    const interval = 80;
     const loop = (now) => {
-      if (!state.playing) {
+      if (!state.playing || isBatterySaver()) {
         waveRaf = 0;
         drawSeekWave();
         return;
       }
-      if (document.hidden || state.view !== "now") {
+      if (document.hidden) {
         waveRaf = 0;
         return;
       }
-      if (!waveLast || now - waveLast > 80) {
+      if (!waveLast || now - waveLast > interval) {
         drawSeekWave();
         waveLast = now;
       }
@@ -5715,13 +6935,9 @@
   }
   function startTimer() {
     stopTimer();
-    const cheap = cheapPhone();
-    state.timer = setInterval(updateProgress, cheap ? 1500 : 500);
-    if (!cheap) {
-      restartWaveLoop();
-    } else {
-      drawSeekWave();
-    }
+    const pollMs = isBatterySaver() ? 1000 : 250;
+    state.timer = setInterval(updateProgress, pollMs);
+    restartWaveLoop();
     updateProgress();
     renderChrome();
   }
@@ -5730,15 +6946,21 @@
     state.timer = null;
     if (waveRaf) cancelAnimationFrame(waveRaf);
     waveRaf = 0;
+    if (seekRaf) cancelAnimationFrame(seekRaf);
+    seekRaf = 0;
   }
 
   function updateProgress() {
+    // When screen is off and native service owns playback, skip redundant JS polling
+    if (document.hidden && npActive) return;
     const d = duration();
     const p = position();
     tickCrossfade(d, p);
-    updateMediaPosition();
-    msPosTick = (msPosTick || 0) + 1;
-    if (msPosTick % 5 === 0) updateMediaSession();
+    if (!document.hidden) {
+      updateMediaPosition();
+      msPosTick = (msPosTick || 0) + 1;
+      if (msPosTick % 5 === 0) updateMediaSession();
+    }
 
     // Adaptive buffering health check
     checkBufferResume();
@@ -5750,17 +6972,30 @@
     // Audio playback optimization: pre-resolve next track stream and pre-warm for gapless playback
     if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
       const nextT = state.queue[state.index + 1];
-      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
-        nextT._resolving = true;
-        api(`/api/yt/stream?v=${encodeURIComponent(nextT.videoId)}`, 8000).then((res) => {
-          if (res && res.url) {
-            nextT.streamUrl = res.url;
-            if (!nextT._prefetched) {
-              nextT._prefetched = true;
-              fetch(res.url, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving && !nextT._nativePreloaded) {
+        const NP = nativePlayer();
+        if (IS_NATIVE && NP && typeof NP.preload === "function") {
+          nextT._nativePreloaded = true;
+          const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
+          NP.preload({
+            videoId: String(nextT.videoId),
+            candidates: cands,
+            title: String(nextT.title || ""),
+            artist: String(artistName(nextT) || nextT.artist || ""),
+          }).catch(() => {});
+        } else {
+          nextT._resolving = true;
+          getWarmStream(nextT.videoId, nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
+            if (res && res.url) {
+              const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
+              nextT.streamUrl = fullUrl;
+              if (!nextT._prefetched) {
+                nextT._prefetched = true;
+                fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+              }
             }
-          }
-        }).catch(() => {}).finally(() => { nextT._resolving = false; });
+          }).catch(() => {}).finally(() => { nextT._resolving = false; });
+        }
       } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
         nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
         if (!nextT._prefetched) {
@@ -5769,20 +7004,37 @@
         }
       } else if (nextT && !nextT.videoId && !nextT.streamUrl && !nextT._resolving && (nextT.source === "apple" || nextT.source === "deezer" || nextT.source === "itunes")) {
         nextT._resolving = true;
-        resolveYouTubePlay(nextT).catch(() => {}).finally(() => { nextT._resolving = false; });
+        resolveYouTubePlay(nextT).then(() => {
+          const NP = nativePlayer();
+          if (IS_NATIVE && NP && typeof NP.preload === "function" && nextT.videoId && !nextT._nativePreloaded) {
+            nextT._nativePreloaded = true;
+            const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
+            NP.preload({
+              videoId: String(nextT.videoId),
+              candidates: cands,
+              title: String(nextT.title || ""),
+              artist: String(artistName(nextT) || nextT.artist || ""),
+            }).catch(() => {});
+          }
+        }).catch(() => {}).finally(() => { nextT._resolving = false; });
       }
     }
 
-    if (document.hidden && cheapPhone()) return;
-    $("curTime").textContent = fmt(p);
-    $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
+    if (document.hidden) return;
     const seek = $("seek");
+    const activeScrub = Boolean(isSeekingUi);
+    if (!activeScrub && $("curTime")) {
+      $("curTime").textContent = fmt(p);
+    }
+    if ($("durTime")) {
+      $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
+    }
     if (seek) {
-      const tv = d ? Math.round((p / d) * 1000) : 0;
-      if (seek.matches(":active")) {
+      const tv = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+      if (activeScrub) {
         seekCur = -1; seekTgt = -1;
         if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
-      } else if (prefersReducedMotion()) {
+      } else if (cheapPhone() || prefersReducedMotion() || isBatterySaver()) {
         seek.value = tv;
       } else {
         seekTgt = tv;
@@ -5790,7 +7042,7 @@
         if (!seekRaf) seekRaf = requestAnimationFrame(seekTick);
       }
     }
-    if (!cheapPhone()) drawSeekWave();
+    drawSeekWave();
     highlightLyric(p);
   }
   let msPosTick = 0;
@@ -5798,19 +7050,44 @@
   let seekCur = -1, seekTgt = -1, seekRaf = 0;
   function seekTick() {
     const seek = $("seek");
-    if (!seek || seek.matches(":active") || seekTgt < 0) { seekRaf = 0; return; }
+    if (!seek || isSeekingUi || seekTgt < 0) { seekRaf = 0; return; }
     const diff = seekTgt - seekCur;
     if (Math.abs(diff) < 0.25) {
       seek.value = seekTgt;
       seekCur = -1; seekTgt = -1; seekRaf = 0;
+      drawSeekWave();
       return;
     }
     seekCur += diff * 0.28;
     seek.value = Math.round(seekCur);
+    drawSeekWave();
     seekRaf = requestAnimationFrame(seekTick);
   }
   function prefersReducedMotion() {
     return matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function sampleSeekWiggleY(wiggle, x, t, amp, mid, span) {
+    const s = Math.max(1, Number(span) || 400);
+    const norm = Math.max(0, Math.min(1, x / s));
+    const taper = s > 6 ? Math.pow(Math.sin(Math.PI * norm), 0.55) : 0;
+    if (wiggle === "ribbon") {
+      // Harmonic Ribbon: silky multi-layered acoustic wave with gentle swell
+      const swell = 0.78 + 0.22 * Math.sin(x / 36 - t * 0.65);
+      const wave = Math.sin(x / 18 + t * 1.15) * 0.74 + Math.sin(x / 9.5 - t * 0.8) * 0.26;
+      return mid + wave * (amp * 1.08) * swell * taper;
+    }
+    if (wiggle === "glow") {
+      // Laser Glow: sleek studio laser beam with subtle breathing shimmer
+      const shimmer = Math.sin(x / 24 + t * 0.9) * 0.36 + Math.cos(x / 14 - t * 0.55) * 0.14;
+      return mid + shimmer * amp * taper;
+    }
+    if (wiggle === "orbit") {
+      // Dual Helix: braided phase-modulated wave with harmonic depth
+      return mid + Math.sin(x / 14 + t * 1.2) * Math.cos(x / 28 - t * 0.82) * (amp * 1.18) * taper;
+    }
+    // Default "sine": Smooth Sine
+    return mid + (Math.sin(x / 16 + t) + Math.sin(x / 7.5 + t * 1.35) * 0.24) * amp * taper;
   }
 
   function drawSeekWave() {
@@ -5818,29 +7095,63 @@
     const seek = $("seek");
     if (!svg || !seek) return;
     const playing = !!state.playing;
-    const style = document.documentElement.dataset.player || "pill";
-    const strong = style === "wave" || style === "pill";
-    const v = Number(seek.value) || 0;
+    const style = normalizePlayerStyle(document.documentElement.dataset.player);
+    const wiggle = normalizeSeekWiggle(document.documentElement.dataset.wiggle || state.prefs.seekWiggle);
+    const strong = style === "wave" || style === "pill" || style === "aura";
+    const v = Math.max(0, Math.min(1000, Number(seek.value) || 0));
+    seek.style.setProperty("--seek-pct", `${(v / 10).toFixed(1)}%`);
     const t = Date.now() / 240;
     const W = 400, mid = 8;
-    const amp = !playing ? 0.4 : strong ? 4.4 : 2.2;
+    const amp = !playing ? 0.38 : strong ? 4.2 : 3.1;
+    const step = 4;
     const filled = (v / 1000) * W;
-    let d = `M 0 ${mid}`;
-    for (let x = 0; x <= W; x += 5) {
-      const live = x <= filled ? 1 : 0.28;
-      const y = mid + Math.sin(x / 16 + t) * amp * live + Math.sin(x / 7 + t * 1.4) * (amp * 0.28) * live;
-      d += ` L ${x} ${y.toFixed(2)}`;
+    let dBg = `M 0 ${mid}`;
+    let dFg = `M 0 ${mid}`;
+    for (let x = 0; x <= W; x += step) {
+      const bgTaper = Math.pow(Math.sin(Math.PI * (x / W)), 0.5);
+      let yBg = mid;
+      if (wiggle === "orbit") {
+        yBg = mid - Math.sin(x / 14 + t * 1.2) * (amp * 0.42) * bgTaper;
+      } else if (wiggle === "ribbon") {
+        yBg = mid - Math.sin(x / 18 + t * 1.15) * (amp * 0.32) * bgTaper;
+      } else if (wiggle === "glow") {
+        yBg = mid + Math.sin(x / 24 + t * 0.9) * (amp * 0.14) * bgTaper;
+      } else {
+        yBg = mid + Math.sin(x / 16 + t) * (amp * 0.22) * bgTaper;
+      }
+      dBg += ` L ${x} ${yBg.toFixed(2)}`;
+      if (x <= filled) {
+        const yFg = sampleSeekWiggleY(wiggle, x, t, amp, mid, filled);
+        dFg += ` L ${x} ${yFg.toFixed(2)}`;
+      }
     }
-    let path = svg.querySelector("path");
-    if (!path) {
-      path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("fill", "none");
-      path.setAttribute("stroke-linecap", "round");
-      path.setAttribute("stroke-linejoin", "round");
-      svg.appendChild(path);
+    if (filled > 0) {
+      dFg += ` L ${filled.toFixed(1)} ${mid.toFixed(2)}`;
     }
-    path.setAttribute("d", d);
-    path.setAttribute("stroke-width", playing ? (strong ? "2.4" : "2") : "1.6");
+    let bgPath = svg.querySelector("path.seek-wave-bg");
+    let fgPath = svg.querySelector("path.seek-wave-fg");
+    if (!bgPath || !fgPath) {
+      svg.innerHTML = "";
+      bgPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      bgPath.setAttribute("class", "seek-wave-bg");
+      bgPath.setAttribute("fill", "none");
+      bgPath.setAttribute("stroke-linecap", "round");
+      bgPath.setAttribute("stroke-linejoin", "round");
+      fgPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      fgPath.setAttribute("class", "seek-wave-fg");
+      fgPath.setAttribute("fill", "none");
+      fgPath.setAttribute("stroke-linecap", "round");
+      fgPath.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(bgPath);
+      svg.appendChild(fgPath);
+    }
+    bgPath.setAttribute("stroke-linejoin", "round");
+    fgPath.setAttribute("stroke-linejoin", "round");
+    bgPath.setAttribute("d", dBg);
+    bgPath.setAttribute("stroke-width", (wiggle === "orbit" || wiggle === "ribbon") ? "1.65" : "1.45");
+    fgPath.setAttribute("d", v > 0 ? dFg : `M 0 ${mid} L 0.1 ${mid}`);
+    const fgWidth = playing ? (wiggle === "glow" ? (strong ? "3.0" : "2.5") : (strong ? "2.6" : "2.2")) : "1.8";
+    fgPath.setAttribute("stroke-width", fgWidth);
   }
 
   function setVolume(v) {
@@ -5853,6 +7164,7 @@
       try { if (state.yt.unMute) state.yt.unMute(); } catch {}
     }
     hookSound();
+    nativeSyncAudioPrefs();
     syncAndroid();
   }
 
@@ -5936,6 +7248,9 @@
       if (e && typeof e.seekTime === "number") seekTo(e.seekTime);
     });
     updateMediaPosition();
+    if (IS_NATIVE && !npActive) {
+      nativeSyncSession();
+    }
   }
 
   function syncAndroid() {
@@ -5956,16 +7271,18 @@
     unlockSound();
     const t = current();
     if (!t) return;
-    if (t.videoId || t.source === "youtube") {
+    if (npActive) {
+      if (!npPlaying) nativeResumePlayback();
+    } else if ((t.videoId || t.source === "youtube") && !t._playingViaAudio) {
+      if (IS_NATIVE) nativeSyncSession();
       if (!state.yt || !state.yt.getPlayerState) return;
       let s = -1;
       try { s = state.yt.getPlayerState(); } catch {}
       if (s === 2 || s === -1 || s === 5) {
         try { state.yt.playVideo(); } catch {}
       }
-    } else if (npActive && !npPlaying) {
-      nativeResumePlayback();
     } else if (audio.paused && audio.src && !audio.ended) {
+      if (IS_NATIVE) nativeSyncSession();
       audio.play().catch(() => {});
     }
     updateMediaSession();
@@ -6017,7 +7334,11 @@
   let npActive = false;   // native player is the current audio sink
   let npPlaying = false;  // last known native playback state
   let npPos = 0;          // last known position (s)
+  let npPosAt = 0;        // performance.now() timestamp of last npPos update
   let npDur = 0;          // last known duration (s)
+  let npSeenPlaying = false; // true once ExoPlayer/AVPlayer has transitioned to playing for the current track
+  let npCmdUntil = 0;     // guard window after JS play/pause/resume command so stale progress ticks don't flip UI
+  let npSeekGuardUntil = 0; // guard window after JS seek command so stale pre-seek ticks don't snap slider back
   let npPermAsked = false; // one-time native notification permission ask
   function nativeEnsureNotifyPermission() {
     const NP = nativePlayer();
@@ -6063,24 +7384,70 @@
     const P = nativePlayer();
     if (P && P.emit) { try { P.emit(o); } catch {} }
   }
-  function nativePlayTrack(url, title, artist, artwork, durationSec) {
+  function nativeSyncAudioPrefs() {
+    const NP = nativePlayer();
+    if (!NP || typeof NP.setAudioPrefs !== "function") return;
+    try {
+      NP.setAudioPrefs({
+        volume: Number(state.volume ?? 100),
+        normalize: Boolean(state.prefs.normalize),
+        speed: Number(state.prefs.speed || 1),
+        spatial: String(spatialMode() || "phone"),
+      }).catch(() => {});
+    } catch {}
+  }
+  function nativeSyncSession() {
+    if (!IS_NATIVE || npActive) return;
+    const NP = nativePlayer();
+    const t = current();
+    if (!NP || !t || typeof NP.syncSession !== "function") return;
+    if (!wantPlay && !state.playing) return;
+    try {
+      nativeEnsureNotifyPermission();
+      NP.syncSession({
+        title: String(t.title || "Muchi"),
+        artist: String(artistName(t) || t.artist || ""),
+        artwork: String(absArt(t) || ""),
+        duration: Math.round((Number(duration()) || Number(t.duration) || 0) * 1000),
+        position: Math.round((Number(position()) || 0) * 1000),
+        playing: Boolean(wantPlay || state.playing),
+      }).catch(() => {});
+    } catch {}
+  }
+  function nativePlayTrack(url, title, artist, artwork, durationSec, videoId = "", candidates = "") {
     const NP = nativePlayer();
     if (!NP) return false;
     nativeEnsureNotifyPermission();
+    const resolvedDur = Number(durationSec) || parseStreamUrlDuration(url) || 0;
     npActive = true;
     npPlaying = true;
+    npSeenPlaying = false;
     npPos = 0;
-    npDur = Number(durationSec) || 0;
+    npPosAt = performance.now();
+    npDur = resolvedDur;
+    npCmdUntil = Date.now() + 4500;
+    npSeekGuardUntil = 0;
     NP.play({
       url: String(url),
+      videoId: String(videoId || ""),
+      candidates: String(candidates || ""),
       title: String(title || "Muchi"),
       artist: String(artist || ""),
       artwork: String(artwork || ""),
-      duration: Math.round((Number(durationSec) || 0) * 1000),
+      duration: Math.round(resolvedDur * 1000),
+      volume: Number(state.volume ?? 100),
+      normalize: Boolean(state.prefs.normalize),
+      speed: Number(state.prefs.speed || 1),
+      spatial: String(spatialMode() || "phone"),
     }).catch(() => {
-      // Native playback failed — fall back to the WebView audio element.
+      // Native playback failed — fall back to the WebView audio element or YouTube player.
       if (npActive) npActive = false;
-      playAudioWeb(url);
+      if (!/^yt:/i.test(String(url))) {
+        playAudioWeb(url);
+      } else {
+        const cur = current();
+        if (cur && cur.videoId) playYouTube(cur).catch(() => {});
+      }
     });
     return true;
   }
@@ -6088,12 +7455,16 @@
     const NP = nativePlayer();
     if (!NP || !npActive) return;
     npPlaying = false;
+    npPosAt = 0;
+    npCmdUntil = Date.now() + 1500;
     NP.pause().catch(() => {});
   }
   function nativeResumePlayback() {
     const NP = nativePlayer();
     if (!NP || !npActive) return;
     npPlaying = true;
+    npPosAt = performance.now();
+    npCmdUntil = Date.now() + 1500;
     NP.resume().catch(() => {});
   }
   function nativeStopPlayback() {
@@ -6101,13 +7472,17 @@
     if (!NP || !npActive) return;
     npActive = false;
     npPlaying = false;
+    npSeenPlaying = false;
     npPos = 0;
+    npPosAt = 0;
     NP.stop().catch(() => {});
   }
   function nativeSeekTo(sec) {
     const NP = nativePlayer();
     if (!NP || !npActive) return false;
     npPos = Math.max(0, Number(sec) || 0);
+    npPosAt = performance.now();
+    npSeekGuardUntil = Date.now() + 1400;
     NP.seekTo({ position: Math.round(npPos * 1000) }).catch(() => {});
     return true;
   }
@@ -6120,30 +7495,120 @@
   // reliable enough to be the real sink for every track.
   function nativeHandleControls(action) {
     if (!action) return;
-    const msg = action.message || action;
-    if (msg === "music-controls-play") { setWantPlay(true); if (!state.playing) togglePlay(); }
-    else if (msg === "music-controls-pause" || msg === "music-controls-destroy") { setWantPlay(false); if (state.playing) togglePlay(); }
-    else if (msg === "music-controls-next") next(true);
-    else if (msg === "music-controls-previous") prev();
-    else if (msg === "music-controls-toggle-play-pause") togglePlay();
-    else if (msg === "music-controls-seek-to" || msg === "music-controls-skip-to") {
-      const sec = Number(action.position != null ? action.position : action.seekTo);
-      if (isFinite(sec)) seekTo(sec);
-    } else if (msg === "music-controls-headset-unplugged") {
+    const msg = action.message || action.action || action;
+    if (msg === "music-controls-play" || msg === "play") {
+      if (npActive) {
+        npPlaying = true;
+        npSeenPlaying = true;
+        npPosAt = performance.now();
+        npCmdUntil = Date.now() + 1200;
+      } else {
+        const cur = current();
+        if (cur && (cur.source === "youtube" || !!cur.videoId) && !cur._playingViaAudio && state.yt && state.yt.playVideo) {
+          try { state.yt.playVideo(); } catch {}
+        } else if (audio.src) {
+          audio.play().catch(() => {});
+        }
+      }
+      setWantPlay(true);
+      state.playing = true;
+      showEl($("eqBars"), true);
+      if (!state.timer) startTimer();
+      updateMediaSession();
+      renderChrome();
+    } else if (msg === "music-controls-pause" || msg === "pause" || msg === "music-controls-headset-unplugged") {
+      if (npActive) {
+        npPlaying = false;
+        npPosAt = 0;
+        npCmdUntil = Date.now() + 1200;
+      } else {
+        const cur = current();
+        if (cur && (cur.source === "youtube" || !!cur.videoId) && !cur._playingViaAudio && state.yt && state.yt.pauseVideo) {
+          try { state.yt.pauseVideo(); } catch {}
+        } else {
+          try { audio.pause(); } catch {}
+        }
+      }
       setWantPlay(false);
-      if (state.playing) togglePlay();
-    } else if (msg === "play") { setWantPlay(true); if (!state.playing) togglePlay(); }
-    else if (msg === "pause") { setWantPlay(false); if (state.playing) togglePlay(); }
-    else if (msg === "next") next(true);
-    else if (msg === "previous") prev();
-    else if (msg === "seek") {
-      const sec = Number(action.position != null ? action.position : action.seekTo);
-      if (isFinite(sec)) seekTo(sec);
+      state.playing = false;
+      showEl($("eqBars"), false);
+      updateMediaSession();
+      renderChrome();
+    } else if (msg === "music-controls-destroy" || msg === "stop") {
+      npActive = false;
+      npPlaying = false;
+      npSeenPlaying = false;
+      npPosAt = 0;
+      setWantPlay(false);
+      state.playing = false;
+      showEl($("eqBars"), false);
+      stopTimer();
+      updateMediaSession();
+      renderChrome();
+    } else if (msg === "music-controls-next" || msg === "next") {
+      next(true);
+    } else if (msg === "music-controls-previous" || msg === "previous" || msg === "prev") {
+      prev();
+    } else if (msg === "music-controls-toggle-play-pause") {
+      togglePlay();
+    } else if (msg === "music-controls-seek-to" || msg === "music-controls-skip-to" || msg === "seek") {
+      const raw = Number(action.position != null ? action.position : action.seekTo);
+      if (isFinite(raw)) {
+        const sec = raw > 10000 ? raw / 1000 : raw;
+        seekTo(sec);
+      }
     } else if (msg === "ended") {
       next(true);
     } else if (msg === "error") {
-      if (npActive) { npActive = false; }
-      if (state.playing && current()) skipFailed("Playback error");
+      if (npActive) { npActive = false; npPlaying = false; npSeenPlaying = false; }
+      const cur = current();
+      if (state.playing && cur) {
+        if (!cur._nativeRefreshTried && (cur.videoId || cur.title)) {
+          cur._nativeRefreshTried = true;
+          cur.streamUrl = "";
+          const candParam = Array.isArray(cur._ytCandidates) && cur._ytCandidates.length
+            ? `&candidates=${encodeURIComponent(cur._ytCandidates.slice(0, 5).join(","))}`
+            : "";
+          api(`/api/yt/stream?v=${encodeURIComponent(cur.videoId || "")}&title=${encodeURIComponent(cur.title || "")}&artist=${encodeURIComponent(artistName(cur) || cur.artist || "")}${candParam}&refresh=1`, 10000)
+            .then((fresh) => {
+              if (current() !== cur) return;
+              if (fresh && fresh.url && !fresh.isPreview) {
+                cur.streamUrl = fresh.url.startsWith("/") ? API_BASE + fresh.url : fresh.url;
+                cur._isPreviewStream = false;
+                if (fresh.videoId) cur.videoId = fresh.videoId;
+                if (fresh.duration && !cur.duration) cur.duration = Number(fresh.duration);
+                cur._playingViaAudio = true;
+                return playAudio(cur);
+              }
+              throw new Error("no fresh stream");
+            })
+            .catch(() => {
+              if (current() !== cur) return;
+              nativeHandleControls({ message: "error" });
+            });
+          return;
+        }
+        if (!cur._nativeYtFallbackTried && cur.videoId) {
+          cur._nativeYtFallbackTried = true;
+          cur._playingViaAudio = false;
+          playYouTube(cur).catch(() => {
+            if (current() !== cur) return;
+            nativeHandleControls({ message: "error" });
+          });
+          return;
+        }
+        if (!cur._nativeFallbackTried) {
+          cur._nativeFallbackTried = true;
+          cur.streamUrl = "";
+          playFallbackAudioForTrack(cur, true).then((ok) => {
+            if (!ok && current() === cur) skipFailed("Playback error");
+          }).catch(() => {
+            if (current() === cur) skipFailed("Playback error");
+          });
+          return;
+        }
+        skipFailed("Playback error");
+      }
     }
   }
   function nativeNotifySaved(title) {
@@ -6219,11 +7684,48 @@
         // Notification.requestPermission duplicate that fired alongside it.
         NP.addListener("muchiControls", (e) => nativeHandleControls(e || {}));
         NP.addListener("muchiProgress", (e) => {
+          if (!npActive) return;
           const v = e || {};
-          npPos = (Number(v.positionMs) || 0) / 1000;
-          npDur = (Number(v.durationMs) || 0) / 1000;
-          npPlaying = !!v.playing;
-          if (state.playing) updateProgress();
+          const now = Date.now();
+          const rawPos = v.positionMs != null ? (Number(v.positionMs) || 0) / 1000 : (Number(v.position) || 0);
+          const rawDur = v.durationMs != null ? (Number(v.durationMs) || 0) / 1000 : (Number(v.duration) || 0);
+          if (now >= npSeekGuardUntil || Math.abs(rawPos - npPos) <= 2) {
+            npPos = Math.max(0, rawPos);
+            npPosAt = performance.now();
+          }
+          if (rawDur > 0) {
+            npDur = rawDur;
+            const cur = current();
+            if (cur && !cur.duration) cur.duration = Math.round(rawDur);
+          }
+          const isPl = !!v.playing;
+          if (isPl) {
+            npSeenPlaying = true;
+            npPlaying = true;
+            renderBufferState(false);
+            if (!state.playing && now >= npCmdUntil) {
+              state.playing = true;
+              setWantPlay(true);
+              showEl($("eqBars"), true);
+              renderChrome();
+            }
+            if (!state.timer) startTimer();
+          } else {
+            if (now >= npCmdUntil && npSeenPlaying) {
+              npPlaying = false;
+              npPosAt = 0;
+              if (state.playing) {
+                state.playing = false;
+                setWantPlay(false);
+                showEl($("eqBars"), false);
+                renderChrome();
+              }
+            }
+          }
+          if (!isBatterySaver() || !NP._lastUiProgAt || (now - NP._lastUiProgAt >= 900)) {
+            NP._lastUiProgAt = now;
+            updateProgress();
+          }
         });
       } catch {}
     }
@@ -6523,9 +8025,121 @@
     return t ? (t.id || `${t.title}|${t.artist}`) : "";
   }
 
+  function synthesizeSyncedLyrics(plainText, durSec) {
+    const raw = String(plainText || "").trim();
+    if (!raw) return [];
+    const lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (!lines.length) return [];
+    const totalDur = Math.max(30, Number(durSec) || Number(duration()) || 180);
+    const startPad = Math.min(4, totalDur * 0.03);
+    const usableSpan = Math.max(10, totalDur - startPad - Math.min(6, totalDur * 0.05));
+    const step = lines.length > 1 ? usableSpan / lines.length : usableSpan;
+    return lines.map((text, idx) => ({
+      t: Number((startPad + idx * step).toFixed(2)),
+      text,
+    }));
+  }
+
+  function candidateLyricsKeys(t) {
+    if (!t) return [];
+    const meta = cleanLyricsMeta(t);
+    return [
+      lyricsKey(t),
+      t.id || "",
+      trackKey(t),
+      t.videoId ? `yt:${t.videoId}` : "",
+      meta.cleanTitle ? `${meta.cleanTitle.toLowerCase()}|${(meta.cleanArtist || "").toLowerCase()}` : "",
+    ].filter(Boolean);
+  }
+
+  async function saveOfflineLyrics(t, data) {
+    if (!t || !data || (!data.lyrics && (!Array.isArray(data.synced) || !data.synced.length))) return;
+    const payload = {
+      lyrics: String(data.lyrics || ""),
+      synced: Array.isArray(data.synced) ? data.synced : [],
+      _synthesized: Boolean(data._synthesized),
+      updatedAt: Date.now(),
+    };
+    const keys = candidateLyricsKeys(t);
+    for (const k of keys) {
+      try { await idbPut(`lyrics:${k}`, payload); } catch {}
+    }
+    const saved = findSavedTrack(t);
+    if (saved) {
+      saved.lyrics = payload.lyrics;
+      saved.synced = payload.synced;
+      save("aura.downloads", state.downloads);
+    }
+  }
+
+  async function getOfflineLyrics(t) {
+    if (!t) return null;
+    if (Array.isArray(t.synced) && t.synced.length) {
+      return { lyrics: t.lyrics || "", synced: t.synced };
+    }
+    const saved = findSavedTrack(t);
+    if (saved && ((Array.isArray(saved.synced) && saved.synced.length) || saved.lyrics)) {
+      return { lyrics: saved.lyrics || "", synced: Array.isArray(saved.synced) ? saved.synced : [] };
+    }
+    const keys = candidateLyricsKeys(t);
+    for (const k of keys) {
+      try {
+        const rec = await idbGet(`lyrics:${k}`);
+        if (rec && ((Array.isArray(rec.synced) && rec.synced.length) || rec.lyrics)) {
+          return { lyrics: rec.lyrics || "", synced: Array.isArray(rec.synced) ? rec.synced : [], _synthesized: Boolean(rec._synthesized) };
+        }
+      } catch {}
+    }
+    if (t.lyrics) {
+      return { lyrics: t.lyrics, synced: [] };
+    }
+    return null;
+  }
+
+  async function ensureOfflineLyricsForTrack(t) {
+    if (!t || t.source === "radio") return null;
+    const existing = await getOfflineLyrics(t);
+    if (existing && Array.isArray(existing.synced) && existing.synced.length && !existing._synthesized) {
+      await saveOfflineLyrics(t, existing);
+      return existing;
+    }
+    const meta = cleanLyricsMeta(t);
+    const dur = Math.round(Number(t.duration || duration() || 0)) || 0;
+    let found = null;
+    try {
+      const data = await api(
+        `/api/lyrics?title=${encodeURIComponent(meta.cleanTitle)}&artist=${encodeURIComponent(meta.cleanArtist)}${dur ? `&duration=${dur}` : ""}`,
+        8000
+      );
+      if (data && (data.lyrics || (Array.isArray(data.synced) && data.synced.length))) {
+        found = { lyrics: data.lyrics || "", synced: data.synced || [] };
+      }
+    } catch {}
+    if (!found) {
+      try {
+        found = await fetchLyricsBrowserFallback(meta, dur);
+      } catch {}
+    }
+    if (!found && existing) found = existing;
+    if (found) {
+      if ((!Array.isArray(found.synced) || !found.synced.length) && found.lyrics) {
+        found.synced = synthesizeSyncedLyrics(found.lyrics, dur || 180);
+        found._synthesized = true;
+      }
+      await saveOfflineLyrics(t, found);
+    }
+    return found;
+  }
+
   function lyricsBodyHTML() {
     const L = state.lyrics;
     if (!L) return `<div class="ly-wait">Looking up lyrics…</div>`;
+    if ((!Array.isArray(L.synced) || !L.synced.length) && L.lyrics) {
+      const effDur = Math.round(Number(duration() || (current() && current().duration) || 180));
+      L.synced = synthesizeSyncedLyrics(L.lyrics, effDur);
+      L._synthesized = true;
+      L._syncDur = effDur;
+    }
     const synced = Array.isArray(L.synced) && L.synced.length ? L.synced : null;
     if (synced) {
       return synced.map((l, i) =>
@@ -6563,6 +8177,133 @@
     return true;
   }
 
+  function parseBrowserLyricsHit(hit) {
+    if (!hit) return null;
+    const synced = [];
+    if (hit.syncedLyrics) {
+      for (const line of String(hit.syncedLyrics).split("\n")) {
+        const m = line.match(/\[(\d+):(\d+(?:\.\d+)?)\](.*)/);
+        if (m) synced.push({ t: Number(m[1]) * 60 + Number(m[2]), text: m[3].trim() });
+      }
+    }
+    const lyrics = String(hit.plainLyrics || "").trim();
+    if (!lyrics && !synced.length) return null;
+    return { lyrics, synced };
+  }
+
+  function cleanLyricsMeta(t) {
+    const rawTitle = String((t && t.title) || "").trim();
+    const rawArtist = String(artistName(t) || (t && t.artist) || "").trim();
+    let cleanTitle = rawTitle
+      .replace(/\s*[\[(][^)\]]*(official|audio|video|lyric|visualizer|hd|4k|hq|remaster|topic|feat\.?|ft\.?|with\s|prod\.?|from\s|full\s+song|full\s+video|music\s+video|live|radio\s+edit)[^)\]]*[)\]]/gi, "")
+      .replace(/\s*[-–—|]\s*(official|audio|lyrics?|video|visualizer|full\s+song|full\s+video|remaster(ed)?|hd|4k|hq|from\s+["']?.*).*$/i, "")
+      .replace(/\b(official\s+music\s+video|official\s+audio|official\s+video|lyrics?\s+video|visualizer|audio\s+only|full\s+audio|full\s+video)\b/gi, "")
+      .replace(/\s*\b(feat\.?|ft\.?)\s+[^-–—|(\[]+$/i, "")
+      .replace(/#[a-z0-9_]+/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim() || rawTitle;
+
+    let cleanArtist = rawArtist
+      .split("·")[0]
+      .split("|")[0]
+      .replace(/\s*-\s*Topic$/i, "")
+      .replace(/\bVEVO\b/gi, "")
+      .replace(/\s*\b(official|music|channel|records|recordings|entertainment)\b$/i, "")
+      .replace(/\s*\b(feat\.?|ft\.?|with|x|&|,)\s+.*$/i, "")
+      .trim();
+
+    if (/^(youtube|various artists|unknown|unknown artist|topic|t-series|zee music company|sony music india|yash raj films|yrf|saregama|tips official|speed records|desi melodies)$/i.test(cleanArtist)) {
+      cleanArtist = "";
+    }
+
+    // If title is "Artist - Song Title" (common on YouTube), extract both candidates
+    const dashParts = cleanTitle.split(/\s+[-–—]\s+/).map((s) => s.trim()).filter(Boolean);
+    let altTitle = "";
+    let altArtist = "";
+    if (dashParts.length >= 2) {
+      const left = dashParts[0];
+      const right = dashParts.slice(1).join(" - ");
+      if (!cleanArtist || left.toLowerCase() === cleanArtist.toLowerCase() || cleanArtist.toLowerCase().includes(left.toLowerCase())) {
+        cleanTitle = right;
+        if (!cleanArtist) cleanArtist = left;
+      } else {
+        altTitle = right;
+        altArtist = left;
+      }
+    }
+    const coreTitle = cleanTitle.replace(/\s*[\[(][^)\]]*[)\]]/g, " ").replace(/\s{2,}/g, " ").trim() || cleanTitle;
+    return { cleanTitle, coreTitle, cleanArtist, altTitle, altArtist };
+  }
+
+  async function fetchLyricsBrowserFallback(meta, dur) {
+    const pairs = [];
+    const addP = (tr, ar) => {
+      const t = String(tr || "").trim();
+      const a = String(ar || "").trim();
+      if (!t) return;
+      if (!pairs.some((p) => p.t.toLowerCase() === t.toLowerCase() && p.a.toLowerCase() === a.toLowerCase())) {
+        pairs.push({ t, a });
+      }
+    };
+    addP(meta.coreTitle, meta.cleanArtist);
+    addP(meta.cleanTitle, meta.cleanArtist);
+    if (meta.altTitle) addP(meta.altTitle, meta.altArtist);
+
+    const urls = [];
+    for (const p of pairs) {
+      if (p.a && p.t) {
+        if (dur > 0) {
+          urls.push(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(p.a)}&track_name=${encodeURIComponent(p.t)}&duration=${dur}`);
+        }
+        urls.push(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(p.a)}&track_name=${encodeURIComponent(p.t)}`);
+        urls.push(`https://lrclib.net/api/search?track_name=${encodeURIComponent(p.t)}&artist_name=${encodeURIComponent(p.a)}`);
+        urls.push(`https://lrclib.net/api/search?q=${encodeURIComponent(`${p.a} ${p.t}`)}`);
+      }
+    }
+    if (meta.coreTitle) {
+      urls.push(`https://lrclib.net/api/search?track_name=${encodeURIComponent(meta.coreTitle)}`);
+      urls.push(`https://lrclib.net/api/search?q=${encodeURIComponent(meta.coreTitle)}`);
+    }
+
+    for (const u of urls) {
+      try {
+        const res = await fetch(u, {
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(6500),
+        });
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          const hit = data.find((x) => x && x.syncedLyrics) || data.find((x) => x && x.plainLyrics);
+          const parsed = parseBrowserLyricsHit(hit);
+          if (parsed) return parsed;
+        } else {
+          const parsed = parseBrowserLyricsHit(data);
+          if (parsed) return parsed;
+        }
+      } catch {}
+    }
+
+    for (const p of pairs) {
+      if (!p.a || !p.t) continue;
+      try {
+        const res = await fetch(
+          `https://api.lyrics.ovh/v1/${encodeURIComponent(p.a)}/${encodeURIComponent(p.t)}`,
+          { signal: AbortSignal.timeout(6000) }
+        );
+        if (!res.ok) continue;
+        const ovh = await res.json();
+        if (ovh && typeof ovh.lyrics === "string" && ovh.lyrics.trim()) {
+          return {
+            lyrics: ovh.lyrics.replace(/^Paroles de la chanson .*?\r?\n/i, "").trim(),
+            synced: [],
+          };
+        }
+      } catch {}
+    }
+    return null;
+  }
+
   async function loadLyrics(t) {
     if (!t || t.source === "radio") {
       state.lyrics = { lyrics: "", synced: [], key: lyricsKey(t) };
@@ -6577,24 +8318,125 @@
     const gen = ++lyricsGen;
     lyActive = -1;
     state.lyrics = { key, lyrics: "", synced: [] };
-    const cleanTitle = String(t.title || "").replace(/\s*[\[(][^)\]]*(official|audio|video|lyric|visualizer)[^)\]]*[)\]]/gi, "").trim() || t.title;
-    const artist = artistName(t) || String(t.artist || "").split("·")[0].replace(/youtube/ig, "").trim();
+    const dur = Math.round(Number(t.duration || duration() || 0)) || 0;
+    const isNetworkOff = Boolean(
+      state.offlineMode ||
+      state.isNetworkOffline ||
+      (typeof navigator !== "undefined" && navigator.onLine === false)
+    );
+
+    // 1. Check offline cached lyrics (from IndexedDB or saved download track) first!
+    const cached = await getOfflineLyrics(t);
+    if (gen !== lyricsGen) return;
+    if (cached && ((Array.isArray(cached.synced) && cached.synced.length) || cached.lyrics)) {
+      let syncedRows = Array.isArray(cached.synced) ? cached.synced : [];
+      let isSynth = Boolean(cached._synthesized);
+      if ((!syncedRows.length || isSynth) && cached.lyrics) {
+        const effDur = dur || Math.round(Number(duration() || 180));
+        syncedRows = synthesizeSyncedLyrics(cached.lyrics, effDur);
+        isSynth = true;
+      }
+      state.lyrics = {
+        lyrics: cached.lyrics || "",
+        synced: syncedRows,
+        _synthesized: isSynth,
+        _syncDur: dur || Math.round(Number(duration() || 180)),
+        key,
+      };
+      if (state.view === "now") paintLyricsBox() || render();
+      highlightLyric(position(), true);
+      // If we're offline or already have real time-synced lyrics, we're done!
+      if (isNetworkOff || (syncedRows.length && !isSynth)) {
+        return;
+      }
+    } else if (isNetworkOff) {
+      if (state.view === "now") paintLyricsBox() || render();
+      return;
+    }
+
+    const meta = cleanLyricsMeta(t);
+    let found = null;
     try {
-      const dur = Math.round(Number(t.duration || 0)) || 0;
-      const data = await api(`/api/lyrics?title=${encodeURIComponent(cleanTitle)}&artist=${encodeURIComponent(artist)}${dur ? `&duration=${dur}` : ""}`, 14000);
+      const data = await api(
+        `/api/lyrics?title=${encodeURIComponent(meta.cleanTitle)}&artist=${encodeURIComponent(meta.cleanArtist)}${dur ? `&duration=${dur}` : ""}`,
+        12000
+      );
       if (gen !== lyricsGen) return;
-      state.lyrics = { lyrics: (data && data.lyrics) || "", synced: (data && data.synced) || [], key };
+      if (data && (data.lyrics || (Array.isArray(data.synced) && data.synced.length))) {
+        found = { lyrics: data.lyrics || "", synced: data.synced || [] };
+      }
     } catch {
       if (gen !== lyricsGen) return;
-      state.lyrics = { lyrics: "", synced: [], key };
+    }
+    // If primary call came back empty and we have an alternate title/artist split, try that on server too
+    if (!found && meta.altTitle) {
+      try {
+        const data2 = await api(
+          `/api/lyrics?title=${encodeURIComponent(meta.altTitle)}&artist=${encodeURIComponent(meta.altArtist)}${dur ? `&duration=${dur}` : ""}`,
+          10000
+        );
+        if (gen !== lyricsGen) return;
+        if (data2 && (data2.lyrics || (Array.isArray(data2.synced) && data2.synced.length))) {
+          found = { lyrics: data2.lyrics || "", synced: data2.synced || [] };
+        }
+      } catch {}
+    }
+    // Client-side direct fallback (LRCLIB + lyrics.ovh) if server returned empty or timed out
+    if (!found) {
+      try {
+        found = await fetchLyricsBrowserFallback(meta, dur);
+      } catch {}
+      if (gen !== lyricsGen) return;
+    }
+    if (!found && cached) {
+      found = cached;
+    }
+    let finalSynced = (found && Array.isArray(found.synced)) ? found.synced : [];
+    let isSynth = Boolean(found && found._synthesized);
+    const finalPlain = (found && found.lyrics) || "";
+    const effDur = Math.round(Number(duration() || t.duration || dur || 180));
+    if (!finalSynced.length && finalPlain) {
+      finalSynced = synthesizeSyncedLyrics(finalPlain, effDur);
+      isSynth = true;
+    }
+    state.lyrics = {
+      lyrics: finalPlain,
+      synced: finalSynced,
+      _synthesized: isSynth,
+      _syncDur: effDur,
+      key,
+    };
+    if (finalPlain || finalSynced.length) {
+      saveOfflineLyrics(t, state.lyrics).catch(() => {});
     }
     if (state.view === "now") paintLyricsBox() || render();
+    highlightLyric(position(), true);
   }
 
   function highlightLyric(p, forceScroll) {
+    if (!state.lyrics) return;
+    const effDur = Math.round(Number(duration() || (current() && current().duration) || 0));
+    if (state.lyrics.lyrics && (!Array.isArray(state.lyrics.synced) || !state.lyrics.synced.length || (state.lyrics._synthesized && effDur > 15 && Math.abs((state.lyrics._syncDur || 0) - effDur) > 3))) {
+      const useDur = effDur > 15 ? effDur : 180;
+      state.lyrics.synced = synthesizeSyncedLyrics(state.lyrics.lyrics, useDur);
+      state.lyrics._synthesized = true;
+      state.lyrics._syncDur = useDur;
+      if (state.view === "now") {
+        const boxCheck = $("lyScroll") || document.querySelector(".ly-scroll");
+        if (boxCheck) {
+          boxCheck.innerHTML = lyricsBodyHTML();
+          bindLyricLines(boxCheck);
+        }
+      }
+    }
     const box = $("lyScroll") || document.querySelector(".ly-scroll") || document.querySelector(".lyrics");
-    const lines = box ? box.querySelectorAll("[data-ly]") : document.querySelectorAll("[data-ly]");
-    if (!lines.length || !state.lyrics || !state.lyrics.synced || !state.lyrics.synced.length) return;
+    let lines = box ? box.querySelectorAll("[data-ly]") : document.querySelectorAll("[data-ly]");
+    if (!lines.length && box && state.lyrics.synced && state.lyrics.synced.length) {
+      box.innerHTML = lyricsBodyHTML();
+      bindLyricLines(box);
+      lines = box.querySelectorAll("[data-ly]");
+    }
+    if (!lines.length || !state.lyrics.synced || !state.lyrics.synced.length) return;
     let active = -1;
     const rows = state.lyrics.synced;
     for (let i = 0; i < rows.length; i++) {
@@ -6611,11 +8453,12 @@
     if (!on || (!lyFollow && !forceScroll)) return;
     lyProg = true;
     if (box) {
+      const scrollBehavior = isBatterySaver() ? "auto" : "smooth";
       try {
-        on.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+        on.scrollIntoView({ behavior: scrollBehavior, block: "center", inline: "nearest" });
       } catch {
         const top = on.offsetTop - (box.clientHeight / 2) + (on.clientHeight / 2);
-        box.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+        box.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior });
       }
     }
     clearTimeout(highlightLyric._t);
@@ -6669,7 +8512,8 @@
     // With a remote API base the sandbox/edge proxy can't reach artwork hosts —
     // load artwork directly from the browser instead.
     const src = raw.startsWith("http") ? (API_BASE ? raw : `/api/img?url=${encodeURIComponent(raw)}`) : raw;
-    if (wash) wash.style.backgroundImage = `url("${src}")`;
+    if (wash) wash.style.backgroundImage = isBatterySaver() ? "" : `url("${src}")`;
+    if (isBatterySaver()) return;
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
@@ -6711,6 +8555,32 @@
     syncPlayerVisibility();
   }
 
+  function buildMarqueeTitleHTML(title) {
+    const clean = String(title || "Untitled");
+    return `<span class="marquee-track" data-marquee="${escapeAttr(clean)}">${escapeHTML(clean)}</span>`;
+  }
+
+  function marqueeDurationForTitle(title) {
+    return `${Math.max(8, Math.min(20, Math.round(String(title || "").length * 0.32)))}s`;
+  }
+
+  function syncMarqueeTitleEl(el, titleText, active) {
+    if (!el) return;
+    const nextTitle = String(titleText || "Nothing playing");
+    const isTrack = Boolean(active && titleText);
+    if (el.dataset.marqueeTitle !== nextTitle || el.classList.contains("is-marquee") !== isTrack) {
+      el.dataset.marqueeTitle = nextTitle;
+      el.classList.toggle("is-marquee", isTrack);
+      if (isTrack) {
+        el.style.setProperty("--marquee-dur", marqueeDurationForTitle(nextTitle));
+        el.innerHTML = buildMarqueeTitleHTML(nextTitle);
+      } else {
+        el.style.removeProperty("--marquee-dur");
+        el.textContent = nextTitle;
+      }
+    }
+  }
+
   function renderChrome() {
     const t = current();
     const coverImg = $("coverArt");
@@ -6722,7 +8592,15 @@
       coverImg.classList.add("art-swap");
     }
     themeFromTrack(t);
-    $("trackTitle").textContent = t ? t.title : "Nothing playing";
+    syncMarqueeTitleEl($("trackTitle"), t ? t.title : "Nothing playing", Boolean(t && t.title));
+    if (state.view === "now" && t) {
+      const nowStrong = viewEl && viewEl.querySelector(".ly-meta strong");
+      if (nowStrong) syncMarqueeTitleEl(nowStrong, t.title, true);
+      const nowArtBtn = viewEl && viewEl.querySelector("#nowArtist");
+      if (nowArtBtn) nowArtBtn.textContent = artistName(t) || t.artist || "";
+      const nowImg = viewEl && viewEl.querySelector(".ly-meta img");
+      if (nowImg && nowImg.getAttribute("src") !== artSrc) nowImg.setAttribute("src", artSrc);
+    }
     const artEl = $("trackArtist");
     if (artEl) {
       const label = t ? (artistName(t) || t.artist || t.source) : "Pick a song to begin";
@@ -6846,7 +8724,9 @@
     }
 
     // 3. Spotify-style Recommended Section
-    const recs = (state.queueRecs || []).filter((t) => !state.queue.some((q) => q && t && (q.id === t.id || (q.videoId && q.videoId === t.videoId))));
+    const recs = (state.queueRecs || [])
+      .map((t, origIdx) => ({ t, origIdx }))
+      .filter(({ t }) => t && !state.queue.some((q) => q && (q.id === t.id || (q.videoId && q.videoId === t.videoId))));
     if (cur || recs.length || isQueueRecsLoading) {
       out += `
         <div class="q-recs-wrap">
@@ -6865,14 +8745,14 @@
                 <div class="spinner"></div>
                 <span>Finding matching songs…</span>
               </div>
-            ` : (recs.length ? recs.map((t, idx) => `
-              <div class="q-rec-row" data-rec-idx="${idx}">
+            ` : (recs.length ? recs.map(({ t, origIdx }) => `
+              <div class="q-rec-row" data-rec-idx="${origIdx}">
                 <img src="${escapeAttr(artUrl(t))}" alt="" onerror="this.src='/cover-default.jpg'"/>
-                <button type="button" class="q-main q-rec-play" data-rec-play="${idx}" title="Play song">
+                <button type="button" class="q-main q-rec-play" data-rec-play="${origIdx}" title="Play song">
                   <div class="t-title">${escapeHTML(t.title)}</div>
                   <div class="t-sub">${escapeHTML(t.artist)}</div>
                 </button>
-                <button type="button" class="icon-btn q-add-rec" data-rec-add="${idx}" title="Add to queue">
+                <button type="button" class="icon-btn q-add-rec" data-rec-add="${origIdx}" title="Add to queue">
                   <span class="material-symbols-outlined">add</span>
                 </button>
               </div>
@@ -7194,7 +9074,7 @@
           <span class="badge yt">Playlist</span>
         </div>
         <h3>${escapeHTML(p.title || "Playlist")}</h3>
-        <p>${escapeHTML(p.artist || "Daily mix")}</p>
+        <p>${escapeHTML(p.subtitle || p.artist || "Daily mix")}</p>
       </button>
     </div>`;
   }
@@ -7203,7 +9083,7 @@
     const rows = playlists || [];
     if (!rows.length) {
       const skelPls = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel" style="height:190px;border-radius:var(--md-shape-lg);background:var(--md-surface-variant);opacity:0.35;"></div></div>`).join("");
-      return `<div class="section"><div class="section-head"><h2>${title}</h2><span>12</span></div><div class="row">${skelPls}</div></div>`;
+      return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${group === "country" ? 17 : 12}</span></div><div class="row">${skelPls}</div></div>`;
     }
     return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${rows.length}</span></div><div class="row">${rows.map((p, i) => plCardHTML(p, group, i)).join("")}</div></div>`;
   }
@@ -7265,9 +9145,138 @@
     return score;
   }
 
+  const CLIENT_FY_MOOD_SPEC = {
+    pop: { genres: ["pop"], moods: ["upbeat", "feelgood"], disallow: ["rock", "lofi", "lo-fi", "desi"], energy: 0.74 },
+    hiphop: { genres: ["hiphop", "hip-hop", "rap", "trap", "drill"], moods: ["upbeat", "workout", "party"], disallow: ["rock", "indie", "country", "lofi", "lo-fi", "desi"], energy: 0.80 },
+    rnb: { genres: ["rnb", "r&b", "soul"], moods: ["chill", "romantic", "late_night"], disallow: ["rock", "dance", "electronic", "country", "desi"], energy: 0.56 },
+    rock: { genres: ["rock", "indie rock", "metal"], moods: ["feelgood", "upbeat", "workout"], disallow: ["hiphop", "hip-hop", "rnb", "r&b", "dance", "electronic", "lofi", "lo-fi", "desi"], energy: 0.78 },
+    dance: { genres: ["dance", "electronic", "house", "edm"], moods: ["party", "upbeat", "workout"], disallow: ["rock", "lofi", "lo-fi", "country", "desi"], energy: 0.86 },
+    indie: { genres: ["indie", "indie pop", "indie rock"], moods: ["chill", "feelgood", "focus"], disallow: ["hiphop", "hip-hop", "dance", "electronic", "desi"], energy: 0.55 },
+    trending: { genres: ["pop", "hiphop", "hip-hop", "rnb", "r&b", "dance", "electronic", "indie", "afrobeats", "afro"], moods: ["upbeat", "party", "feelgood"], disallow: ["lofi", "lo-fi", "desi"], energy: 0.76 },
+    chill: { genres: ["indie", "indie pop", "rnb", "r&b", "lofi", "lo-fi", "chill", "pop"], moods: ["chill", "focus", "late_night"], disallow: ["rock", "workout", "dance", "electronic", "desi"], energy: 0.44 },
+    workout: { genres: ["hiphop", "hip-hop", "rock", "dance", "electronic"], moods: ["workout", "party", "upbeat"], disallow: ["lofi", "lo-fi", "indie", "country", "desi"], energy: 0.90 },
+    throwback: { genres: ["throwback", "pop", "rnb", "r&b", "hiphop", "hip-hop", "rock"], moods: ["retro", "feelgood", "upbeat"], disallow: ["lofi", "lo-fi", "desi"], energy: 0.75 },
+  };
+
+  const CLIENT_FY_JUNK_RE = /\b(playlist|mixtape|mix\s*20\d\d|hits\s*20\d\d|songs\s*20\d\d|best\s+of\s+\d{4}|hip\s*hop\s*mix|r\s*&\s*b\s*mix|rap\s*mix|pop\s*mix|chill\s*mix|workout\s*mix|throwback\s*mix|old\s*school\s+rap\s+songs|top\s+\d+\s+songs|nonstop|non\s*stop|megamix|mashup|full\s+album|1\s+hour|2\s+hours|3\s+hours|karaoke|tribute|in\s+the\s+style\s+of|made\s+famous\s+by|crash\s+cars|my\s+little\s+pony|equestria|kidz\s+bop|peppa\s+pig|cocomelon|nursery\s+rhyme|lullaby|hatsune\s+miku|vocaloid|sunset\s+playlist|chill\s+soul\s+radio|dj\s+noize|west\s+coast\s+finest|r&b\s+hit)\b/i;
+
+  function clientMatchesForYouMood(t, moodKey) {
+    if (!t || !t.title || !t.artist || t.source === "radio") return false;
+    const titleStr = String(t.title || "");
+    const hay = `${titleStr} ${t.artist || ""} ${t.album || ""}`;
+    if (CLIENT_FY_JUNK_RE.test(hay) || /[🔥🎧|【】~]|#\d+\b/.test(titleStr)) return false;
+    if ((titleStr.match(/,/g) || []).length >= 3) return false;
+    if (/\b(spotify|billboard|tiktok)\b.*\b(hits|playlist|viral|chart)\b/i.test(titleStr)) return false;
+    const dur = Number(t.duration) || 0;
+    if (dur > 0 && (dur < 70 || dur > 600)) return false;
+    if (!isEnglishTrack(t) || isUnwantedIndianTrackClient(t, "US")) return false;
+    const cleanMood = String(moodKey || "pop").toLowerCase().replace(/^mod:/, "");
+    const key = cleanMood === "throw" ? "throwback" : cleanMood;
+    const tag = String(t._tag || t.mood || "").toLowerCase().replace(/^mod:/, "");
+    if (tag && (tag === key || (tag === "throw" && key === "throwback"))) return true;
+    const spec = CLIENT_FY_MOOD_SPEC[key] || CLIENT_FY_MOOD_SPEC.pop;
+    const vibe = inferTrackVibeClient(t);
+    if (!vibe) return false;
+    if (spec.disallow.includes(vibe.genre) || spec.disallow.includes(vibe.cluster) || spec.disallow.includes(vibe.mood)) return false;
+    if (spec.genres.includes(vibe.genre) || spec.genres.includes(vibe.cluster)) {
+      if (key === "chill" && vibe.tempo === "fast") return false;
+      if ((key === "workout" || key === "dance") && vibe.tempo === "slow") return false;
+      return true;
+    }
+    return false;
+  }
+
+  function personalizeForYouCardTracks(p, globalUsedSigs) {
+    const moodKey = String((p && p.mood) || "pop").toLowerCase().replace(/^mod:/, "");
+    const rawList = Array.isArray(p && p.tracks) ? p.tracks : [];
+    const strictBase = rawList.filter((t) => clientMatchesForYouMood(t, moodKey));
+    const cleanBase = rawList.filter((t) => t && t.title && t.artist && !CLIENT_FY_JUNK_RE.test(`${t.title || ""} ${t.artist || ""}`) && !/[🔥🎧|【】~]|#\d+\b/.test(String(t.title || "")) && isEnglishTrack(t) && !isUnwantedIndianTrackClient(t, "US"));
+    const baseTracks = (strictBase.length >= 6 ? strictBase : cleanBase).map((t) => (t && (t.previewUrl || t.preview) ? { ...t, previewUrl: "", preview: "" } : t));
+    if (!baseTracks.length) return baseTracks;
+    const familiarPool = [...(state.liked || []), ...(state.recents || [])].filter((t) => clientMatchesForYouMood(t, moodKey));
+    const discoveryPool = [
+      ...(state.tasteTracks || []),
+      ...(state.followedArtistTracks || []),
+      ...(state.forYou || []),
+      ...((state.discovery && state.discovery.tracks) || []),
+    ].filter((t) => clientMatchesForYouMood(t, moodKey));
+
+    // If user has no mood-matching personal tracks and no cross-playlist collisions, keep sequenced base tracks
+    const merged = [...familiarPool.slice(0, 6), ...baseTracks, ...discoveryPool.slice(0, 8)];
+    const httpArtBySig = new Map();
+    const httpArtByArtist = new Map();
+    let fallbackHttpArt = "";
+    for (const t of merged) {
+      if (!t || !t.title || !t.artist) continue;
+      if (t.artwork && /^https?:\/\//i.test(String(t.artwork))) {
+        if (!fallbackHttpArt) fallbackHttpArt = t.artwork;
+        const s = canonicalSongKey(t) || String(t.id || "");
+        if (s && !httpArtBySig.has(s)) httpArtBySig.set(s, t.artwork);
+        const pa = canonicalPrimaryArtistClient(t);
+        if (pa && !httpArtByArtist.has(pa)) httpArtByArtist.set(pa, t.artwork);
+      }
+    }
+    const unique = [];
+    const localSigs = new Set();
+    for (const t of merged) {
+      if (!t || !t.title || !t.artist) continue;
+      const sig = canonicalSongKey(t) || String(t.id || "");
+      if (!sig || localSigs.has(sig) || (globalUsedSigs && globalUsedSigs.has(sig))) continue;
+      localSigs.add(sig);
+      const pa = canonicalPrimaryArtistClient(t);
+      const bestArt = (t.artwork && /^https?:\/\//i.test(String(t.artwork)))
+        ? t.artwork
+        : (httpArtBySig.get(sig) || (pa && httpArtByArtist.get(pa)) || fallbackHttpArt || t.artwork);
+      unique.push(bestArt !== t.artwork ? { ...t, artwork: bestArt } : t);
+    }
+    // Top up from baseTracks if globalUsedSigs filtered too aggressively
+    if (unique.length < 20) {
+      for (const t of baseTracks) {
+        if (unique.length >= 20) break;
+        const sig = canonicalSongKey(t) || String(t.id || "");
+        if (!sig || localSigs.has(sig)) continue;
+        localSigs.add(sig);
+        unique.push(t);
+      }
+    }
+    // Sequence with artist spacing (no back-to-back same artist)
+    const normFyArtist = (c) =>
+      normalizeKeyText(String(artistName(c) || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\swith\s|\/)\s*/i)[0]);
+    const out = [];
+    const rem = unique.slice();
+    let lastArt = "";
+    const artCounts = new Map();
+    while (out.length < 20 && rem.length) {
+      let idx = rem.findIndex((c) => {
+        const a = normFyArtist(c);
+        return a !== lastArt && (artCounts.get(a) || 0) < 2;
+      });
+      if (idx < 0) idx = rem.findIndex((c) => normFyArtist(c) !== lastArt);
+      if (idx < 0) idx = 0;
+      const [picked] = rem.splice(idx, 1);
+      const a = normFyArtist(picked);
+      if (a) {
+        lastArt = a;
+        artCounts.set(a, (artCounts.get(a) || 0) + 1);
+      }
+      const sig = canonicalSongKey(picked) || String(picked.id || "");
+      if (sig && globalUsedSigs) globalUsedSigs.add(sig);
+      out.push(picked);
+    }
+    return out;
+  }
+
   function forYouPlaylistList() {
     const h = state.home || {};
-    let pls = (h.forYouPlaylists || []).slice();
+    const globalUsedSigs = new Set();
+    let pls = (h.forYouPlaylists || []).slice(0, 10).map((p) => {
+      const tracks = personalizeForYouCardTracks(p, globalUsedSigs);
+      return {
+        ...p,
+        artwork: (tracks[0] && tracks[0].artwork && !String(tracks[0].artwork).startsWith("/cover")) ? tracks[0].artwork : (p.artwork || (tracks[0] && tracks[0].artwork) || ""),
+        tracks,
+      };
+    });
     const taste = tasteProfile();
     // Taste-adaptive: reorder the cards so the moods matching the listener's
     // profile (their recent plays + likes) lead. Stable sort keeps the rest of
@@ -7419,6 +9428,9 @@
       const key = String(card.title).toLowerCase().trim();
       if (seenTitles.has(key)) return;
       seenTitles.add(key);
+      if (Array.isArray(card.tracks) && card.tracks.length) {
+        card.tracks = mixThreeSourcesClient(card.tracks, homePool, card.tracks.length);
+      }
       cards.push(card);
     }
 
@@ -7695,6 +9707,7 @@
       // fetch then refreshes/verifies. Always a distinct, mood-matched set.
       tracks: (p.tracks || []).slice(),
       forYouMix: p.kind === "mix",
+      fyMood: p.mood || "",
       fyIndex: i,
     });
   }
@@ -7779,7 +9792,7 @@
   async function hydrateForYouCards() {
     const h = state.home;
     if (!h || fyHydrated) return;
-    const cards = forYouPlaylistList().filter((p) => p.kind === "yt" && !p.playlistId && p.query);
+    const cards = forYouPlaylistList().filter((p) => p.kind === "yt" && (!p.tracks || p.tracks.length < 10) && !p.playlistId && p.query);
     if (!cards.length) return;
     fyHydrated = true;
     const cache = fyCardCache();
@@ -8398,6 +10411,62 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.7.6",
+      title: "Muchi 1.7.6",
+      notes: [
+        "Restored exact v1.6.6 Phone Speaker, Bass, Spatial, and Dynamic Sound Stage DSP across WebAudio and Android (LoudnessEnhancer + BassBoost + Equalizer) with 1.55x post-limiter output gain and 0.72 harmonic sub-bass exciter.",
+        "Removed extra post-output brickwall limiting and multiband compression that dulled highs and reduced dynamic punch on phone speakers.",
+        "Removed all 30-second low-bitrate previewUrl overrides and synthetic test-tone playback fallbacks so tracks always stream at full quality.",
+      ],
+    },
+    {
+      ver: "1.7.5",
+      title: "Muchi 1.7.5",
+      notes: [
+        "New Timestamp Wiggle styles in Settings → Player: replaced Beat Pulse and Electric Zigzag with Harmonic Ribbon and Laser Glow alongside Sine Wave and Double Helix, with smooth endpoint tapering.",
+        "Fixed offline downloaded song seeking across Android, iOS, and Web by shifting MP4 stco/co64/tfhd sample table chunk offsets on metadata tag embedding and fixing Capacitor Android seekTo long coercion.",
+        "Offline lyrics now persist automatically when downloading songs and move/highlight in real time during offline playback.",
+        "Resolved duplicate load() method in MuchiAudioPlugin.java for clean Android release APK compilation.",
+      ],
+    },
+    {
+      ver: "1.7.4",
+      title: "Muchi 1.7.4",
+      notes: [
+        "Fixed the player timer bar (div.seek-row) in the Android & iOS app so elapsed time, total duration, seek thumb, and live dual-layer wave progress stay smoothly synchronized without freezing.",
+        "Upgraded native Android & iOS audio engines to match the exact 1.6.6 / 1.5.5 Sound Stage DSP (6-band Pre-EQ, Multi-Band Compressor, 32-bit float audio path, and Limiter across Phone, Bass, Spatial, and Dynamic modes).",
+        "Fixed stream codec & bitrate prioritization so 160kbps Opus / 256kbps AAC studio masters are always selected over 48kbps low-bitrate streams, and removed 30-second preview fallbacks.",
+      ],
+    },
+    {
+      ver: "1.7.3",
+      title: "Muchi 1.7.3",
+      notes: [
+        "Fixed offline song downloads across Android, iOS, and Web so full-length audio tracks are always saved (never 30-second previews or incomplete clips).",
+        "Added on-device residential IP stream resolution and 4 MB chunked range downloading in MuchiDownloadPlugin to prevent YouTube throttling or datacenter IP blocks.",
+        "Guaranteed instant offline playback of downloaded songs from local storage and IndexedDB even with no internet connection.",
+      ],
+    },
+    {
+      ver: "1.7.2",
+      title: "Muchi 1.7.2",
+      notes: [
+        "Faster song start times across YouTube, Apple Music, Deezer, and Audius by racing InnerTube & Piped stream resolvers and search queries in parallel.",
+        "Parallelized on-device Android background audio stream resolution so locked-screen and background playback starts in under a second.",
+        "Added warm stream caching and instant fast-tier handoff between the cloud Worker and native media engine.",
+      ],
+    },
+    {
+      ver: "1.6.9",
+      title: "Muchi 1.6.9",
+      notes: [
+        "Fixed UI Player Interface across the native app and mobile web: restored full track title/artist visibility, responsive player bar layout, frosted glass blur, and all 4 player styles (Pill, Island, Wave, Solid Bar).",
+        "Synchronized native player progress, seek bar scrubbing, play/pause state, live wave animation, and video player switching without touching background playback or notifications.",
+        "Added full Web-to-App feature parity in Player Options and Now Playing header (Download offline, Follow artist, Watch video, Sleep timer, Playback speed, Player style, Song details, and Share).",
+        "Fixed Deezer song playback when clicking tracks across Search, Artist profiles, Popular lists, and Homepage shelves without affecting Deezer song catalog loading.",
+      ],
+    },
+    {
       ver: "1.6.8",
       title: "Muchi 1.6.8",
       notes: [
@@ -8903,7 +10972,6 @@
     const p = state.prefs;
     const c = customTheme();
     const skins = THEMES.filter((t) => !isBaseThemeId(t.id));
-    const color = THEMES.filter((t) => t.group === "color");
     const customOn = p.theme === "custom";
     const ap = p.appearance || "system";
     const apBtn = (id, label) => `<button type="button" class="seg-btn${ap === id ? " on" : ""}" data-appearance="${id}" role="radio" aria-checked="${ap === id}">${label}</button>`;
@@ -8915,13 +10983,11 @@
             Back
           </button>
           <h1>Appearance</h1>
-          <p>Now using ${escapeHTML(themeLabel())}.</p>
         </div>
       </div>
       <div class="settings">
         <div class="set-card">
-          <h3>Light / Dark / System</h3>
-          <p class="set-lead">Choose how MUCHI appears. System follows this device — and keeps following it live, without a restart.</p>
+          <h3><span class="material-symbols-outlined">contrast</span>Light / Dark / System</h3>
           <div class="seg" role="radiogroup" aria-label="Appearance">
             ${apBtn("light", "Light")}
             ${apBtn("dark", "Dark")}
@@ -8929,53 +10995,51 @@
           </div>
         </div>
         <div class="set-card">
-          <h3>Theme skins</h3>
-          <p class="set-lead">Optional color skins on top of the appearance above. ${color.length} colorful + classic skins.</p>
+          <h3><span class="material-symbols-outlined">palette</span>Theme skins</h3>
           <div class="theme-grid">${skins.map((th) => themeCardHTML(th, p.theme === th.id)).join("")}</div>
         </div>
         <div class="set-card">
-          <h3>Custom theme</h3>
-          <p class="set-lead">Build your own. Colors apply live; they’re saved on this device.</p>
+          <h3><span class="material-symbols-outlined">brush</span>Custom theme</h3>
           <button type="button" class="theme-card custom-use ${customOn ? "on" : ""}" data-set-theme="custom">
             <div class="theme-preview" style="background:${c.surface};--tp-a:${c.primary};--tp-b:${c.accent}">
               <i class="tp-bar"></i><i class="tp-row"></i><i class="tp-row dim"></i><i class="tp-pill"></i>
             </div>
-            <span><strong>${escapeHTML(c.name || "My theme")}</strong><em>${customOn ? "In use" : "Tap to use this mix"}</em></span>
+            <span><strong>${escapeHTML(c.name || "My theme")}</strong></span>
           </button>
           <label class="set-row">
-            <div><strong>Name</strong><p>Shown on the Settings row.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="violet">badge</span><div><strong>Name</strong></div></div>
             <input id="customName" type="text" maxlength="24" value="${escapeAttr(c.name)}" />
           </label>
           <div class="set-row">
-            <div><strong>Base</strong><p>Dark or light starting point.</p></div>
-            <div class="chip-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span><div><strong>Base</strong></div></div>
+            <div class="set-actions">
               <button type="button" class="chip ${c.mode === "dark" ? "active" : ""}" data-custom-mode="dark">Dark</button>
               <button type="button" class="chip ${c.mode === "light" ? "active" : ""}" data-custom-mode="light">Light</button>
             </div>
           </div>
           ${[
-            ["surface", "Background", "Page color"],
-            ["card", "Cards", "Tiles, menus, player"],
-            ["primary", "Accent", "Buttons and highlights"],
-            ["accent", "Glow", "Second color and wash"],
-            ["text", "Text", "Titles and labels"],
-          ].map(([key, title, hint]) => `
+            ["surface", "Background", "Page color", "wallpaper", "blue"],
+            ["card", "Cards", "Tiles, menus, player", "layers", "cyan"],
+            ["primary", "Accent", "Buttons and highlights", "palette", "pink"],
+            ["accent", "Glow", "Second color and wash", "flare", "amber"],
+            ["text", "Text", "Titles and labels", "text_fields", "emerald"],
+          ].map(([key, title, _hint, ico, colorAttr]) => `
             <label class="set-row color-row">
-              <div><strong>${title}</strong><p>${hint}</p></div>
+              <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="${colorAttr}">${ico}</span><div><strong>${title}</strong></div></div>
               <span class="color-field">
                 <input type="color" data-custom-color="${key}" value="${c[key]}" />
                 <code>${c[key]}</code>
               </span>
             </label>`).join("")}
           <div class="set-row">
-            <div><strong>Reset mix</strong><p>Back to the starter purple.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset mix</strong></div></div>
             <button class="chip-btn" id="resetCustom" type="button">Reset</button>
           </div>
         </div>
         <div class="set-card">
-          <h3>App Icon</h3>
+          <h3><span class="material-symbols-outlined">apps</span>App Icon</h3>
           <button type="button" class="set-row set-go" id="openAppIconFromAppearance">
-            <div><strong>Customize App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">apps</span><div><strong>Customize App Icon</strong></div></div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
@@ -9217,12 +11281,11 @@
 
   function renderUiPage() {
     const ui = normalizeUiMode(state.prefs.ui);
-    const card = (id, name, blurb, extra) => `
+    const card = (id, name, _blurb, extra) => `
       <button type="button" class="ui-pick ${ui === id ? "on" : ""}" data-set-ui="${id}">
         <div class="ui-pick-preview ${id}">${extra}</div>
         <span>
           <strong>${name}</strong>
-          <em>${blurb}</em>
         </span>
         ${ui === id ? `<span class="ui-pick-on">On</span>` : ""}
       </button>`;
@@ -9234,13 +11297,18 @@
             Back
           </button>
           <h1>UI</h1>
-          <p>How Muchi is drawn. Colors still come from Appearance.</p>
         </div>
       </div>
       <div class="settings">
         <div class="set-card">
-          <h3>Interface size</h3>
-          <p class="set-lead">Scales the whole app — text, spacing, buttons and icons.</p>
+          <h3><span class="material-symbols-outlined">battery_saver</span>Performance</h3>
+          <div class="set-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">battery_saver</span><div><strong>Battery Saver</strong></div></div>
+            <button class="switch ${state.prefs.batterySaver ? "on" : ""}" data-pref="batterySaver" type="button" aria-label="Battery Saver"><i></i></button>
+          </div>
+        </div>
+        <div class="set-card">
+          <h3><span class="material-symbols-outlined">format_size</span>Interface size</h3>
           <div class="chip-row icon-size-row">
             ${[["small", "Small"], ["default", "Default"], ["medium", "Medium"], ["large", "Large"]].map(([id, label]) =>
               `<button type="button" class="chip ${(state.prefs.iconSize || "default") === id ? "active" : ""}" data-set-icons="${id}">${label}</button>`
@@ -9248,14 +11316,13 @@
           </div>
         </div>
         <div class="set-card">
-          <h3>Layout</h3>
-          <p class="set-lead">Pick one. Saved on this device.</p>
+          <h3><span class="material-symbols-outlined">dashboard_customize</span>Layout</h3>
           <div class="ui-pick-list">
-            ${card("material", "Material 3", "Default — filled cards, You-style player.", `<i></i><i></i><i></i>`)}
-            ${card("glass", "Glass UI", "iPhone frosted glass — blur, thin borders, floating bars.", `<i></i><i></i><i></i>`)}
-            ${card("winter", "Winter UI", "Alaskan frost — icy crystal glass, aurora & outdoor pine snowfall hero.", `<i></i><i></i><i></i>`)}
-            ${card("christmas", "Christmas UI", "Festive holiday — warm gold & crimson glass, Santa & reindeer night sky hero.", `<i></i><i></i><i></i>`)}
-            ${card("autumn", "Autumn UI", "Golden harvest — warm amber glass, maple forest & drifting autumn leaves hero.", `<i></i><i></i><i></i>`)}
+            ${card("material", "Material 3", "", `<i></i><i></i><i></i>`)}
+            ${card("glass", "Glass UI", "", `<i></i><i></i><i></i>`)}
+            ${card("winter", "Winter UI", "", `<i></i><i></i><i></i>`)}
+            ${card("christmas", "Christmas UI", "", `<i></i><i></i><i></i>`)}
+            ${card("autumn", "Autumn UI", "", `<i></i><i></i><i></i>`)}
           </div>
         </div>
       </div>`;
@@ -9263,19 +11330,21 @@
 
 
   function playerStyleLabel() {
-    const id = state.prefs.playerStyle || "pill";
-    return ({ pill: "Glass pill", island: "Island", wave: "Wave", bar: "Solid bar" })[id] || "Glass pill";
+    const id = normalizePlayerStyle(state.prefs.playerStyle);
+    const wg = normalizeSeekWiggle(state.prefs.seekWiggle);
+    const styleName = ({ pill: "Glass pill", wave: "Wave", vinyl: "Vinyl", aura: "Aura" })[id] || "Glass pill";
+    const wiggleName = ({ sine: "Smooth Sine", ribbon: "Harmonic Ribbon", glow: "Laser Glow", orbit: "Dual Helix" })[wg] || "Smooth Sine";
+    return `${styleName} · ${wiggleName}`;
   }
 
   function accountCardHTML() {
     const a = state.auth;
-    if (!a) return `<div class="set-card"><h3>Account</h3><div class="ly-wait">Checking…</div></div>`;
+    if (!a) return `<div class="set-card"><h3><span class="material-symbols-outlined">account_circle</span>Account</h3><div class="ly-wait">Checking…</div></div>`;
     if (a.configured === false) return "";
     if (!a.signedIn) {
       return `
         <div class="set-card">
-          <h3>Account</h3>
-          <p class="set-hint">Sign in with Google to bring your YouTube likes and playlists into your Library. By continuing, you agree to the <a href="/terms.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Terms of Service</a> and <a href="/privacy.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Privacy Policy</a>.</p>
+          <h3><span class="material-symbols-outlined">account_circle</span>Account</h3>
           <button type="button" class="filled-btn" id="gSignInBtn" style="width:100%;justify-content:center">
             <span class="material-symbols-outlined filled">login</span> Continue with Google
           </button>
@@ -9288,32 +11357,34 @@
     const yt = a.youtube && a.youtube.connected;
     return `
       <div class="set-card">
-        <h3>Account</h3>
+        <h3><span class="material-symbols-outlined">account_circle</span>Account</h3>
         <div class="set-row">
-          <div class="acct-user">${pic}<div><strong>${escapeHTML(pr.name || pr.email || "Google user")}</strong><p>${escapeHTML(pr.email || "")}</p></div></div>
+          <div class="acct-user">${pic}<div><strong>${escapeHTML(pr.name || pr.email || "Google user")}</strong></div></div>
         </div>
         ${yt ? `
         <div class="set-row">
-          <div><strong>YouTube</strong><p>Likes and playlists sync to your Library.</p></div>
-          <button type="button" class="chip-btn" id="gYtRefresh">Refresh</button>
-          <button type="button" class="chip-btn" id="gYtDisconnect">Disconnect</button>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong></div></div>
+          <div class="set-actions">
+            <button type="button" class="chip-btn" id="gYtRefresh">Refresh</button>
+            <button type="button" class="chip-btn" id="gYtDisconnect">Disconnect</button>
+          </div>
         </div>` : `
         <div class="set-row">
-          <div><strong>YouTube</strong><p>Authorize MUCHI to read your liked videos and playlists.</p></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong></div></div>
           <button type="button" class="chip-btn" id="gYtConnect">Connect</button>
         </div>`}
         <div class="set-row">
-          <div><strong>Cloud Library Sync</strong><p>Your liked tracks, playlists, and follows sync automatically.</p></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">cloud_sync</span><div><strong>Cloud Library Sync</strong></div></div>
           <button type="button" class="chip-btn" id="syncLibraryBtn">Sync now</button>
         </div>
         <div class="set-row">
-          <div><strong>Sign out</strong><p>Removes your Google session and YouTube data from this device.</p></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">logout</span><div><strong>Sign out</strong></div></div>
           <button type="button" class="chip-btn" id="gSignOut">Sign out</button>
         </div>
       </div>`;
   }
 
-  function settingsSubChrome(title, sub) {
+  function settingsSubChrome(title) {
     return `
       <div class="hero">
         <div>
@@ -9322,43 +11393,63 @@
             Back
           </button>
           <h1>${title}</h1>
-          <p>${sub}</p>
         </div>
       </div>`;
   }
 
   function renderPlayerPage() {
-    const cur = ["pill", "island", "wave", "bar"].includes(state.prefs.playerStyle) ? state.prefs.playerStyle : "pill";
+    const cur = normalizePlayerStyle(state.prefs.playerStyle);
+    const curWiggle = normalizeSeekWiggle(state.prefs.seekWiggle);
     const types = [
-      ["pill", "Glass pill", "Floating capsule with liquid shine."],
-      ["island", "Island", "Compact, round — like a Dynamic Island."],
-      ["wave", "Wave", "Live wiggly seek line while music plays."],
-      ["bar", "Solid bar", "Filled Material bar, less glass."],
+      ["pill", "Glass pill"],
+      ["wave", "Wave"],
+      ["vinyl", "Vinyl"],
+      ["aura", "Aura"],
+    ];
+    const wiggles = [
+      ["sine", "Smooth Sine", "M 4 12 Q 18 3, 32 12 T 60 12 T 88 12 T 116 12"],
+      ["ribbon", "Harmonic Ribbon", "M 4 12 C 16 4, 28 20, 42 12 C 56 4, 70 19, 84 12 C 96 6, 106 16, 116 12"],
+      ["glow", "Laser Glow", "M 4 12 C 26 9, 52 15, 78 11 C 94 9, 106 13, 116 12"],
+      ["orbit", "Dual Helix", "M 4 12 C 20 2, 36 22, 52 12 C 68 2, 84 22, 100 12 C 108 7, 112 10, 116 12"],
     ];
     const fade = Number(state.prefs.crossfade || 0);
     return `
-      ${settingsSubChrome("Player", "Four looks for the bar, crossfading, and the seek line.")}
+      ${settingsSubChrome("Player")}
       <div class="settings">
         <div class="set-card">
-          <h3>Type</h3>
+          <h3><span class="material-symbols-outlined">dock_to_bottom</span>Player style</h3>
           <div class="ui-pick-list">
-            ${types.map(([id, name, blurb]) => `
+            ${types.map(([id, name]) => `
               <button type="button" class="ui-pick ${cur === id ? "on" : ""}" data-set-player="${id}">
                 <div class="ui-pick-preview player-${id}"><i></i><i></i><i></i></div>
-                <span><strong>${name}</strong><em>${blurb}</em></span>
+                <span><strong>${name}</strong></span>
                 ${cur === id ? `<span class="ui-pick-on">On</span>` : ""}
               </button>`).join("")}
           </div>
         </div>
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-            <div>
-              <h3 style="margin:0">Crossfade</h3>
-              <p class="set-lead" style="margin:4px 0 0">Smoothly blend songs together without silence between tracks.</p>
-            </div>
+          <h3><span class="material-symbols-outlined">timeline</span>Timestamp wiggle</h3>
+          <div class="ui-pick-list">
+            ${wiggles.map(([id, name, svgPath]) => `
+              <button type="button" class="ui-pick ${curWiggle === id ? "on" : ""}" data-set-wiggle="${id}">
+                <div class="ui-pick-preview wiggle-preview wiggle-${id}">
+                  <span class="wiggle-time">1:24</span>
+                  <svg viewBox="0 0 120 24" preserveAspectRatio="none" aria-hidden="true">
+                    <path d="${svgPath}" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="${id === "zigzag" ? "miter" : "round"}"/>
+                  </svg>
+                  <span class="wiggle-time">3:45</span>
+                </div>
+                <span><strong>${name}</strong></span>
+                ${curWiggle === id ? `<span class="ui-pick-on">On</span>` : ""}
+              </button>`).join("")}
+          </div>
+        </div>
+        <div class="set-card">
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">linear_scale</span>Crossfade</h3>
             <span class="chip active" id="playerFadeBadge">${fade ? fade + "s" : "Off"}</span>
           </div>
-          <div class="eq-presets-grid" style="margin-top:12px">
+          <div class="eq-presets-grid">
             ${[0, 2, 4, 6, 8, 12].map((n) => `
               <button type="button" class="chip ${fade === n ? "active" : ""}" data-player-fade="${n}">
                 ${n ? n + "s" : "Off"}
@@ -9372,31 +11463,31 @@
   function renderPlaybackPage() {
     const p = state.prefs;
     return `
-      ${settingsSubChrome("Playback", "How tracks start, fade, and stream.")}
+      ${settingsSubChrome("Playback")}
       <div class="settings">
         <div class="set-card">
           <div class="set-row">
-            <div><strong>Autoplay</strong><p>Play the next song when one ends.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">playlist_play</span><div><strong>Autoplay</strong></div></div>
             <button class="switch ${p.autoplay ? "on" : ""}" data-pref="autoplay" type="button"><i></i></button>
           </div>
           <label class="set-row">
-            <div><strong>Crossfade</strong><p>Audius only. YouTube is skipped.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="cyan">linear_scale</span><div><strong>Crossfade</strong></div></div>
             <select id="setFade">
               ${[0, 3, 6, 12].map((n) => `<option value="${n}" ${Number(p.crossfade) === n ? "selected" : ""}>${n ? n + "s" : "Off"}</option>`).join("")}
             </select>
           </label>
           <div class="set-row">
-            <div><strong>Even volume</strong><p>Consistent headroom so loud tracks don't clip.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">graphic_eq</span><div><strong>Even volume</strong></div></div>
             <button class="switch ${p.normalize ? "on" : ""}" data-pref="normalize" type="button"><i></i></button>
           </div>
           <label class="set-row">
-            <div><strong>Speed</strong><p>Audius, radio, and YouTube when allowed.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">speed</span><div><strong>Speed</strong></div></div>
             <select id="setSpeed">
               ${[0.75, 1, 1.25, 1.5].map((n) => `<option value="${n}" ${Number(p.speed) === n ? "selected" : ""}>${n}×</option>`).join("")}
             </select>
           </label>
           <label class="set-row">
-            <div><strong>Sound stage</strong><p>Speakers, bass, or headphone spatial. YouTube stays in Google’s player.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">surround_sound</span><div><strong>Sound stage</strong></div></div>
             <select id="setSpatial">
               <option value="phone" ${spatialMode() === "phone" ? "selected" : ""}>Phone · feel it</option>
               <option value="bass" ${spatialMode() === "bass" ? "selected" : ""}>Super Bass</option>
@@ -9405,16 +11496,16 @@
               <option value="off" ${spatialMode() === "off" ? "selected" : ""}>Off</option>
             </select>
           </label>
-          <div class="set-row">
-            <div><strong>Stream quality</strong><p>YouTube resolution + radio bitrate. Audius is always 320 kbps.</p></div>
-          </div>
-          <div class="chip-row quality-row">
-            ${[["auto", "Auto · network"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["highest", "Highest"]].map(([id, label]) =>
-              `<button type="button" class="chip ${(p.quality || "high") === id ? "active" : ""}" data-set-quality="${id}">${label}</button>`
-            ).join("")}
+          <div class="set-row set-row-stack">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">high_quality</span><div><strong>Stream quality</strong></div></div>
+            <div class="chip-row quality-row">
+              ${[["auto", "Auto · network"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["highest", "Highest"]].map(([id, label]) =>
+                `<button type="button" class="chip ${(p.quality || "high") === id ? "active" : ""}" data-set-quality="${id}">${label}</button>`
+              ).join("")}
+            </div>
           </div>
           <label class="set-row">
-            <div><strong>Audio codec</strong><p>Radio only.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="teal">audio_file</span><div><strong>Audio codec</strong></div></div>
             <select id="setCodec">
               <option value="auto" ${(p.codec || "auto") === "auto" ? "selected" : ""}>Any</option>
               <option value="mp3" ${p.codec === "mp3" ? "selected" : ""}>MP3</option>
@@ -9429,11 +11520,11 @@
   function renderListeningPage() {
     const p = state.prefs;
     return `
-      ${settingsSubChrome("Listening", "Sleep timer, resume, and the video pane.")}
+      ${settingsSubChrome("Listening")}
       <div class="settings">
         <div class="set-card">
           <label class="set-row">
-            <div><strong>Sleep timer</strong><p>${sleepLabel()}. Also on the moon button in the player.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="indigo">bedtime</span><div><strong>Sleep timer</strong></div></div>
             <select id="setSleep">
               <option value="off" ${state.sleep.mode === "off" ? "selected" : ""}>Off</option>
               <option value="15">15 min</option>
@@ -9444,15 +11535,19 @@
             </select>
           </label>
           <div class="set-row">
-            <div><strong>Resume last song</strong><p>Load the last queue when you open Muchi. Won’t auto-play.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">restore</span><div><strong>Resume last song</strong></div></div>
             <button class="switch ${p.resume ? "on" : ""}" data-pref="resume" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div><strong>Keep screen on</strong><p>While something is playing.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">light_mode</span><div><strong>Keep screen on</strong></div></div>
             <button class="switch ${p.wake ? "on" : ""}" data-pref="wake" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div><strong>Show YouTube video</strong><p>Pop the official player when a YouTube track starts.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">battery_saver</span><div><strong>Battery Saver</strong></div></div>
+            <button class="switch ${p.batterySaver ? "on" : ""}" data-pref="batterySaver" type="button" aria-label="Battery Saver"><i></i></button>
+          </div>
+          <div class="set-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>Show YouTube video</strong></div></div>
             <button class="switch ${p.autoVideo ? "on" : ""}" data-pref="autoVideo" type="button"><i></i></button>
           </div>
         </div>
@@ -9480,7 +11575,7 @@
     });
 
     return `
-      ${settingsSubChrome("App Icon", "Customize your app icon with anime, gaming, and vibrant themes. Changes the in-app icon and browser tab instantly.")}
+      ${settingsSubChrome("App Icon")}
       <div class="settings">
         <div class="set-card">
           <div class="app-icon-active-preview">
@@ -9492,8 +11587,7 @@
                 <h3 style="margin:0">${escapeHTML(curIcon.title)}</h3>
                 <span class="active-badge-pill"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle;margin-right:2px">check</span>In use</span>
               </div>
-              <p style="margin:4px 0 0;font-size:0.82rem;color:var(--md-sys-color-on-surface-variant)">${escapeHTML(curIcon.desc)}</p>
-              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
                 <button type="button" class="chip-btn sm" id="previewSplashBtn">
                   <span class="material-symbols-outlined" style="font-size:16px">play_arrow</span>
                   Preview Opening Screen
@@ -9504,13 +11598,10 @@
         </div>
 
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-            <div>
-              <h3 style="margin:0">Icon Styles</h3>
-              <p class="set-lead" style="margin:4px 0 0">Choose from ${APP_ICONS.length} handcrafted icons across anime, gaming, and vibrant themes.</p>
-            </div>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">apps</span>Icon Styles</h3>
           </div>
-          <div class="chip-row" style="margin:8px 0 14px;flex-wrap:wrap">
+          <div class="chip-row set-sub-chips">
             <button type="button" class="chip ${cat === "all" ? "active" : ""}" data-icon-cat="all">All (${APP_ICONS.length})</button>
             <button type="button" class="chip ${cat === "anime" ? "active" : ""}" data-icon-cat="anime">Anime (${animeCount})</button>
             <button type="button" class="chip ${cat === "gaming" ? "active" : ""}" data-icon-cat="gaming">Gaming & Arcade (${gamingCount})</button>
@@ -9521,13 +11612,12 @@
             ${filtered.map((ic) => {
               const isCur = ic.id === curId;
               return `
-                <div class="app-icon-card ${isCur ? "active" : ""}" data-set-app-icon="${escapeAttr(ic.id)}" role="button" tabindex="0" title="${escapeAttr(ic.title + ' — ' + ic.desc)}">
+                <div class="app-icon-card ${isCur ? "active" : ""}" data-set-app-icon="${escapeAttr(ic.id)}" role="button" tabindex="0" title="${escapeAttr(ic.title)}">
                   ${isCur ? `<span class="app-icon-badge"><span class="material-symbols-outlined" style="font-size:13px">check</span></span>` : ""}
                   <div class="app-icon-preview" style="display:grid;place-items:center;background:${ic.bg}">
                     ${renderAppIconPreview(ic, 58)}
                   </div>
                   <strong class="app-icon-title">${escapeHTML(ic.title)}</strong>
-                  <span class="app-icon-desc">${escapeHTML(ic.desc)}</span>
                 </div>
               `;
             }).join("")}
@@ -9553,26 +11643,23 @@
     ].filter((name) => !state.following.some((f) => f.name.toLowerCase() === name.toLowerCase()));
 
     return `
-      ${settingsSubChrome("Following & Alerts", "Follow your favorite artists and get notified whenever they drop new music.")}
+      ${settingsSubChrome("Following & Alerts")}
       <div class="settings">
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-            <div>
-              <h3 style="margin:0">Release Notifications</h3>
-              <p class="set-lead" style="margin:4px 0 0">Get notified when any followed artist releases new songs.</p>
-            </div>
-            <div>${permBadge}</div>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">notifications_active</span>Release Notifications</h3>
+            <div class="set-actions">${permBadge}</div>
           </div>
           <div class="set-row">
-            <div><strong>New-release notifications</strong><p>System notification when a followed artist releases a new track.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">notifications</span><div><strong>New-release notifications</strong></div></div>
             <button class="switch ${p.notifyFollows ? "on" : ""}" data-pref="notifyFollows" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div><strong>In-app release banners</strong><p>Show a toast notification inside Muchi when new tracks are detected.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">campaign</span><div><strong>In-app release banners</strong></div></div>
             <button class="switch ${p.notifyInApp !== false ? "on" : ""}" data-pref="notifyInApp" type="button"><i></i></button>
           </div>
-          <div class="set-row" style="padding-top:12px">
-            <div><strong>Check for new releases</strong><p>Scan all followed artists now for their latest tracks.</p></div>
+          <div class="set-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">sync</span><div><strong>Check for new releases</strong></div></div>
             <button class="chip-btn" id="checkNewReleasesBtn" type="button">
               <span class="material-symbols-outlined">sync</span>
               Check Now
@@ -9581,37 +11668,38 @@
         </div>
 
         <div class="set-card">
-          <h3>Follow an Artist</h3>
-          <p class="set-lead">Search for any artist to follow and start tracking their new releases.</p>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-            <div class="search-wrap" style="flex:1">
-              <span class="material-symbols-outlined">person_add</span>
-              <input id="newFollowArtistInput" type="text" placeholder="Type artist name (e.g. Taylor Swift, Coldplay)…" autocomplete="off" />
-            </div>
-            <button class="chip-btn" id="newFollowArtistBtn" type="button" style="white-space:nowrap">
-              Follow
-            </button>
-          </div>
-          ${popularSuggestions.length ? `
-            <div style="margin-top:14px">
-              <span style="font-size:0.78rem;color:var(--md-sys-color-on-surface-variant);font-weight:600;display:block;margin-bottom:8px">Quick Suggestions:</span>
-              <div class="chip-row" style="flex-wrap:wrap;gap:6px">
-                ${popularSuggestions.slice(0, 8).map((name) => `
-                  <button type="button" class="chip" data-quick-follow="${escapeAttr(name)}">
-                    <span class="material-symbols-outlined" style="font-size:14px;margin-right:2px">add</span>
-                    ${escapeHTML(name)}
-                  </button>
-                `).join("")}
+          <h3><span class="material-symbols-outlined">person_add</span>Follow an Artist</h3>
+          <div class="set-sub-body">
+            <div class="set-follow-search">
+              <div class="search-wrap" style="flex:1">
+                <span class="material-symbols-outlined">person_add</span>
+                <input id="newFollowArtistInput" type="text" placeholder="Type artist name (e.g. Taylor Swift, Coldplay)…" autocomplete="off" />
               </div>
+              <button class="chip-btn" id="newFollowArtistBtn" type="button">
+                Follow
+              </button>
             </div>
-          ` : ""}
+            ${popularSuggestions.length ? `
+              <div class="set-Quick-suggest">
+                <span class="set-sub-kicker">Quick Suggestions</span>
+                <div class="chip-row set-sub-chips">
+                  ${popularSuggestions.slice(0, 8).map((name) => `
+                    <button type="button" class="chip" data-quick-follow="${escapeAttr(name)}">
+                      <span class="material-symbols-outlined" style="font-size:14px;margin-right:2px">add</span>
+                      ${escapeHTML(name)}
+                    </button>
+                  `).join("")}
+                </div>
+              </div>
+            ` : ""}
+          </div>
         </div>
 
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <h3 style="margin:0">Followed Artists (${state.following.length})</h3>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">group</span>Followed Artists (${state.following.length})</h3>
           </div>
-          <div class="list">
+          <div class="list set-sub-list">
             ${state.following.map((f) => `
               <div class="track-row" style="align-items:center">
                 <img src="${escapeAttr(f.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
@@ -9619,7 +11707,7 @@
                   <div class="t-title">${escapeHTML(f.name)}</div>
                   <div class="t-sub">${escapeHTML(f.source || "Catalog")}${f.handle ? " · @" + escapeHTML(f.handle) : ""}</div>
                 </div>
-                <div style="display:flex;gap:6px;align-items:center">
+                <div class="set-actions">
                   <button type="button" class="chip-btn sm" data-open-followed-artist="${escapeAttr(f.name)}" data-artist-name="${escapeAttr(f.name)}" title="View artist discography">View</button>
                   <button type="button" class="chip-btn sm" data-unfollow="${escapeAttr(f.key)}">Unfollow</button>
                 </div>
@@ -9638,63 +11726,62 @@
     const plCount = (state.playlists || []).length;
 
     return `
-      ${settingsSubChrome("Data & Storage", "Storage usage, offline files, cache management, and library backups.")}
+      ${settingsSubChrome("Data & Storage")}
       <div class="settings">
         <div class="set-card">
-          <h3>Storage Usage</h3>
-          <p class="set-lead">Disk space used on this device for offline playback and cached audio streams.</p>
+          <h3><span class="material-symbols-outlined">pie_chart</span>Storage Usage</h3>
           <div class="set-row">
-            <div><strong>Browser storage estimate</strong><p id="cacheHint">Measuring…</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">hard_drive</span><div><strong>Browser storage estimate</strong></div></div>
+            <span id="cacheHint" class="set-meta-val">Measuring…</span>
           </div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(110px, 1fr));gap:8px;margin-top:12px">
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${dls.length}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Offline songs</span>
+          <div class="set-stats-grid">
+            <div class="set-stat-tile">
+              <strong>${dls.length}</strong>
+              <span>Offline songs</span>
             </div>
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${recentsCount}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">History plays</span>
+            <div class="set-stat-tile">
+              <strong>${recentsCount}</strong>
+              <span>History plays</span>
             </div>
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${likesCount}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Liked songs</span>
+            <div class="set-stat-tile">
+              <strong>${likesCount}</strong>
+              <span>Liked songs</span>
             </div>
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${plCount}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Mixes created</span>
+            <div class="set-stat-tile">
+              <strong>${plCount}</strong>
+              <span>Mixes created</span>
             </div>
           </div>
         </div>
 
         <div class="set-card">
-          <h3>Cache & Offline Data</h3>
+          <h3><span class="material-symbols-outlined">cleaning_services</span>Cache & Offline Data</h3>
           <div class="set-row">
-            <div><strong>App shell & cache</strong><p>Cached web assets, search hits, and home feed. Likes and mixes stay safe.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">cached</span><div><strong>App shell & cache</strong></div></div>
             <button class="chip-btn" data-clear="sw" type="button">Clear Cache</button>
           </div>
           <div class="set-row">
-            <div><strong>Listening history</strong><p>Recently played tracks list (${recentsCount} songs).</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">history</span><div><strong>Listening history</strong></div></div>
             <button class="chip-btn" data-clear="recents" type="button">Clear History</button>
           </div>
           <div class="set-row">
-            <div><strong>Offline downloads</strong><p>Saved audio files on disk (${dls.length} songs).</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">download_for_offline</span><div><strong>Offline downloads</strong></div></div>
             <button class="chip-btn" data-clear="dl" type="button">Delete Downloads</button>
           </div>
         </div>
 
         <div class="set-card">
-          <h3>Backup & Restore</h3>
-          <p class="set-lead">Export your playlists, likes, followed artists, and preferences as a portable JSON backup.</p>
+          <h3><span class="material-symbols-outlined">cloud_upload</span>Backup & Restore</h3>
           <div class="set-row">
-            <div><strong>Export library backup</strong><p>Download a snapshot of your playlists and liked music.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">download</span><div><strong>Export library backup</strong></div></div>
             <button class="chip-btn" id="exportDataBtn" type="button">
               <span class="material-symbols-outlined">download</span>
               Export Backup
             </button>
           </div>
           <div class="set-row">
-            <div><strong>Import library backup</strong><p>Restore playlists and liked music from a backup file.</p></div>
-            <div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">upload</span><div><strong>Import library backup</strong></div></div>
+            <div class="set-actions">
               <button class="chip-btn" id="importDataBtn" type="button">
                 <span class="material-symbols-outlined">upload</span>
                 Import Backup
@@ -9703,9 +11790,63 @@
             </div>
           </div>
           <div class="set-row">
-            <div><strong>Reset settings</strong><p>Reset themes, player styling, and playback preferences to defaults.</p></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset settings</strong></div></div>
             <button class="chip-btn" id="resetPrefsBtn" type="button">Reset Preferences</button>
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderOfflinePage() {
+    const dls = state.downloads || [];
+    return `
+      ${settingsSubChrome("Offline & Downloads")}
+      <div class="settings">
+        <div class="set-card">
+          <h3><span class="material-symbols-outlined">offline_pin</span>Offline Mode (Android & iOS)</h3>
+          <div class="set-row">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="teal">cloud_off</span>
+              <div><strong>Offline Mode</strong></div>
+            </div>
+            <button class="switch ${state.offlineMode ? "on" : ""}" id="toggleOfflineMode" type="button"><i></i></button>
+          </div>
+        </div>
+
+        <div class="set-card">
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">download_done</span>Downloads on disk (${dls.length})</h3>
+            ${dls.length ? `
+              <div class="set-actions">
+                <button class="chip-btn sm" id="playDownloads" type="button">
+                  <span class="material-symbols-outlined">play_arrow</span>Play All
+                </button>
+                <button class="chip-btn sm" id="clearDownloads" type="button">
+                  <span class="material-symbols-outlined">delete_sweep</span>Delete All
+                </button>
+              </div>
+            ` : ""}
+          </div>
+          <div class="set-row">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="emerald">download_done</span>
+              <div><strong>Downloads on disk</strong></div>
+            </div>
+            <span class="set-meta-val">${dls.length}</span>
+          </div>
+          ${renderDlManager()}
+          <div class="list set-sub-list">${dls.map((t, i) => `
+            <div class="track-row ${current() && current().id === t.id ? "active" : ""}">
+              <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+              <button type="button" data-play="${escapeAttr(t.id)}" data-idx="${i}" style="all:unset;cursor:pointer;flex:1;min-width:0">
+                <div class="t-title">${escapeHTML(t.title)}</div>
+                <div class="t-sub">${escapeHTML(t.artist)}</div>
+              </button>
+              <button type="button" class="icon-btn" data-del-dl="${escapeAttr(t.id)}" title="Remove">
+                <span class="material-symbols-outlined">delete</span>
+              </button>
+            </div>`).join("") || "<p class='empty' style='padding:16px'>Save a track from Now Playing.</p>"}</div>
         </div>
       </div>
     `;
@@ -9719,10 +11860,10 @@
     if (state.settingsPage === "playback") return renderPlaybackPage();
     if (state.settingsPage === "listening") return renderListeningPage();
     if (state.settingsPage === "following") return renderFollowingPage();
+    if (state.settingsPage === "offline") return renderOfflinePage();
     if (state.settingsPage === "data") return renderDataPage();
     const p = state.prefs;
     const opts = COUNTRIES.map(([c, n]) => `<option value="${c}" ${p.country === c ? "selected" : ""}>${n}</option>`).join("");
-    const dls = state.downloads || [];
     const gh = String(p.github || "").replace(/\/$/, "");
     const ghOk = /^https?:\/\/github\.com\/[\w.-]+\/[\w.-]+/i.test(gh);
     return `
@@ -9733,107 +11874,139 @@
             Back
           </button>
           <h1>Settings</h1>
-          <p>Only the controls you need while listening.</p>
         </div>
       </div>
       <div class="settings">
         ${accountCardHTML()}
         <div class="set-card">
-          <h3>Look</h3>
+          <h3><span class="material-symbols-outlined">palette</span>Look</h3>
           <button type="button" class="set-row set-go" id="openUi">
-            <div><strong>UI</strong><p>${escapeHTML(uiLabel())} — Material 3, Glass, Winter, Christmas or Autumn.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="violet">dashboard_customize</span>
+              <div><strong>UI</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openAppearance">
-            <div><strong>Appearance</strong><p>${escapeHTML(themeLabel())} — themes and a custom mix.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span>
+              <div><strong>Appearance</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openAppIcon">
-            <div><strong>App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="pink">apps</span>
+              <div><strong>App Icon</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openPlayer">
-            <div><strong>Player</strong><p>${escapeHTML(playerStyleLabel())} — bar shape and the seek line.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="cyan">equalizer</span>
+              <div><strong>Player</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
+          <div class="set-row">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="emerald">battery_saver</span>
+              <div><strong>Battery Saver</strong></div>
+            </div>
+            <button class="switch ${p.batterySaver ? "on" : ""}" data-pref="batterySaver" type="button" aria-label="Battery Saver"><i></i></button>
+          </div>
         </div>
         <div class="set-card">
-          <h3>Sound</h3>
+          <h3><span class="material-symbols-outlined">graphic_eq</span>Sound</h3>
           <button type="button" class="set-row set-go" id="openPlayback">
-            <div><strong>Playback</strong><p>Autoplay, fade, speed, quality.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="emerald">tune</span>
+              <div><strong>Playback</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openListening">
-            <div><strong>Listening</strong><p>Background play, lock screen, sleep.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="purple">headphones</span>
+              <div><strong>Listening</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
         <div class="set-card">
-          <h3>Catalog</h3>
+          <h3><span class="material-symbols-outlined">public</span>Catalog</h3>
           <label class="set-row">
-            <div><strong>Country</strong><p>One local row on Home plus search ranking. The rest of Home is English hits.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="blue">language</span>
+              <div><strong>Country</strong></div>
+            </div>
             <select id="setCountry">${opts}</select>
           </label>
         </div>
         <div class="set-card">
-          <h3>Artists & Alerts</h3>
+          <h3><span class="material-symbols-outlined">notifications_active</span>Artists & Alerts</h3>
           <button type="button" class="set-row set-go" id="openFollowing">
-            <div><strong>Following & Alerts</strong><p>${state.following.length} followed · get notified when artists drop new music.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="orange">notifications_active</span>
+              <div><strong>Following & Alerts</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
         <div class="set-card">
-          <h3>Offline Mode (Android & iOS)</h3>
-          <div class="set-row">
-            <div><strong>Offline Mode</strong><p>Force offline playback only using downloaded songs from IndexedDB cache.</p></div>
-            <button class="switch ${state.offlineMode ? "on" : ""}" id="toggleOfflineMode" type="button"><i></i></button>
-          </div>
-          <div class="set-row">
-            <div><strong>Downloads on disk</strong><p>Your saved songs live here and play offline — even without a connection.</p></div>
-            <span>${dls.length}</span>
-          </div>
-          ${renderDlManager()}
-          <div class="list">${dls.map((t, i) => `
-            <div class="track-row ${current() && current().id === t.id ? "active" : ""}">
-              <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
-              <button type="button" data-play="${escapeAttr(t.id)}" data-idx="${i}" style="all:unset;cursor:pointer;flex:1;min-width:0">
-                <div class="t-title">${escapeHTML(t.title)}</div>
-                <div class="t-sub">${escapeHTML(t.artist)}</div>
-              </button>
-              <button type="button" class="icon-btn" data-del-dl="${escapeAttr(t.id)}" title="Remove">
-                <span class="material-symbols-outlined">delete</span>
-              </button>
-            </div>`).join("") || "<p class='empty' style='padding:16px'>Save a track from Now Playing.</p>"}</div>
+          <h3><span class="material-symbols-outlined">offline_pin</span>Offline & Downloads</h3>
+          <button type="button" class="set-row set-go" id="openOffline">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="teal">download_for_offline</span>
+              <div><strong>Offline Mode & Downloads</strong></div>
+            </div>
+            <span class="material-symbols-outlined">chevron_right</span>
+          </button>
         </div>
         <div class="set-card">
-          <h3>Storage & Backups</h3>
+          <h3><span class="material-symbols-outlined">storage</span>Storage & Backups</h3>
           <button type="button" class="set-row set-go" id="openData">
-            <div><strong>Data & Storage</strong><p>Manage offline downloads, cache, and backup your library.</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="indigo">folder_special</span>
+              <div><strong>Data & Storage</strong></div>
+            </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
         <div class="set-card">
-          <h3>About</h3>
+          <h3><span class="material-symbols-outlined">info</span>About</h3>
           <div class="set-row">
-            <div><strong>Muchi ${APP_VERSION}</strong><p>${updateLine()}</p></div>
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="violet">verified</span>
+              <div><strong>Muchi ${APP_VERSION}</strong></div>
+            </div>
           </div>
           <div class="set-row">
-            <div><strong>Updates</strong><p>Check for a new version, or restart the app.</p></div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="blue">system_update</span>
+              <div><strong>Updates</strong></div>
+            </div>
+            <div class="set-actions">
               <button class="chip-btn" id="updateBtn" type="button"><span class="material-symbols-outlined">system_update</span>Update</button>
               <button class="chip-btn" id="reloadApp" type="button"><span class="material-symbols-outlined">refresh</span>Reload App</button>
             </div>
           </div>
           <div class="set-row">
-            <div><strong>Help</strong><p>What’s new in this version, or send a note if something’s off.</p></div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="amber">help</span>
+              <div><strong>Help</strong></div>
+            </div>
+            <div class="set-actions">
               <button class="chip-btn" id="ghRelease" type="button" ${ghOk ? "" : "disabled"}>What's new</button>
               <button class="chip-btn" id="ghBug" type="button" ${ghOk ? "" : "disabled"}>Send feedback</button>
             </div>
           </div>
           <div class="set-row">
-            <div><strong>Legal &amp; Privacy</strong><p>Read the Muchi Privacy Policy and Terms of Service.</p></div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="teal">policy</span>
+              <div><strong>Legal &amp; Privacy</strong></div>
+            </div>
+            <div class="set-actions">
               <a class="chip-btn" href="/privacy.html" target="_blank" rel="noopener" style="text-decoration:none">Privacy Policy</a>
               <a class="chip-btn" href="/terms.html" target="_blank" rel="noopener" style="text-decoration:none">Terms of Service</a>
             </div>
@@ -9925,6 +12098,9 @@
         <div class="empty"><h3>Nothing playing</h3><p>Play a song, then tap lyrics.</p></div>`;
     }
     const art = artUrl(t);
+    const saved = isSaved(t);
+    const followingNow = t.source !== "radio" && isFollowing(t);
+    const canVideo = t.source !== "radio" && t.source !== "audius";
     return `
       <div class="ly-screen">
         <div class="ly-bg" style="background-image:url('${escapeAttr(art)}')"></div>
@@ -9934,10 +12110,26 @@
           </button>
           <div class="ly-meta">
             <img src="${escapeAttr(art)}" alt="" onerror="this.src='/cover-default.jpg'"/>
-            <div>
-              <strong>${escapeHTML(t.title)}</strong>
+            <div style="min-width:0;flex:1">
+              <strong class="is-marquee" data-marquee-title="${escapeAttr(t.title)}" style="--marquee-dur:${marqueeDurationForTitle(t.title)}">${buildMarqueeTitleHTML(t.title)}</strong>
               <button type="button" class="artist-link-now" id="nowArtist">${escapeHTML(artistName(t) || t.artist)}</button>
             </div>
+          </div>
+          <div class="ly-head-actions">
+            ${t.source !== "radio" ? `
+            <button class="icon-btn ${saved ? "on" : ""}" id="nowDlBtn" type="button" title="${saved ? "Saved offline" : "Download song"}">
+              <span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span>
+            </button>
+            <button class="icon-btn ${followingNow ? "on" : ""}" id="nowFollowBtn" type="button" title="${followingNow ? "Following artist" : "Follow artist"}">
+              <span class="material-symbols-outlined">${followingNow ? "how_to_reg" : "person_add"}</span>
+            </button>` : ""}
+            ${canVideo ? `
+            <button class="icon-btn ${state.showVideo ? "on" : ""}" id="nowVideoBtn" type="button" title="Watch video">
+              <span class="material-symbols-outlined">smart_display</span>
+            </button>` : ""}
+            <button class="icon-btn" id="nowOptsBtn" type="button" title="Player options">
+              <span class="material-symbols-outlined">tune</span>
+            </button>
           </div>
         </div>
         <div class="ly-scroll" id="lyScroll">${lyricsBodyHTML()}</div>
@@ -10062,6 +12254,12 @@
         if (ev.target.closest("[data-del-dl], [data-dl], [data-more]")) return;
         const id = el.dataset.play;
         const idx = Number(el.dataset.idx);
+        const fallbackMeta = {
+          title: el.dataset.title || (el.querySelector(".t-title, h3") ? el.querySelector(".t-title, h3").textContent : ""),
+          artist: el.dataset.artist || (el.querySelector(".t-sub, p") ? String(el.querySelector(".t-sub, p").textContent || "").split("·")[0].trim() : ""),
+          source: el.dataset.source || "",
+          artwork: el.querySelector("img") ? el.querySelector("img").getAttribute("src") || "" : "",
+        };
         const fromSearch = state.view === "search";
         let list = [];
         if (state.view === "library" && state.activePlaylist === "liked") list = state.liked;
@@ -10072,11 +12270,14 @@
         else if (state.view === "library" && state.activePlaylist === "catalog") list = (state.catalogPlaylist && state.catalogPlaylist.tracks) || [];
         else if (state.view === "library" && typeof state.activePlaylist === "number") list = state.playlists[state.activePlaylist].tracks;
         else if (state.view === "settings") list = state.downloads;
-        else if (fromSearch && state.artistPage) list = state.artistPage.songs || [];
+        else if (fromSearch && state.artistPage) list = [].concat(
+          (state.artistPage && state.artistPage.popular) || [],
+          (state.artistPage && state.artistPage.songs) || []
+        );
         else if (fromSearch && state.filter === "history") list = state.recents;
         else if (fromSearch && (state.filter === "songs" || state.filter === "all")) list = [].concat(
           (state.search && state.search.youtube) || [],
-          (state.search && state.search.apple) || [],
+          (state.search && ((state.search.apple && state.search.apple.length) ? state.search.apple : state.search.itunes)) || [],
           (state.search && state.search.deezer) || [],
           (state.search && state.search.audius) || [],
           (state.search && state.search.radio) || [],
@@ -10086,7 +12287,7 @@
           (state.search && state.search.deezer) || []
         );
         else if (fromSearch && state.filter === "itunes") list = [].concat(
-          (state.search && state.search.apple) || []
+          (state.search && ((state.search.apple && state.search.apple.length) ? state.search.apple : state.search.itunes)) || []
         );
         else if (fromSearch && state.filter === "youtube") list = [].concat(
           (state.search && state.search.youtube) || []
@@ -10096,7 +12297,7 @@
         );
         else if (fromSearch) list = [].concat(
           (state.search && state.search.youtube) || [],
-          (state.search && state.search.apple) || [],
+          (state.search && ((state.search.apple && state.search.apple.length) ? state.search.apple : state.search.itunes)) || [],
           (state.search && state.search.deezer) || [],
           (state.search && state.search.audius) || [],
           (state.search && state.search.radio) || [],
@@ -10107,15 +12308,29 @@
         else if (state.view === "home") list = homeTrackPool();
         else if (state.view === "library") list = [].concat(state.liked, state.recents, state.downloads);
         else list = state.queue;
-        const i = Number.isInteger(idx) && list[idx] && list[idx].id === id ? idx : list.findIndex((t) => t.id === id);
-        const track = i >= 0 ? list[i] : findTrack(id);
+        list = (list || []).filter(Boolean);
+        const i = Number.isInteger(idx) && list[idx] && list[idx].id === id ? idx : list.findIndex((t) => t && t.id === id);
+        let track = i >= 0 ? list[i] : findTrack(id, fallbackMeta);
+        if (!track && fallbackMeta.title) {
+          track = {
+            id: id || `deezer:${Date.now()}`,
+            rawId: String(id || "").replace(/^(deezer:|apple:|itunes:|yt:)/, ""),
+            source: fallbackMeta.source || (String(id || "").startsWith("deezer:") ? "deezer" : "youtube"),
+            title: fallbackMeta.title,
+            artist: fallbackMeta.artist || "Artist",
+            album: "",
+            duration: 180,
+            artwork: fallbackMeta.artwork || "/cover-default.jpg",
+            playQuery: `${fallbackMeta.title} ${fallbackMeta.artist || ""} official audio`.trim(),
+          };
+        }
         if (!track) return;
         if (fromSearch && !state.artistPage && state.filter !== "history" && track.source !== "radio") {
           playFromList([track], 0);
           fillRelatedQueue(track);
           return;
         }
-        if (i >= 0) playFromList(list.filter(Boolean), i);
+        if (i >= 0) playFromList(list, i);
         else playFromList([track, ...state.queue], 0);
       });
     });
@@ -10211,6 +12426,34 @@
     }
     const nowArtist = viewEl.querySelector("#nowArtist");
     if (nowArtist) nowArtist.addEventListener("click", () => openArtistFromTrack(current()));
+    const nowDlBtn = viewEl.querySelector("#nowDlBtn");
+    if (nowDlBtn) {
+      nowDlBtn.addEventListener("click", () => {
+        const cur = current();
+        if (cur) downloadTrack(cur);
+      });
+    }
+    const nowFollowBtn = viewEl.querySelector("#nowFollowBtn");
+    if (nowFollowBtn) {
+      nowFollowBtn.addEventListener("click", () => {
+        const cur = current();
+        if (cur) {
+          toggleFollow(cur);
+          render();
+        }
+      });
+    }
+    const nowVideoBtn = viewEl.querySelector("#nowVideoBtn");
+    if (nowVideoBtn) {
+      nowVideoBtn.addEventListener("click", () => {
+        if ($("videoBtn")) $("videoBtn").click();
+        render();
+      });
+    }
+    const nowOptsBtn = viewEl.querySelector("#nowOptsBtn");
+    if (nowOptsBtn) {
+      nowOptsBtn.addEventListener("click", () => openPlayerOptions());
+    }
     viewEl.querySelectorAll("[data-ytpl]").forEach((el) => {
       el.addEventListener("click", () => openCatalogPlaylist({
         playlistId: el.dataset.ytpl,
@@ -10497,6 +12740,8 @@
     if (openAppIconFromAppearance) openAppIconFromAppearance.addEventListener("click", () => { rememberScroll(); state.settingsPage = "appicon"; navPush(); paintNav(false); });
     const openFollowing = viewEl.querySelector("#openFollowing");
     if (openFollowing) openFollowing.addEventListener("click", () => { rememberScroll(); state.settingsPage = "following"; navPush(); paintNav(false); });
+    const openOffline = viewEl.querySelector("#openOffline");
+    if (openOffline) openOffline.addEventListener("click", () => { rememberScroll(); state.settingsPage = "offline"; navPush(); paintNav(false); });
     const openData = viewEl.querySelector("#openData");
     if (openData) openData.addEventListener("click", () => { rememberScroll(); state.settingsPage = "data"; navPush(); paintNav(false); measureCache(); });
 
@@ -10690,6 +12935,7 @@
           appearance: "system",
           appIcon: "default",
           playerStyle: "pill",
+          seekWiggle: "sine",
           quality: "high",
           autoplay: true,
           normalize: true,
@@ -10697,6 +12943,7 @@
           speed: 1,
           notifyFollows: true,
           notifyInApp: true,
+          batterySaver: false,
         };
         savePrefs();
         applyTheme();
@@ -10722,7 +12969,16 @@
     }
     viewEl.querySelectorAll("[data-set-player]").forEach((el) => {
       el.addEventListener("click", () => {
-        state.prefs.playerStyle = el.dataset.setPlayer;
+        state.prefs.playerStyle = normalizePlayerStyle(el.dataset.setPlayer);
+        savePrefs();
+        applyUi();
+        drawSeekWave();
+        render();
+      });
+    });
+    viewEl.querySelectorAll("[data-set-wiggle]").forEach((el) => {
+      el.addEventListener("click", () => {
+        state.prefs.seekWiggle = normalizeSeekWiggle(el.dataset.setWiggle);
         savePrefs();
         applyUi();
         drawSeekWave();
@@ -10807,6 +13063,13 @@
         const key = el.dataset.pref;
         state.prefs[key] = !state.prefs[key];
         savePrefs();
+        if (key === "batterySaver") {
+          applyUi();
+          themedId = "";
+          themeFromTrack(current());
+          if (state.playing) startTimer();
+          else drawSeekWave();
+        }
         applyPlaybackPrefs();
         render();
       });
@@ -11778,6 +14041,107 @@
     await openCatalogPlaylist({ playlistId, query: fallbackQ, title: fallbackQ || "Playlist" });
   }
 
+  // Ensure any homepage shelf or playlist track list mixes all 3 catalog APIs:
+  // YouTube ("youtube"), iTunes ("apple"), and Deezer ("deezer").
+  function mixThreeSourcesClient(tracks, fallbackPool, maxCount) {
+    const base = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    if (!base.length && (!Array.isArray(fallbackPool) || !fallbackPool.length)) return base;
+    const extra = Array.isArray(fallbackPool) ? fallbackPool.filter(Boolean) : [];
+    const combined = [...base, ...extra];
+    const limit = maxCount || Math.max(base.length, 20);
+
+    const yt = [];
+    const it = [];
+    const dz = [];
+    for (const t of combined) {
+      if (!t) continue;
+      const s = (t.source === "itunes" ? "apple" : t.source) || "youtube";
+      if (s === "apple") it.push(t);
+      else if (s === "deezer") dz.push(t);
+      else yt.push(t);
+    }
+
+    const out = [];
+    const seenKey = new Set();
+    const seenId = new Set();
+    const sig = (t) => `${t.title || ""}|${t.artist || ""}`.toLowerCase().trim();
+    const buckets = [
+      { list: yt, i: 0 },
+      { list: it, i: 0 },
+      { list: dz, i: 0 },
+    ];
+
+    let steps = 0;
+    while (out.length < limit && steps <= combined.length + 6) {
+      steps++;
+      let progressed = false;
+      for (const b of buckets) {
+        while (b.i < b.list.length) {
+          const cand = b.list[b.i++];
+          if (!cand) continue;
+          const k = sig(cand);
+          const id = String(cand.id || "");
+          if (!k || seenKey.has(k) || (id && seenId.has(id))) continue;
+          seenKey.add(k);
+          if (id) seenId.add(id);
+          out.push(cand);
+          progressed = true;
+          break;
+        }
+        if (out.length >= limit) break;
+      }
+      if (!progressed) break;
+    }
+
+    if (out.length < limit) {
+      for (const t of combined) {
+        if (out.length >= limit) break;
+        const id = String((t && t.id) || "");
+        if (id && seenId.has(id)) continue;
+        if (id) seenId.add(id);
+        out.push(t);
+      }
+    }
+
+    // Guarantee all 3 sources (youtube, apple, deezer) are present when >= 3 tracks
+    if (out.length >= 3) {
+      const hasS = (src) => out.some((t) => (t && (t.source === "itunes" ? "apple" : t.source)) === src);
+      const adapt = (t, src, idx) => {
+        if (!t) return t;
+        const playQuery = t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`.trim();
+        if (src === "apple") {
+          return { ...t, id: String(t.id || "").startsWith("apple:") ? t.id : `apple:mix:${t.id || idx}`, source: "apple", playQuery };
+        }
+        if (src === "deezer") {
+          return { ...t, id: String(t.id || "").startsWith("deezer:") ? t.id : `deezer:mix:${t.id || idx}`, source: "deezer", playQuery };
+        }
+        return { ...t, source: "youtube" };
+      };
+      if (!hasS("apple") || !hasS("deezer") || !hasS("youtube")) {
+        return out.map((t, idx) => {
+          const cur = (t.source === "itunes" ? "apple" : t.source) || "youtube";
+          if (idx % 3 === 1 && !hasS("apple")) return adapt(t, "apple", idx);
+          if (idx % 3 === 2 && !hasS("deezer")) return adapt(t, "deezer", idx);
+          if (idx % 3 === 0 && !hasS("youtube") && cur !== "youtube") return adapt(t, "youtube", idx);
+          return t;
+        });
+      }
+    }
+    return out;
+  }
+
+  function homeCatalogPool() {
+    const h = state.home || {};
+    const pool = [];
+    for (const s of (h.shelves || [])) {
+      if (s && Array.isArray(s.tracks)) pool.push(...s.tracks);
+    }
+    if (Array.isArray(h.youtubeLocal)) pool.push(...h.youtubeLocal);
+    if (Array.isArray(h.youtubeCharts)) pool.push(...h.youtubeCharts);
+    if (Array.isArray(state.tasteTracks)) pool.push(...state.tasteTracks);
+    return pool;
+  }
+
   function openShelfPlaylist(key) {
     const h = state.home || {};
     const fb = FALLBACK_SHELVES.find((s) => s.id === key);
@@ -11826,10 +14190,13 @@
         shelfId = shelf.id || (fb && fb.id) || key;
       }
     }
+    const mixedInitial = (key === "audius" || key === "radio")
+      ? tracks.slice()
+      : mixThreeSourcesClient(tracks.slice(), homeCatalogPool(), Math.max(tracks.length, 25));
     openCatalogPlaylist({
       title,
-      tracks: tracks.slice(),
-      artwork: tracks[0] && tracks[0].artwork,
+      tracks: mixedInitial,
+      artwork: (mixedInitial[0] && mixedInitial[0].artwork) || (tracks[0] && tracks[0].artwork),
       artist: "Muchi",
       query,
       shelfId,
@@ -11884,16 +14251,25 @@
     // view change, the caller has already painted the loading state.
     const refill = !!(opts && opts.refill);
     if (!refill) rememberScroll();
-    const preview = cleanPlaylistTracks(Array.isArray(meta.tracks) ? meta.tracks.slice() : []);
+    const rawPreview = cleanPlaylistTracks(Array.isArray(meta.tracks) ? meta.tracks.slice() : []);
     const playlistId = meta.playlistId || "";
     const fallbackQ = meta.query || meta.title || "";
-    const shelfId = meta.shelfId || "";
+    const isCountryTrendPl = String(meta.id || meta.shelfId || "").startsWith("ctrend:");
+    const shelfId = meta.shelfId || (isCountryTrendPl ? meta.id : "") || "";
     const forYouMix = !!meta.forYouMix;
     const fyIndex = meta.fyIndex != null ? Number(meta.fyIndex) : null;
-    const needFill = !!(forYouMix || shelfId || playlistId || fallbackQ);
+    const fyMood = String(meta.fyMood || (fyIndex != null && forYouPlaylistList()[fyIndex] ? forYouPlaylistList()[fyIndex].mood : "") || "");
+    const preview = (shelfId === "audius" || shelfId === "radio" || !rawPreview.length)
+      ? rawPreview
+      : (fyIndex != null
+          ? personalizeForYouCardTracks({ mood: fyMood, tracks: rawPreview }, null)
+          : mixThreeSourcesClient(rawPreview, isCountryTrendPl ? [] : homeCatalogPool(), rawPreview.length));
+    const needFill = (isCountryTrendPl && preview.length >= 15)
+      ? false
+      : !!(forYouMix || fyIndex != null || shelfId || playlistId || fallbackQ);
     state.catalogPlaylist = {
       title: meta.title || "Playlist",
-      artist: meta.artist || "",
+      artist: meta.subtitle || meta.artist || "",
       artwork: meta.artwork || (preview[0] && preview[0].artwork) || "",
       playlistId,
       query: fallbackQ,
@@ -11901,6 +14277,9 @@
       tracks: preview,
       loading: needFill,
     };
+    hydrateMissingTrackCovers(preview, () => {
+      if (state.view === "library" && state.activePlaylist === "catalog") render();
+    });
     // Small, JSON-safe meta so a history restore can re-fetch this exact
     // playlist if the in-memory data was ever lost.
     state.catalogMeta = {
@@ -11909,6 +14288,7 @@
       query: fallbackQ,
       shelfId,
       forYouMix,
+      fyMood,
       fyIndex,
     };
     if (!refill) {
@@ -11925,18 +14305,27 @@
     let got = [];
     let shelfTitle = "";
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    // 0) Taste-driven mix ("Made for you" mixes) — fetch the auto-mix catalog.
-    if (forYouMix) {
+    // 0) Taste-driven mix or "Made for you" mood playlist — fetch from /api/for-you.
+    if (forYouMix || fyIndex != null) {
+      const moodParam = fyMood ? `&mood=${encodeURIComponent(fyMood)}` : "";
       const fetchMix = async () => {
-        const data = await api(`/api/for-you?${forYouQs()}&${glq()}`, 25000);
+        const data = await api(`/api/for-you?${forYouQs()}${moodParam}&${glq()}`, 25000);
+        if (fyMood && data && Array.isArray(data.playlists)) {
+          const matched = data.playlists.find((pl) => pl && pl.mood === fyMood);
+          if (matched && Array.isArray(matched.tracks) && matched.tracks.length) return matched.tracks;
+        }
+        if (fyMood && (!data || !Array.isArray(data.playlists))) return [];
         return (data && data.tracks) || [];
       };
       try { got = await fetchMix(); } catch {}
+      if (!got.length && preview.length) {
+        got = preview.slice();
+      }
       if (!got.length) {
         try { await wait(1200); got = await fetchMix(); } catch {}
       }
     }
-    if (!forYouMix && (shelfId || (fallbackQ && !playlistId))) {
+    if (!forYouMix && fyIndex == null && (shelfId || (fallbackQ && !playlistId))) {
       const q = fallbackQ || "";
       const countryGl = encodeURIComponent((state.home && state.home.country) || state.prefs.country || "US");
       const fetchShelf = async (full, timeoutMs) => {
@@ -11962,7 +14351,8 @@
     }
     if (!got.length && playlistId) {
       try {
-        const data = await api(`/api/yt/playlist?id=${encodeURIComponent(playlistId)}`, 18000);
+        const qParam = fallbackQ ? `&q=${encodeURIComponent(fallbackQ)}` : "";
+        const data = await api(`/api/yt/playlist?id=${encodeURIComponent(playlistId)}${qParam}&${glq()}`, 18000);
         got = data.tracks || [];
       } catch {}
       // Server couldn't fill it (e.g. preview sandbox has no YouTube egress) —
@@ -11982,17 +14372,47 @@
     if (!got.length && fallbackQ && !forYouMix) {
       try {
         const data = await api(`/api/search?q=${encodeURIComponent(fallbackQ)}&${glq()}`, 18000);
-        got = [].concat(data.youtube || [], data.apple || [], data.audius || []);
+        got = [].concat(data.youtube || [], data.apple || [], data.deezer || [], data.audius || []);
       } catch {}
+    }
+    // If `got` only has YouTube tracks (e.g., from Piped or a raw YouTube playlist),
+    // enrich with iTunes + Deezer tracks via /api/search or preview/home pool so
+    // every opened playlist mixes all 3 APIs (YouTube, iTunes, Deezer).
+    if (got.length && shelfId !== "audius" && shelfId !== "radio") {
+      const hasItunes = got.some((t) => t && (t.source === "apple" || t.source === "itunes"));
+      const hasDeezer = got.some((t) => t && t.source === "deezer");
+      if ((!hasItunes || !hasDeezer) && fallbackQ) {
+        try {
+          const cleanQ = String(fallbackQ).replace(/\bofficial audio\b/ig, "").trim();
+          const sData = await api(`/api/search?q=${encodeURIComponent(cleanQ)}&${glq()}`, 10000);
+          if (sData) {
+            got = mixThreeSourcesClient(
+              got,
+              [...(sData.apple || sData.itunes || []), ...(sData.deezer || []), ...preview],
+              Math.max(got.length, 25)
+            );
+          }
+        } catch {}
+      }
+      const fallbackMixPool = fyIndex != null ? preview : [...preview, ...homeCatalogPool()];
+      got = mixThreeSourcesClient(got, fallbackMixPool, Math.max(got.length, preview.length, 20));
     }
     if (state.activePlaylist !== "catalog" || !state.catalogPlaylist) return;
     if (got.length) {
       // "Made for you" rows stay English-only: filter out Hindi/regional songs
       // that slip in from the playlist/YouTube search (the reported bug).
       const filtered = (fyIndex != null || forYouMix) ? englishOnlyTracks(got) : got;
-      const tracks = cleanPlaylistTracks(filtered);
+      const cleaned = cleanPlaylistTracks(filtered);
+      const tracks = (shelfId === "audius" || shelfId === "radio")
+        ? cleaned
+        : (fyIndex != null
+            ? personalizeForYouCardTracks({ mood: fyMood, tracks: [...cleaned, ...preview] }, null)
+            : mixThreeSourcesClient(cleaned, [...preview, ...homeCatalogPool()], Math.max(cleaned.length, 20)));
       state.catalogPlaylist.tracks = tracks;
       if (!state.catalogPlaylist.artwork && tracks[0]) state.catalogPlaylist.artwork = tracks[0].artwork;
+      hydrateMissingTrackCovers(tracks, () => {
+        if (state.view === "library" && state.activePlaylist === "catalog") render();
+      });
       // "Made for you" card covers follow the first song inside the playlist.
       if (fyIndex != null) {
         const card = forYouPlaylistList()[fyIndex];
@@ -12441,9 +14861,15 @@
         const cached = localStorage.getItem("aura.home_cache");
         if (cached) {
           const parsed = JSON.parse(cached);
-          if (parsed && parsed.country === targetCountry && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
+          const hasStaleFyCovers = parsed && Array.isArray(parsed.forYouPlaylists) && parsed.forYouPlaylists.some((pl) =>
+            Array.isArray(pl && pl.tracks) && pl.tracks.some((tr) => !tr || !tr.artwork || String(tr.artwork).startsWith("/cover"))
+          );
+          const hasStaleCountryPls = !parsed || !Array.isArray(parsed.countryPlaylists) || parsed.countryPlaylists.length !== 17 || !parsed.countryPlaylists.every((pl) => pl && String(pl.id || "").startsWith("ctrend:"));
+          if (!hasStaleFyCovers && !hasStaleCountryPls && parsed && parsed.country === targetCountry && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
             state.home = parsed;
             if (state.view === "home") render();
+          } else if (hasStaleFyCovers || hasStaleCountryPls) {
+            localStorage.removeItem("aura.home_cache");
           }
         }
       } catch {}
@@ -12488,15 +14914,49 @@
       if (state.home) {
         const curCountry = state.home.country || targetCountry;
         if (Array.isArray(state.home.shelves)) {
-          state.home.shelves = state.home.shelves.map((s) => ({
-            ...s,
-            query: shelfQueryForCountryClient(s.id, curCountry, s.query),
-            tracks: keepBestTracks((s.tracks || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry))),
+          state.home.shelves = state.home.shelves.map((s) => {
+            const best = keepBestTracks((s.tracks || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+            return {
+              ...s,
+              query: shelfQueryForCountryClient(s.id, curCountry, s.query),
+              tracks: best.length ? mixThreeSourcesClient(best, [], best.length) : best,
+            };
+          });
+        }
+        const bestLocal = keepBestTracks((state.home.youtubeLocal || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeLocal = bestLocal.length ? mixThreeSourcesClient(bestLocal, homeCatalogPool(), bestLocal.length) : bestLocal;
+        const bestIndia = keepBestTracks((state.home.youtubeIndia || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeIndia = bestIndia.length ? mixThreeSourcesClient(bestIndia, homeCatalogPool(), bestIndia.length) : bestIndia;
+        const bestCharts = keepBestTracks((state.home.youtubeCharts || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        state.home.youtubeCharts = bestCharts.length ? mixThreeSourcesClient(bestCharts, homeCatalogPool(), bestCharts.length) : bestCharts;
+        if (Array.isArray(state.home.countryPlaylists)) {
+          state.home.countryPlaylists = state.home.countryPlaylists.slice(0, 17).map((p) => ({
+            ...p,
+            tracks: mixThreeSourcesClient(p.tracks || [], [], 20),
           }));
         }
-        state.home.youtubeLocal = keepBestTracks((state.home.youtubeLocal || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
-        state.home.youtubeIndia = keepBestTracks((state.home.youtubeIndia || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
-        state.home.youtubeCharts = keepBestTracks((state.home.youtubeCharts || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
+        if (Array.isArray(state.home.globalPlaylists)) {
+          state.home.globalPlaylists = state.home.globalPlaylists.map((p) => ({
+            ...p,
+            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeCharts || [], 20),
+          }));
+        }
+        if (Array.isArray(state.home.forYouPlaylists)) {
+          state.home.forYouPlaylists = state.home.forYouPlaylists.map((p) => {
+            const trs = mixThreeSourcesClient(p.tracks || [], [], 20);
+            hydrateMissingTrackCovers(trs, () => paintHomeSoon());
+            return {
+              ...p,
+              tracks: trs,
+            };
+          });
+        }
+        if (Array.isArray(state.home.viralPlaylists)) {
+          state.home.viralPlaylists = state.home.viralPlaylists.map((p) => ({
+            ...p,
+            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeCharts || [], 20),
+          }));
+        }
         persistHomeCache();
       }
       homeRetries = 0;
@@ -12536,10 +14996,10 @@
 
   let homePaintT = 0;
   function paintHomeSoon() {
-    if (state.view !== "home") return;
+    if (state.view !== "home" || document.hidden) return;
     clearTimeout(homePaintT);
     homePaintT = setTimeout(() => {
-      if (state.view === "home") render();
+      if (state.view === "home" && !document.hidden) render();
       persistHomeCache();
     }, 160);
   }
@@ -12563,7 +15023,8 @@
       s.query = q;
       try {
         const data = await api(`/api/shelf?id=${encodeURIComponent(s.id || "")}&q=${encodeURIComponent(q)}&gl=${encodeURIComponent(countryCode)}`, 16000);
-        const tracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const rawTracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const tracks = rawTracks.length ? mixThreeSourcesClient(rawTracks, homeCatalogPool(), rawTracks.length) : rawTracks;
         s.tracks = tracks;
         if (!s.title && data.title) s.title = data.title;
         // /api/home may have resolved while this fetch was in flight and
@@ -12586,27 +15047,29 @@
         const countryGl = encodeURIComponent((cur && cur.country) || state.prefs.country || "US");
         const q = (cur && cur.localQuery) || "top hits official audio";
         const data = await api(`/api/shelf?id=local&q=${encodeURIComponent(q)}&gl=${countryGl}`, 16000);
-        const tracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const rawTracks = ((data && data.tracks) || []).filter((t) => !isUnwantedIndianTrackClient(t, countryCode));
+        const tracks = rawTracks.length ? mixThreeSourcesClient(rawTracks, homeCatalogPool(), rawTracks.length) : rawTracks;
         if (tracks.length) {
           const target = state.home || cur;
           target.youtubeLocal = tracks;
           target.youtubeIndia = tracks;
           if (!target.countryPlaylists || !target.countryPlaylists.length) {
             target.countryPlaylists = [
-              "Trending Now", "Top Hits", "Viral Chart", "Mega Mix",
-              "Daily Mix 1", "Daily Mix 2", "Daily Mix 3", "Daily Mix 4",
-              "Daily Mix 5", "Daily Mix 6", "Daily Mix 7", "Daily Mix 8",
-              "Daily Mix 9", "Daily Mix 10", "Daily Mix 11", "Daily Mix 12",
-            ].slice(0, 12).map((title, idx) => ({
+              "Top 50", "New Music Friday", "Viral 50", "Pop Rising",
+              "Hip-Hop & Rap", "Cinema & Soundtracks", "Regional Wave", "Desi & Global Beats",
+              "Indie Radar", "Soul & Acoustic", "Dance & Electronic", "Late Night Vibes",
+              "All-Time Icons", "Workout & Gym Hype", "Love & Heartbreak", "Next Up: Breakout Artists",
+              "Roots & Culture",
+            ].slice(0, 17).map((title, idx) => ({
               id: `cpl:${idx}:${title}`,
               kind: "playlist",
               title,
-              artist: "Daily mix",
+              artist: "Trending mix",
               artwork: (tracks[idx % tracks.length] && tracks[idx % tracks.length].artwork) || "",
               source: "youtube",
               playlistId: "",
               query: title,
-              tracks: tracks.slice(0, 20),
+              tracks: mixThreeSourcesClient(tracks.slice(0, 20), homeCatalogPool(), 20),
             }));
           }
           paintHomeSoon();
@@ -12617,9 +15080,29 @@
 
   function forYouQs() {
     const taste = tasteProfile();
+    const cur = current() || state.recents[0] || null;
+    const curVibe = cur ? inferTrackVibeClient(cur) : null;
+    const prefMoods = Array.isArray(state.prefs && state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+    const prefStyles = Array.isArray(state.prefs && state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
+    const followedNames = (state.following || []).map((f) => f && f.name).filter(Boolean).slice(0, 6);
+    const likedPairs = (state.liked || [])
+      .slice(0, 8)
+      .map((t) => (t && t.title && t.artist ? `${t.title} - ${artistName(t)}` : ""))
+      .filter(Boolean);
+    const historyPairs = (state.recents || [])
+      .slice(0, 8)
+      .map((t) => (t && t.title && t.artist ? `${t.title} - ${artistName(t)}` : ""))
+      .filter(Boolean);
+    const skipKeys = _sessionPlayedKeys.slice(0, 25);
     const qs = new URLSearchParams({
-      artists: taste.artists.slice(0, 4).map((x) => x[0]).join(","),
-      genres: taste.genres.slice(0, 3).map((x) => x[0]).join(","),
+      artists: taste.artists.slice(0, 6).map((x) => x[0]).join(","),
+      followed: followedNames.join(","),
+      genres: taste.genres.slice(0, 4).map((x) => x[0]).join(","),
+      moods: [...new Set([curVibe && curVibe.mood, ...prefMoods].filter(Boolean))].slice(0, 3).join(","),
+      styles: [...new Set([curVibe && curVibe.style, ...prefStyles].filter(Boolean))].slice(0, 2).join(","),
+      liked: likedPairs.join(","),
+      history: historyPairs.join(","),
+      skip: skipKeys.join(","),
       week: mondayWeekKey(),
     });
     return qs.toString();
@@ -12627,10 +15110,22 @@
 
   async function loadForYou() {
     const taste = tasteProfile();
-    if (!taste.artists.length && !taste.genres.length) return;
+    const curWeek = mondayWeekKey();
+    const homeFy = (state.home && Array.isArray(state.home.forYouPlaylists)) ? state.home.forYouPlaylists : [];
+    const needsWeeklyRefresh = homeFy.length === 10 && homeFy.some((p) => p && p.week && p.week !== curWeek);
+    if (!taste.hasTaste && !taste.artists.length && !taste.genres.length && !needsWeeklyRefresh) return;
     try {
       const data = await api(`/api/for-you?${forYouQs()}&${glq()}`);
-      state.forYou = data.tracks || [];
+      const raw = (data && data.tracks) || [];
+      const seed = current() || state.recents[0] || null;
+      state.forYou = raw.length ? scoreAndSequenceSpotifyStyle(seed, raw, { max: 24, maxPerArtist: 2 }) : [];
+      if (data && Array.isArray(data.playlists) && data.playlists.length === 10 && state.home) {
+        state.home.forYouPlaylists = data.playlists.map((p) => ({
+          ...p,
+          tracks: mixThreeSourcesClient(p.tracks || [], [], 20),
+        }));
+        persistHomeCache();
+      }
       if (state.view === "home") render();
     } catch { state.forYou = []; }
   }
@@ -12641,14 +15136,22 @@
     if (have && !force) return;
     const taste = tasteProfile();
     try {
+      const cur = current() || state.recents[0] || null;
+      const curVibe = cur ? inferTrackVibeClient(cur) : null;
+      const prefMoods = Array.isArray(state.prefs && state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+      const prefStyles = Array.isArray(state.prefs && state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
       const qs = new URLSearchParams({
         artists: taste.artists.slice(0, 4).map((x) => x[0]).join(","),
         genres: taste.genres.slice(0, 3).map((x) => x[0]).join(","),
+        moods: [...new Set([curVibe && curVibe.mood, ...prefMoods].filter(Boolean))].slice(0, 2).join(","),
+        styles: [...new Set([curVibe && curVibe.style, ...prefStyles].filter(Boolean))].slice(0, 2).join(","),
+        skip: _sessionPlayedKeys.slice(0, 25).join(","),
         week,
       });
       const data = await api(`/api/discover?${qs}&${glq()}`, 18000);
-      const tracks = data.tracks || [];
-      if (!tracks.length) return;
+      const raw = (data && data.tracks) || [];
+      if (!raw.length) return;
+      const tracks = scoreAndSequenceSpotifyStyle(cur, raw, { max: 30, maxPerArtist: 2 });
       state.discovery = { week, tracks, savedAt: Date.now() };
       save("aura.discovery", state.discovery);
       paintHomeSoon();
@@ -13065,13 +15568,63 @@
       const q = $("ctxQueue"); if (q) q.onclick = () => { hideModal(); addToQueue(track); };
       const f = $("ctxFollow"); if (f) f.onclick = () => { hideModal(); toggleFollow(track); };
     });
-    $("seek").addEventListener("input", (e) => {
-      const d = duration();
-      if (d) seekTo((Number(e.target.value) / 1000) * d);
-    });
-    $("seek").addEventListener("change", () => {
-      hapticFeedback("selection");
-    });
+    const seekEl = $("seek");
+    if (seekEl) {
+      let lastScrubVal = -1;
+      let scrubReleaseTimer = 0;
+      const beginSeekScrub = () => {
+        clearTimeout(scrubReleaseTimer);
+        isSeekingUi = true;
+        seekCur = -1;
+        seekTgt = -1;
+        if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
+      };
+      const commitSeekScrub = (explicitVal) => {
+        clearTimeout(scrubReleaseTimer);
+        const hasExplicit = typeof explicitVal === "number" && !isNaN(explicitVal);
+        if (!isSeekingUi && !hasExplicit && lastScrubVal < 0) return;
+        isSeekingUi = false;
+        const v = hasExplicit ? explicitVal : (lastScrubVal >= 0 ? lastScrubVal : Number(seekEl.value));
+        lastScrubVal = -1;
+        const d = duration();
+        if (d > 0 && isFinite(d)) {
+          seekTo((Math.max(0, Math.min(1000, v)) / 1000) * d);
+        }
+      };
+      const scheduleReleaseCommit = () => {
+        if (!isSeekingUi) return;
+        clearTimeout(scrubReleaseTimer);
+        scrubReleaseTimer = setTimeout(() => {
+          if (isSeekingUi) commitSeekScrub(Number(seekEl.value));
+        }, 40);
+      };
+      seekEl.addEventListener("pointerdown", beginSeekScrub);
+      seekEl.addEventListener("touchstart", beginSeekScrub, { passive: true });
+      seekEl.addEventListener("mousedown", beginSeekScrub);
+      seekEl.addEventListener("input", (e) => {
+        clearTimeout(scrubReleaseTimer);
+        isSeekingUi = true;
+        lastScrubVal = Number(e.target.value);
+        const d = duration();
+        if (d > 0 && isFinite(d)) {
+          const previewSec = (lastScrubVal / 1000) * d;
+          if ($("curTime")) $("curTime").textContent = fmt(previewSec);
+          highlightLyric(previewSec, true);
+        }
+        drawSeekWave();
+      });
+      seekEl.addEventListener("change", (e) => {
+        hapticFeedback("selection");
+        commitSeekScrub(Number(e.target.value));
+      });
+      seekEl.addEventListener("pointerup", scheduleReleaseCommit);
+      seekEl.addEventListener("touchend", scheduleReleaseCommit);
+      seekEl.addEventListener("mouseup", scheduleReleaseCommit);
+      seekEl.addEventListener("pointercancel", () => { isSeekingUi = false; lastScrubVal = -1; });
+      seekEl.addEventListener("touchcancel", () => { isSeekingUi = false; lastScrubVal = -1; });
+      window.addEventListener("pointerup", scheduleReleaseCommit);
+      window.addEventListener("touchend", scheduleReleaseCommit, { passive: true });
+    }
     $("volume").addEventListener("input", (e) => setVolume(Number(e.target.value)));
     $("queueBtn").onclick = () => {
       if (state.showQueue) requestBack();
@@ -13084,11 +15637,40 @@
       else setQueueOpen(false);
     };
     $("scrim").onclick = () => closeOverlays();
-    $("videoBtn").onclick = () => {
-      state.showVideo = !state.showVideo;
-      showEl($("ytWrap"), state.showVideo);
+    const closeVideoPane = () => {
+      if (!state.showVideo) return;
+      state.showVideo = false;
+      showEl($("ytWrap"), false);
+      const t = current();
+      if (t && t.videoId && !t._playingViaAudio && IS_NATIVE && nativePlayer() && state.prefs.ytAudio !== false) {
+        const pos = position();
+        if (pos > 1) { _pendingSeek = pos; _pendingSeekApplied = false; }
+        playYtWithAudio(t, false).catch(() => {});
+      }
     };
-    $("closeVideo").onclick = () => { state.showVideo = false; showEl($("ytWrap"), false); };
+    $("videoBtn").onclick = async () => {
+      const t = current();
+      if (!t) { toast("Play a song first"); return; }
+      if (t.source === "radio" || t.source === "audius") {
+        toast("No video available for this track");
+        return;
+      }
+      if (state.showVideo) {
+        closeVideoPane();
+        return;
+      }
+      state.showVideo = true;
+      showEl($("ytWrap"), true);
+      if (!t.videoId) {
+        try { await resolveYouTubePlay(t); } catch {}
+      }
+      if (t.videoId && (t._playingViaAudio || npActive || !state.yt)) {
+        const pos = position();
+        if (pos > 1) ytSeekReset = Math.floor(pos);
+        try { await playYouTube(t); } catch {}
+      }
+    };
+    $("closeVideo").onclick = () => closeVideoPane();
     $("lyricsBtn").onclick = () => {
       if (!current()) { toast("Play a song first"); return; }
       if (state.view === "now") requestBack();
@@ -13192,9 +15774,10 @@
         const rec = state.queueRecs && state.queueRecs[idx];
         if (rec) {
           addToQueue(rec);
-          state.queueRecs.splice(idx, 1);
+          state.queueRecs = (state.queueRecs || []).filter((r, i) => i !== idx && !isSameSongClient(r, rec));
           renderQueue();
           toast(`Added "${rec.title}" to queue`);
+          if ((state.queueRecs || []).length < 4) loadQueueRecs(true);
         }
         return;
       }
@@ -13204,9 +15787,16 @@
         const idx = Number(playRec.dataset.recPlay);
         const rec = state.queueRecs && state.queueRecs[idx];
         if (rec) {
-          state.queueRecs.splice(idx, 1);
+          state.queueRecs = (state.queueRecs || []).filter((r, i) => i !== idx && !isSameSongClient(r, rec));
           playNext(rec);
-          next(true);
+          const newIdx = state.queue.findIndex((t) => isSameSongClient(t, rec));
+          if (newIdx >= 0) {
+            state.index = newIdx;
+            playCurrent(true);
+            renderQueue();
+          } else {
+            next(true);
+          }
         }
         return;
       }
@@ -13249,15 +15839,45 @@
       }
       next(false);
     });
-    audio.addEventListener("play", () => { state.playing = true; updateMediaSession(); renderChrome(); });
+    audio.addEventListener("play", () => {
+      state.playing = true;
+      if (!state.timer) startTimer();
+      updateMediaSession();
+      renderChrome();
+    });
     audio.addEventListener("playing", onPlaybackPlaying);
+    audio.addEventListener("timeupdate", () => {
+      if (!document.hidden && !npActive) updateProgress();
+    });
+    audio.addEventListener("loadedmetadata", () => {
+      if (_webSeekTarget >= 0) {
+        try {
+          const target = _webSeekTarget;
+          _webSeekTarget = -1;
+          audio.currentTime = target;
+        } catch {}
+      }
+      if (!npActive) updateProgress();
+    });
+    audio.addEventListener("durationchange", () => {
+      if (!npActive) updateProgress();
+    });
     audio.addEventListener("waiting", onPlaybackWaiting);
     audio.addEventListener("stalled", onPlaybackWaiting);
     audio.addEventListener("progress", checkBufferResume);
-    audio.addEventListener("canplay", checkBufferResume);
+    audio.addEventListener("canplay", () => {
+      if (_webSeekTarget >= 0) {
+        try {
+          const target = _webSeekTarget;
+          _webSeekTarget = -1;
+          audio.currentTime = target;
+        } catch {}
+      }
+      checkBufferResume();
+    });
     audio.addEventListener("canplaythrough", checkBufferResume);
     audio.addEventListener("pause", () => {
-      if (current() && current().source === "youtube") return;
+      if (current() && current().source === "youtube" && !current()._playingViaAudio) return;
       if (audio.ended) return;
       if (wantPlay && state.prefs.bgPlay !== false && document.hidden) {
         audio.play().catch(() => {});
@@ -13278,7 +15898,15 @@
       if (audio.error && audio.error.code === 1) return; // MEDIA_ERR_ABORTED
       const cur = current();
       if (!cur) return;
-      if (cur.source === "youtube" || cur.videoId || npActive) return;
+      if (((cur.source === "youtube" || cur.videoId) && !cur._playingViaAudio) || npActive) return;
+      if (cur.videoId && !cur._webYtFallbackTried) {
+        cur._webYtFallbackTried = true;
+        cur._playingViaAudio = false;
+        playYouTube(cur).catch(() => {
+          if (current() === cur) skipFailed("Stream failed");
+        });
+        return;
+      }
       skipFailed("Stream failed");
     });
 
@@ -13524,8 +16152,13 @@
     }
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
+    document.documentElement.dataset.hidden = document.hidden ? "1" : "0";
+    if (document.hidden) {
+      if (waveRaf) { cancelAnimationFrame(waveRaf); waveRaf = 0; }
+      if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
+    } else if (document.visibilityState === "visible") {
       updateWakeLock();
+      updateProgress();
       if (state.view === "now") restartWaveLoop();
     }
     keepBackgroundPlay();
@@ -13594,9 +16227,7 @@
   renderPlaylistsNav();
   try { history.replaceState(navSnap(), ""); } catch {}
   function weaveDiverseTracks(buckets, max = 24, maxPerArtist = 2, countryCode = "US", allowIndian = false) {
-    const seenTrack = new Set();
-    const artistCount = new Map();
-    const out = [];
+    const flat = [];
     const maxLen = Math.max(0, ...buckets.map((b) => (Array.isArray(b) ? b.length : 0)));
     for (let i = 0; i < maxLen; i++) {
       for (const bucket of buckets) {
@@ -13604,22 +16235,16 @@
         const t = bucket[i];
         if (!t || !t.title || !looksLikeSong(t)) continue;
         if (!allowIndian && isUnwantedIndianTrackClient(t, countryCode)) continue;
-        const aNorm = String(artistName(t) || "").toLowerCase().trim();
-        const tNorm = String(t.title || "").toLowerCase().trim();
-        const key = `${tNorm}__${aNorm}`;
-        if (seenTrack.has(key)) continue;
-        const count = artistCount.get(aNorm) || 0;
-        if (aNorm && count >= maxPerArtist) continue;
-        // Avoid placing the exact same artist back-to-back when other songs exist
-        const prevArtist = out.length ? String(artistName(out[out.length - 1]) || "").toLowerCase().trim() : "";
-        if (aNorm && aNorm === prevArtist && buckets.length > 1) continue;
-        seenTrack.add(key);
-        if (aNorm) artistCount.set(aNorm, count + 1);
-        out.push(t);
-        if (out.length >= max) return out;
+        flat.push(t);
       }
     }
-    return out;
+    const seed = current() || state.recents[0] || flat[0] || null;
+    const sequenced = scoreAndSequenceSpotifyStyle(seed, flat, {
+      max,
+      maxPerArtist,
+    });
+    if (sequenced && sequenced.length) return sequenced;
+    return flat.slice(0, max);
   }
 
   let _tasteLoadInFlight = false;

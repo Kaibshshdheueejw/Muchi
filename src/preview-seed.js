@@ -16,6 +16,9 @@
 // NOTE: durations/artwork are illustrative; tracks play a short local tone in
 // the preview only, and the sample title set below is real song metadata.
 
+import { FY_MOOD_PROFILES, regionCode, utcWeekKey, weekSeedOffset } from "./data.js";
+import { curateCountryTrendingPlaylists } from "./aggregate.js";
+
 // ── Curated catalog (real English hits, mood-tagged) ─────────────────────
 // [title, artist, duration, moodTags...] — a track belongs to the moods it is
 // tagged with, so each "Made for you" playlist draws its own distinct set.
@@ -334,47 +337,48 @@ function catalogTracks() {
 // overflow by exactly the 4 undersupplied moods' shortfall (48), this fills
 // every pool to exactly `per` while keeping each playlist dominated by its
 // mood and guaranteeing zero cross-playlist repeats.
-function fyMoodPools(per = 20) {
-  const tags = FY_MOODS.map((m) => m.tags[0]);
-  // Group songs by primary (first) tag.
-  const primary = {};
-  for (const c of CATALOG) {
-    const t = c[3] || "pop";
-    (primary[t] = primary[t] || []).push(c);
-  }
-  const pools = FY_MOODS.map(() => []);
-  const used = new Set(); // "title|artist" keys
-  const key = (c) => `${c[0]}|${c[1]}`;
-  const donor = []; // overflow songs from primary-heavy moods
-  for (let i = 0; i < FY_MOODS.length; i++) {
-    const group = primary[tags[i]] || [];
-    const take = Math.min(per, group.length);
-    for (let j = 0; j < take; j++) {
-      pools[i].push(group[j]);
-      used.add(key(group[j]));
+function fyMoodPools(per = 20, weekKey = "") {
+  const wk = weekKey || utcWeekKey();
+  const used = new Set();
+  const key = (c) => `${String(c[0] || "").toLowerCase()}|${String(c[1] || "").toLowerCase()}`;
+  const primaryArt = (a) => String(a || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bx\b)\s*/i)[0].trim().toLowerCase();
+
+  return FY_MOODS.map((m) => {
+    const tag = m.tags[0] === "throw" ? "throwback" : m.tags[0];
+    const prof = FY_MOOD_PROFILES[tag];
+    const rawPool = prof && Array.isArray(prof.curatedSongs) && prof.curatedSongs.length
+      ? prof.curatedSongs.map(([title, artist, dur, _album, coverUrl]) => [title, artist, dur, tag, coverUrl])
+      : CATALOG.filter((c) => c.slice(3).includes(tag));
+    const offset = rawPool.length ? (weekSeedOffset(wk, tag) % rawPool.length) : 0;
+    const rotated = rawPool.slice(offset).concat(rawPool.slice(0, offset));
+
+    // Sequence with artist spacing (no back-to-back same artist, max 2 per artist)
+    const remaining = rotated.filter((c) => !used.has(key(c)));
+    const sequenced = [];
+    const artCounts = new Map();
+    while (sequenced.length < per && remaining.length > 0) {
+      const lastArt = sequenced.length ? primaryArt(sequenced[sequenced.length - 1][1]) : "";
+      let idx = remaining.findIndex((c) => {
+        const a = primaryArt(c[1]);
+        return a !== lastArt && (artCounts.get(a) || 0) < 2;
+      });
+      if (idx < 0) idx = remaining.findIndex((c) => primaryArt(c[1]) !== lastArt);
+      if (idx < 0) idx = 0;
+      const [picked] = remaining.splice(idx, 1);
+      used.add(key(picked));
+      const a = primaryArt(picked[1]);
+      artCounts.set(a, (artCounts.get(a) || 0) + 1);
+      sequenced.push(picked);
     }
-    for (let j = take; j < group.length; j++) donor.push(group[j]);
-  }
-  // Fill undersupplied moods from the donor pool, preferring donated songs that
-  // carry this mood's tag (so Chill Vibes gets chill-leaning songs, etc.).
-  for (let i = 0; i < FY_MOODS.length; i++) {
-    const t = tags[i];
-    while (pools[i].length < per) {
-      let idx = donor.findIndex((c) => !used.has(key(c)) && c.slice(3).includes(t));
-      if (idx === -1) idx = donor.findIndex((c) => !used.has(key(c)));
-      if (idx === -1) break;
-      used.add(key(donor[idx]));
-      pools[i].push(donor[idx]);
-    }
-  }
-  return pools;
+    return sequenced;
+  });
 }
 
 // Build a "Made for you" playlist object from a pre-partitioned song pool.
 function fyPlaylistFrom(mood, pool) {
   const tracks = pool.map((c) => {
-    const t = mkTrack([c[0], c[1], c[2]], c.slice(3).join(","));
-    return { ...t, artwork: mood.cover };
+    const t = mkTrack([c[0], c[1], c[2]], c[3] || mood.tags.join(","));
+    return { ...t, artwork: (c[4] && String(c[4]).startsWith("http")) ? c[4] : mood.cover };
   });
   return {
     id: mood.id,
@@ -488,20 +492,32 @@ export function previewHome(gl, taste) {
     });
   }
   const mixedPool = withMixedSources(allTracks());
+  const cc = regionCode(gl || "IN");
+  const curatedCountryPlaylists = curateCountryTrendingPlaylists(cc, [], 20).map((pl) => ({
+    ...pl,
+    tracks: (pl.tracks || []).map((t) => ({
+      ...t,
+      streamUrl: t.streamUrl || `/api/preview/audio?dur=${t.duration || 30}`,
+      previewUrl: t.previewUrl || `/api/preview/audio?dur=${t.duration || 30}`,
+    })),
+  }));
+  const countryTop25 = (curatedCountryPlaylists[0] && curatedCountryPlaylists[0].tracks.length)
+    ? [
+        ...curatedCountryPlaylists[0].tracks,
+        ...((curatedCountryPlaylists[1] && curatedCountryPlaylists[1].tracks) || []),
+      ].slice(0, 25)
+    : [...mixedPool, ...mixedPool].slice(0, 25);
+
   return {
-    country: gl || "IN",
+    country: cc,
     day: new Date().toISOString().slice(0, 10),
     localQuery: "popular songs",
     moods,
     shelves,
     youtubeCharts: mixedPool.slice(0, 25),
-    youtubeIndia: mixedPool.slice(0, 25),
-    youtubeLocal: [...mixedPool, ...mixedPool].slice(0, 25),
-    countryPlaylists: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1].map((i) => {
-      const sc = shelfPlaylistCard(cards[i], FY_MOODS[i]);
-      sc.tracks = withMixedSources(sc.tracks);
-      return sc;
-    }),
+    youtubeIndia: countryTop25,
+    youtubeLocal: countryTop25,
+    countryPlaylists: curatedCountryPlaylists.slice(0, 17),
     globalPlaylists: [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2].map((i) => {
       const sc = shelfPlaylistCard(cards[i], FY_MOODS[i]);
       sc.tracks = withMixedSources(sc.tracks);
@@ -518,6 +534,25 @@ export function previewHome(gl, taste) {
 
 // ── /api/shelf ───────────────────────────────────────────────────────────
 export function previewShelf(id, q, gl) {
+  if (id && String(id).startsWith("ctrend:")) {
+    const parts = String(id).split(":");
+    const cc = regionCode(parts[1] || gl || "IN");
+    const role = parts[2] || "";
+    const curatedAll = curateCountryTrendingPlaylists(cc, [], 20);
+    const matched = curatedAll.find((p) => p.id === id || p.role === role) || curatedAll[0];
+    return {
+      id: matched ? matched.id : id,
+      title: matched ? matched.title : (q || "Trending"),
+      subtitle: matched ? matched.subtitle : "",
+      description: matched ? matched.description : "",
+      query: (matched && matched.query) || q || "",
+      tracks: ((matched && matched.tracks) || []).map((t) => ({
+        ...t,
+        streamUrl: t.streamUrl || `/api/preview/audio?dur=${t.duration || 30}`,
+        previewUrl: t.previewUrl || `/api/preview/audio?dur=${t.duration || 30}`,
+      })),
+    };
+  }
   if (id && SHELF_BY_ID[id]) {
     const s = SHELF_BY_ID[id];
     return { id, title: s.title, query: s.tags.join(" "), tracks: withMixedSources(tracksForShelf(id)) };
@@ -647,27 +682,112 @@ export function previewArtist(name) {
 }
 
 // ── /api/related + /api/discover + /api/for-you ──────────────────────────
-export function previewRelated(title) {
-  const base = matchTracks(title);
-  const tracks = base.length ? base : allTracks().slice(0, 24);
-  return { tracks: withMixedSources(tracks.slice(0, 24)) };
+export function previewRelated(title, artist = "", opts = {}) {
+  const seedTitle = String(title || "").toLowerCase().trim();
+  const seedArtist = String(artist || "").toLowerCase().trim();
+  const skipRaw = String((opts && opts.skip) || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const skipSet = new Set(skipRaw);
+
+  const pool = allTracks();
+  const matched = matchTracks(`${title || ""} ${artist || ""}`.trim());
+  const candidates = [...matched, ...pool];
+
+  const seenSongs = new Set();
+  const unique = [];
+  for (const t of candidates) {
+    if (!t || !t.title) continue;
+    const tNorm = String(t.title || "").toLowerCase().trim();
+    const aNorm = String(t.artist || "").toLowerCase().trim();
+    const sig = `${tNorm}__${aNorm}`;
+    if (seedTitle && tNorm === seedTitle && (!seedArtist || aNorm === seedArtist)) continue;
+    if (skipSet.has(sig) || skipSet.has(String(t.id || "").toLowerCase())) continue;
+    if (seenSongs.has(sig)) continue;
+    seenSongs.add(sig);
+    unique.push(t);
+  }
+
+  // Score: same artist -> related matches -> broader discovery, then sequence with artist spacing
+  const scored = unique.map((t, idx) => {
+    const aNorm = String(t.artist || "").toLowerCase().trim();
+    const inMatched = idx < matched.length;
+    let score = inMatched ? 30 : 12;
+    if (seedArtist && aNorm === seedArtist) score += 25;
+    else if (seedArtist && (aNorm.includes(seedArtist) || seedArtist.includes(aNorm))) score += 18;
+    return { track: t, artistNorm: aNorm, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const sequenced = [];
+  const artistCounts = new Map();
+  const remaining = scored.slice();
+  while (sequenced.length < 24 && remaining.length > 0) {
+    const lastArtist = sequenced.length ? sequenced[sequenced.length - 1].artistNorm : seedArtist;
+    let pickIdx = remaining.findIndex(
+      (c) => c.artistNorm !== lastArtist && (artistCounts.get(c.artistNorm) || 0) < 2
+    );
+    if (pickIdx < 0) {
+      pickIdx = remaining.findIndex((c) => c.artistNorm !== lastArtist);
+    }
+    if (pickIdx < 0) pickIdx = 0;
+    const [picked] = remaining.splice(pickIdx, 1);
+    sequenced.push(picked);
+    artistCounts.set(picked.artistNorm, (artistCounts.get(picked.artistNorm) || 0) + 1);
+  }
+
+  return {
+    tracks: withMixedSources(sequenced.map((x) => x.track)),
+    vibe: {
+      genre: (opts && opts.genre) || "pop",
+      mood: (opts && opts.mood) || "upbeat",
+      tempo: (opts && opts.tempo) || "mid",
+      style: (opts && opts.style) || "modern",
+    },
+  };
 }
 
 // Taste-adaptive discovery / "for you" mix. We use the same English catalog and
 // PROMOTE songs by artists the user has been listening to (from the taste
-// profile). When no taste exists, we just return a broad English mix.
+// profile), then gradually explore related tracks without back-to-back artist repeats.
 export function previewDiscover(gl, taste) {
-  let tracks = allTracks();
+  const pool = allTracks();
   const artists = taste && taste.artists ? taste.artists.map((x) => (Array.isArray(x) ? x[0] : x)).filter(Boolean) : [];
-  if (artists.length) {
-    const a = new Set(artists.map((x) => String(x).toLowerCase()));
-    tracks = tracks.slice().sort((x, y) => {
-      const am = a.has(String(x.artist).toLowerCase()) ? 1 : 0;
-      const bm = a.has(String(y.artist).toLowerCase()) ? 1 : 0;
-      return bm - am;
-    });
+  const skipArr = taste && Array.isArray(taste.skip) ? taste.skip : [];
+  const skipSet = new Set(skipArr.map((s) => String(s || "").toLowerCase().trim()).filter(Boolean));
+  const artistSet = new Set(artists.map((x) => String(x).toLowerCase().trim()));
+
+  const seenSongs = new Set();
+  const scored = [];
+  for (const t of pool) {
+    if (!t || !t.title) continue;
+    const tNorm = String(t.title || "").toLowerCase().trim();
+    const aNorm = String(t.artist || "").toLowerCase().trim();
+    const sig = `${tNorm}__${aNorm}`;
+    if (seenSongs.has(sig) || skipSet.has(sig)) continue;
+    seenSongs.add(sig);
+    const isFavArtist = artistSet.has(aNorm);
+    scored.push({ track: t, artistNorm: aNorm, score: isFavArtist ? 40 : 15 });
   }
-  return { week: "preview", title: "Discovery Mix", tracks: withMixedSources(tracks.slice(0, 30)) };
+  scored.sort((a, b) => b.score - a.score);
+
+  const sequenced = [];
+  const artistCounts = new Map();
+  const remaining = scored.slice();
+  while (sequenced.length < 30 && remaining.length > 0) {
+    const lastArtist = sequenced.length ? sequenced[sequenced.length - 1].artistNorm : "";
+    let pickIdx = remaining.findIndex(
+      (c) => c.artistNorm !== lastArtist && (artistCounts.get(c.artistNorm) || 0) < 2
+    );
+    if (pickIdx < 0) pickIdx = remaining.findIndex((c) => c.artistNorm !== lastArtist);
+    if (pickIdx < 0) pickIdx = 0;
+    const [picked] = remaining.splice(pickIdx, 1);
+    sequenced.push(picked);
+    artistCounts.set(picked.artistNorm, (artistCounts.get(picked.artistNorm) || 0) + 1);
+  }
+
+  return { week: "preview", title: "Discovery Mix", tracks: withMixedSources(sequenced.map((x) => x.track)) };
 }
 
 // ── /api/radio ───────────────────────────────────────────────────────────

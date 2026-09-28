@@ -146,8 +146,22 @@ async function handleApi(request, env, url) {
     if (p === "/api/artist") {
       return seedJson(200, previewArtist(url.searchParams.get("name") || url.searchParams.get("q") || ""));
     }
-    if (p === "/api/related") return seedJson(200, previewRelated(url.searchParams.get("title") || ""));
-    if (p === "/api/discover" || p === "/api/for-you") return seedJson(200, previewDiscover(gl));
+    if (p === "/api/related") {
+      const title = url.searchParams.get("title") || "";
+      const artist = url.searchParams.get("artist") || "";
+      const genre = url.searchParams.get("genre") || "";
+      const mood = url.searchParams.get("mood") || "";
+      const tempo = url.searchParams.get("tempo") || "";
+      const style = url.searchParams.get("style") || "";
+      const skip = url.searchParams.get("skip") || "";
+      return seedJson(200, previewRelated(title || artist, artist, { genre, mood, tempo, style, skip }));
+    }
+    if (p === "/api/discover" || p === "/api/for-you") {
+      const artists = (url.searchParams.get("artists") || "").split(",").filter(Boolean);
+      const genres = (url.searchParams.get("genres") || "").split(",").filter(Boolean);
+      const skip = (url.searchParams.get("skip") || "").split(",").filter(Boolean);
+      return seedJson(200, previewDiscover(gl, { artists, genres, skip }));
+    }
     if (p === "/api/radio") return seedJson(200, previewRadio(url.searchParams.get("q") || ""));
     if (p === "/api/lyrics") {
       return seedJson(200, previewLyrics(url.searchParams.get("title") || "", url.searchParams.get("artist") || ""));

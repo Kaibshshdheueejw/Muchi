@@ -14,8 +14,7 @@
 import { json, corsHeaders, cached, invalidateCached } from "./util.js";
 import { assertPublicUrl } from "./ssrf.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
-import { audiusStreamUrl, youtubeAudioStream, searchYouTube, audiusSearch, itunesSearch } from "./providers.js";
-import { deezerSearch } from "./deezer.js";
+import { audiusStreamUrl, youtubeAudioStream, searchYouTube, audiusSearch } from "./providers.js";
 
 const PROXY_ACCEPT = "audio/*,*/*";
 
@@ -51,7 +50,9 @@ async function pipeUrl(request, src, accept, overrideMime) {
 
   if (isYt) {
     if (/c=ANDROID_VR/i.test(src)) {
-      headers["User-Agent"] = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+      headers["User-Agent"] = /cver=1\.61/i.test(src)
+        ? "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+        : "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
     } else if (/c=ANDROID_TESTSUITE/i.test(src)) {
       headers["User-Agent"] = "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip";
     } else if (/c=TVHTML5/i.test(src)) {
@@ -59,13 +60,9 @@ async function pipeUrl(request, src, accept, overrideMime) {
       headers.Origin = "https://www.youtube.com";
       headers.Referer = "https://www.youtube.com/";
     } else if (/c=ANDROID/i.test(src)) {
-      if (/cver=20\.10/i.test(src)) {
-        headers["User-Agent"] = "com.google.android.youtube/20.10.44 (Linux; U; Android 14) gzip";
-      } else {
-        headers["User-Agent"] = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip";
-      }
+      headers["User-Agent"] = "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip";
     } else if (/c=IOS/i.test(src)) {
-      headers["User-Agent"] = "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X) gzip";
+      headers["User-Agent"] = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)";
     } else {
       const clientUa = request && request.headers && request.headers.get("user-agent");
       headers["User-Agent"] = (clientUa && !clientUa.includes("Cloudflare-Workers") && !clientUa.includes("node-fetch"))
@@ -186,7 +183,6 @@ export async function handleStream(request, url) {
   const vId = (url.searchParams.get("v") || url.searchParams.get("videoId") || "").trim();
   const title = (url.searchParams.get("title") || "").trim();
   const artist = (url.searchParams.get("artist") || "").trim();
-  const allowPreview = url.searchParams.get("allowPreview") === "1";
   const q = `${title} ${artist}`.trim();
 
   if (vId) {
@@ -237,27 +233,6 @@ export async function handleStream(request, url) {
               }
             }
           }
-        }
-      } catch {}
-    }
-
-    if (allowPreview) {
-      try {
-        const dzRes = await deezerSearch(q, { limit: 10, includeExtra: false });
-        const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
-        const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
-        if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
-          const rDz = await pipeUrl(request, dzHit.previewUrl || dzHit.preview, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
-          if (rDz.status < 400) return rDz;
-        }
-      } catch {}
-      try {
-        const itRes = await itunesSearch(q, { includeExtra: false });
-        const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
-        const itHit = itList.find((x) => x && x.previewUrl);
-        if (itHit && itHit.previewUrl) {
-          const rIt = await pipeUrl(request, itHit.previewUrl, "audio/mp4, audio/*;q=0.9, */*;q=0.8", "audio/mp4");
-          if (rIt.status < 400) return rIt;
         }
       } catch {}
     }
@@ -472,9 +447,19 @@ export async function handleImg(url) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
+    const imgHeaders = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    };
+    if (/dzcdn\.net|deezer\.com/i.test(src)) {
+      imgHeaders.Referer = "https://www.deezer.com/";
+    } else if (/ytimg\.com|googleusercontent\.com|ggpht\.com|youtube\.com/i.test(src)) {
+      imgHeaders.Referer = "https://www.youtube.com/";
+    }
     const r = await fetch(src, {
       signal: ctrl.signal,
-      headers: { "User-Agent": `${APP_NAME}/1.0`, Accept: "image/*" },
+      redirect: "follow",
+      headers: imgHeaders,
     });
     if (!r.ok) return json(r.status, { error: "image fetch failed" });
 

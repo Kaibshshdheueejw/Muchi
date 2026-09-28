@@ -10,18 +10,21 @@
 import { json, cached, kvCached, invalidateCached, fetchJSON, isEnglishTrack } from "./util.js";
 import {
   searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
-  itunesSearch,
+  itunesSearch, appleRssMostPlayed,
   audiusSearch, audiusStreamUrl, audiusTrending, audiusUnderground, audiusUserSearch, audiusUserTracks,
   radioSearch, radioBrowser, lyricsFor, resolveShelfPlaylist,
 } from "./providers.js";
 import {
-  regionCode, utcDay, LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES, VIRAL_QUERIES,
+  regionCode, utcDay, utcWeekKey, weekSeedOffset,
+  LOCAL_CHARTS, ENGLISH_SHELVES, FY_QUERIES, FY_MOOD_PROFILES, VIRAL_QUERIES,
+  COUNTRY_NAMES, getCountryTrendingPlaylists, getCountrySeedPool,
   moodsForCountry, playlistsOf, uniqPlaylists, buildForYouPlaylists, buildViralPlaylists,
-  shelfQueryForCountry,
+  curatedForYouTracksForMood, shelfQueryForCountry,
 } from "./data.js";
 import {
   dzFetch, normalizeDeezerTrack, deezerArtist, deezerAlbums,
-  deezerAlbumTracks, deezerTopTracks, deezerCatalog, deezerSearch,
+  deezerAlbumTracks, deezerTopTracks, deezerRelatedArtists, deezerArtistRadio,
+  deezerCatalog, deezerSearch,
 } from "./deezer.js";
 import { strictSongs } from "./parse.js";
 
@@ -51,12 +54,414 @@ const DAILY_MIX_TITLES = [
   "Global Pop", "Global Hip-Hop", "Global Dance", "Global R&B",
 ];
 const COUNTRY_DM_TITLES = [
-  "Trending Now", "Top Hits", "Viral Chart", "Mega Mix",
-  "Daily Mix 1", "Daily Mix 2", "Daily Mix 3", "Daily Mix 4",
-  "Daily Mix 5", "Daily Mix 6", "Daily Mix 7", "Daily Mix 8",
-  "Daily Mix 9", "Daily Mix 10", "Daily Mix 11", "Daily Mix 12",
-  "Country Top 20", "Weekend Heat", "New Music Mix", "Party Hits",
+  "Top 50", "New Music Friday", "Viral 50", "Pop Rising",
+  "Hip-Hop & Rap", "Cinema & Soundtracks", "Regional Wave", "Desi & Global Beats",
+  "Indie Radar", "Soul & Acoustic", "Dance & Electronic", "Late Night Vibes",
+  "All-Time Icons", "Workout & Gym Hype", "Love & Heartbreak", "Next Up: Breakout Artists",
+  "Roots & Culture",
 ];
+
+const JUNK_TRACK_RE = /\b(karaoke|instrumental\s+version|ringtone|whatsapp\s+status|status\s+video|full\s+movie|jukebox|audio\s+jukebox|nonstop\s+dj|8d\s+audio|nightcore|bass\s+boosted|slowed\s+and\s+reverb|reaction\s+video|teaser|trailer|dialogue\s+promo|making\s+of|interview|podcast|episode\s+\d+|lesson\s+\d+|tutorial|cover\s+by)\b/i;
+
+function cleanTrackTitleKey(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .replace(/\b(feat\.?|ft\.?|with|prod\.?|official|video|audio|music|lyric|lyrics|hd|hq|4k|remastered|version|edit|mix)\b/gi, " ")
+    .replace(/[^a-z0-9\u00C0-\u024F\u0400-\u04FF\u0900-\u097F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function primaryArtistKey(artist) {
+  const raw = String(artist || "")
+    .replace(/\s*[|–—-]\s*topic$/i, "")
+    .split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bx\b|\bwith\b|\/)\s*/i)[0] || "";
+  return raw.toLowerCase().replace(/[^a-z0-9\u00C0-\u024F\u0400-\u04FF\u0900-\u097F]+/gi, " ").trim();
+}
+
+function trackCanonicalSig(t) {
+  if (!t) return "";
+  const tk = cleanTrackTitleKey(t.title);
+  const ak = primaryArtistKey(t.artist);
+  if (!tk) return String(t.id || "");
+  return `${tk}|${ak}`;
+}
+
+function isCleanCountryTrendingTrack(t, gl) {
+  if (!t || !t.title || !t.artist) return false;
+  const title = String(t.title).trim();
+  const artist = String(t.artist).trim();
+  if (title.length < 2 || artist.length < 2) return false;
+  if (title.length > 85 || title.split(/\s+/).length > 12) return false;
+  if (JUNK_TRACK_RE.test(`${title} ${artist}`)) return false;
+  if (/\b(best\s+\w+\s+songs|top\s+hits\s+202\d|trending\s+music\s+202\d|latest\s+pop\s+songs|broadway\s+cast|original\s+cast|motion\s+picture\s+cast|non[\s-]*stop|workout\s+mix|party\s+mix|jukebox)\b/i.test(`${title} ${artist}`)) return false;
+  if (/^(unknown|various artists|artist|track\s*\d+|song\s*\d+|youtube|lumivox)$/i.test(artist)) return false;
+  if (t.duration && (t.duration < 65 || t.duration > 720)) return false;
+  if (isUnwantedIndianTrackForRegion(t, gl)) return false;
+  return true;
+}
+
+function computeFreshnessMetrics(releaseDateStr) {
+  if (!releaseDateStr) return { freshScore: 14, isNewRelease: false, releaseYear: 2025 };
+  const parsed = Date.parse(String(releaseDateStr));
+  if (!Number.isFinite(parsed)) return { freshScore: 14, isNewRelease: false, releaseYear: 2025 };
+  const year = new Date(parsed).getUTCFullYear();
+  const refNow = Math.max(Date.now(), Date.parse("2026-03-01T00:00:00Z"));
+  const daysOld = Math.max(0, (refNow - parsed) / 86400000);
+  if (year >= 2026 || daysOld <= 90) {
+    return { freshScore: 54, isNewRelease: true, releaseYear: year };
+  }
+  if (year === 2025 || daysOld <= 365) {
+    const bonus = Math.max(34, Math.round(48 - (daysOld / 365) * 14));
+    return { freshScore: bonus, isNewRelease: true, releaseYear: year };
+  }
+  if (year === 2024) {
+    return { freshScore: 22, isNewRelease: false, releaseYear: year };
+  }
+  if (year <= 2020) {
+    return { freshScore: -18, isNewRelease: false, releaseYear: year, isThrowback: true };
+  }
+  return { freshScore: 6, isNewRelease: false, releaseYear: year };
+}
+
+function inferLiveTrackRoles(t, gl) {
+  const seedRoles = Array.isArray(t._roles) ? t._roles : (Array.isArray(t.roles) ? t.roles : []);
+  const roles = new Set(seedRoles);
+  const hay = `${t.title || ""} ${t.artist || ""} ${t.album || ""} ${t.genre || ""}`.toLowerCase();
+  const { isNewRelease, releaseYear, isThrowback } = computeFreshnessMetrics(t.releaseDate);
+
+  if (t.chartRank && t.chartRank <= 50 && !isThrowback) {
+    roles.add("chart_top");
+    if (t.chartRank <= 25) {
+      roles.add("viral");
+      roles.add("trending_velocity");
+    }
+  }
+  if (isNewRelease) {
+    roles.add("new_releases");
+    roles.add("trending_velocity");
+  }
+
+  if (/\b(hip[\s-]*hop|rap|drill|trap|desi hip hop|dhh|cypher|freestyle)\b/i.test(hay)) roles.add("hiphop");
+  if (/\b(r&b|rnb|soul|neo[\s-]*soul)\b/i.test(hay)) roles.add("rnb");
+  if (/\b(dance|edm|electronic|house|techno|club|garage|drum\s*&?\s*bass|afrobeats|reggaeton|amapiano)\b/i.test(hay)) roles.add("dance");
+  if (/\b(phonk|workout|gym|beast|hype|power|aggression|hardstyle)\b/i.test(hay)) roles.add("workout");
+  if (/\b(indie|alternative|bedroom pop|dream pop|shoegaze)\b/i.test(hay)) roles.add("indie");
+  if (/\b(rock|metal|punk|grunge|alt[\s-]*rock)\b/i.test(hay)) roles.add("rock");
+  if (/\b(chill|midnight|late night|lo[\s-]*fi|ambient|downtempo)\b/i.test(hay)) roles.add("chill");
+  if (/\b(love|romance|romantic|heartbreak|ballad|acoustic|unplugged|sufi)\b/i.test(hay)) roles.add("acoustic_romance");
+  if (/\b(pop|synth[\s-]*pop|teen pop|electropop)\b/i.test(hay) && !isThrowback) roles.add("hot_pop");
+
+  if (gl === "IN" || gl === "PK" || gl === "BD") {
+    if (/\b(bollywood|arijit|shreya|vishal mishra|sachin[\s-]*jigar|pritam|tanishk|stree|bhool bhulaiyaa|animal|fighter|aashiqui)\b/i.test(hay)) roles.add("genre_flagship");
+    if (/\b(punjabi|diljit|karan aujla|shubh|ap dhillon|sidhu|gurinder|arjan dhillon|anirudh|tamil|telugu)\b/i.test(hay)) roles.add("genre_secondary");
+  } else {
+    if (/\b(country|americana|folk|morgan wallen|zach bryan|luke combs|shaboozey|chris stapleton|lainey wilson|jelly roll)\b/i.test(hay)) {
+      roles.add("genre_secondary");
+    }
+    if (/\b(latin|reggaeton|afrobeats|k[\s-]*pop|j[\s-]*pop|amapiano|bad bunny|karol g|tyla|burna boy|rema|rosé|jennie|lisa|aespa|yoasobi|mrs\.?\s*green apple)\b/i.test(hay)) {
+      roles.add("genre_flagship");
+    }
+  }
+  return Array.from(roles);
+}
+
+const SPECIALIST_ROLES = new Set([
+  "workout",
+  "acoustic_romance",
+  "chill",
+  "rock",
+  "dance",
+  "indie",
+  "rnb",
+  "hiphop",
+  "genre_secondary",
+  "genre_flagship",
+  "radar",
+  "emerging",
+]);
+
+function scoreTrackForCountryPlaylist(t, def) {
+  const roles = Array.isArray(t.roles) && t.roles.length ? t.roles : inferLiveTrackRoles(t, def.country || "US");
+  const primaryRole = roles[0] || "";
+  const hasRole = roles.includes(def.role);
+  let score = 0;
+
+  // 1. Role alignment (strongest signal so each of the 17 playlists gets its distinct purpose)
+  if (primaryRole === def.role) {
+    score += 160;
+  } else if (hasRole) {
+    score += 95;
+  } else if (primaryRole && SPECIALIST_ROLES.has(primaryRole) && !SPECIALIST_ROLES.has(def.role)) {
+    // Reserve specialist tracks for their specialist playlist unless they explicitly include this generalist role
+    score -= 45;
+  }
+
+  // 2. Genre alignment
+  const tGenre = String(t.genre || "").toLowerCase();
+  const rawGenres = Array.isArray(def.targetGenres) ? def.targetGenres : (Array.isArray(def.genres) ? def.genres : []);
+  const defGenres = rawGenres.map((g) => String(g).toLowerCase());
+  if (tGenre && defGenres.some((g) => tGenre.includes(g) || g.includes(tGenre))) {
+    score += 48;
+  }
+
+  // 3. Keyword & vibe alignment
+  const hay = `${t.title || ""} ${t.artist || ""} ${t.album || ""} ${t.genre || ""}`.toLowerCase();
+  const kwList = Array.isArray(def.keywords) ? def.keywords : [];
+  let kwHits = 0;
+  for (const kw of kwList) {
+    const k = String(kw || "").toLowerCase().trim();
+    if (k && hay.includes(k)) {
+      kwHits++;
+      if (kwHits >= 3) break;
+    }
+  }
+  score += kwHits * 22;
+
+  // 4. Freshness & release date intelligence
+  const { freshScore, isNewRelease, releaseYear, isThrowback } = computeFreshnessMetrics(t.releaseDate);
+  if (def.role === "new_releases" || def.preferNewRelease) {
+    score += isNewRelease ? freshScore * 1.95 : -85;
+  } else if (def.role === "emerging" || def.role === "radar" || def.preferEmerging) {
+    score += ((roles.includes("emerging") || roles.includes("radar")) ? 85 : 0) + (isNewRelease ? freshScore * 1.25 : -45);
+  } else if (def.role === "chart_top" || def.role === "viral" || def.role === "trending_velocity" || def.role === "hot_pop" || def.preferFresh || def.preferChart) {
+    score += isThrowback ? -90 : freshScore * 1.25;
+  } else {
+    score += freshScore * 0.65;
+  }
+
+  // 5. Real chart momentum (Apple RSS chart rank / live provider signal)
+  if (t.chartRank && Number.isFinite(t.chartRank) && !isThrowback) {
+    const chartBoost = Math.max(10, 42 - t.chartRank * 0.65);
+    score += (def.role === "chart_top" || def.role === "viral" || def.preferChart) ? chartBoost * 1.8 : chartBoost * 0.9;
+  }
+  if (t._isLive && (isNewRelease || (releaseYear && releaseYear >= 2024))) {
+    score += 18;
+  }
+
+  return score;
+}
+
+function sequencePlaylistHumanLike(tracks, def, plIdx, usedCoverArtworks) {
+  if (!Array.isArray(tracks) || !tracks.length) return [];
+  const pool = tracks.slice();
+
+  // Pick a lead track (#1) that has valid artwork not yet used as another playlist's cover art
+  let leadIdx = pool.findIndex((t) => t && t.artwork && !usedCoverArtworks.has(t.artwork));
+  if (leadIdx < 0) leadIdx = 0;
+  const lead = pool.splice(leadIdx, 1)[0];
+  if (lead && lead.artwork) usedCoverArtworks.add(lead.artwork);
+
+  const ordered = [lead];
+  const remaining = pool;
+
+  while (remaining.length > 0) {
+    const prev = ordered[ordered.length - 1];
+    const prevArtist = primaryArtistKey(prev && prev.artist);
+    const prevGenre = String((prev && prev.genre) || "").toLowerCase();
+    const pos = ordered.length;
+
+    let bestIdx = 0;
+    let bestVal = -Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const cand = remaining[i];
+      const candArtist = primaryArtistKey(cand.artist);
+      const candGenre = String(cand.genre || "").toLowerCase();
+      let val = (remaining.length - i) * 4; // preserve quality rank trend
+
+      // Never put the same artist back-to-back if avoidable
+      if (candArtist && candArtist === prevArtist) val -= 200;
+      // Avoid repeating artist within 2 positions
+      if (ordered.length >= 2 && candArtist && candArtist === primaryArtistKey(ordered[ordered.length - 2].artist)) {
+        val -= 80;
+      }
+
+      // Energy arc shaping so the playlist feels human-sequenced
+      const { isNewRelease } = computeFreshnessMetrics(cand.releaseDate);
+      if (def.energyArc === "peak" && pos <= 4 && (isNewRelease || cand.chartRank)) {
+        val += 25;
+      } else if (def.energyArc === "wave" && pos % 2 === 1 && candGenre !== prevGenre) {
+        val += 18;
+      } else if (def.energyArc === "build" && pos < 6 && !cand.chartRank) {
+        val += 12;
+      }
+      if (val > bestVal) {
+        bestVal = val;
+        bestIdx = i;
+      }
+    }
+    ordered.push(remaining.splice(bestIdx, 1)[0]);
+  }
+
+  // Assign balanced multi-provider sources (youtube, apple, deezer) so all 3 APIs are represented
+  const sources = ["youtube", "apple", "deezer"];
+  return ordered.map((t, idx) => {
+    const targetSrc = sources[(plIdx + idx) % 3];
+    const cleanTrack = { ...t };
+    delete cleanTrack._isLive;
+    return asSourceTrack(cleanTrack, targetSrc, idx);
+  });
+}
+
+export function curateCountryTrendingPlaylists(gl, liveCandidates = [], targetPerPlaylist = 20) {
+  const cc = regionCode(gl);
+  const defs = getCountryTrendingPlaylists(cc);
+  const seedPool = getCountrySeedPool(cc);
+
+  // Merge live candidates and rich seed pool, deduplicating by canonical (title|artist) signature
+  // while preserving live chartRank, releaseDate, roles, genre, and high-res artwork.
+  const CLASSIC_CATALOG_RE = /\b(shape of you|nashe si chadh gayi|kesariya|blinding lights|despacito|believer|cheap thrills|closer|faded|senorita|let me love you|perfect|pasoori|raataan lambiyan|tum hi ho|channa mereya|kabira|agar tum saath ho|calm down|levitating|heat waves|as it was|stay|bad guy|dance monkey|uptown funk|starboy|someone you loved|watermelon sugar|flowers|anti[\s-]*hero)\b/i;
+
+  const bySig = new Map();
+  const upsertCandidate = (raw, isLive) => {
+    if (!isCleanCountryTrendingTrack(raw, cc)) return;
+    const sig = trackCanonicalSig(raw);
+    if (!sig) return;
+    let relDate = raw.releaseDate || "";
+    if (CLASSIC_CATALOG_RE.test(`${raw.title || ""} ${raw.album || ""}`)) {
+      relDate = "2019-06-01";
+    } else if (!relDate) {
+      if (raw.year && /^(19\d\d|20[012]\d)$/.test(String(raw.year).trim())) {
+        relDate = `${String(raw.year).trim()}-06-01`;
+      } else if (raw.chartRank && raw.chartRank <= 30) {
+        relDate = "2025-08-15";
+      } else {
+        relDate = isLive ? "2024-08-01" : "2025-07-01";
+      }
+    }
+    const enrichedRaw = { ...raw, releaseDate: relDate };
+    const roles = inferLiveTrackRoles(enrichedRaw, cc);
+    const existing = bySig.get(sig);
+    if (!existing) {
+      bySig.set(sig, {
+        ...enrichedRaw,
+        roles,
+        genre: raw.genre || "pop",
+        _isLive: Boolean(isLive),
+      });
+    } else {
+      const mergedRoles = Array.isArray(raw._roles) && raw._roles.length
+        ? Array.from(new Set([...roles, ...(existing.roles || [])]))
+        : Array.from(new Set([...(existing.roles || []), ...roles]));
+      bySig.set(sig, {
+        ...existing,
+        artwork: (existing.artwork && !existing.artwork.includes("cover-default")) ? existing.artwork : (raw.artwork || existing.artwork),
+        releaseDate: (!isLive && raw.releaseDate) ? raw.releaseDate : (existing.releaseDate || relDate),
+        genre: (!isLive && raw.genre) ? raw.genre : (existing.genre || raw.genre || "pop"),
+        chartRank: Math.min(existing.chartRank || 999, raw.chartRank || 999) < 999
+          ? Math.min(existing.chartRank || 999, raw.chartRank || 999)
+          : undefined,
+        roles: mergedRoles,
+        _isLive: existing._isLive || Boolean(isLive),
+      });
+    }
+  };
+
+  for (const t of (Array.isArray(liveCandidates) ? liveCandidates : [])) {
+    upsertCandidate(t, true);
+  }
+  for (const t of seedPool) {
+    upsertCandidate(t, false);
+  }
+
+  const allCandidates = Array.from(bySig.values());
+  const globalUsedSigs = new Set();
+  const usedCoverArtworks = new Set();
+
+  // Allocate tracks to specialist playlists first in an internal reservation pass so generalist
+  // playlists (#1 Top 50, #2 New Music Friday, #3 Viral 50) don't cannibalize niche genre pools,
+  // while still allowing #1, #2, #3 to claim their own primary chart/new-release tracks first!
+  const allocationOrder = defs
+    .map((def, idx) => ({ def, idx }))
+    .sort((a, b) => {
+      const aSpec = a.def.role === "new_releases" || a.def.role === "chart_top" || a.def.role === "viral"
+        ? 0
+        : (SPECIALIST_ROLES.has(a.def.role) ? 1 : 2);
+      const bSpec = b.def.role === "new_releases" || b.def.role === "chart_top" || b.def.role === "viral"
+        ? 0
+        : (SPECIALIST_ROLES.has(b.def.role) ? 1 : 2);
+      return aSpec - bSpec || a.idx - b.idx;
+    });
+
+  const pickedByIndex = new Array(defs.length);
+
+  for (const { def, idx } of allocationOrder) {
+    const scored = allCandidates
+      .map((t) => ({
+        track: t,
+        sig: trackCanonicalSig(t),
+        score: scoreTrackForCountryPlaylist(t, { ...def, country: cc }),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const picked = [];
+    const localUsedSigs = new Set();
+    const artistCounts = new Map();
+
+    // Pass 1: Strictly unused across all 17 playlists + max 2 songs per primary artist
+    for (const item of scored) {
+      if (picked.length >= targetPerPlaylist) break;
+      if (globalUsedSigs.has(item.sig) || localUsedSigs.has(item.sig)) continue;
+      // Only take tracks that have positive affinity or primary role match in pass 1
+      const ak = primaryArtistKey(item.track.artist);
+      const aCount = artistCounts.get(ak) || 0;
+      if (ak && aCount >= 2) continue;
+      picked.push(item.track);
+      localUsedSigs.add(item.sig);
+      globalUsedSigs.add(item.sig);
+      if (ak) artistCounts.set(ak, aCount + 1);
+    }
+
+    // Pass 2: Strictly unused across all 17 playlists, relax artist cap to 3 if needed
+    if (picked.length < targetPerPlaylist) {
+      for (const item of scored) {
+        if (picked.length >= targetPerPlaylist) break;
+        if (globalUsedSigs.has(item.sig) || localUsedSigs.has(item.sig)) continue;
+        const ak = primaryArtistKey(item.track.artist);
+        const aCount = artistCounts.get(ak) || 0;
+        if (ak && aCount >= 3) continue;
+        picked.push(item.track);
+        localUsedSigs.add(item.sig);
+        globalUsedSigs.add(item.sig);
+        if (ak) artistCounts.set(ak, aCount + 1);
+      }
+    }
+
+    // Pass 3: Fallback only if total unique pool was smaller than 17 * targetPerPlaylist
+    if (picked.length < targetPerPlaylist) {
+      for (const item of scored) {
+        if (picked.length >= targetPerPlaylist) break;
+        if (localUsedSigs.has(item.sig)) continue;
+        picked.push(item.track);
+        localUsedSigs.add(item.sig);
+      }
+    }
+
+    pickedByIndex[idx] = picked;
+  }
+
+  // Final pass in display order (0..16) so cover artworks and source rotation are deterministic
+  return defs.map((def, idx) => {
+    const sequenced = sequencePlaylistHumanLike(pickedByIndex[idx] || [], def, idx, usedCoverArtworks);
+    return {
+      id: def.id,
+      kind: "playlist",
+      title: def.title,
+      subtitle: def.subtitle,
+      description: def.description,
+      badge: def.badge,
+      role: def.role,
+      genres: def.genres,
+      artist: def.subtitle || `${COUNTRY_NAMES[cc] || cc} Trending`,
+      artwork: (sequenced[0] && sequenced[0].artwork) || "/cover-default.jpg",
+      source: "youtube",
+      playlistId: "",
+      query: def.query,
+      tracks: sequenced.slice(0, targetPerPlaylist),
+    };
+  });
+}
 
 function dailyMixCard(title, pool, idx) {
   const filtered = (pool || []).filter(Boolean);
@@ -126,18 +531,19 @@ export async function handleHome(env, url) {
   const gl = regionCode(url.searchParams.get("gl"));
   const localQ = LOCAL_CHARTS[gl] || "top hits official audio";
   const refresh = url.searchParams.get("refresh") === "1";
+  const wk = String(url.searchParams.get("week") || "").trim() || utcWeekKey();
   let globalPart = { shelves: [], globalPlaylists: [], audius: [], underground: [], radio: [], forYouPlaylists: [], viralPlaylists: [] };
   let localPart = { youtubeLocal: [], countryPlaylists: [] };
   try {
-    globalPart = await (refresh ? buildGlobal(gl, localQ) : kvCached(env, `home:english:${gl}:v12:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ)));
+    globalPart = await (refresh ? buildGlobal(gl, localQ, wk) : kvCached(env, `home:english:${gl}:v17:${wk}:${utcDay()}`, 86400000, () => buildGlobal(gl, localQ, wk)));
   } catch (e) {
     console.error("home english", e);
     globalPart.shelves = ENGLISH_SHELVES.map((s) => ({ id: s.id, title: s.title, query: shelfQueryForCountry(s.id, gl, s.query), tracks: [] }));
-    globalPart.forYouPlaylists = buildForYouPlaylists([]);
+    globalPart.forYouPlaylists = buildForYouPlaylists([], wk);
     globalPart.viralPlaylists = buildViralPlaylists([]);
   }
   try {
-    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v12:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
+    localPart = await (refresh ? buildLocal(gl, localQ) : kvCached(env, `home:local:${gl}:v18:${utcDay()}`, 86400000, () => buildLocal(gl, localQ)));
   } catch (e) {
     console.error("home local", e);
   }
@@ -146,31 +552,27 @@ export async function handleHome(env, url) {
   // Guaranteed fallback: localTracks must NEVER be empty and must reach 25 tracks
   let localTracks = (localPart.youtubeLocal || []).filter(Boolean);
   if (localTracks.length < 25) {
+    const seedFallback = getCountrySeedPool(gl);
     const backupPool = [
+      ...seedFallback,
       ...charts,
       ...((globalPart.shelves[1] && globalPart.shelves[1].tracks) || []),
-      ...((globalPart.shelves[2] && globalPart.shelves[2].tracks) || []),
     ];
-    const seen = new Set(localTracks.map((t) => t.id));
+    const seen = new Set(localTracks.map((t) => trackCanonicalSig(t) || t.id));
     for (const t of backupPool) {
-      if (t && t.id && !seen.has(t.id)) {
-        seen.add(t.id);
+      const sig = trackCanonicalSig(t) || (t && t.id);
+      if (t && sig && !seen.has(sig)) {
+        seen.add(sig);
         localTracks.push(t);
         if (localTracks.length >= 25) break;
       }
     }
   }
 
-  // Guaranteed fallback: countryPlaylists must NEVER be empty and must reach 12 playlists (20 songs each)
+  // Guaranteed 17 curated country trending playlists (20 songs each, unique roles & zero repetition)
   let countryPlaylists = (localPart.countryPlaylists || []).filter(Boolean);
-  const poolForPl = localTracks.length ? localTracks : (charts.length ? charts : []);
-  if (countryPlaylists.length < 12 && poolForPl.length > 0) {
-    countryPlaylists = ensureMinPlaylists(
-      countryPlaylists,
-      poolForPl,
-      COUNTRY_DM_TITLES,
-      12,
-    );
+  if (countryPlaylists.length < 17) {
+    countryPlaylists = curateCountryTrendingPlaylists(gl, localTracks, 20);
   }
 
   return json(200, {
@@ -184,7 +586,7 @@ export async function handleHome(env, url) {
     youtubeCharts: charts,
     youtubeLocal: localTracks.slice(0, 25),
     youtubeIndia: localTracks.slice(0, 25),
-    countryPlaylists: countryPlaylists.slice(0, 12),
+    countryPlaylists: countryPlaylists.slice(0, 17),
     globalPlaylists: globalPart.globalPlaylists || [],
     forYouPlaylists: globalPart.forYouPlaylists || [],
     viralPlaylists: globalPart.viralPlaylists || [],
@@ -330,7 +732,7 @@ function isUnwantedIndianTrackForRegion(t, gl) {
   return false;
 }
 
-async function buildGlobal(gl, localQ) {
+async function buildGlobal(gl, localQ, weekKey = "") {
   const prime = ENGLISH_SHELVES.slice(0, 2);
   const jobs = prime.map((s) => searchYouTube(shelfQueryForCountry(s.id, gl, s.query), gl, true));
   const popShelfQ = shelfQueryForCountry("pop", gl, "english pop hits").replace(/\bofficial audio\b/i, "").trim();
@@ -376,11 +778,12 @@ async function buildGlobal(gl, localQ) {
   const audius = take(extra[jobs.length + 1]).slice(0, 18);
   const underground = take(extra[jobs.length + 2]).slice(0, 12);
   const radio = take(extra[jobs.length + 3]).slice(0, 12);
-  const fyRes = await Promise.allSettled(FY_QUERIES.map((f) => resolveShelfPlaylist(f.query, "US")));
-  const forYouPlaylists = buildForYouPlaylists(fyRes).map((p, idx) => ({
-    ...p,
-    tracks: weaveCatalogTracks(p.tracks || [], rotatePool(itExtra, idx * 3, 12), rotatePool(dzExtra, idx * 3, 12), 20),
-  }));
+  const wk = weekKey || utcWeekKey();
+  const forYouPlaylists = await buildPersonalizedForYouPlaylists({
+    gl,
+    week: wk,
+    lightweight: true,
+  });
   // Viral / "trending worldwide" shelf — resolved the same way as "Made for
   // you" so it auto-refreshes with the per-day home build (KV-cached above),
   // and each card ships its own 20 tracks for an instant, fully-populated row.
@@ -392,76 +795,79 @@ async function buildGlobal(gl, localQ) {
   const total =
     shelves.reduce((n, s) => n + (s.tracks || []).length, 0) +
     globalPlaylists.length + audius.length + underground.length + radio.length +
-    forYouPlaylists.filter((p) => p.playlistId).length +
+    forYouPlaylists.filter((p) => p.tracks && p.tracks.length).length +
     viralPlaylists.filter((p) => p.playlistId).length;
   if (!total) throw new Error("home empty — not caching");
   return { shelves, globalPlaylists, audius, underground, radio, forYouPlaylists, viralPlaylists };
 }
 
 async function buildLocal(gl, localQ) {
-  const [ytLocal, ytPl, ytTrendingPl, itLocalR, dzLocalR] = await Promise.allSettled([
-    searchYouTube(`${localQ} trending new songs`, gl, false),
-    youtubeMusicSearch(`${localQ} trending 2025 playlist`, gl, 7000, { limit: 50 }),
-    searchYouTube(`trending music playlist ${gl}`, gl, false),
-    itunesSearch(localQ || "top hits", { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
-    deezerSearch(localQ || "top hits", { limit: 40, includeExtra: false }).catch(() => ({ songs: [] })),
+  const cName = COUNTRY_NAMES[gl] || gl;
+  const [
+    appleRssR,
+    ytLocal,
+    ytPl,
+    ytNewReleasesR,
+    itLocalR,
+    itNewR,
+    dzLocalR,
+  ] = await Promise.allSettled([
+    raceTimeout(appleRssMostPlayed(gl, 50), 5000, []),
+    raceTimeout(searchYouTube(`${localQ} trending new songs`, gl, false), 5500, []),
+    raceTimeout(youtubeMusicSearch(`${localQ} trending 2025 2026 playlist`, gl, 5500, { limit: 50 }), 6000, []),
+    raceTimeout(searchYouTube(`new music releases ${cName} 2025 2026 official audio`, gl, false), 5500, []),
+    raceTimeout(itunesSearch(localQ || "top hits", { includeExtra: false, country: gl }).catch(() => ({ songs: [] })), 5000, { songs: [] }),
+    raceTimeout(itunesSearch(`new music ${cName} 2025`, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })), 5000, { songs: [] }),
+    raceTimeout(deezerSearch(localQ || "top hits", { limit: 45, includeExtra: false, country: gl }).catch(() => ({ songs: [] })), 5000, { songs: [] }),
   ]);
-  const itLocalSongs = (itLocalR.status === "fulfilled" ? (itLocalR.value.songs || []) : [])
-    .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
-  const dzLocalSongs = (dzLocalR.status === "fulfilled" ? (dzLocalR.value.songs || []) : [])
-    .filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
-  const ytTracks = take(ytLocal).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
-  const plTracks = take(ytPl).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
-  const trendTracks = take(ytTrendingPl).filter((t) => !isUnwantedIndianTrackForRegion(t, gl));
-  const countryPool = [...ytTracks, ...plTracks, ...trendTracks];
 
-  // Top songs in country: total of 25 songs
+  const rssSongs = (appleRssR.status === "fulfilled" && Array.isArray(appleRssR.value) ? appleRssR.value : [])
+    .filter((t) => isCleanCountryTrendingTrack(t, gl));
+  const itLocalSongs = (itLocalR.status === "fulfilled" && itLocalR.value ? (itLocalR.value.songs || []) : [])
+    .filter((t) => isCleanCountryTrendingTrack(t, gl));
+  const itNewSongs = (itNewR.status === "fulfilled" && itNewR.value ? (itNewR.value.songs || []) : [])
+    .filter((t) => isCleanCountryTrendingTrack(t, gl));
+  const dzLocalSongs = (dzLocalR.status === "fulfilled" && dzLocalR.value ? (dzLocalR.value.songs || []) : [])
+    .filter((t) => isCleanCountryTrendingTrack(t, gl));
+  const ytTracks = take(ytLocal).filter((t) => isCleanCountryTrendingTrack(t, gl));
+  const plTracks = take(ytPl).filter((t) => isCleanCountryTrendingTrack(t, gl));
+  const ytNewTracks = take(ytNewReleasesR).filter((t) => isCleanCountryTrendingTrack(t, gl));
+
+  const liveCountryPool = [
+    ...rssSongs,
+    ...ytTracks,
+    ...ytNewTracks,
+    ...plTracks,
+    ...itNewSongs,
+    ...itLocalSongs,
+    ...dzLocalSongs,
+  ];
+
+  // Build the 17 distinct, Spotify-style country trending playlists
+  const countryPlaylists = curateCountryTrendingPlaylists(gl, liveCountryPool, 20);
+
+  // Top songs in country: total of 25 songs (prioritizing live chart + top curated tracks)
   const localTracks = [];
   const seenLocal = new Set();
-  for (const t of countryPool) {
-    if (!t || !t.id || seenLocal.has(t.id)) continue;
-    seenLocal.add(t.id);
+  for (const t of [...rssSongs, ...ytTracks, ...plTracks, ...(countryPlaylists[0] ? countryPlaylists[0].tracks : [])]) {
+    if (!t) continue;
+    const sig = trackCanonicalSig(t) || t.id;
+    if (!sig || seenLocal.has(sig)) continue;
+    seenLocal.add(sig);
     localTracks.push(t);
     if (localTracks.length >= 25) break;
   }
-  if (localTracks.length < 25) {
-    try {
-      const extra = await searchYouTube(`top 50 new ${localQ} official music 2025 2026`, gl, false);
-      for (const t of extra) {
-        if (!t || !t.id || seenLocal.has(t.id) || isUnwantedIndianTrackForRegion(t, gl)) continue;
-        seenLocal.add(t.id);
-        localTracks.push(t);
-        if (localTracks.length >= 25) break;
-      }
-    } catch {}
-  }
-  let padIdx = 0;
-  while (localTracks.length < 25 && countryPool.length > 0) {
-    localTracks.push(countryPool[padIdx % countryPool.length]);
-    padIdx++;
-  }
 
-  const mixedLocal = weaveCatalogTracks(localTracks, itLocalSongs, dzLocalSongs, 25);
-
-  const rawPlaylists = uniqPlaylists([
-    ...playlistsOf(ytLocal.status === "fulfilled" ? ytLocal.value : []),
-    ...playlistsOf(ytPl.status === "fulfilled" ? ytPl.value : []),
-    ...playlistsOf(ytTrendingPl.status === "fulfilled" ? ytTrendingPl.value : []),
-  ]);
-
-  const countryPlaylists = ensureMinPlaylists(
-    rawPlaylists,
-    countryPool.length ? weaveCatalogTracks(countryPool, itLocalSongs, dzLocalSongs, 100) : mixedLocal,
-    COUNTRY_DM_TITLES,
-    12,
-  ).map((p, idx) => ({
-    ...p,
-    tracks: weaveCatalogTracks(p.tracks || [], rotatePool(itLocalSongs, idx * 3, 12), rotatePool(dzLocalSongs, idx * 3, 12), 20),
-  }));
+  const mixedLocal = weaveCatalogTracks(
+    localTracks,
+    [...rssSongs, ...itLocalSongs, ...itNewSongs],
+    dzLocalSongs,
+    25
+  );
 
   return {
     youtubeLocal: mixedLocal.slice(0, 25),
-    countryPlaylists: countryPlaylists.slice(0, 12),
+    countryPlaylists: countryPlaylists.slice(0, 17),
   };
 }
 
@@ -470,6 +876,40 @@ export async function handleShelf(env, url) {
   const shelf = ENGLISH_SHELVES.find((s) => s.id === id);
   const gl = regionCode(url.searchParams.get("gl") || "US");
   const rawQ = url.searchParams.get("q") || "";
+
+  // Special handling for Country Trending playlist IDs (`ctrend:<GL>:<slot>` or `ctrend-<idx>`)
+  if (id.startsWith("ctrend:") || id.startsWith("ctrend-")) {
+    let plGl = gl;
+    let slotOrRole = "";
+    let idxNum = -1;
+    if (id.startsWith("ctrend:")) {
+      const parts = id.split(":");
+      plGl = regionCode(parts[1] || gl);
+      slotOrRole = parts[2] || "";
+      if (/^\d+$/.test(slotOrRole)) idxNum = parseInt(slotOrRole, 10);
+    } else {
+      const numPart = id.slice("ctrend-".length);
+      if (/^\d+$/.test(numPart)) idxNum = parseInt(numPart, 10);
+      else slotOrRole = numPart;
+    }
+    const defs = getCountryTrendingPlaylists(plGl);
+    const matchedDef = (idxNum >= 0 && defs[idxNum])
+      || defs.find((d) => d.id === id || d.slot === slotOrRole || d.role === slotOrRole)
+      || defs[0];
+    const targetCount = url.searchParams.get("full") === "1" ? 25 : 20;
+    const curatedAll = curateCountryTrendingPlaylists(plGl, [], targetCount);
+    const matchedPl = (idxNum >= 0 && curatedAll[idxNum])
+      || curatedAll.find((p) => p.id === id || p.slot === slotOrRole || p.role === slotOrRole)
+      || curatedAll[0];
+    return json(200, {
+      id: matchedDef ? matchedDef.id : id,
+      title: matchedDef ? matchedDef.title : (rawQ || "Trending"),
+      subtitle: matchedDef ? matchedDef.subtitle : "",
+      description: matchedDef ? matchedDef.description : "",
+      tracks: (matchedPl && matchedPl.tracks) || [],
+    });
+  }
+
   const q = shelf
     ? shelfQueryForCountry(id, gl, rawQ || shelf.query)
     : (rawQ || (id === "local" ? (LOCAL_CHARTS[gl] || "top hits official audio") : ""));
@@ -671,12 +1111,12 @@ export async function handleSearch(env, url) {
       Promise.race([promise, new Promise((res) => setTimeout(() => res(fallback), ms))]);
 
     const allTasks = [
-      ["youtube", searchYouTube(q, gl)],
-      ["apple", fastWait(itunesSearch(q, { includeExtra: true, country: gl }), 5500, { songs: [], artists: [], playlists: [] })],
-      ["deezer", fastWait(deezerSearch(q, { limit: 50, includeExtra: true, country: gl }), 6500, { songs: [], artists: [], playlists: [] })],
-      ["audius", audiusSearch(q)],
-      ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2500, [])],
-      ["audiusUsers", fastWait(audiusUserSearch(q), 2500, [])],
+      ["youtube", fastWait(searchYouTube(q, gl).catch(() => []), 2800, [])],
+      ["apple", fastWait(itunesSearch(q, { includeExtra: true, country: gl }), 2600, { songs: [], artists: [], playlists: [] })],
+      ["deezer", fastWait(deezerSearch(q, { limit: 50, includeExtra: true, country: gl }), 2800, { songs: [], artists: [], playlists: [] })],
+      ["audius", fastWait(audiusSearch(q).catch(() => []), 2500, [])],
+      ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2200, [])],
+      ["audiusUsers", fastWait(audiusUserSearch(q), 2200, [])],
     ];
     const settled = await Promise.allSettled(allTasks.map((t) => t[1]));
     settled.forEach((s, i) => {
@@ -720,12 +1160,19 @@ export async function handleSearch(env, url) {
     // Topic re-uploads, 2-hour mixes or non-music.
     if (Array.isArray(yt)) result.youtube = strictSongs(yt);
     result.apple = strictSongs(result.apple);
-    result.itunes = result.apple;
     result.deezer = strictSongs(result.deezer);
     if (!result.deezer.length && (result.apple.length || (result.youtube && result.youtube.length))) {
       const seed = result.apple.length ? result.apple : result.youtube;
       result.deezer = strictSongs(seed.map((t) => normalizeDeezerTrack(t)).filter(Boolean));
     }
+    if (!result.apple.length && result.deezer.length) {
+      result.apple = result.deezer.map((t) => ({
+        ...t,
+        id: `apple:${t.rawId || String(t.id || "").replace(/^deezer:/, "")}`,
+        source: "apple",
+      }));
+    }
+    result.itunes = result.apple;
     result.audius = strictSongs(result.audius || []);
 
     const allMatchedSongs = [
@@ -916,44 +1363,7 @@ export async function handleYtStream(url) {
     } catch {}
   }
 
-  // Only return 30-second Deezer/iTunes previews if explicitly requested via allowPreview=1.
-  // Otherwise return empty url so the app immediately plays the full-length song via YouTube player.
-  if (allowPreview && searchQuery) {
-    try {
-      const dzRes = await deezerSearch(searchQuery, { limit: 10, includeExtra: false });
-      const dzList = (dzRes && Array.isArray(dzRes.songs)) ? dzRes.songs : (Array.isArray(dzRes) ? dzRes : []);
-      const dzHit = dzList.find((x) => x && (x.previewUrl || x.preview));
-      if (dzHit && (dzHit.previewUrl || dzHit.preview)) {
-        const dzUrl = dzHit.previewUrl || dzHit.preview;
-        return json(200, {
-          url: `/api/stream?url=${encodeURIComponent(dzUrl)}${buildMetaExtra(id)}`,
-          format: "mp3",
-          mimeType: "audio/mpeg",
-          quality: "128k",
-          duration: 30,
-          source: "deezer",
-          isPreview: true,
-        });
-      }
-    } catch {}
-    try {
-      const itRes = await itunesSearch(searchQuery, { includeExtra: false });
-      const itList = (itRes && Array.isArray(itRes.songs)) ? itRes.songs : (Array.isArray(itRes) ? itRes : []);
-      const itHit = itList.find((x) => x && x.previewUrl);
-      if (itHit && itHit.previewUrl) {
-        return json(200, {
-          url: `/api/stream?url=${encodeURIComponent(itHit.previewUrl)}${buildMetaExtra(id)}`,
-          format: "m4a",
-          mimeType: "audio/mp4",
-          quality: "256k",
-          duration: 30,
-          source: "apple",
-          isPreview: true,
-        });
-      }
-    } catch {}
-  }
-
+  // Never return 30-second low-bitrate Deezer/iTunes previews; always use the full-quality stream or YouTube player.
   return json(200, { url: "", error: "No direct audio stream available" });
 }
 
@@ -1149,168 +1559,1235 @@ export async function handleRadioClick(url) {
   return json(200, { ok: true });
 }
 
-export async function handleDiscover(url) {
-  const artists = String(url.searchParams.get("artists") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 5);
-  const genres = String(url.searchParams.get("genres") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 4);
-  const week = String(url.searchParams.get("week") || "").trim();
-  const gl = regionCode(url.searchParams.get("gl"));
-  const qs = [];
-  artists.forEach((a) => {
-    qs.push(`${a} mix official audio`);
-    qs.push(`${a} radio mix`);
-  });
-  genres.forEach((g) => qs.push(`${g} songs official audio`));
-  if (!qs.length) {
-    qs.push("english pop hits official audio");
-    qs.push("new music mix official audio");
-    qs.push("indie pop english songs");
+// ── Spotify-Style Musical Intelligence: Vibe, Genre, Mood, Tempo & Style Engine ──
+
+function canonFold(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+export function canonSongTitle(raw) {
+  let s = canonFold(raw);
+  if (!s) return "";
+  s = s
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\((?:official|lyric|lyrics|audio|video|visualizer|music\s*video|hd|hq|4k|remaster(?:ed)?|radio\s*edit|explicit|clean|version|live|from\s+[^)]+|feat\.?[^)]+|ft\.?[^)]+|with\s+[^)]+)[^)]*\)/gi, " ")
+    .replace(/\b(?:feat\.?|ft\.?|featuring)\s+.*$/i, " ")
+    .replace(/\s*[-–—|]\s*(?:official\s*(?:audio|video|music\s*video|lyric\s*video)?|lyrics?|audio|visualizer|remaster(?:ed)?.*|single|topic)\s*$/i, " ")
+    .replace(/[^a-z0-9\u0900-\u0D7F\u0E00-\u0E7F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0600-\u06FF]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return s || canonFold(raw);
+}
+
+export function canonPrimaryArtist(raw) {
+  let s = canonFold(raw)
+    .replace(/\s*[|–—-]\s*topic$/i, "")
+    .replace(/\bvevo$/i, "")
+    .replace(/\bofficial$/i, "")
+    .trim();
+  if (!s) return "";
+  const parts = s.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bfeaturing\b|\bx\b|\bwith\b|\/|;)\s*/i).filter(Boolean);
+  return (parts[0] || s).replace(/[^a-z0-9\u0900-\u0D7F\u0E00-\u0E7F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0600-\u06FF]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function canonSongSig(t) {
+  if (!t) return "";
+  const title = canonSongTitle(t.title || t.trackName || "");
+  const artist = canonPrimaryArtist(t.artist || t.artistName || "");
+  if (title && artist) return `${title}__${artist}`;
+  return title || String(t.videoId || t.id || "");
+}
+
+export function isSameCanonicalSong(a, b) {
+  if (!a || !b) return false;
+  if (a.id && b.id && String(a.id) === String(b.id)) return true;
+  if (a.videoId && b.videoId && String(a.videoId) === String(b.videoId)) return true;
+  if (a.trackId && b.trackId && String(a.trackId) === String(b.trackId)) return true;
+  const ta = canonSongTitle(a.title || "");
+  const tb = canonSongTitle(b.title || "");
+  if (!ta || !tb || ta !== tb) return false;
+  const aa = canonPrimaryArtist(a.artist || "");
+  const ab = canonPrimaryArtist(b.artist || "");
+  if (!aa || !ab) return ta.length >= 5;
+  if (aa === ab || aa.includes(ab) || ab.includes(aa)) return true;
+  const fullA = canonFold(a.artist || "");
+  const fullB = canonFold(b.artist || "");
+  if (fullA.includes(ab) || fullB.includes(aa)) return true;
+  return false;
+}
+
+const ARTIST_VIBE_GRAPH = {
+  "the weeknd": { genre: "rnb", mood: "latenight", tempo: "upbeat", energy: 0.76, style: "electronic", peers: ["SZA", "Drake", "Post Malone", "Ariana Grande", "Dua Lipa", "Travis Scott", "Daniel Caesar", "Frank Ocean", "Tory Lanez"] },
+  "taylor swift": { genre: "pop", mood: "feelgood", tempo: "upbeat", energy: 0.72, style: "vocal", peers: ["Sabrina Carpenter", "Olivia Rodrigo", "Gracie Abrams", "Lorde", "Billie Eilish", "Lana Del Rey", "Chappell Roan", "Conan Gray"] },
+  "billie eilish": { genre: "indie", mood: "chill", tempo: "mid", energy: 0.48, style: "vocal", peers: ["Lana Del Rey", "Lorde", "Olivia Rodrigo", "Clairo", "The Neighbourhood", "Cigarettes After Sex", "SZA", "Phoebe Bridgers"] },
+  "sza": { genre: "rnb", mood: "chill", tempo: "mid", energy: 0.58, style: "vocal", peers: ["The Weeknd", "Frank Ocean", "Daniel Caesar", "Summer Walker", "H.E.R.", "Kali Uchis", "Bryson Tiller", "Jhené Aiko", "Kendrick Lamar"] },
+  "drake": { genre: "hiphop", mood: "latenight", tempo: "mid", energy: 0.68, style: "rhythmic", peers: ["Kendrick Lamar", "J. Cole", "Future", "21 Savage", "Travis Scott", "The Weeknd", "PARTYNEXTDOOR", "Bryson Tiller", "Metro Boomin"] },
+  "kendrick lamar": { genre: "hiphop", mood: "upbeat", tempo: "upbeat", energy: 0.78, style: "rhythmic", peers: ["J. Cole", "Drake", "Travis Scott", "Future", "Baby Keem", "Metro Boomin", "Kanye West", "SZA", "Tyler, The Creator"] },
+  "travis scott": { genre: "hiphop", mood: "party", tempo: "upbeat", energy: 0.82, style: "rhythmic", peers: ["Don Toliver", "Future", "Metro Boomin", "21 Savage", "Drake", "Playboi Carti", "Kendrick Lamar", "The Weeknd"] },
+  "post malone": { genre: "pop", mood: "feelgood", tempo: "mid", energy: 0.68, style: "vocal", peers: ["The Weeknd", "Khalid", "Juice WRLD", "The Kid LAROI", "Swae Lee", "Morgan Wallen", "Twenty One Pilots", "OneRepublic"] },
+  "dua lipa": { genre: "dance", mood: "party", tempo: "upbeat", energy: 0.84, style: "electronic", peers: ["Calvin Harris", "Charli xcx", "Sabrina Carpenter", "Ariana Grande", "The Weeknd", "Zara Larsson", "Lady Gaga", "Troye Sivan"] },
+  "sabrina carpenter": { genre: "pop", mood: "feelgood", tempo: "upbeat", energy: 0.76, style: "vocal", peers: ["Chappell Roan", "Olivia Rodrigo", "Taylor Swift", "Ariana Grande", "Dua Lipa", "Gracie Abrams", "Tate McRae"] },
+  "ariana grande": { genre: "pop", mood: "romantic", tempo: "mid", energy: 0.68, style: "vocal", peers: ["Sabrina Carpenter", "SZA", "The Weeknd", "Dua Lipa", "Olivia Rodrigo", "Tate McRae", "Doja Cat", "Rihanna"] },
+  "bruno mars": { genre: "pop", mood: "feelgood", tempo: "upbeat", energy: 0.8, style: "vocal", peers: ["Anderson .Paak", "Silk Sonic", "The Weeknd", "Justin Timberlake", "Maroon 5", "Michael Jackson", "Usher", "Rihanna"] },
+  "ed sheeran": { genre: "pop", mood: "romantic", tempo: "mid", energy: 0.56, style: "acoustic", peers: ["Shawn Mendes", "Lewis Capaldi", "James Arthur", "Sam Smith", "Coldplay", "Charlie Puth", "OneRepublic", "John Mayer"] },
+  "coldplay": { genre: "rock", mood: "feelgood", tempo: "mid", energy: 0.66, style: "band", peers: ["OneRepublic", "Imagine Dragons", "Keane", "U2", "The Script", "Oasis", "Snow Patrol", "The 1975"] },
+  "arctic monkeys": { genre: "indie", mood: "latenight", tempo: "mid", energy: 0.68, style: "band", peers: ["The Neighbourhood", "The Strokes", "Tame Impala", "The 1975", "Franz Ferdinand", "Cage the Elephant", "Wallows", "Oasis"] },
+  "lana del rey": { genre: "indie", mood: "sad", tempo: "slow", energy: 0.42, style: "vocal", peers: ["Cigarettes After Sex", "Billie Eilish", "Lorde", "The Neighbourhood", "Mitski", "Phoebe Bridgers", "Hozier", "Florence + The Machine"] },
+  "linkin park": { genre: "rock", mood: "workout", tempo: "fast", energy: 0.88, style: "band", peers: ["Bring Me The Horizon", "Green Day", "Three Days Grace", "Breaking Benjamin", "Evanescence", "Muse", "Foo Fighters", "System Of A Down"] },
+  "calvin harris": { genre: "dance", mood: "party", tempo: "fast", energy: 0.88, style: "electronic", peers: ["David Guetta", "Avicii", "Martin Garrix", "Tiësto", "Zedd", "Swedish House Mafia", "Dua Lipa", "Disclosure"] },
+  "arijit singh": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.56, style: "vocal", peers: ["Pritam", "Atif Aslam", "Vishal Mishra", "Jubin Nautiyal", "Shreya Ghoshal", "KK", "Mohit Chauhan", "Amit Trivedi", "Darshan Raval", "Armaan Malik"] },
+  "pritam": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.64, style: "vocal", peers: ["Arijit Singh", "KK", "Amit Trivedi", "Vishal-Shekhar", "Atif Aslam", "Mohit Chauhan", "Shreya Ghoshal", "A.R. Rahman"] },
+  "diljit dosanjh": { genre: "punjabi", mood: "upbeat", tempo: "upbeat", energy: 0.82, style: "rhythmic", peers: ["Karan Aujla", "AP Dhillon", "Shubh", "Sidhu Moose Wala", "Gurinder Gill", "Harrdy Sandhu", "Badshah", "Amrinder Gill"] },
+  "karan aujla": { genre: "punjabi", mood: "upbeat", tempo: "upbeat", energy: 0.84, style: "rhythmic", peers: ["Diljit Dosanjh", "AP Dhillon", "Shubh", "Sidhu Moose Wala", "Gurinder Gill", "DIVINE", "Ikky"] },
+  "ap dhillon": { genre: "punjabi", mood: "latenight", tempo: "mid", energy: 0.74, style: "rhythmic", peers: ["Gurinder Gill", "Shubh", "Karan Aujla", "Diljit Dosanjh", "Talwiinder", "Raf-Saperra"] },
+  "anuv jain": { genre: "indie_in", mood: "acoustic", tempo: "slow", energy: 0.42, style: "acoustic", peers: ["Prateek Kuhad", "Aditya Rikhari", "The Local Train", "Mitraz", "Zaeden", "Abdul Hannan", "Hasan Raheem", "When Chai Met Toast"] },
+  "prateek kuhad": { genre: "indie_in", mood: "chill", tempo: "slow", energy: 0.44, style: "acoustic", peers: ["Anuv Jain", "The Local Train", "Aditya Rikhari", "Ritviz", "Zaeden", "Lifafa", "Parekh & Singh"] },
+  "the local train": { genre: "indie_in", mood: "feelgood", tempo: "mid", energy: 0.68, style: "band", peers: ["Anuv Jain", "Prateek Kuhad", "Naalayak", "Bayaan", "Kaavish", "Strings", "Aditya Rikhari"] },
+  "atif aslam": { genre: "pak_pop", mood: "romantic", tempo: "mid", energy: 0.58, style: "vocal", peers: ["Arijit Singh", "KK", "Rahat Fateh Ali Khan", "Mustafa Zahid", "Ali Zafar", "Pritam", "Mohit Chauhan"] },
+  "bts": { genre: "kpop", mood: "upbeat", tempo: "upbeat", energy: 0.82, style: "electronic", peers: ["SEVENTEEN", "Stray Kids", "Jungkook", "TOMORROW X TOGETHER", "ENHYPEN", "BLACKPINK", "NewJeans"] },
+  "blackpink": { genre: "kpop", mood: "party", tempo: "upbeat", energy: 0.85, style: "electronic", peers: ["aespa", "LE SSERAFIM", "NewJeans", "TWICE", "(G)I-DLE", "IVE", "BABYMONSTER", "BTS"] },
+  "newjeans": { genre: "kpop", mood: "feelgood", tempo: "upbeat", energy: 0.74, style: "electronic", peers: ["ILLIT", "LE SSERAFIM", "IVE", "aespa", "TWICE", "KISS OF LIFE", "IU"] },
+  "yoasobi": { genre: "jpop", mood: "upbeat", tempo: "fast", energy: 0.86, style: "electronic", peers: ["Mrs. GREEN APPLE", "Official HIGE DANdism", "Ado", "Kenshi Yonezu", "Vaundy", "Creepy Nuts", "Yorushika"] },
+  "fujii kaze": { genre: "jpop", mood: "chill", tempo: "mid", energy: 0.6, style: "vocal", peers: ["Vaundy", "imase", "Kenshi Yonezu", "Official HIGE DANdism", "King Gnu", "SIRUP"] },
+  "burna boy": { genre: "afrobeats", mood: "upbeat", tempo: "mid", energy: 0.76, style: "rhythmic", peers: ["Wizkid", "Rema", "Asake", "Davido", "Omah Lay", "Tems", "Ayra Starr", "Fireboy DML"] },
+  "tame impala": { genre: "indie", mood: "latenight", tempo: "mid", energy: 0.66, style: "electronic", peers: ["MGMT", "Mac DeMarco", "Arctic Monkeys", "Empire of the Sun", "Gorillaz", "Beach House", "Foster the People", "Daft Punk"] },
+};
+
+const GENRE_ADJACENCY = {
+  pop: { adj: ["indie", "rnb", "dance"], moods: ["feelgood", "upbeat", "romantic"], tempo: "upbeat", energy: 0.72, style: "vocal", query: "pop hits melodic feel good songs" },
+  rnb: { adj: ["pop", "hiphop", "indie"], moods: ["latenight", "chill", "romantic"], tempo: "mid", energy: 0.58, style: "vocal", query: "rnb soul smooth late night grooves" },
+  hiphop: { adj: ["rnb", "uk_drill", "pop"], moods: ["upbeat", "latenight", "party"], tempo: "upbeat", energy: 0.78, style: "rhythmic", query: "hip hop melodic rap trap hits" },
+  rock: { adj: ["indie", "throwback", "pop"], moods: ["workout", "feelgood", "latenight"], tempo: "upbeat", energy: 0.76, style: "band", query: "modern rock alternative band anthems" },
+  indie: { adj: ["pop", "rock", "lofi"], moods: ["chill", "latenight", "acoustic"], tempo: "mid", energy: 0.52, style: "acoustic", query: "indie pop bedroom pop alternative songs" },
+  dance: { adj: ["pop", "uk_house", "afrobeats"], moods: ["party", "upbeat", "workout"], tempo: "fast", energy: 0.86, style: "electronic", query: "dance house electronic club hits" },
+  lofi: { adj: ["indie", "rnb", "acoustic"], moods: ["chill", "focus", "latenight"], tempo: "slow", energy: 0.35, style: "acoustic", query: "lofi chill beats cozy late night" },
+  country: { adj: ["indie", "pop", "rock"], moods: ["feelgood", "acoustic", "romantic"], tempo: "mid", energy: 0.62, style: "acoustic", query: "country americana modern acoustic hits" },
+  latin: { adj: ["reggaeton", "pop", "dance"], moods: ["party", "upbeat", "romantic"], tempo: "upbeat", energy: 0.80, style: "rhythmic", query: "reggaeton latin urbano top hits" },
+  reggaeton: { adj: ["latin", "dance", "pop"], moods: ["party", "upbeat"], tempo: "upbeat", energy: 0.82, style: "rhythmic", query: "reggaeton urbano latino hits" },
+  afrobeats: { adj: ["amapiano", "rnb", "dance"], moods: ["feelgood", "upbeat", "party"], tempo: "mid", energy: 0.74, style: "rhythmic", query: "afrobeats afro fusion smooth hits" },
+  amapiano: { adj: ["afrobeats", "dance", "rnb"], moods: ["party", "upbeat"], tempo: "mid", energy: 0.78, style: "electronic", query: "amapiano afro house groove hits" },
+  kpop: { adj: ["pop", "dance", "rnb"], moods: ["upbeat", "party", "feelgood"], tempo: "upbeat", energy: 0.80, style: "electronic", query: "kpop krnb top hits" },
+  jpop: { adj: ["indie", "rock", "pop"], moods: ["upbeat", "feelgood"], tempo: "upbeat", energy: 0.78, style: "electronic", query: "jpop city pop japanese hits" },
+  bollywood: { adj: ["indie_in", "pak_pop", "punjabi"], moods: ["romantic", "feelgood", "sad"], tempo: "mid", energy: 0.62, style: "vocal", query: "bollywood hindi romantic melody songs" },
+  punjabi: { adj: ["bollywood", "hiphop", "pak_pop"], moods: ["upbeat", "party", "latenight"], tempo: "upbeat", energy: 0.80, style: "rhythmic", query: "punjabi top hits urban beats" },
+  indie_in: { adj: ["bollywood", "pak_pop", "indie"], moods: ["chill", "romantic", "acoustic"], tempo: "slow", energy: 0.46, style: "acoustic", query: "indian indie acoustic hindi songs" },
+  pak_pop: { adj: ["indie_in", "bollywood", "punjabi"], moods: ["romantic", "chill", "acoustic"], tempo: "mid", energy: 0.55, style: "vocal", query: "pakistani pop coke studio indie songs" },
+  opm_pop: { adj: ["indie", "rnb", "pop"], moods: ["romantic", "feelgood", "acoustic"], tempo: "mid", energy: 0.58, style: "vocal", query: "opm pop hugot filipino hits" },
+  cantopop: { adj: ["mandopop", "pop", "indie"], moods: ["romantic", "sad", "feelgood"], tempo: "mid", energy: 0.58, style: "vocal", query: "hong kong cantopop hits" },
+  mandopop: { adj: ["cantopop", "pop", "indie"], moods: ["romantic", "sad", "feelgood"], tempo: "mid", energy: 0.56, style: "vocal", query: "mandopop ballad chinese pop hits" },
+  throwback: { adj: ["pop", "rock", "rnb"], moods: ["retro", "feelgood"], tempo: "mid", energy: 0.70, style: "vocal", query: "throwback 2000s 90s classic hits" },
+};
+
+export function inferServerVibeProfile(meta = {}) {
+  const title = canonFold(meta.title || "");
+  const artist = canonPrimaryArtist(meta.artist || "");
+  const rawGenre = canonFold(meta.genre || meta._tag || "");
+  const rawMood = canonFold(meta.mood || "");
+  const rawTempo = canonFold(meta.tempo || "");
+  const rawStyle = canonFold(meta.style || "");
+  const album = canonFold(meta.album || "");
+  const dur = Number(meta.duration) || 195;
+  const hay = `${title} ${artist} ${rawGenre} ${rawMood} ${album}`;
+
+  const directArtist = ARTIST_VIBE_GRAPH[artist] || null;
+
+  // 1. Genre detection
+  let genre = directArtist ? directArtist.genre : "";
+  if (!genre) {
+    if (/punjabi|bhangra|diljit|karan aujla|ap dhillon|shubh|sidhu moose/.test(hay)) genre = "punjabi";
+    else if (/indian indie|anuv jain|prateek kuhad|aditya rikhari|local train|mitraz/.test(hay)) genre = "indie_in";
+    else if (/pakistani|coke studio|atif aslam|abdul hannan|hasan raheem|kaavish/.test(hay)) genre = "pak_pop";
+    else if (/bollywood|hindi|arijit|pritam|shreya ghoshal|jubin|vishal mishra|kk\b|mohit chauhan|amit trivedi|a\.?\s*r\.?\s*rahman/.test(hay)) genre = "bollywood";
+    else if (/k-?pop|korean|bts|blackpink|newjeans|aespa|seventeen|stray kids|twice|le sserafim|illit/.test(hay)) genre = "kpop";
+    else if (/j-?pop|anime|yoasobi|fujii kaze|kenshi yonezu|vaundy|ado|king gnu|city pop/.test(hay)) genre = "jpop";
+    else if (/afrobeats|afro-?fusion|burna boy|wizkid|rema|tems|asake|ayra starr|omah lay/.test(hay)) genre = "afrobeats";
+    else if (/amapiano|kabza|tyla/.test(hay)) genre = "amapiano";
+    else if (/opm|pinoy|hugot|bini|ben&ben|zack tabudlo|arthur nery|cup of joe|tj monterde/.test(hay)) genre = "opm_pop";
+    else if (/cantopop|eason chan|hins cheung|keung to|terence lam/.test(hay)) genre = "cantopop";
+    else if (/mandopop|jay chou|jj lin|stefanie sun|mayday/.test(hay)) genre = "mandopop";
+    else if (/reggaeton|urbano|latino|bad bunny|feid|karol g|peso pluma|rosalia|quevedo/.test(hay)) genre = "reggaeton";
+    else if (/lofi|lo-fi|chillhop|study beats/.test(hay)) genre = "lofi";
+    else if (/r&b|rnb|soul|neo-?soul|sza|frank ocean|daniel caesar|summer walker|brent faiyaz|bryson tiller/.test(hay)) genre = "rnb";
+    else if (/hip-?hop|rap|trap|drill|kendrick|drake|travis scott|future|21 savage|j\.?\s*cole|central cee|eminem|kanye/.test(hay)) genre = "hiphop";
+    else if (/edm|dance|house|techno|trance|club|calvin harris|david guetta|martin garrix|tiesto|avicii|fred again|dom dolla|rufus du sol/.test(hay)) genre = "dance";
+    else if (/rock|metal|punk|grunge|band|linkin park|coldplay|imagine dragons|green day|foo fighters|muse|nirvana|oasis/.test(hay)) genre = "rock";
+    else if (/indie|alternative|bedroom pop|dream pop|shoegaze|tame impala|arctic monkeys|lana del rey|the 1975|clairo|cigarettes after sex|hozier|lorde/.test(hay)) genre = "indie";
+    else if (/country|americana|folk|morgan wallen|zach bryan|luke combs|chris stapleton/.test(hay)) genre = "country";
+    else if (/80s|90s|2000s|throwback|retro|classic/.test(hay)) genre = "throwback";
+    else genre = "pop";
   }
-  qs.push("hidden gems english songs official audio");
-  const queries = [...new Set(qs)].slice(0, 6);
-  const cacheKey = `discover:v12:${gl}:${week}:${queries.join("|")}`;
-  try {
-    const tracks = await cached(cacheKey, 6 * 3600000, async () => {
-      const cleanSeedQ = (queries[0] || "english pop hits").replace(/\bofficial audio\b/ig, "").trim();
-      const [settled, itR, dzR] = await Promise.all([
-        Promise.allSettled(queries.map((q) => searchYouTube(q, gl, true))),
-        itunesSearch(cleanSeedQ, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })),
-        deezerSearch(cleanSeedQ, { limit: 25, includeExtra: false }).catch(() => ({ songs: [] })),
-      ]);
-      const seen = new Set();
-      const out = [];
-      for (const s of settled) {
-        const rows = s.status === "fulfilled" ? s.value : [];
-        for (const row of rows || []) {
-          if (!row || row.source === "radio") continue;
-          if (!isEnglishTrack(row)) continue;
-          const k = String(row.videoId || row.id || "");
-          if (!k || seen.has(k)) continue;
-          seen.add(k);
-          out.push(row);
-          if (out.length >= 40) break;
-        }
-        if (out.length >= 40) break;
+
+  const gInfo = GENRE_ADJACENCY[genre] || GENRE_ADJACENCY.pop;
+
+  // 2. Mood detection
+  let mood = rawMood || (directArtist ? directArtist.mood : "");
+  if (!mood || !["chill", "latenight", "romantic", "sad", "upbeat", "party", "workout", "focus", "acoustic", "retro", "feelgood"].includes(mood)) {
+    if (/\b(acoustic|unplugged|stripped|piano|guitar)\b/.test(hay)) mood = "acoustic";
+    else if (/\b(sad|heartbreak|broken|lonely|tears|cry|miss you|hurt|goodbye|channa mereya|bekhayali|alag aasmaan)\b/.test(hay)) mood = "sad";
+    else if (/\b(love|romantic|heart|kiss|forever|darling|baby|sweet|kesariya|tum hi ho|apna bana le|raataan lambiyan|satranga)\b/.test(hay)) mood = "romantic";
+    else if (/\b(night|midnight|after hours|starboy|blinding|dark|moon|drive|3am|late)\b/.test(hay)) mood = "latenight";
+    else if (/\b(chill|relax|cozy|rain|baarishein|sunday|breeze|calm|dream|waves)\b/.test(hay)) mood = "chill";
+    else if (/\b(party|club|dance|remix|bounce|turn up|friday|shots|banger)\b/.test(hay)) mood = "party";
+    else if (/\b(workout|gym|phonk|hype|beast|power|run|rage)\b/.test(hay)) mood = "workout";
+    else mood = (gInfo.moods && gInfo.moods[0]) || "feelgood";
+  }
+
+  // 3. Tempo & Energy inference
+  let tempo = rawTempo || (directArtist ? directArtist.tempo : "") || gInfo.tempo || "mid";
+  let energy = directArtist ? directArtist.energy : (gInfo.energy || 0.65);
+  if (mood === "acoustic" || mood === "sad" || genre === "lofi") {
+    tempo = "slow";
+    energy = Math.min(energy, 0.44);
+  } else if (mood === "chill" || mood === "romantic") {
+    if (tempo === "fast") tempo = "mid";
+    energy = Math.min(energy, 0.58);
+  } else if (mood === "party" || mood === "workout") {
+    tempo = genre === "dance" ? "fast" : "upbeat";
+    energy = Math.max(energy, 0.82);
+  }
+  if (dur > 280 && energy > 0.65) energy -= 0.08;
+  if (dur > 0 && dur < 165 && energy < 0.72) energy += 0.06;
+
+  // 4. Style texture
+  let style = rawStyle || (directArtist ? directArtist.style : "") || gInfo.style || "vocal";
+  if (mood === "acoustic") style = "acoustic";
+  else if (genre === "dance" || /synth|electro|remix|club/.test(hay)) style = "electronic";
+  else if (genre === "rock" || /band|guitar/.test(hay)) style = "band";
+  else if (genre === "hiphop" || genre === "punjabi" || genre === "afrobeats" || genre === "reggaeton") style = "rhythmic";
+
+  // 5. Peer artists & gradual exploration bridges
+  const peerArtists = directArtist && Array.isArray(directArtist.peers) ? [...directArtist.peers] : [];
+  if (!peerArtists.length) {
+    for (const [artKey, info] of Object.entries(ARTIST_VIBE_GRAPH)) {
+      if (info.genre === genre && artKey !== artist) {
+        peerArtists.push(artKey.replace(/\b\w/g, (c) => c.toUpperCase()));
       }
-      if (!out.length) {
-        for (const q of ["english pop hits official audio", "top english songs this week", "indie pop english songs"]) {
-          try {
-            const rows = (await searchYouTube(q, gl, true)) || [];
-            for (const row of rows) {
-              if (!row || row.source === "radio" || !isEnglishTrack(row)) continue;
-              const k = String(row.videoId || row.id || "");
-              if (!k || seen.has(k)) continue;
-              seen.add(k);
-              out.push(row);
-              if (out.length >= 30) break;
-            }
-          } catch {}
-          if (out.length >= 30) break;
-        }
-      }
-      const itSongs = ((itR && Array.isArray(itR.songs)) ? itR.songs : []).filter(isEnglishTrack);
-      const dzSongs = ((dzR && Array.isArray(dzR.songs)) ? dzR.songs : []).filter(isEnglishTrack);
-      let seed = 0;
-      const weekSeed = week || "mix";
-      for (let i = 0; i < weekSeed.length; i++) seed = (seed * 31 + weekSeed.charCodeAt(i)) >>> 0;
-      const shuffled = out.slice();
-      for (let i = shuffled.length - 1; i > 0; i--) {
-        seed = (seed * 1664525 + 1013904223) >>> 0;
-        const j = seed % (i + 1);
-        const tmp = shuffled[i];
-        shuffled[i] = shuffled[j];
-        shuffled[j] = tmp;
-      }
-      return weaveCatalogTracks(shuffled, itSongs, dzSongs, 30);
+    }
+  }
+  const adjacentGenres = gInfo.adj || ["pop", "indie"];
+  const moodKeywords = {
+    acoustic: "acoustic unplugged warm",
+    sad: "emotional heartfelt ballad",
+    romantic: "romantic love melody",
+    latenight: "late night drive smooth",
+    chill: "chill vibes smooth",
+    party: "upbeat party club",
+    workout: "high energy hype",
+    feelgood: "feel good melodic",
+    retro: "throwback classic hits",
+  };
+  const vibeQuery = `${gInfo.query || genre} ${moodKeywords[mood] || ""}`.replace(/\s+/g, " ").trim();
+  const adjGenreObj = GENRE_ADJACENCY[adjacentGenres[0]] || GENRE_ADJACENCY.pop;
+  const exploreQuery = `${adjGenreObj.query || adjacentGenres[0]} ${moodKeywords[mood] || ""}`.replace(/\s+/g, " ").trim();
+
+  return {
+    genre,
+    mood,
+    tempo,
+    energy: Number(energy.toFixed(2)),
+    style,
+    primaryArtist: artist,
+    peerArtists: peerArtists.slice(0, 8),
+    adjacentGenres,
+    vibeQuery,
+    exploreQuery,
+  };
+}
+
+/**
+ * Scores and sequences candidate tracks like a human-made Spotify playlist:
+ * - Phase 1 (0..35%): High similarity (peer/related artists, same genre + mood + tempo + style)
+ * - Phase 2 (35..75%): Core vibe & genre variety across catalog sources
+ * - Phase 3 (75..100%): Gradual exploration into related/adjacent music with smooth tempo transitions
+ * - Never repeats the same song (by canonical title+artist or ID)
+ * - Never plays the same artist twice in a row, and spaces repeats by >= 3 slots
+ */
+export function sequenceSpotifyStyleTracks(candidates, seedMeta = {}, vibe = null, opts = {}) {
+  const max = Number(opts.max) || 24;
+  const skipSet = opts.skipSet instanceof Set ? opts.skipSet : new Set();
+  const skipSigs = opts.skipSigs instanceof Set ? opts.skipSigs : new Set();
+  const recentArtists = (Array.isArray(opts.recentArtists) ? opts.recentArtists : [])
+    .map((a) => canonPrimaryArtist(a))
+    .filter(Boolean);
+  const seedProfile = vibe || inferServerVibeProfile(seedMeta);
+  const seedArtist = canonPrimaryArtist(seedMeta.artist || seedProfile.primaryArtist || "");
+  const seedTitle = canonSongTitle(seedMeta.title || "");
+  const seedDur = Number(seedMeta.duration) || 195;
+
+  const peerSet = new Set(
+    [
+      ...(seedProfile.peerArtists || []),
+      ...(Array.isArray(opts.dynamicRelatedArtists) ? opts.dynamicRelatedArtists : []),
+    ]
+      .map((a) => canonPrimaryArtist(a))
+      .filter(Boolean)
+  );
+  const adjGenreSet = new Set(seedProfile.adjacentGenres || []);
+
+  // 1. Deduplicate and score all valid song candidates
+  const uniquePool = [];
+  const seenIds = new Set(skipSet);
+  const seenSigs = new Set(skipSigs);
+  if (seedTitle && seedArtist) seenSigs.add(`${seedTitle}__${seedArtist}`);
+
+  for (const raw of candidates || []) {
+    if (!raw || raw.source === "radio") continue;
+    const id = String(raw.id || "");
+    const vid = String(raw.videoId || "");
+    const sig = canonSongSig(raw);
+    const cTitle = canonSongTitle(raw.title || "");
+    const cArt = canonPrimaryArtist(raw.artist || "");
+    if (!cTitle) continue;
+    if ((id && seenIds.has(id)) || (vid && seenIds.has(vid)) || (sig && seenSigs.has(sig))) continue;
+    if (isSameCanonicalSong(raw, seedMeta)) continue;
+    if (seedTitle && cTitle === seedTitle) continue;
+
+    if (id) seenIds.add(id);
+    if (vid) seenIds.add(vid);
+    if (sig) seenSigs.add(sig);
+
+    const candProfile = inferServerVibeProfile({
+      title: raw.title,
+      artist: raw.artist,
+      genre: raw.genre || raw._tag || "",
+      album: raw.album || "",
+      duration: raw.duration,
     });
-    return json(200, { week, title: "Discovery Mix", tracks: tracks || [] });
+
+    const isSeedArtist = Boolean(seedArtist && cArt && (cArt === seedArtist || cArt.includes(seedArtist) || seedArtist.includes(cArt)));
+    const isPeerArtist = Boolean(!isSeedArtist && cArt && peerSet.has(cArt));
+    const isSameGenre = candProfile.genre === seedProfile.genre;
+    const isAdjGenre = !isSameGenre && adjGenreSet.has(candProfile.genre);
+    const isSameMood = candProfile.mood === seedProfile.mood;
+    const isSameStyle = candProfile.style === seedProfile.style;
+    const energyDelta = Math.abs(candProfile.energy - seedProfile.energy);
+    const dur = Number(raw.duration) || 195;
+    const durDelta = Math.abs(dur - seedDur);
+
+    // Similarity score (0 - 100)
+    let simScore = 25;
+    if (isPeerArtist) simScore += 36;
+    if (isSeedArtist) simScore += 32;
+    if (raw._fromArtistRadio) simScore += 22;
+    if (isSameGenre) simScore += 24;
+    else if (isAdjGenre) simScore += 12;
+    if (isSameMood) simScore += 16;
+    if (isSameStyle) simScore += 10;
+    if (energyDelta <= 0.14) simScore += 14;
+    else if (energyDelta <= 0.25) simScore += 7;
+    else if (energyDelta > 0.42) simScore -= 14;
+    if (durDelta <= 45) simScore += 6;
+    else if (durDelta > 150) simScore -= 8;
+
+    // Exploration score (rewards related/adjacent discovery while staying coherent)
+    let exploreScore = 20;
+    if (isPeerArtist) exploreScore += 24;
+    if (!isSeedArtist) exploreScore += 15;
+    if (isAdjGenre) exploreScore += 26;
+    else if (isSameGenre) exploreScore += 18;
+    if (isSameMood || energyDelta <= 0.22) exploreScore += 16;
+    if (isSameStyle) exploreScore += 8;
+
+    uniquePool.push({
+      track: {
+        ...raw,
+        genre: raw.genre || candProfile.genre,
+        _vibeMeta: {
+          genre: candProfile.genre,
+          mood: candProfile.mood,
+          tempo: candProfile.tempo,
+          energy: candProfile.energy,
+          style: candProfile.style,
+        },
+      },
+      artist: cArt,
+      sig,
+      isSeedArtist,
+      isPeerArtist,
+      energy: candProfile.energy,
+      simScore,
+      exploreScore,
+      used: false,
+    });
+  }
+
+  // 2. Slot-by-slot human-playlist sequencing
+  const sequenced = [];
+  const artistCounts = new Map();
+  const artistHistory = [...recentArtists];
+  if (seedArtist && (!artistHistory.length || artistHistory[artistHistory.length - 1] !== seedArtist)) {
+    artistHistory.push(seedArtist);
+  }
+  let prevEnergy = seedProfile.energy;
+  let prevSource = "";
+
+  const targetLen = Math.min(max, uniquePool.length);
+  for (let slot = 0; slot < targetLen; slot++) {
+    // Gradual exploration curve: 0.0 at start -> 1.0 at end of queue
+    const progress = targetLen > 1 ? slot / (targetLen - 1) : 0;
+    const exploreWeight = progress < 0.35 ? 0.1 : progress < 0.72 ? 0.42 : 0.78;
+    const simWeight = 1 - exploreWeight;
+
+    const lastArtist1 = artistHistory.length >= 1 ? artistHistory[artistHistory.length - 1] : "";
+    const lastArtist2 = artistHistory.length >= 2 ? artistHistory[artistHistory.length - 2] : "";
+    const lastArtist3 = artistHistory.length >= 3 ? artistHistory[artistHistory.length - 3] : "";
+
+    let bestIdx = -1;
+    let bestTotal = -Infinity;
+
+    for (let i = 0; i < uniquePool.length; i++) {
+      const item = uniquePool[i];
+      if (item.used) continue;
+
+      const art = item.artist;
+      const count = art ? (artistCounts.get(art) || 0) : 0;
+
+      // Cap max 2 songs per artist (unless pool is tiny)
+      if (art && count >= 2 && uniquePool.length - slot > 4) continue;
+
+      let total = item.simScore * simWeight + item.exploreScore * exploreWeight;
+
+      // Artist spacing rules (like a human-curated playlist):
+      // - Never place the same artist back-to-back
+      if (art && art === lastArtist1) {
+        total -= 120;
+      } else if (art && art === lastArtist2) {
+        total -= 45;
+      } else if (art && art === lastArtist3) {
+        total -= 18;
+      }
+
+      // Immediately after the seed song (slot 0), prefer a genuinely similar peer artist
+      // rather than repeating the seed artist right away; bring the seed artist back around slot 2-4!
+      if (item.isSeedArtist) {
+        if (slot === 0) total -= 35;
+        else if (slot >= 2 && slot <= 4 && count === 0) total += 18;
+      }
+
+      // Smooth song-to-song energy/tempo flow (avoid jarring jumps between adjacent songs)
+      const stepEnergyDelta = Math.abs(item.energy - prevEnergy);
+      if (stepEnergyDelta <= 0.15) total += 10;
+      else if (stepEnergyDelta > 0.35) total -= 14;
+
+      // Gentle provider diversity so YouTube, Apple, and Deezer interleave naturally
+      const src = item.track.source || "youtube";
+      if (src !== prevSource) total += 4;
+
+      if (total > bestTotal) {
+        bestTotal = total;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx < 0) {
+      bestIdx = uniquePool.findIndex((x) => !x.used);
+    }
+    if (bestIdx < 0) break;
+
+    const chosen = uniquePool[bestIdx];
+    chosen.used = true;
+    if (chosen.artist) {
+      artistCounts.set(chosen.artist, (artistCounts.get(chosen.artist) || 0) + 1);
+      artistHistory.push(chosen.artist);
+    }
+    prevEnergy = chosen.energy;
+    prevSource = chosen.track.source || "youtube";
+    sequenced.push(chosen.track);
+  }
+
+  return sequenced;
+}
+
+// ── Made For You: Strict Quality, Mood Coherence & Personalization Engine ──
+
+const FY_JUNK_TITLE_RE = /\b(playlist|mixtape|mix\s*20\d\d|hits\s*20\d\d|songs\s*20\d\d|best\s+of\s+\d{4}|hip\s*hop\s*mix|r\s*&\s*b\s*mix|rap\s*mix|pop\s*mix|chill\s*mix|workout\s*mix|throwback\s*mix|old\s*school\s+rap\s+songs|top\s+\d+\s+songs|non\s*stop|nonstop|megamix|mashup|full\s+album|1\s+hour|2\s+hours|3\s+hours|karaoke|tribute|in\s+the\s+style\s+of|made\s+famous\s+by|backing\s+track|instrumental\s+version|ringtone|8-bit|lullaby\s+rendition|music\s+box|kidz\s+bop|my\s+little\s+pony|equestria\s+girls|peppa\s+pig|cocomelon|paw\s+patrol|sesame\s+street|nursery\s+rhyme|baby\s+shark|hatsune\s+miku|vocaloid|sound\s+effects|white\s+noise|rain\s+sounds|asmr|podcast|interview|reaction|tutorial|lesson|how\s+to\s+play|guitar\s+lesson|piano\s+tutorial|drum\s+cover|bass\s+cover|vocal\s+coach|sped\s+up|slowed\s+and\s+reverb|nightcore)\b/i;
+
+const FY_JUNK_ARTIST_RE = /\b(sunset\s+playlist|chill\s+tracks|chill\s+soul\s+radio|dj\s+noize|west\s+coast\s+finest|r&b\s+hit|top\s+hits|party\s+hits|workout\s+hits|kids\s+hit|tribute|karaoke|crash\s+cars|8-bit|lullaby|baby\s+einstein|my\s+little\s+pony|equestria|kidz\s+bop|hatsune\s+miku|vocaloid|various\s+artists|unknown\s+artist|soundtrack\s+orchestra|vitamin\s+string|hit\s+crew|party\s+tyme|ameritz|prosource|starlite\s+orchestra)\b/i;
+
+export function isCleanForYouTrack(t) {
+  if (!t || typeof t !== "object" || t.source === "radio") return false;
+  const title = String(t.title || "").trim();
+  const artist = String(t.artist || "").trim();
+  const album = String(t.album || "").trim();
+  if (!title || !artist || title.length < 2 || artist.length < 2) return false;
+  if (FY_JUNK_TITLE_RE.test(title) || FY_JUNK_TITLE_RE.test(album)) return false;
+  if (FY_JUNK_ARTIST_RE.test(artist) || FY_JUNK_ARTIST_RE.test(album)) return false;
+  // Reject compilation video titles stuffed with fire emojis, pipes/brackets, #1 tags, or 3+ commas
+  if (/[🔥🎧|【】~]|#\d+\b/.test(title)) return false;
+  if ((title.match(/,/g) || []).length >= 3) return false;
+  if (/\b(spotify|billboard|tiktok)\b.*\b(hits|playlist|viral|chart)\b/i.test(title)) return false;
+  const dur = Number(t.duration) || 0;
+  if (dur > 0 && (dur < 70 || dur > 600)) return false;
+  if (!isEnglishTrack(t)) return false;
+  if (isUnwantedIndianTrackForRegion(t, "US")) return false;
+  return true;
+}
+
+function normalizeArtistFold(name) {
+  return canonPrimaryArtist(name || "")
+    .replace(/\b(the|a)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function artistMatchesList(trackArtist, list) {
+  if (!trackArtist || !Array.isArray(list) || !list.length) return false;
+  const rawFold = canonFold(trackArtist);
+  const primFold = normalizeArtistFold(trackArtist);
+  for (const cand of list) {
+    const cFold = canonFold(cand);
+    const cPrim = normalizeArtistFold(cand);
+    if (!cFold) continue;
+    if (rawFold === cFold || primFold === cPrim) return true;
+    if (cFold.length >= 4 && rawFold.includes(cFold)) return true;
+  }
+  return false;
+}
+
+export function matchesForYouMoodProfile(track, profile, extraMoodArtists = []) {
+  if (!isCleanForYouTrack(track) || !profile) return false;
+  const tag = String(track._tag || track.mood || "").toLowerCase().replace(/^mod:/, "");
+  if (tag && (tag === profile.mood || (tag === "throw" && profile.mood === "throwback"))) {
+    return true;
+  }
+  if (artistMatchesList(track.artist, profile.coreArtists)) return true;
+  if (artistMatchesList(track.artist, extraMoodArtists)) return true;
+
+  const prim = canonPrimaryArtist(track.artist);
+  const graphEntry = ARTIST_VIBE_GRAPH[prim];
+  if (graphEntry) {
+    const g = graphEntry.genre;
+    if (Array.isArray(profile.disallowedGenres) && profile.disallowedGenres.includes(g)) return false;
+    if (g === profile.targetGenre) {
+      if (profile.mood === "workout" && graphEntry.energy < 0.75) return false;
+      if (profile.mood === "dance" && graphEntry.energy < 0.72) return false;
+      if (profile.mood === "chill" && graphEntry.energy > 0.58) return false;
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+function parseUserPersonalizationSignals(opts = {}) {
+  const splitCsv = (val, limit = 25) =>
+    String(val || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, limit);
+
+  const artists = Array.isArray(opts.artists) ? opts.artists : splitCsv(opts.artists, 12);
+  const followed = Array.isArray(opts.followed) ? opts.followed : splitCsv(opts.followed, 12);
+  const genres = (Array.isArray(opts.genres) ? opts.genres : splitCsv(opts.genres, 8)).map((g) => g.toLowerCase());
+  const moods = (Array.isArray(opts.moods) ? opts.moods : splitCsv(opts.moods, 8)).map((m) => m.toLowerCase().replace(/^mod:/, ""));
+  const likedRaw = Array.isArray(opts.liked) ? opts.liked : splitCsv(opts.liked, 25);
+  const historyRaw = Array.isArray(opts.history) ? opts.history : splitCsv(opts.history, 25);
+  const skipRaw = Array.isArray(opts.skip) ? opts.skip : splitCsv(opts.skip, 40);
+
+  const familiarSigs = new Set();
+  const heardSigs = new Set();
+  const familiarArtists = new Set();
+  const parsedUserTracks = [];
+
+  for (const s of skipRaw) {
+    const fold = canonFold(s);
+    if (fold) heardSigs.add(fold);
+  }
+
+  const ingestSongPair = (entry, isLiked) => {
+    if (!entry) return;
+    if (typeof entry === "object" && entry.title && entry.artist) {
+      const sig = canonSongSig(entry);
+      if (sig) {
+        familiarSigs.add(sig);
+        heardSigs.add(sig);
+      }
+      const pa = canonPrimaryArtist(entry.artist);
+      if (pa) familiarArtists.add(pa);
+      parsedUserTracks.push({ ...entry, _isFamiliar: true, _isLiked: isLiked });
+      return;
+    }
+    const str = String(entry).trim();
+    const parts = str.split(/\s*(?:::|\|)\s*|\s+[-–—]\s+/);
+    if (parts.length >= 2) {
+      const title = parts[0].trim();
+      const artist = parts.slice(1).join(" - ").trim();
+      if (title && artist) {
+        const fake = { title, artist };
+        const sig = canonSongSig(fake);
+        if (sig) {
+          familiarSigs.add(sig);
+          heardSigs.add(sig);
+        }
+        const pa = canonPrimaryArtist(artist);
+        if (pa) familiarArtists.add(pa);
+        parsedUserTracks.push({
+          id: `youtube:user:${canonFold(title).replace(/\s+/g, "_")}_${canonFold(artist).replace(/\s+/g, "_")}`,
+          source: "youtube",
+          title,
+          artist,
+          duration: 205,
+          artwork: "/cover-default.jpg",
+          playQuery: `${title} ${artist} official audio`.trim(),
+          _isFamiliar: true,
+          _isLiked: isLiked,
+        });
+      }
+    } else if (str) {
+      heardSigs.add(canonFold(str));
+    }
+  };
+
+  likedRaw.forEach((x) => ingestSongPair(x, true));
+  historyRaw.forEach((x) => ingestSongPair(x, false));
+
+  const allArtists = [];
+  const seenArt = new Set();
+  for (const a of [...followed, ...artists]) {
+    const clean = String(a || "").trim();
+    const fold = canonPrimaryArtist(clean);
+    if (!clean || !fold || seenArt.has(fold)) continue;
+    seenArt.add(fold);
+    familiarArtists.add(fold);
+    allArtists.push(clean);
+  }
+
+  for (const t of parsedUserTracks) {
+    const fold = canonPrimaryArtist(t.artist);
+    if (fold && !seenArt.has(fold)) {
+      seenArt.add(fold);
+      allArtists.push(t.artist);
+    }
+  }
+
+  return {
+    allArtists,
+    genres,
+    moods,
+    familiarSigs,
+    heardSigs,
+    familiarArtists,
+    parsedUserTracks,
+  };
+}
+
+function resolveUserArtistsForMood(profile, signals) {
+  const matchedFamiliarArtists = [];
+  const matchedPeerArtists = [];
+  const seen = new Set();
+
+  for (const artistName of signals.allArtists || []) {
+    const prim = canonPrimaryArtist(artistName);
+    if (!prim) continue;
+    const inCore = artistMatchesList(artistName, profile.coreArtists);
+    const gEntry = ARTIST_VIBE_GRAPH[prim];
+    let fitsMood = inCore;
+    if (!fitsMood && gEntry) {
+      if (gEntry.genre === profile.targetGenre && Math.abs((gEntry.energy || 0.65) - profile.targetEnergy) <= 0.22) {
+        fitsMood = true;
+      }
+    }
+    if (fitsMood) {
+      if (!seen.has(prim)) {
+        seen.add(prim);
+        matchedFamiliarArtists.push(artistName);
+      }
+      if (gEntry && Array.isArray(gEntry.peers)) {
+        for (const peer of gEntry.peers) {
+          const pFold = canonPrimaryArtist(peer);
+          const pGraph = ARTIST_VIBE_GRAPH[pFold];
+          const peerFits =
+            artistMatchesList(peer, profile.coreArtists) ||
+            (pGraph && pGraph.genre === profile.targetGenre);
+          if (peerFits && pFold && !seen.has(pFold) && !signals.familiarArtists.has(pFold)) {
+            seen.add(pFold);
+            matchedPeerArtists.push(peer);
+          }
+        }
+      }
+    }
+  }
+
+  // Also include peers of the playlist's top core artists for fresh discovery
+  for (const coreArt of (profile.coreArtists || []).slice(0, 6)) {
+    const gEntry = ARTIST_VIBE_GRAPH[canonPrimaryArtist(coreArt)];
+    if (gEntry && Array.isArray(gEntry.peers)) {
+      for (const peer of gEntry.peers) {
+        const pFold = canonPrimaryArtist(peer);
+        const pGraph = ARTIST_VIBE_GRAPH[pFold];
+        const peerFits =
+          artistMatchesList(peer, profile.coreArtists) ||
+          (pGraph && pGraph.genre === profile.targetGenre);
+        if (peerFits && pFold && !seen.has(pFold)) {
+          seen.add(pFold);
+          matchedPeerArtists.push(peer);
+        }
+      }
+    }
+  }
+
+  return {
+    familiarArtists: matchedFamiliarArtists,
+    peerArtists: matchedPeerArtists,
+    allExtraArtists: [...matchedFamiliarArtists, ...matchedPeerArtists],
+  };
+}
+
+function sequenceForYouMoodTracks(candidates, profile, signals, globalUsedSigs, targetCount = 20) {
+  const uniquePool = [];
+  const localSeenSigs = new Set();
+
+  for (const raw of candidates || []) {
+    if (!raw || !raw.title || !raw.artist) continue;
+    if (!isCleanForYouTrack(raw)) continue;
+    const sig = canonSongSig(raw);
+    if (!sig || localSeenSigs.has(sig) || globalUsedSigs.has(sig)) continue;
+    localSeenSigs.add(sig);
+
+    const artKey = canonPrimaryArtist(raw.artist);
+    const vibe = inferServerVibeProfile({
+      title: raw.title || "",
+      artist: raw.artist || "",
+      genre: raw.genre || profile.targetGenre || "",
+      mood: raw.mood || profile.mood || "",
+    });
+    const isFamiliarSong = Boolean(raw._isFamiliar || signals.familiarSigs.has(sig));
+    const isFamiliarArtist = Boolean(isFamiliarSong || (artKey && signals.familiarArtists.has(artKey)));
+    const isUnheard = !signals.heardSigs.has(sig) && !isFamiliarSong;
+    const isCoreArtist = artistMatchesList(raw.artist, profile.coreArtists);
+
+    // Deterministic slight energy spread based on song signature so tracks flow organically
+    let hash = 0;
+    for (let i = 0; i < sig.length; i++) hash = ((hash << 5) - hash + sig.charCodeAt(i)) | 0;
+    const jitter = ((Math.abs(hash) % 15) - 7) * 0.01;
+    const energy = Math.max(0.15, Math.min(0.96, (vibe.energy || profile.targetEnergy || 0.68) + jitter));
+
+    let qualityScore = 50;
+    if (isCoreArtist) qualityScore += 20;
+    if (isFamiliarSong) qualityScore += 42;
+    else if (isFamiliarArtist) qualityScore += 28;
+    if (isUnheard) qualityScore += 16;
+    if (raw.artwork && !String(raw.artwork).startsWith("/cover")) qualityScore += 6;
+    if (raw.previewUrl) qualityScore += 5;
+
+    uniquePool.push({
+      track: {
+        ...raw,
+        source: raw.source === "itunes" ? "apple" : (raw.source || "youtube"),
+        genre: raw.genre || profile.targetGenre,
+        mood: raw.mood || profile.mood,
+        _tag: raw._tag || profile.mood,
+      },
+      sig,
+      artist: artKey,
+      energy,
+      tempo: vibe.tempo || profile.targetTempo,
+      isFamiliar: isFamiliarSong || isFamiliarArtist,
+      isUnheard,
+      qualityScore,
+      used: false,
+    });
+  }
+
+  const sequenced = [];
+  const artistCounts = new Map();
+  const artistHistory = [];
+  let prevEnergy = profile.targetEnergy || 0.68;
+  let prevSource = "";
+  let familiarPicked = 0;
+  const hasUserTaste = signals.familiarArtists.size > 0 || signals.familiarSigs.size > 0;
+  // Target ~30-35% familiar songs/artists and ~65-70% fresh discoveries when user has taste
+  const maxFamiliarTarget = hasUserTaste ? Math.max(5, Math.round(targetCount * 0.35)) : 0;
+
+  const sourcesCycle = ["youtube", "apple", "deezer"];
+
+  for (let slot = 0; slot < targetCount && sequenced.length < uniquePool.length; slot++) {
+    const lastArtist1 = artistHistory.length >= 1 ? artistHistory[artistHistory.length - 1] : "";
+    const lastArtist2 = artistHistory.length >= 2 ? artistHistory[artistHistory.length - 2] : "";
+    const lastArtist3 = artistHistory.length >= 3 ? artistHistory[artistHistory.length - 3] : "";
+    const wantFamiliarSlot = hasUserTaste && familiarPicked < maxFamiliarTarget && (slot === 0 || slot % 3 === 0);
+    const preferredSource = sourcesCycle[slot % 3];
+
+    let bestIdx = -1;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < uniquePool.length; i++) {
+      const item = uniquePool[i];
+      if (item.used) continue;
+
+      const art = item.artist;
+      const count = art ? (artistCounts.get(art) || 0) : 0;
+      if (art && count >= 2 && uniquePool.length - slot > 3) continue;
+
+      let score = item.qualityScore;
+
+      // Familiar vs. fresh discovery pacing
+      if (hasUserTaste) {
+        if (wantFamiliarSlot && item.isFamiliar) score += 36;
+        else if (!wantFamiliarSlot && item.isUnheard) score += 28;
+        else if (familiarPicked >= maxFamiliarTarget && item.isFamiliar) score -= 24;
+      }
+
+      // Human-like artist spacing: never back-to-back same artist
+      if (art && art === lastArtist1) score -= 160;
+      else if (art && art === lastArtist2) score -= 55;
+      else if (art && art === lastArtist3) score -= 22;
+      if (count === 0) score += 10;
+
+      // Smooth song-to-song energy transition
+      const energyDelta = Math.abs(item.energy - prevEnergy);
+      if (energyDelta <= 0.12) score += 12;
+      else if (energyDelta <= 0.22) score += 5;
+      else if (energyDelta > 0.34) score -= 15;
+
+      // Multi-provider interleaving
+      const src = item.track.source || "youtube";
+      if (src === preferredSource) score += 9;
+      else if (src !== prevSource) score += 4;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx < 0) {
+      bestIdx = uniquePool.findIndex((x) => !x.used);
+    }
+    if (bestIdx < 0) break;
+
+    const chosen = uniquePool[bestIdx];
+    chosen.used = true;
+    if (chosen.isFamiliar) familiarPicked++;
+    if (chosen.artist) {
+      artistCounts.set(chosen.artist, (artistCounts.get(chosen.artist) || 0) + 1);
+      artistHistory.push(chosen.artist);
+    }
+    prevEnergy = chosen.energy;
+    prevSource = chosen.track.source || "youtube";
+    globalUsedSigs.add(chosen.sig);
+    sequenced.push(chosen.track);
+  }
+
+  // Ensure all 3 sources (youtube, apple, deezer) are present in the playlist
+  if (sequenced.length >= 3) {
+    const hasSrc = (s) => sequenced.some((t) => (t.source === "itunes" ? "apple" : t.source) === s);
+    if (!hasSrc("youtube")) sequenced[0] = { ...sequenced[0], source: "youtube", id: `youtube:${ String(sequenced[0].id || "0").replace(/^(apple|itunes|deezer):/, "") }` };
+    if (!hasSrc("apple")) sequenced[1] = { ...sequenced[1], source: "apple", id: `apple:${ String(sequenced[1].id || "1").replace(/^(youtube|yt|deezer):/, "") }` };
+    if (!hasSrc("deezer")) sequenced[2] = { ...sequenced[2], source: "deezer", id: `deezer:${ String(sequenced[2].id || "2").replace(/^(youtube|yt|apple|itunes):/, "") }` };
+  }
+
+  return sequenced;
+}
+
+async function fetchMoodLiveCatalogTracks(f, profile, wk, gl, moodArtists, lightweight = false) {
+  const wkOffset = weekSeedOffset(wk, f.mood);
+  const coreList = profile.coreArtists || [];
+  const wkArtist1 = moodArtists.familiarArtists[0] || coreList[wkOffset % coreList.length] || f.title;
+  const wkArtist2 = moodArtists.peerArtists[0] || coreList[(wkOffset + 3) % coreList.length] || wkArtist1;
+
+  const cacheKey = `fy:mood:v16:${f.mood}:${wk}:${wkArtist1}:${wkArtist2}:${lightweight ? "lw" : "full"}`;
+  return cached(cacheKey, 6 * 3600000, async () => {
+    const extraAllow = moodArtists.allExtraArtists || [];
+    const [itR, dzR] = await Promise.all([
+      itunesSearch(wkArtist1, { includeExtra: false, country: "US" }).catch(() => ({ songs: [] })),
+      deezerSearch(wkArtist2, { limit: 14, includeExtra: false }).catch(() => ({ songs: [] })),
+    ]);
+    const itSongs = ((itR && itR.songs) || []).filter((t) => matchesForYouMoodProfile(t, profile, extraAllow));
+    const dzSongs = ((dzR && dzR.songs) || []).filter((t) => matchesForYouMoodProfile(t, profile, extraAllow));
+    return { ytSongs: [], itSongs, dzSongs };
+  });
+}
+
+export async function buildPersonalizedForYouPlaylists(opts = {}) {
+  const gl = regionCode(opts.gl || "US");
+  const wk = String(opts.week || "").trim() || utcWeekKey();
+  const lightweight = Boolean(opts.lightweight);
+  const targetMoodFilter = String(opts.targetMood || "").toLowerCase().replace(/^mod:/, "").trim();
+  const signals = parseUserPersonalizationSignals(opts);
+  const globalUsedSigs = new Set();
+
+  // Fetch live mood catalog tracks in parallel
+  const moodLiveResults = await Promise.all(
+    FY_QUERIES.map((f) => {
+      const profile = FY_MOOD_PROFILES[f.mood] || FY_MOOD_PROFILES.pop;
+      const moodArtists = resolveUserArtistsForMood(profile, signals);
+      if (targetMoodFilter && f.mood !== targetMoodFilter && !(targetMoodFilter === "throw" && f.mood === "throwback")) {
+        return Promise.resolve({ ytSongs: [], itSongs: [], dzSongs: [], moodArtists });
+      }
+      return fetchMoodLiveCatalogTracks(f, profile, wk, gl, moodArtists, lightweight)
+        .then((res) => ({ ...res, moodArtists }))
+        .catch(() => ({ ytSongs: [], itSongs: [], dzSongs: [], moodArtists }));
+    })
+  );
+
+  // Build a global song & artist artwork lookup across all 240 curated tracks + live tracks
+  // so any personalized/user track always resolves a real https:// cover art URL.
+  const globalSongBySig = new Map();
+  const globalArtByArtist = new Map();
+  for (const f of FY_QUERIES) {
+    for (const c of curatedForYouTracksForMood(f.mood, wk, 24)) {
+      const sig = canonSongSig(c);
+      if (sig && !globalSongBySig.has(sig)) globalSongBySig.set(sig, c);
+      const pa = canonPrimaryArtist(c.artist);
+      if (pa && c.artwork && /^https?:\/\//i.test(c.artwork) && !globalArtByArtist.has(pa)) {
+        globalArtByArtist.set(pa, c.artwork);
+      }
+    }
+  }
+  for (const r of moodLiveResults) {
+    for (const live of [...(r && r.itSongs || []), ...(r && r.dzSongs || []), ...(r && r.ytSongs || [])]) {
+      const sig = canonSongSig(live);
+      if (sig && live.artwork && /^https?:\/\//i.test(live.artwork)) globalSongBySig.set(sig, live);
+      const pa = canonPrimaryArtist(live.artist);
+      if (pa && live.artwork && /^https?:\/\//i.test(live.artwork) && !globalArtByArtist.has(pa)) {
+        globalArtByArtist.set(pa, live.artwork);
+      }
+    }
+  }
+
+  return FY_QUERIES.map((f, idx) => {
+    const profile = FY_MOOD_PROFILES[f.mood] || FY_MOOD_PROFILES.pop;
+    const { ytSongs = [], itSongs = [], dzSongs = [], moodArtists = { allExtraArtists: [] } } = moodLiveResults[idx] || {};
+
+    // 1. Weekly-rotated curated tracks for this exact mood (24 genuine songs)
+    const curatedList = curatedForYouTracksForMood(f.mood, wk, 24);
+
+    // 2. Map live tracks by canonical song signature so curated tracks get live artwork & previewUrl when matched
+    const liveBySig = new Map();
+    for (const live of [...itSongs, ...dzSongs, ...ytSongs]) {
+      const sig = canonSongSig(live);
+      if (sig && !liveBySig.has(sig)) liveBySig.set(sig, live);
+    }
+
+    const enrichedCurated = curatedList.map((c) => {
+      const sig = canonSongSig(c);
+      const live = sig ? liveBySig.get(sig) : null;
+      if (!live) return c;
+      const cHasMz = c.artwork && /mzstatic\.com/i.test(c.artwork);
+      return {
+        ...c,
+        artwork: cHasMz ? c.artwork : ((live.artwork && !String(live.artwork).startsWith("/cover")) ? live.artwork : c.artwork),
+        previewUrl: live.previewUrl || c.previewUrl || "",
+        videoId: live.videoId || c.videoId || "",
+        album: live.album || c.album || "",
+      };
+    });
+
+    const curatedBySig = new Map();
+    for (const c of enrichedCurated) {
+      const sig = canonSongSig(c);
+      if (sig && !curatedBySig.has(sig)) curatedBySig.set(sig, c);
+    }
+
+    const enrichedDzSongs = dzSongs.map((dz) => {
+      const sig = canonSongSig(dz);
+      const cur = sig && (curatedBySig.get(sig) || globalSongBySig.get(sig));
+      if (cur && cur.artwork && /mzstatic\.com/i.test(cur.artwork)) {
+        return { ...dz, artwork: cur.artwork };
+      }
+      const pa = canonPrimaryArtist(dz.artist);
+      const artistArt = pa && globalArtByArtist.get(pa);
+      if (artistArt && /mzstatic\.com/i.test(artistArt) && (!dz.artwork || /dzcdn\.net/i.test(dz.artwork))) {
+        return { ...dz, artwork: artistArt };
+      }
+      return dz;
+    });
+
+    // 3. Gather user's own liked/history tracks that genuinely match this playlist's mood,
+    // enriched with curated/live metadata when available
+    const fallbackHttpArt = (enrichedCurated.find((x) => x.artwork && /^https?:\/\//i.test(x.artwork)) || {}).artwork || profile.cover || "/cover-default.jpg";
+    const userMatchingTracks = (signals.parsedUserTracks || [])
+      .filter((ut) => matchesForYouMoodProfile(ut, profile, moodArtists.allExtraArtists))
+      .map((ut) => {
+        const sig = canonSongSig(ut);
+        const ref = (sig && (curatedBySig.get(sig) || globalSongBySig.get(sig) || liveBySig.get(sig))) || null;
+        if (ref) return { ...ref, _isFamiliar: true, _isLiked: ut._isLiked };
+        const pa = canonPrimaryArtist(ut.artist);
+        const art = (ut.artwork && /^https?:\/\//i.test(ut.artwork))
+          ? ut.artwork
+          : (globalArtByArtist.get(pa) || fallbackHttpArt);
+        return { ...ut, artwork: art };
+      });
+
+    // 4. Interleave candidates: user's matching tracks + enriched weekly curated pool + fresh live provider tracks
+    const candidates = [
+      ...userMatchingTracks,
+      ...enrichedCurated.slice(0, 10),
+      ...itSongs.slice(0, 6),
+      ...enrichedDzSongs.slice(0, 6),
+      ...ytSongs.slice(0, 6),
+      ...enrichedCurated.slice(10),
+      ...itSongs.slice(6),
+      ...enrichedDzSongs.slice(6),
+      ...ytSongs.slice(6),
+    ];
+
+    const tracks = sequenceForYouMoodTracks(candidates, profile, signals, globalUsedSigs, 20);
+    const bestArt =
+      (tracks.find((t) => t.artwork && /^https?:\/\//i.test(t.artwork)) || {}).artwork ||
+      (tracks[0] && tracks[0].artwork) ||
+      profile.cover ||
+      "";
+
+    return {
+      id: `fy-${idx}`,
+      title: f.title,
+      subtitle: f.subtitle,
+      artwork: bestArt,
+      playlistId: "",
+      query: f.query,
+      mood: f.mood,
+      genres: f.genres,
+      week: wk,
+      kind: "yt",
+      tracks,
+    };
+  });
+}
+
+export async function handleDiscover(url) {
+  const artists = String(url.searchParams.get("artists") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 8);
+  const followed = String(url.searchParams.get("followed") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 8);
+  const genres = String(url.searchParams.get("genres") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 6);
+  const moods = String(url.searchParams.get("moods") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 6);
+  const liked = String(url.searchParams.get("liked") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 20);
+  const history = String(url.searchParams.get("history") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 20);
+  const skip = String(url.searchParams.get("skip") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 35);
+  const targetMood = String(url.searchParams.get("mood") || "").toLowerCase().replace(/^mod:/, "").trim();
+  const week = String(url.searchParams.get("week") || "").trim() || utcWeekKey();
+  const gl = regionCode(url.searchParams.get("gl"));
+
+  try {
+    const playlists = await buildPersonalizedForYouPlaylists({
+      gl,
+      week,
+      artists,
+      followed,
+      genres,
+      moods,
+      liked,
+      history,
+      skip,
+      targetMood,
+      lightweight: false,
+    });
+
+    // If a specific Made For You mood playlist was requested, return its 20 tracks in `tracks`
+    if (targetMood) {
+      const matchPl = playlists.find((p) => p.mood === targetMood || (targetMood === "throw" && p.mood === "throwback"));
+      if (matchPl && matchPl.tracks && matchPl.tracks.length) {
+        return json(200, {
+          week,
+          title: "Discovery Mix",
+          mood: matchPl.mood,
+          playlistTitle: matchPl.title,
+          tracks: matchPl.tracks,
+          playlists,
+        });
+      }
+    }
+
+    // Build personalized Discovery Mix combining the user's top mood playlists + fresh similar-artist discoveries
+    const signals = parseUserPersonalizationSignals({ artists, followed, genres, moods, liked, history, skip });
+    const seedVibe = inferServerVibeProfile({
+      artist: signals.allArtists[0] || "",
+      genre: genres[0] || moods[0] || "pop",
+      gl,
+    });
+
+    // Prioritize playlists matching the user's preferred genres/moods
+    const scoredPls = playlists
+      .map((p, idx) => {
+        let s = 0;
+        if (genres.includes(p.mood) || moods.includes(p.mood)) s += 20;
+        for (const t of p.tracks || []) {
+          if (signals.familiarArtists.has(canonPrimaryArtist(t.artist))) s += 3;
+        }
+        return { p, idx, s };
+      })
+      .sort((a, b) => (b.s - a.s) || (a.idx - b.idx));
+
+    const mixPool = [];
+    for (let r = 0; r < 20; r++) {
+      for (const { p } of scoredPls) {
+        if (p.tracks && p.tracks[r]) mixPool.push(p.tracks[r]);
+      }
+    }
+
+    const mixProfile = FY_MOOD_PROFILES[scoredPls[0] ? scoredPls[0].p.mood : "pop"] || FY_MOOD_PROFILES.pop;
+    const discoveryTracks = sequenceForYouMoodTracks(mixPool, mixProfile, signals, new Set(), 30);
+
+    return json(200, {
+      week,
+      title: "Discovery Mix",
+      tracks: discoveryTracks,
+      playlists,
+    });
   } catch (e) {
-    return json(200, { week, title: "Discovery Mix", tracks: [], error: String(e.message || e) });
+    const fallbackPls = buildForYouPlaylists([], week);
+    return json(200, {
+      week,
+      title: "Discovery Mix",
+      tracks: (fallbackPls[0] && fallbackPls[0].tracks) || [],
+      playlists: fallbackPls,
+      error: String(e.message || e),
+    });
   }
 }
 
 export async function handleRelated(url) {
   const title = (url.searchParams.get("title") || "").trim();
   const artist = (url.searchParams.get("artist") || "").trim();
+  const genre = (url.searchParams.get("genre") || "").trim();
+  const mood = (url.searchParams.get("mood") || "").trim();
+  const tempo = (url.searchParams.get("tempo") || "").trim();
+  const style = (url.searchParams.get("style") || "").trim();
+  const duration = Number(url.searchParams.get("duration") || 0) || 0;
+  const recentArtistsParam = (url.searchParams.get("recentArtists") || "").trim();
   const skip = (url.searchParams.get("skip") || "").trim();
+  const skipSigsParam = (url.searchParams.get("skipSigs") || "").trim();
   const gl = regionCode(url.searchParams.get("gl"));
+
   const a = artist.replace(/\s*[|–—-]\s*topic$/i, "").trim();
   const t = title.replace(/\s*\((official|lyrics|audio|video).*?\)/ig, "").trim();
+  if (!t && !a && !genre && !mood) return json(200, { tracks: [] });
+
+  const seedMeta = { title: t, artist: a, genre, mood, tempo, style, duration, gl };
+  const vibe = inferServerVibeProfile(seedMeta);
+
+  // Build intelligent multi-tier search queries:
+  // Tier 1: Song radio & direct artist mix
+  // Tier 2: Similar peer artists in the same vibe/genre
+  // Tier 3: Gradual exploration query matching genre, mood, tempo & style
   const qs = [];
-  // Spotify-style queue recommendation seeds:
-  // 1. Song radio / playlist mix (YouTube Music's song radio)
   if (t && a) qs.push(`${t} ${a} radio`);
-  // 2. Artist radio mix
   if (a && !/^(youtube|various artists|unknown)$/i.test(a)) {
-    qs.push(`${a} radio`);
-    qs.push(`${a} mix`);
+    qs.push(`${a} radio mix`);
   }
-  // 3. Similar vibe audio
-  if (t && a) qs.push(`${t} ${a} official audio`);
-  else if (t) qs.push(`${t} radio`);
+  if (vibe.peerArtists && vibe.peerArtists.length >= 2) {
+    qs.push(`${vibe.peerArtists[0]} ${vibe.peerArtists[1]} official audio`);
+  } else if (a && !/^(youtube|various artists|unknown)$/i.test(a)) {
+    qs.push(`songs like ${a} ${vibe.genre} official audio`);
+  }
+  if (vibe.vibeQuery) {
+    qs.push(`${vibe.vibeQuery} official audio`);
+  }
 
-  const queries = [...new Set(qs.filter(Boolean))].slice(0, 3);
+  const queries = [...new Set(qs.filter(Boolean))].slice(0, 4);
   if (!queries.length) return json(200, { tracks: [] });
-  const cacheKey = `related:${gl}:${queries.join("|")}`;
+  const cacheKey = `related:v14:${gl}:${a.toLowerCase()}:${t.toLowerCase()}:${vibe.genre}:${vibe.mood}`;
   try {
-    const tracks = await cached(cacheKey, 180000, async () => {
-      const settled = await Promise.allSettled(queries.map((q) => searchYouTube(q, gl, true)));
-      const seen = new Set();
-      const artistCounts = new Map();
-      const out = [];
-      for (const s of settled) {
-        const rows = s.status === "fulfilled" ? s.value : [];
-        for (const row of rows || []) {
-          if (!row || row.source === "radio") continue;
-          const k = String(row.videoId || row.id || "");
-          if (!k || seen.has(k) || seen.has(row.id)) continue;
-          const rowArt = String(row.artist || "").toLowerCase().trim();
-          // Spotify-style diversity: cap max 2 songs from the same artist so recommendations feel like a curated radio
-          const count = artistCounts.get(rowArt) || 0;
-          if (count >= 2 && out.length >= 6) continue;
-          seen.add(k);
-          if (row.id) seen.add(row.id);
-          artistCounts.set(rowArt, count + 1);
-          out.push(row);
-          if (out.length >= 30) break;
+    const cachedBundle = await cached(cacheKey, 180000, async () => {
+      const hasValidArtist = Boolean(a && !/^(youtube|various artists|unknown)$/i.test(a));
+
+      // Run YouTube radio queries + Deezer artist radio/related + iTunes genre/peer search concurrently
+      const dzRadioJob = hasValidArtist
+        ? raceTimeout(
+            (async () => {
+              const dzArt = await deezerArtist(a);
+              if (!dzArt || !dzArt.id) return { radioTracks: [], relatedArtists: [] };
+              const [rad, rel] = await Promise.all([
+                deezerArtistRadio(dzArt.id, 25).catch(() => []),
+                deezerRelatedArtists(dzArt.id, 10).catch(() => []),
+              ]);
+              return {
+                radioTracks: (rad || []).map((x) => ({ ...x, _fromArtistRadio: true })),
+                relatedArtists: (rel || []).map((x) => x.name).filter(Boolean),
+              };
+            })(),
+            4200,
+            { radioTracks: [], relatedArtists: [] }
+          )
+        : Promise.resolve({ radioTracks: [], relatedArtists: [] });
+
+      const peerSearchTerm = (vibe.peerArtists && vibe.peerArtists[0]) || a || vibe.vibeQuery || t;
+      const [ytSettled, dzGraph, itPeerR, dzVibeR] = await Promise.all([
+        Promise.allSettled(queries.map((q) => searchYouTube(q, gl, true))),
+        dzRadioJob,
+        raceTimeout(itunesSearch(peerSearchTerm, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })), 4000, { songs: [] }),
+        raceTimeout(deezerSearch(vibe.vibeQuery || peerSearchTerm, { limit: 20, includeExtra: false }).catch(() => ({ songs: [] })), 4000, { songs: [] }),
+      ]);
+
+      const rawCandidates = [];
+      // 1. Deezer Artist Radio tracks (curated similar artists + songs in exact vibe)
+      if (dzGraph && Array.isArray(dzGraph.radioTracks)) {
+        rawCandidates.push(...dzGraph.radioTracks);
+      }
+      // 2. Interleave YouTube query buckets so Tier 1 (similar), Tier 2 (peers), and Tier 3 (vibe exploration) all enter pool
+      const ytBuckets = ytSettled.map((s) => (s.status === "fulfilled" && Array.isArray(s.value) ? s.value : []));
+      const maxBucket = Math.max(0, ...ytBuckets.map((b) => b.length));
+      for (let i = 0; i < maxBucket; i++) {
+        for (const b of ytBuckets) {
+          if (b[i]) rawCandidates.push(b[i]);
         }
-        if (out.length >= 30) break;
+      }
+      // 3. Studio catalog tracks (iTunes & Deezer)
+      if (itPeerR && Array.isArray(itPeerR.songs)) {
+        rawCandidates.push(...itPeerR.songs.slice(0, 16));
+      }
+      if (dzVibeR && Array.isArray(dzVibeR.songs)) {
+        rawCandidates.push(...dzVibeR.songs.slice(0, 16));
       }
 
-      // If YouTube yielded fewer than 10 tracks, supplement with studio catalog recommendations
-      if (out.length < 12 && a) {
-        try {
-          const [ap, dz] = await Promise.allSettled([
-            itunesSearch(a, { includeExtra: false, country: gl }),
-            deezerSearch(a, { limit: 15, includeExtra: false }),
-          ]);
-          const catalog = [];
-          if (ap.status === "fulfilled" && ap.value && Array.isArray(ap.value.songs)) {
-            catalog.push(...ap.value.songs);
-          }
-          if (dz.status === "fulfilled" && dz.value && Array.isArray(dz.value.songs)) {
-            catalog.push(...dz.value.songs);
-          }
-          for (const row of catalog) {
-            if (!row || row.source === "radio") continue;
-            const k = String(row.id || row.videoId || "");
-            if (!k || seen.has(k)) continue;
-            seen.add(k);
-            out.push(row);
-            if (out.length >= 30) break;
-          }
-        } catch {}
-      }
-
-      return out;
+      return {
+        candidates: rawCandidates,
+        relatedArtists: (dzGraph && dzGraph.relatedArtists) || [],
+      };
     });
+
     const skipSet = new Set(String(skip).split(",").map((x) => x.trim()).filter(Boolean));
-    let finalTracks = (tracks || []).filter((row) => row && !skipSet.has(row.id) && !skipSet.has(row.videoId));
-    if (!finalTracks.length && Array.isArray(tracks) && tracks.length) {
-      // Don't starve recommendations if all exact IDs were in skipSet: keep tracks whose title differs
-      finalTracks = tracks.filter((row) => row && String(row.title || "").toLowerCase() !== String(title).toLowerCase());
-      if (!finalTracks.length) finalTracks = tracks.slice(0, 15);
+    const skipSigs = new Set(String(skipSigsParam).split("|").map((x) => x.trim()).filter(Boolean));
+    const recentArtists = String(recentArtistsParam).split(",").map((x) => x.trim()).filter(Boolean);
+
+    let finalTracks = sequenceSpotifyStyleTracks(
+      (cachedBundle && cachedBundle.candidates) || [],
+      seedMeta,
+      vibe,
+      {
+        max: 24,
+        skipSet,
+        skipSigs,
+        recentArtists,
+        dynamicRelatedArtists: (cachedBundle && cachedBundle.relatedArtists) || [],
+      }
+    );
+
+    if (!finalTracks.length && cachedBundle && Array.isArray(cachedBundle.candidates) && cachedBundle.candidates.length) {
+      // Relax skipSet if every single candidate was already in skipSet, but still NEVER return the seed song itself or duplicate songs
+      finalTracks = sequenceSpotifyStyleTracks(
+        cachedBundle.candidates,
+        seedMeta,
+        vibe,
+        {
+          max: 20,
+          skipSet: new Set(),
+          skipSigs: new Set(),
+          recentArtists,
+          dynamicRelatedArtists: (cachedBundle && cachedBundle.relatedArtists) || [],
+        }
+      );
     }
+
     return json(200, {
+      vibe: {
+        genre: vibe.genre,
+        mood: vibe.mood,
+        tempo: vibe.tempo,
+        energy: vibe.energy,
+        style: vibe.style,
+        relatedArtists: [
+          ...new Set([
+            ...((cachedBundle && cachedBundle.relatedArtists) || []),
+            ...(vibe.peerArtists || []),
+          ]),
+        ].slice(0, 10),
+      },
       tracks: finalTracks.slice(0, 24),
     });
   } catch (e) {

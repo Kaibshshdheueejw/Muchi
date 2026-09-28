@@ -8,6 +8,24 @@
 
 const DOH = "https://cloudflare-dns.com/dns-query";
 
+// Known public media CDNs and isolate-level DNS cache so /api/stream Range chunks
+// and /api/img artwork requests don't burn 2 DNS-over-HTTPS subrequests per chunk.
+const TRUSTED_CDN_SUFFIXES = [
+  ".googlevideo.com",
+  ".youtube.com",
+  ".ytimg.com",
+  ".ggpht.com",
+  ".dzcdn.net",
+  ".deezer.com",
+  ".mzstatic.com",
+  ".apple.com",
+  ".itunes.com",
+  ".audius.co",
+  ".cultur3stake.com",
+];
+const verifiedHostCache = new Map();
+const DNS_CACHE_TTL = 30 * 60 * 1000;
+
 /** Verbatim port of server.js isPrivateIp(). */
 export function isPrivateIp(ip) {
   if (!ip) return true;
@@ -52,9 +70,19 @@ export async function assertPublicUrl(src) {
   if (!/^https?:\/\//i.test(src)) throw new Error("bad url");
   const u = new URL(src);
   const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (!host) throw new Error("bad host");
+  if (!host || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".lan")) {
+    throw new Error("bad host");
+  }
   if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host) || host.includes(":")) {
     if (isPrivateIp(host)) throw new Error("private address blocked");
+    return true;
+  }
+  if (TRUSTED_CDN_SUFFIXES.some((sfx) => host.endsWith(sfx))) {
+    return true;
+  }
+  const now = Date.now();
+  const cachedExp = verifiedHostCache.get(host);
+  if (cachedExp && cachedExp > now) {
     return true;
   }
   const [a4, a6] = await Promise.all([
@@ -66,5 +94,10 @@ export async function assertPublicUrl(src) {
   for (const addr of addrs) {
     if (isPrivateIp(addr)) throw new Error("private address blocked");
   }
+  if (verifiedHostCache.size > 500) {
+    const first = verifiedHostCache.keys().next().value;
+    if (first) verifiedHostCache.delete(first);
+  }
+  verifiedHostCache.set(host, now + DNS_CACHE_TTL);
   return true;
 }

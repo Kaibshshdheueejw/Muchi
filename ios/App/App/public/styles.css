@@ -2306,14 +2306,17 @@ img { max-width: 100%; display: block; }
 }
 .eq i {
   width: 3px;
+  height: 12px;
+  transform-origin: bottom;
+  will-change: transform;
   background: var(--md-sys-color-primary);
   animation: bounce 0.8s infinite ease-in-out;
 }
 .eq i:nth-child(2) { animation-delay: .15s; }
 .eq i:nth-child(3) { animation-delay: .28s; }
 @keyframes bounce {
-  0%, 100% { height: 3px; }
-  50% { height: 12px; }
+  0%, 100% { transform: scaleY(0.25); }
+  50% { transform: scaleY(1); }
 }
 .meta { min-width: 0; }
 .meta strong, .meta span, .meta .artist-link {
@@ -2858,6 +2861,21 @@ html[data-theme="light"] .ly-head #nowBack {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex: 1 1 auto;
+}
+.ly-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.ly-head-actions .icon-btn {
+  width: 36px;
+  height: 36px;
+}
+.ly-head-actions .icon-btn.on {
+  color: var(--song-primary);
 }
 .ly-meta img {
   width: 42px;
@@ -2879,6 +2897,7 @@ html[data-theme="light"] .ly-head #nowBack {
   font-size: 12px;
   color: var(--md-sys-color-on-surface-variant);
 }
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(1) > div#lyScroll:nth-of-type(3),
 .ly-scroll {
   position: relative;
   z-index: 1;
@@ -2887,7 +2906,8 @@ html[data-theme="light"] .ly-head #nowBack {
   overflow: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding: calc(72px + 6vh) 22px 22vh;
+  padding: calc(84px + 6vh) 22px 22vh;
+  margin-top: 6px;
   scroll-behavior: smooth;
 }
 /* Now-playing quick actions: download / queue / lyrics */
@@ -3044,7 +3064,115 @@ html[data-ui="glass"] .now-actions .ly-icon {
   box-sizing: border-box;
   min-width: 0;
 }
+.set-label {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.set-label > div {
+  min-width: 0;
+  flex: 1;
+}
+.set-ico {
+  --ico-c: var(--md-sys-color-primary);
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 20px;
+  background: color-mix(in srgb, var(--ico-c) 16%, var(--md-sys-color-surface-container-highest));
+  color: var(--ico-c);
+  border: 1px solid color-mix(in srgb, var(--ico-c) 26%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--ico-c) 12%, transparent);
+}
+.set-ico[data-ico="violet"] { --ico-c: #a78bfa; }
+.set-ico[data-ico="amber"] { --ico-c: #fbbf24; }
+.set-ico[data-ico="pink"] { --ico-c: #f472b6; }
+.set-ico[data-ico="cyan"] { --ico-c: #22d3ee; }
+.set-ico[data-ico="emerald"] { --ico-c: #34d399; }
+.set-ico[data-ico="purple"] { --ico-c: #c084fc; }
+.set-ico[data-ico="blue"] { --ico-c: #60a5fa; }
+.set-ico[data-ico="orange"] { --ico-c: #fb923c; }
+.set-ico[data-ico="teal"] { --ico-c: #2dd4bf; }
+.set-ico[data-ico="rose"] { --ico-c: #fb7185; }
+.set-ico[data-ico="indigo"] { --ico-c: #818cf8; }
+html[data-theme="light"] .set-ico[data-ico="violet"] { --ico-c: #7c3aed; }
+html[data-theme="light"] .set-ico[data-ico="amber"] { --ico-c: #d97706; }
+html[data-theme="light"] .set-ico[data-ico="pink"] { --ico-c: #db2777; }
+html[data-theme="light"] .set-ico[data-ico="cyan"] { --ico-c: #0891b2; }
+html[data-theme="light"] .set-ico[data-ico="emerald"] { --ico-c: #059669; }
+html[data-theme="light"] .set-ico[data-ico="purple"] { --ico-c: #9333ea; }
+html[data-theme="light"] .set-ico[data-ico="blue"] { --ico-c: #2563eb; }
+html[data-theme="light"] .set-ico[data-ico="orange"] { --ico-c: #ea580c; }
+html[data-theme="light"] .set-ico[data-ico="teal"] { --ico-c: #0d9488; }
+html[data-theme="light"] .set-ico[data-ico="rose"] { --ico-c: #e11d48; }
+html[data-theme="light"] .set-ico[data-ico="indigo"] { --ico-c: #4f46e5; }
+.set-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.set-card h3 .material-symbols-outlined {
+  font-size: 17px;
+  color: var(--md-sys-color-primary);
+}
+/* Lock outer viewport on Now Playing / Lyrics so active lyric scrolling never shifts the UI upwards */
+html:has(body[data-view="now"]),
+body[data-view="now"] {
+  overflow: hidden !important;
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  overscroll-behavior: none !important;
+}
+body[data-view="now"] #app {
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  padding-bottom: 0 !important;
+}
+body[data-view="now"] .view {
+  padding: 12px 0 0 !important;
+  overflow: hidden !important;
+  height: calc(100dvh - var(--player) - var(--dock)) !important;
+  max-height: calc(100dvh - var(--player) - var(--dock)) !important;
+}
+@media (max-width: 980px) {
+  body[data-view="now"] {
+    padding-top: 0 !important;
+  }
+  body[data-view="now"] .view {
+    padding: calc(max(env(safe-area-inset-top, 0px), 32px) + 10px) 8px 0 !important;
+    height: calc(100dvh - var(--player) - 20px - var(--safe-b, 0px)) !important;
+    max-height: calc(100dvh - var(--player) - 20px - var(--safe-b, 0px)) !important;
+  }
+}
+html[data-native="1"] body[data-view="now"] {
+  padding-top: 0 !important;
+}
+html[data-native="1"] body[data-view="now"] .view {
+  padding: calc(max(env(safe-area-inset-top, 0px), 36px) + 12px) 10px 0 !important;
+  height: calc(100dvh - var(--player) - 20px - var(--safe-b, 0px)) !important;
+  max-height: calc(100dvh - var(--player) - 20px - var(--safe-b, 0px)) !important;
+}
+html[data-native="1"] .ly-mode-toggle,
+html[data-native="1"] .ly-video-stage,
+html[data-native="1"] #nowVideoBtn,
+html[data-native="1"] body[data-view="now"] #ytWrap {
+  display: none !important;
+}
 .set-row p { margin: 4px 0 0; color: var(--md-sys-color-on-surface-variant); font-size: 13px; }
+.settings .set-label p,
+.settings .set-lead,
+.settings .ui-pick em,
+.settings .theme-card em,
+.settings .app-icon-desc {
+  display: none !important;
+}
 .set-row select, .set-row input[type="range"] { min-width: 160px; }
 .set-row select {
   height: 40px;
@@ -3062,9 +3190,14 @@ html[data-ui="glass"] .now-actions .ly-icon {
 }
 .theme-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-  gap: 10px;
-  padding: 8px 12px 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 10px 12px 14px;
+}
+@media (min-width: 580px) {
+  .theme-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
 }
 .theme-card {
   display: grid;
@@ -3075,11 +3208,94 @@ html[data-ui="glass"] .now-actions .ly-icon {
   border: 2px solid transparent;
   background: var(--md-sys-color-surface-container);
   color: inherit;
+  cursor: pointer;
 }
 .theme-card:hover { background: var(--md-sys-color-surface-container-high); }
 .theme-card.on {
   border-color: var(--md-sys-color-primary);
   box-shadow: 0 0 0 1px var(--md-sys-color-primary);
+}
+.theme-grid .theme-card {
+  height: 94px;
+  min-height: 84px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border-radius: var(--md-shape-lg);
+  padding: 14px;
+  text-align: left;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: flex-start;
+  gap: 6px;
+  color: #fff;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03) 42%, transparent 72%),
+    linear-gradient(135deg, color-mix(in srgb, var(--tp-a, #7dd3bb) 78%, var(--tp-bg, #101413)) 0%, var(--tp-bg, #101413) 88%);
+  border: 1px solid color-mix(in srgb, var(--tp-a, #7dd3bb) 68%, rgba(255, 255, 255, 0.28));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -16px 34px -20px color-mix(in srgb, var(--tp-b, #a8cbe2) 55%, transparent),
+    0 14px 34px -16px color-mix(in srgb, var(--tp-a, #7dd3bb) 60%, rgba(0, 0, 0, 0.55));
+  transition: transform 160ms var(--md-motion), filter 180ms var(--md-motion), box-shadow 180ms var(--md-motion), border-color 180ms var(--md-motion);
+}
+.theme-grid .theme-card:hover {
+  filter: brightness(1.06);
+}
+.theme-grid .theme-card:active {
+  transform: scale(0.97);
+  filter: brightness(1.06);
+}
+.theme-grid .theme-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(115deg, transparent 34%, rgba(255, 255, 255, 0.09) 52%, rgba(255, 255, 255, 0.16) 68%, transparent 82%);
+  pointer-events: none;
+  z-index: 1;
+}
+.theme-grid .theme-card > span {
+  position: relative;
+  z-index: 2;
+  order: -1;
+  max-width: calc(100% - 24px);
+}
+.theme-grid .theme-card strong {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: #fff;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.38);
+}
+.theme-grid .theme-card .theme-preview {
+  position: absolute;
+  right: -8px;
+  bottom: -20px;
+  width: 84px;
+  height: 76px !important;
+  border-radius: 18px;
+  padding: 9px;
+  transform: rotate(22deg);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.5);
+  z-index: 1;
+  pointer-events: none;
+}
+.theme-grid .theme-card.on {
+  border-color: #ffffff;
+  box-shadow:
+    0 0 0 2px var(--tp-a, var(--md-sys-color-primary)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 14px 34px -12px color-mix(in srgb, var(--tp-a, #7dd3bb) 80%, rgba(0, 0, 0, 0.6));
+}
+@media (max-width: 400px) {
+  .theme-grid { gap: 10px; }
+  .theme-grid .theme-card { height: 88px; padding: 12px; }
+  .theme-grid .theme-card strong { font-size: 14px; }
 }
 .theme-preview {
   height: 84px;
@@ -3129,7 +3345,7 @@ html[data-ui="glass"] .now-actions .ly-icon {
   text-align: left;
   cursor: pointer;
 }
-.set-go .material-symbols-outlined { color: var(--md-sys-color-on-surface-variant); }
+.set-go > .material-symbols-outlined { color: var(--md-sys-color-on-surface-variant); }
 .theme-card.custom-use {
   width: calc(100% - 24px);
   margin: 4px 12px 12px;
@@ -3434,7 +3650,7 @@ html[data-ui="glass"] .lib-track {
 
 .seek-box {
   position: relative;
-  height: 16px;
+  height: 18px;
   display: grid;
   align-items: center;
 }
@@ -3442,30 +3658,40 @@ html[data-ui="glass"] .lib-track {
   position: absolute;
   inset: 0;
   width: 100%;
-  height: 16px;
+  height: 100%;
   pointer-events: none;
   z-index: 0;
+  overflow: visible;
 }
 .seek-wave path {
   stroke: var(--song-primary, #7dd3bb);
   filter: drop-shadow(0 0 6px var(--song-glow, rgba(125,211,187,0.45)));
 }
+.seek-wave path.seek-wave-bg {
+  stroke: color-mix(in srgb, var(--song-primary, #7dd3bb) 28%, rgba(255, 255, 255, 0.22));
+  filter: none;
+  opacity: 0.55;
+}
+html[data-theme="light"] .seek-wave path.seek-wave-bg {
+  stroke: color-mix(in srgb, var(--song-primary, #0f766e) 28%, rgba(15, 23, 42, 0.22));
+}
 .seek-box input[type="range"] {
   position: relative;
   z-index: 1;
   width: 100%;
-  height: 16px;
+  height: 18px;
   background: transparent;
   margin: 0;
+  touch-action: pan-y;
 }
 .seek-box input[type="range"]::-webkit-slider-runnable-track {
-  height: 16px;
+  height: 18px;
   background: transparent;
 }
 .seek-box input[type="range"]::-webkit-slider-thumb {
   width: 14px;
   height: 14px;
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 html[data-ui="glass"] .player {
@@ -3503,34 +3729,6 @@ html[data-player="pill"] .player {
   padding: 8px 14px;
 }
 
-/* Island — compact, centered "Dynamic Island" capsule: narrower than the
-   screen, fully rounded, tinted border so it reads as a floating pill. */
-html[data-player="island"] .player {
-  left: 0;
-  right: 0;
-  margin: 0 auto;
-  max-width: min(620px, calc(100% - 24px));
-  border-radius: 999px;
-  padding: 6px 12px;
-  min-height: 62px;
-  gap: 2px 8px;
-  border-width: 1.5px;
-}
-html[data-player="island"] .now { gap: 8px; }
-html[data-player="island"] .cover-btn {
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-}
-html[data-player="island"] .fab {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-}
-html[data-player="island"] .meta { max-width: 22ch; }
-html[data-player="island"] .extras { gap: 0; }
-html[data-player="island"] .extras .icon-btn { width: 30px; }
-
 /* Wave — the seek line is the hero: taller, thicker, glowing, and always
    animated while playing; the bar shell recedes behind it. */
 html[data-player="wave"] .player {
@@ -3547,26 +3745,48 @@ html[data-player="wave"][data-ui="glass"] body[data-playing="1"] .player::before
   animation-duration: 4.5s;
 }
 
-/* Solid bar — a flat, opaque Material bar: no glass blur, no shine, square
-   corners, full-width, controls sit on a hard surface. */
-html[data-player="bar"] .player {
-  left: 0;
-  right: 0;
-  border-radius: 0;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: color-mix(in srgb, var(--song-container) 96%, #000);
-  box-shadow: 0 -1px 0 var(--md-sys-color-outline-variant), 0 -8px 24px rgba(0,0,0,0.28);
-  border: 0;
+/* Vinyl — warm studio deck look with a spinning vinyl disc cover and grooved trim. */
+html[data-player="vinyl"] .player {
+  border-radius: 26px;
+  padding: 8px 14px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #1c201f) 90%, #090b0b), color-mix(in srgb, var(--song-container, #1c201f) 76%, #000));
+  border: 1px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 32%, rgba(255, 255, 255, 0.14));
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
-/* Re-assert the light mix at higher specificity (matches the top-of-file
-   light override). */
-html[data-theme="light"][data-player="bar"] .player {
-  background: color-mix(in srgb, var(--song-container) 96%, #fff);
+html[data-theme="light"][data-player="vinyl"] .player {
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #e6eae6) 90%, #fff), color-mix(in srgb, var(--song-container, #e6eae6) 80%, #dce4e0));
 }
-html[data-player="bar"] .player::before { display: none; }
-html[data-player="bar"] .player-wash { display: none; }
-html[data-player="bar"] .cover-btn { border-radius: 10px; }
+html[data-player="vinyl"] .cover-btn {
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 55%, rgba(255, 255, 255, 0.25));
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.32);
+}
+html[data-player="vinyl"] body[data-playing="1"] .cover-btn img {
+  animation: vinylSpin 9s linear infinite;
+}
+@keyframes vinylSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Aura — luminous song-color ambient halo with frosted crystal border. */
+html[data-player="aura"] .player {
+  border-radius: 28px;
+  padding: 8px 14px;
+  border: 1.5px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 52%, rgba(255, 255, 255, 0.28));
+  box-shadow:
+    0 12px 38px rgba(0, 0, 0, 0.34),
+    0 0 26px var(--song-glow, rgba(125, 211, 187, 0.38)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+html[data-player="aura"] .player-wash {
+  opacity: 0.44;
+  filter: blur(28px) saturate(1.65);
+}
+html[data-player="aura"] .cover-btn {
+  border-radius: 14px;
+  box-shadow: 0 0 16px var(--song-glow, rgba(125, 211, 187, 0.42));
+}
 
 /* Settings picker previews — distinct silhouettes per type. Each preview is a
    mini rendition of the docked player so the choice is obvious in Settings.
@@ -3579,17 +3799,6 @@ html[data-player="bar"] .cover-btn { border-radius: 10px; }
 }
 .ui-pick-preview.player-pill i { height: 6px; }
 .ui-pick-preview.player-pill i:nth-child(2) { width: 72%; }
-.ui-pick-preview.player-island {
-  background: #111;
-  border-radius: 999px;
-  width: 70%;
-  max-width: 70%;
-  margin: 0 auto;
-  padding: 10px 12px;
-  align-content: center;
-}
-.ui-pick-preview.player-island i { height: 6px; }
-.ui-pick-preview.player-island i:nth-child(2) { width: 66%; }
 .ui-pick-preview.player-wave {
   background: linear-gradient(90deg, #64f0ff, #ff8ad8);
   border-radius: 18px;
@@ -3597,12 +3806,83 @@ html[data-player="bar"] .cover-btn { border-radius: 10px; }
 }
 .ui-pick-preview.player-wave i { height: 6px; border-radius: 2px; }
 .ui-pick-preview.player-wave i:nth-child(2) { width: 60%; }
-.ui-pick-preview.player-bar {
-  background: #1b2421;
-  border-radius: 4px;
+.ui-pick-preview.player-vinyl {
+  background: radial-gradient(circle at 24% 50%, #7dd3bb 0 6px, #111 7px 18px, #252b29 19px 100%);
+  border-radius: 20px;
+  border: 1px solid rgba(125, 211, 187, 0.4);
+  padding: 10px 12px 10px 42px;
   align-content: center;
 }
-.ui-pick-preview.player-bar i { height: 6px; }
+.ui-pick-preview.player-vinyl i { height: 6px; }
+.ui-pick-preview.player-vinyl i:nth-child(2) { width: 68%; }
+.ui-pick-preview.player-aura {
+  background: linear-gradient(125deg, rgba(125, 211, 187, 0.42), rgba(168, 203, 226, 0.25), rgba(196, 181, 253, 0.42));
+  border-radius: 22px;
+  border: 1.5px solid rgba(125, 211, 187, 0.65);
+  box-shadow: inset 0 0 14px rgba(125, 211, 187, 0.38);
+  padding: 10px 12px;
+  align-content: center;
+}
+.ui-pick-preview.player-aura i { height: 6px; }
+.ui-pick-preview.player-aura i:nth-child(2) { width: 74%; }
+
+/* Timestamp wiggle previews in Settings -> Player */
+.ui-pick-preview.wiggle-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(18, 24, 23, 0.92), rgba(30, 40, 38, 0.85));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--song-primary, #7dd3bb);
+}
+.ui-pick-preview.wiggle-preview .wiggle-time {
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.72);
+  flex-shrink: 0;
+}
+.ui-pick-preview.wiggle-preview svg {
+  width: 100%;
+  height: 20px;
+  overflow: visible;
+  filter: drop-shadow(0 0 5px rgba(125, 211, 187, 0.45));
+}
+.ui-pick-preview.wiggle-ribbon { color: #64f0ff; }
+.ui-pick-preview.wiggle-glow { color: #38bdf8; }
+.ui-pick-preview.wiggle-orbit { color: #c4b5fd; }
+
+/* Selected element styling: footer#playerBar > div.controls > div.seek-row */
+footer#playerBar > div.controls > div.seek-row {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  align-items: center;
+  transition: color 180ms ease;
+}
+footer#playerBar > div.controls > div.seek-row > span {
+  font-weight: 600;
+  opacity: 0.86;
+  user-select: none;
+}
+html[data-wiggle="ribbon"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-fg {
+  filter: drop-shadow(0 0 8px var(--song-glow, rgba(100, 240, 255, 0.62)));
+}
+html[data-wiggle="ribbon"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-bg {
+  opacity: 0.68;
+  stroke: color-mix(in srgb, var(--song-primary, #7dd3bb) 42%, rgba(100, 240, 255, 0.35));
+}
+html[data-wiggle="glow"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-fg {
+  filter:
+    drop-shadow(0 0 6px var(--song-primary, #7dd3bb))
+    drop-shadow(0 0 14px var(--song-glow, rgba(56, 189, 248, 0.78)));
+}
+html[data-wiggle="orbit"] footer#playerBar > div.controls > div.seek-row .seek-wave path.seek-wave-bg {
+  opacity: 0.72;
+  stroke: color-mix(in srgb, var(--song-primary, #7dd3bb) 48%, rgba(196, 181, 253, 0.45));
+}
 
 /* ── Player bar extras: fit every quick-action button without clipping ─────
    The bottom bar now has save / sleep / lyrics / follow / queue / video /
@@ -3621,11 +3901,6 @@ html[data-player="bar"] .cover-btn { border-radius: 10px; }
   .player .extras #followBtn,
   .player .extras #videoBtn { display: none !important; }
 }
-/* The Island look confines the whole player to a narrow capsule; a full
-   extras row cannot fit there, so show only the essential quick actions. */
-html[data-player="island"] .player .extras #followBtn,
-html[data-player="island"] .player .extras #videoBtn,
-html[data-player="island"] .player .extras .vol { display: none !important; }
 
 /* ── Player options bottom sheet (tune button) ───────────────────────────
    Quick sleep-timer presets + player-look chips (and YouTube actions when a
@@ -4282,20 +4557,6 @@ body {
 .set-go > div { flex: 1; min-width: 0; }
 
 @media (max-width: 980px) {
-  .set-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .set-row select,
-  .set-row .switch,
-  .set-row input[type="text"],
-  .set-row input[type="range"] {
-    margin-left: 0;
-    align-self: flex-start;
-  }
-  .set-row select {
-    width: min(100%, 280px);
-  }
   .lib-hero, .lib-hero.custom-pl, .pl-banner .lib-hero {
     flex-wrap: wrap;
   }
@@ -4310,9 +4571,9 @@ button.set-go,
   align-items: center !important;
   justify-content: space-between !important;
   gap: 12px !important;
-  min-height: 0 !important;
+  min-height: 56px !important;
   height: auto !important;
-  padding: 12px 14px !important;
+  padding: 10px 14px !important;
   margin: 0 !important;
 }
 button.set-go > div:first-child,
@@ -4321,29 +4582,26 @@ button.set-go > div:first-child,
   min-width: 0 !important;
   max-width: calc(100% - 36px);
 }
-button.set-go .material-symbols-outlined,
-.set-row.set-go .material-symbols-outlined {
+button.set-go > .material-symbols-outlined,
+.set-row.set-go > .material-symbols-outlined {
   flex: none !important;
   width: 24px;
   height: 24px;
-  font-size: 22px !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px !important;
   line-height: 1;
 }
-.set-card h3 { margin: 10px 16px 2px; }
+.set-card h3 { margin: 4px 6px 10px; }
 .set-row {
-  min-height: 0 !important;
+  min-height: 56px !important;
 }
 .set-row:not(.set-go) {
   align-items: center;
 }
 
 @media (max-width: 980px) {
-  .set-row:not(.set-go) {
-    flex-direction: column !important;
-    align-items: stretch !important;
-    gap: 8px !important;
-    padding: 12px 14px !important;
-  }
   button.set-go,
   .set-row.set-go {
     flex-direction: row !important;
@@ -4472,86 +4730,402 @@ html[data-theme="light"][data-ui="glass"] .mood {
   border-color: color-mix(in srgb, var(--mood, #4cc9f0) 45%, rgba(255, 255, 255, 0.6));
 }
 
+/* ── Unified Settings & Subpages UI Layout (Web, Android & iOS) ──────── */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 12px;
+}
+.settings .set-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  margin-bottom: 0;
+  border-radius: 24px;
+}
+.settings .set-card > h3,
+.settings .set-card-head > h3 {
+  margin: 0;
+  padding: 2px 4px 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+  line-height: 1.3;
+}
+.settings .set-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 2px 4px 6px;
+}
+.settings .set-card-head > h3 {
+  padding: 0;
+}
+.settings .set-card > h3 .material-symbols-outlined,
+.settings .set-card-head > h3 .material-symbols-outlined {
+  font-size: 18px !important;
+  color: var(--md-sys-color-primary);
+  flex-shrink: 0;
+}
+
 .settings .set-row,
 .settings label.set-row,
 .settings button.set-row,
-.settings div.set-row {
+.settings div.set-row,
+.settings button.set-go,
+.settings .set-row.set-go {
   display: flex !important;
   flex-direction: row !important;
   flex-wrap: wrap !important;
   align-items: center !important;
   justify-content: space-between !important;
-  gap: 8px 12px !important;
-  min-height: 0 !important;
+  gap: 10px 14px !important;
+  min-height: 58px !important;
   height: auto !important;
   padding: 10px 14px !important;
+  margin: 0 !important;
+  border-radius: 16px !important;
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 3.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 24%, transparent);
+  box-sizing: border-box !important;
+  width: 100% !important;
   flex: none !important;
+  transition: background-color 160ms ease, border-color 160ms ease, transform 140ms ease;
 }
-.settings .set-row > div:first-child {
-  flex: 1 1 auto !important;
-  flex-basis: auto !important;
+.settings button.set-row,
+.settings label.set-row,
+.settings button.set-go,
+.settings .set-row.set-go {
+  cursor: pointer;
+}
+.settings button.set-row:hover,
+.settings label.set-row:hover,
+.settings button.set-go:hover,
+.settings .set-row.set-go:hover {
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 7%, transparent);
+  border-color: color-mix(in srgb, var(--md-sys-color-outline-variant) 42%, transparent);
+}
+.settings button.set-row:active,
+.settings label.set-row:active,
+.settings button.set-go:active,
+.settings .set-row.set-go:active {
+  transform: scale(0.992);
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 9%, transparent);
+}
+
+.settings .set-row > div:first-child,
+.settings .set-row > .set-label {
+  display: flex !important;
+  align-items: center !important;
+  gap: 14px !important;
+  flex: 1 1 160px !important;
   min-width: 0 !important;
   max-width: 100%;
 }
+.settings button.set-go,
+.settings .set-row.set-go {
+  flex-wrap: nowrap !important;
+}
+.settings button.set-go > .set-label,
+.settings .set-row.set-go > .set-label {
+  flex: 1 1 auto !important;
+  max-width: calc(100% - 36px);
+}
+.settings .set-ico {
+  width: 38px !important;
+  height: 38px !important;
+  border-radius: 12px !important;
+  font-size: 20px !important;
+  line-height: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex-shrink: 0 !important;
+}
+.settings .set-label strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--md-sys-color-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .settings .set-row > .switch,
 .settings .set-row > select,
 .settings .set-row > .chip-btn,
 .settings .set-row > .color-field,
+.settings .set-row > .set-actions,
+.settings .set-row > .set-meta-val,
 .settings .set-row > span,
 .settings .set-row > input,
 .settings .set-row > .material-symbols-outlined {
   flex: 0 0 auto !important;
-  margin: 0 !important;
+  margin: 0 0 0 auto !important;
+  align-self: center !important;
 }
-.settings .set-row .chip-row {
+.settings .set-row > select {
+  height: 38px;
+  min-width: 112px !important;
+  max-width: min(52vw, 220px);
+  padding: 0 34px 0 14px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.settings .set-row > input[type="text"] {
+  height: 38px;
+  width: min(46vw, 190px);
+  max-width: min(46vw, 190px);
+  padding: 0 12px;
+  border-radius: 12px;
+  font-size: 14px;
+}
+.settings .set-row > .switch {
+  width: 50px;
+  height: 30px;
+  border-radius: 999px;
+}
+.settings .set-row > .switch i {
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+}
+.settings .set-row > .switch.on i {
+  transform: translateX(20px);
+}
+.settings .color-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.settings .color-field input[type="color"] {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 55%, transparent);
+}
+.settings .color-field code {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  min-width: 60px;
+  text-align: right;
+}
+.settings .set-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings .set-meta-val {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+  text-align: right;
+}
+
+.settings .set-row.set-row-stack {
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 12px !important;
+  padding: 12px 14px !important;
+}
+.settings .set-row.set-row-stack > .set-label {
+  flex: 0 0 auto !important;
+  width: 100%;
+}
+.settings .set-row .chip-row,
+.settings .set-row.set-row-stack .quality-row {
   flex: 1 1 100% !important;
-  margin: 0;
+  margin: 0 !important;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Subpages: Appearance, UI, Player, App Icon, Following, Offline, Data */
+.settings .seg {
+  margin: 2px 0 0;
+  padding: 4px;
+  border-radius: 16px;
+}
+.settings .seg-btn {
+  min-height: 42px;
+  font-weight: 600;
+  border-radius: 12px;
+}
+.settings .theme-grid {
+  padding: 4px 0 2px;
+}
+.settings .theme-card.custom-use {
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  box-sizing: border-box;
+}
+.settings .theme-card.custom-use .theme-preview {
+  height: 64px;
+}
+.settings .ui-pick-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
 }
 .settings .ui-pick {
-  min-height: 0;
-  padding: 10px;
+  min-height: 74px;
+  padding: 10px 14px;
+  border-radius: 18px;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 3.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 26%, transparent);
 }
-.settings .ui-pick-preview { height: 56px; }
+.settings .ui-pick.on {
+  border-color: var(--md-sys-color-primary);
+  background: color-mix(in srgb, var(--md-sys-color-primary) 10%, transparent);
+  box-shadow: 0 0 0 1px var(--md-sys-color-primary);
+}
+.settings .ui-pick-on {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent);
+  color: var(--md-sys-color-primary);
+}
+.settings .ui-pick-preview { height: 54px; }
 .settings .theme-preview { height: 72px; }
-.settings .set-card { display: block; }
 
-@media (max-width: 980px) {
-  .settings .set-row:not(.set-go) {
-    flex-direction: column !important;
-    align-items: stretch !important;
-    gap: 6px !important;
-    padding: 10px 14px !important;
-  }
-  .settings .set-row:not(.set-go) > div:first-child {
-    flex: 0 0 auto !important;
-    width: 100%;
-  }
-  .settings .set-row .switch {
-    align-self: flex-start !important;
-  }
-  .settings .set-row select,
-  .settings .set-row input[type="text"] {
-    width: 100%;
-    max-width: 100%;
-  }
-  .settings button.set-go,
-  .settings .set-row.set-go {
-    flex-direction: row !important;
-    align-items: center !important;
-    flex-wrap: nowrap !important;
-  }
+.settings .icon-size-row,
+.settings .eq-presets-grid,
+.settings .set-sub-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 2px;
+}
+.settings .icon-size-row .chip,
+.settings .eq-presets-grid .chip,
+.settings .quality-row .chip {
+  flex: 1 1 auto;
+  min-height: 38px;
+  justify-content: center;
 }
 
-/* v65 phone: kill GPU heat */
+.settings .app-icon-active-preview {
+  padding: 4px 2px;
+  gap: 16px;
+}
+.settings .app-icon-grid {
+  margin-top: 4px;
+}
+
+.settings .set-sub-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 2px;
+}
+.settings .set-follow-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings .set-follow-search #newFollowArtistBtn {
+  min-height: 44px;
+  padding: 0 18px;
+  flex-shrink: 0;
+}
+.settings .set-sub-kicker {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+.settings .set-sub-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+.settings .set-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+@media (min-width: 520px) {
+  .settings .set-stats-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+.settings .set-stat-tile {
+  padding: 12px 10px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--md-sys-color-on-surface) 3.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 24%, transparent);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+.settings .set-stat-tile strong {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--md-sys-color-primary);
+}
+.settings .set-stat-tile span {
+  font-size: 0.76rem;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* v65 phone: keep per-card list scrolling cheap while preserving frosted chrome & artwork wash */
 @media (max-width: 980px), (pointer: coarse) {
-  html[data-ui="glass"] *,
-  html[data-ui="glass"] *::before,
-  html[data-ui="glass"] *::after,
-  .player, .dock-nav, .card, .set-card, .panel, .modal-card,
-  .queue-panel, .search-wrap, .ly-screen, .lib-hero {
+  .card, .set-card, .panel, .lib-row, .track-row, .mood, .search-wrap, .lib-hero {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
-    filter: none !important;
+  }
+  .player,
+  html[data-ui="glass"] .player {
+    backdrop-filter: blur(24px) saturate(165%) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(165%) !important;
+  }
+  .dock-nav,
+  html[data-ui="glass"] .dock-nav {
+    backdrop-filter: blur(24px) saturate(165%) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(165%) !important;
+  }
+  .player-wash {
+    filter: blur(24px) saturate(1.4) !important;
+  }
+  .ly-bg {
+    filter: blur(36px) saturate(1.35) !important;
   }
 }
 
@@ -4947,12 +5521,12 @@ html[data-theme="light"] .sk {
    polished native music-app scale on real phone screens/densities.
    ═══════════════════════════════════════════════════════════════════ */
 html[data-native="1"] {
-  --icon: 26px;
-  --player: 118px;
+  --icon: 24px;
+  --player: 126px;
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
 /* Respect the user's icon-size setting; only lift the dock when needed */
-html[data-native="1"][data-icons="small"] { --icon: 22px; --dock: 60px; }
+html[data-native="1"][data-icons="small"] { --icon: 20px; --dock: 60px; }
 html[data-native="1"]:not([data-icons]),
 html[data-native="1"][data-icons="default"] { --dock: 66px; }
 html[data-native="1"][data-icons="medium"] { --dock: 72px; }
@@ -4986,17 +5560,38 @@ html[data-native="1"] .nav-ico {
   height: calc(12px + var(--icon));
 }
 
-/* ── Player bar: bigger artwork + controls, still compact ── */
+/* ── Player bar: balanced artwork + controls so track title & artist never clip on phones ── */
 html[data-native="1"] .player {
   padding: 8px 12px 10px;
   border-radius: 24px;
+  gap: 2px 8px;
 }
-html[data-native="1"] .cover-btn { width: 56px; height: 56px; border-radius: 14px; }
-html[data-native="1"] .fab { width: 52px; height: 52px; border-radius: 14px; }
-html[data-native="1"] .player .icon-btn,
+html[data-native="1"] .cover-btn { width: 46px; height: 46px; border-radius: 12px; }
+html[data-native="1"] .fab { width: 44px; height: 44px; border-radius: 14px; }
 html[data-native="1"] .icon-btn {
-  width: 46px;
-  height: 46px;
+  width: 42px;
+  height: 42px;
+}
+html[data-native="1"] .player .icon-btn {
+  width: 38px;
+  height: 38px;
+}
+html[data-native="1"] .player .like-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+html[data-native="1"] .player .ctrl-row {
+  gap: 6px;
+}
+html[data-native="1"] .player .seek-row {
+  width: 100%;
+  margin-top: 2px;
+}
+html[data-native="1"] .player .seek-box,
+html[data-native="1"] .player .seek-wave,
+html[data-native="1"] .player .seek-box input[type="range"] {
+  height: 22px;
 }
 html[data-native="1"] .icon-btn .material-symbols-outlined {
   font-size: var(--icon);
@@ -5029,8 +5624,8 @@ html[data-native="1"] .search-wrap input { font-size: 16px; }
 
 /* ── Settings rows: comfortable touch height ── */
 html[data-native="1"] .set-row {
-  min-height: 52px;
-  padding: 8px 14px;
+  min-height: 58px;
+  padding: 10px 14px;
 }
 html[data-native="1"] .set-row p { font-size: 13px; }
 
@@ -5054,9 +5649,15 @@ html[data-native="1"] .chip,
 html[data-native="1"] .chip-btn,
 html[data-native="1"] .tonal-btn,
 html[data-native="1"] .filled-btn {
-  min-height: 44px;
+  min-height: 42px;
   padding-left: 16px;
   padding-right: 16px;
+}
+html[data-native="1"] .chip-btn.sm,
+html[data-native="1"] .tonal-btn.sm {
+  min-height: 36px;
+  padding-left: 12px;
+  padding-right: 12px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -5519,35 +6120,6 @@ html[data-native="1"][data-player="pill"] .player {
 html[data-native="1"][data-player="pill"] .fab { border-radius: 50%; }
 html[data-native="1"][data-player="pill"] .cover-btn { border-radius: 12px; }
 
-html[data-native="1"][data-player="island"] .player {
-  left: 0;
-  right: 0;
-  margin: 0 auto;
-  max-width: min(620px, calc(100% - 24px));
-  border-radius: 999px;
-  padding: 6px 12px;
-  min-height: 62px;
-  gap: 2px 8px;
-  border-width: 1.5px;
-}
-html[data-native="1"][data-player="island"] .now { gap: 8px; }
-html[data-native="1"][data-player="island"] .cover-btn {
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-}
-html[data-native="1"][data-player="island"] .fab {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-}
-html[data-native="1"][data-player="island"] .meta { max-width: 22ch; }
-html[data-native="1"][data-player="island"] .extras { gap: 0; }
-html[data-native="1"][data-player="island"] .extras .icon-btn { width: 32px; }
-html[data-native="1"][data-player="island"] .player .extras #followBtn,
-html[data-native="1"][data-player="island"] .player .extras #videoBtn,
-html[data-native="1"][data-player="island"] .player .extras .vol { display: none !important; }
-
 html[data-native="1"][data-player="wave"] .player {
   border-radius: 24px;
   padding: 6px 12px 4px;
@@ -5559,22 +6131,32 @@ html[data-native="1"][data-player="wave"] .seek-wave path {
   filter: drop-shadow(0 0 8px var(--song-glow, rgba(125,211,187,0.7)));
 }
 
-html[data-native="1"][data-player="bar"] .player {
-  left: 0;
-  right: 0;
-  border-radius: 0;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: color-mix(in srgb, var(--song-container) 96%, #000);
-  box-shadow: 0 -1px 0 var(--md-sys-color-outline-variant), 0 -8px 24px rgba(0,0,0,0.28);
-  border: 0;
+html[data-native="1"][data-player="vinyl"] .player {
+  border-radius: 26px;
+  padding: 8px 14px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #1c201f) 90%, #090b0b), color-mix(in srgb, var(--song-container, #1c201f) 76%, #000));
+  border: 1px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 32%, rgba(255, 255, 255, 0.14));
 }
-html[data-theme="light"][data-native="1"][data-player="bar"] .player {
-  background: color-mix(in srgb, var(--song-container) 96%, #fff);
+html[data-theme="light"][data-native="1"][data-player="vinyl"] .player {
+  background: linear-gradient(145deg, color-mix(in srgb, var(--song-container, #e6eae6) 90%, #fff), color-mix(in srgb, var(--song-container, #e6eae6) 80%, #dce4e0));
 }
-html[data-native="1"][data-player="bar"] .player::before,
-html[data-native="1"][data-player="bar"] .player-wash { display: none; }
-html[data-native="1"][data-player="bar"] .cover-btn { border-radius: 10px; }
+html[data-native="1"][data-player="vinyl"] .cover-btn {
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 55%, rgba(255, 255, 255, 0.25));
+}
+
+html[data-native="1"][data-player="aura"] .player {
+  border-radius: 28px;
+  padding: 8px 14px;
+  border: 1.5px solid color-mix(in srgb, var(--song-primary, #7dd3bb) 52%, rgba(255, 255, 255, 0.28));
+  box-shadow:
+    0 12px 38px rgba(0, 0, 0, 0.34),
+    0 0 24px var(--song-glow, rgba(125, 211, 187, 0.38)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+html[data-native="1"][data-player="aura"] .cover-btn {
+  border-radius: 14px;
+}
 
 /* The same native block also collapses `.extras` on desktop widths on phones;
    keep the variants' extras-fit rules alive inside the native shell. */
@@ -7541,6 +8123,184 @@ html[data-ui="autumn"] .home-hero .home-hero-copy p {
     transform: translate3d(32%, 12px, 0) rotate(-8deg);
   }
 }
+
+/* ── 5. PHONE THERMAL & BACKGROUND GPU FREEZE ────────────────────────── */
+/* When the screen is off or app is backgrounded, pause 100% of CSS animations
+   so WebView compositor uses 0% GPU/CPU while background audio plays. */
+html[data-hidden="1"] *,
+html[data-hidden="1"] *::before,
+html[data-hidden="1"] *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
+/* Pause homepage hero scene animations whenever the user is on another tab */
+body:not([data-view="home"]) .hero-scene *,
+body:not([data-view="home"]) .hero-orbs i {
+  animation-play-state: paused !important;
+}
+
+/* Mobile thermal guard: disable perpetual box-shadow / blur / sheen loops
+   on phones so playing music never heats up the GPU. */
+@media (max-width: 980px), (pointer: coarse) {
+  .hero-orbs i,
+  .cover-btn.live,
+  .cover-btn.live img,
+  .fab.live,
+  body[data-playing="1"] .cover-btn.live,
+  body[data-playing="1"] .now-actions .ly-icon.on,
+  html[data-ui="glass"] body[data-playing="1"] .player::before {
+    animation: none !important;
+  }
+  .xmas-sleigh-svg {
+    filter: none;
+  }
+  .winter-aurora {
+    filter: none;
+  }
+}
+
+/* ── 6. CONTINUOUS STRAIGHT-LINE MARQUEE LOOP FOR PLAYER & LYRICS SONG TITLES ── */
+.player .now {
+  min-width: 0;
+  overflow: hidden;
+}
+.player .meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+.player .title-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+.player .title-row #likeBtn {
+  flex: 0 0 auto;
+}
+.ly-meta > div {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > strong:nth-of-type(1),
+.player .meta #trackTitle.is-marquee,
+.ly-meta strong.is-marquee {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+  position: relative;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 4%, #000 94%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0%, #000 4%, #000 94%, transparent 100%);
+}
+
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > strong:nth-of-type(1) .marquee-track,
+.player .meta #trackTitle.is-marquee .marquee-track,
+.ly-meta strong.is-marquee .marquee-track {
+  display: inline-block !important;
+  width: max-content !important;
+  max-width: none !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: nowrap !important;
+  color: inherit !important;
+  font: inherit !important;
+  line-height: inherit !important;
+  letter-spacing: inherit !important;
+  will-change: transform;
+  animation: songTitleMarquee var(--marquee-dur, 11s) linear infinite !important;
+}
+
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > strong:nth-of-type(1) .marquee-track::after,
+.player .meta #trackTitle.is-marquee .marquee-track::after,
+.ly-meta strong.is-marquee .marquee-track::after {
+  content: attr(data-marquee);
+  display: inline-block;
+  padding-inline: 2.25rem;
+}
+
+html[data-hidden="1"] .marquee-track {
+  animation-play-state: paused !important;
+}
+
+@keyframes songTitleMarquee {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+/* ── 7. BATTERY SAVER MODE (Settings -> Battery Saver) ──────────────────
+   Disables heavy animations and visual effects in the homepage hero and
+   lyrics view, and reduces GPU/compositor work across playback UI. */
+html[data-battery-saver="1"] .home-hero,
+html[data-battery-saver="1"] .ly-screen,
+html[data-battery-saver="1"] .ly-head,
+html[data-battery-saver="1"] .ly-head #nowBack,
+html[data-battery-saver="1"] .now-actions .ly-icon {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+  transition: none !important;
+}
+html[data-battery-saver="1"] .home-hero .hero-orbs,
+html[data-battery-saver="1"] .home-hero .winter-snow-layer,
+html[data-battery-saver="1"] .home-hero .winter-flakes,
+html[data-battery-saver="1"] .home-hero .xmas-snow-layer,
+html[data-battery-saver="1"] .home-hero .autumn-breeze-layer,
+html[data-battery-saver="1"] .home-hero .autumn-leaves,
+html[data-battery-saver="1"] .ly-bg,
+html[data-battery-saver="1"] .player-wash {
+  display: none !important;
+  animation: none !important;
+  filter: none !important;
+}
+html[data-battery-saver="1"] .home-hero .hero-scene *,
+html[data-battery-saver="1"] .winter-aurora,
+html[data-battery-saver="1"] .xmas-stars i,
+html[data-battery-saver="1"] .xmas-santa-bob,
+html[data-battery-saver="1"] .xmas-sleigh-svg,
+html[data-battery-saver="1"] .xmas-sleigh-svg .reindeer-unit,
+html[data-battery-saver="1"] .autumn-sun-glow,
+html[data-battery-saver="1"] .ly-scroll,
+html[data-battery-saver="1"] .ly-line,
+html[data-battery-saver="1"] .ly-meta strong.is-marquee .marquee-track,
+html[data-battery-saver="1"] .player .meta #trackTitle.is-marquee .marquee-track,
+html[data-battery-saver="1"] #eqBars i,
+html[data-battery-saver="1"] .cover-btn.live,
+html[data-battery-saver="1"] .cover-btn.live img,
+html[data-battery-saver="1"] .fab.live,
+html[data-battery-saver="1"] .now-actions .ly-icon.on,
+html[data-battery-saver="1"] .player::before {
+  animation: none !important;
+  transition: none !important;
+  filter: none !important;
+  will-change: auto !important;
+  scroll-behavior: auto !important;
+}
+html[data-battery-saver="1"] .xmas-santa-track {
+  animation: none !important;
+  will-change: auto !important;
+  transform: translate3d(32%, 12px, 0) rotate(-8deg) !important;
+}
+html[data-battery-saver="1"] .ly-head {
+  background: color-mix(in srgb, var(--song-container, #181c1b) 92%, #000) !important;
+}
+html[data-theme="light"][data-battery-saver="1"] .ly-head {
+  background: color-mix(in srgb, var(--song-container, #dfe4df) 92%, #fff) !important;
+}
+
+
 
 
 

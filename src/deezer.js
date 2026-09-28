@@ -140,8 +140,6 @@ export function normalizeDeezerTrack(t, fallbackArtist = "", fallbackArt = "") {
       t.artwork ||
       fallbackArt
     ) || "/cover-default.jpg";
-  const preview = clean(t.preview || t.previewUrl) || "";
-
   return {
     id,
     rawId: rawId || id.replace(/^deezer:/, ""),
@@ -151,8 +149,8 @@ export function normalizeDeezerTrack(t, fallbackArtist = "", fallbackArt = "") {
     album: albumTitle,
     duration,
     artwork,
-    previewUrl: preview,
-    preview,
+    previewUrl: "",
+    preview: "",
     playQuery: clean(t.playQuery) || `${title} ${artistName} official audio`.trim(),
     videoId: t.videoId || "",
   };
@@ -327,6 +325,58 @@ export async function deezerTopTracks(artistId, artistName, limit = 50) {
   }
   if (out.length) setCached(cacheKey, out);
   return out;
+}
+
+/**
+ * Genuinely similar / related artists on Deezer (/artist/{id}/related).
+ */
+export async function deezerRelatedArtists(artistId, limit = 12) {
+  if (!artistId) return [];
+  const cap = Math.min(Number(limit) || 12, 30);
+  const cacheKey = `relart:${artistId}:${cap}`;
+  const cachedRel = getCached(cacheKey);
+  if (cachedRel) return cachedRel;
+
+  try {
+    const j = await dzFetch(`/artist/${artistId}/related?limit=${cap}`, 5000);
+    const out = [];
+    for (const a of (j && j.data) || []) {
+      if (!a || !a.name) continue;
+      out.push({
+        id: String(a.id || ""),
+        name: clean(a.name),
+        artwork: clean(a.picture_xl || a.picture_big || a.picture_medium) || "",
+      });
+    }
+    if (out.length) setCached(cacheKey, out);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Curated artist radio tracks on Deezer (/artist/{id}/radio) — blends similar artists & songs in the same vibe.
+ */
+export async function deezerArtistRadio(artistId, limit = 25) {
+  if (!artistId) return [];
+  const cap = Math.min(Number(limit) || 25, 50);
+  const cacheKey = `artradio:${artistId}:${cap}`;
+  const cachedRad = getCached(cacheKey);
+  if (cachedRad) return cachedRad;
+
+  try {
+    const j = await dzFetch(`/artist/${artistId}/radio?limit=${cap}`, 5000);
+    const out = [];
+    for (const t of (j && j.data) || []) {
+      const norm = normalizeDeezerTrack(t);
+      if (norm) out.push(norm);
+    }
+    if (out.length) setCached(cacheKey, out);
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -543,7 +593,7 @@ export async function deezerSearch(query, { limit = 50, includeExtra = true, cou
           artist: { name: t.artist || t.artistName },
           album: { title: t.album || t.collectionName, cover_big: t.artwork, cover_medium: t.artwork },
           duration: t.duration || Math.round(Number(t.trackTimeMillis || 0) / 1000),
-          preview: t.previewUrl || "",
+          preview: "",
           playQuery: t.playQuery,
         });
         if (songs.length >= limit) break;

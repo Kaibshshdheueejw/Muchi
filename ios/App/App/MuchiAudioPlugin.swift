@@ -26,6 +26,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "MuchiAudio"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "play", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "preload", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "pause", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "resume", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
@@ -43,6 +44,16 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var errorSent = false
     private var fallbackDurationMs: Double = 0
     private var prefSpeed: Float = 1.0
+    private var prefVolume: Float = 1.0
+    private var loadSeq: Int = 0
+    private var currentVideoId: String = ""
+    private var currentCandidates: String = ""
+    private var currentTitle: String = ""
+    private var currentArtist: String = ""
+    private var triedOnDeviceResolve = false
+
+    private static let defaultUA =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1"
 
     /* ── lifecycle ─────────────────────────────────────────────────── */
 
@@ -105,27 +116,42 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     /* ── JS → native ───────────────────────────────────────────────── */
 
+    @objc public func preload(_ call: CAPPluginCall) {
+        let videoId = call.getString("videoId") ?? ""
+        let candidates = call.getString("candidates") ?? ""
+        let title = call.getString("title") ?? ""
+        let artist = call.getString("artist") ?? ""
+        Self.preloadStream(videoId: videoId, candidates: candidates, title: title, artist: artist)
+        call.resolve()
+    }
+
     @objc public func play(_ call: CAPPluginCall) {
-        let url = call.getString("url") ?? ""
-        if url.lowercased().hasPrefix("yt:") {
-            call.reject("MuchiAudio: yt scheme requires web stream resolution")
-            return
+        var url = call.getString("url") ?? ""
+        var videoId = call.getString("videoId") ?? ""
+        if url.isEmpty && !videoId.isEmpty {
+            url = "yt:" + videoId
         }
-        guard !url.isEmpty, let streamUrl = URL(string: url) else {
+        if videoId.isEmpty && url.lowercased().hasPrefix("yt:") {
+            videoId = String(url.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if videoId.isEmpty {
+            videoId = Self.extractVideoIdFromUrl(url)
+        }
+        guard !url.isEmpty else {
             call.reject("MuchiAudio: missing url")
             return
         }
         configureAudioSession()
 
-        let p: AVPlayer
-        if let existing = player { p = existing } else { p = AVPlayer() }
-        p.automaticallyWaitsToMinimizeStalling = true
-        player = p
+        let title = call.getString("title") ?? "Muchi"
+        let artist = call.getString("artist") ?? ""
+        let artwork = call.getString("artwork") ?? ""
+        let candidates = call.getString("candidates") ?? ""
 
-        let item = AVPlayerItem(url: streamUrl)
-        item.audioTimePitchAlgorithm = .spectral
-        currentItem = item
-        errorSent = false
+        currentVideoId = videoId
+        currentCandidates = candidates
+        currentTitle = title
+        currentArtist = artist
 
         var durMs = call.getDouble("duration") ?? 0
         if durMs <= 0 {
@@ -133,9 +159,83 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         fallbackDurationMs = max(0, durMs)
 
+        let volPct = call.getDouble("volume") ?? 100.0
+        let normalize = call.getBool("normalize") ?? false
+        let normGain = normalize ? 0.86 : 1.0
+        prefVolume = Float(min(1.0, max(0.0, (volPct / 100.0) * normGain)))
+
         if let spd = call.getDouble("speed"), spd >= 0.25 && spd <= 3.0 {
             prefSpeed = Float(spd)
         }
+
+        loadSeq += 1
+        let seq = loadSeq
+        errorSent = false
+
+        // Update Lock Screen / Dynamic Island metadata immediately on tap
+        updateNowPlaying(
+            title: title,
+            artist: artist,
+            artwork: artwork,
+            durationMs: fallbackDurationMs
+        )
+
+        if url.lowercased().hasPrefix("yt:") {
+            triedOnDeviceResolve = true
+            player?.pause()
+            let vid = currentVideoId
+            let cands = currentCandidates
+            let tTitle = currentTitle
+            let tArtist = currentArtist
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
+                DispatchQueue.main.async {
+                    guard let self = self, seq == self.loadSeq else { return }
+                    if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
+                        if rs.durationMs > 0 && self.fallbackDurationMs <= 0 {
+                            self.fallbackDurationMs = rs.durationMs
+                        }
+                        self.startPlayer(with: streamUrl, rawUrl: rs.url, userAgent: rs.userAgent)
+                    } else {
+                        self.errorSent = true
+                        self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
+                    }
+                }
+            }
+            call.resolve()
+            return
+        }
+
+        guard let streamUrl = URL(string: url) else {
+            call.reject("MuchiAudio: invalid url")
+            return
+        }
+        triedOnDeviceResolve = false
+        startPlayer(with: streamUrl, rawUrl: url, userAgent: Self.userAgentForStreamUrl(url))
+        call.resolve()
+    }
+
+    private func startPlayer(with streamUrl: URL, rawUrl: String, userAgent: String) {
+        let p: AVPlayer
+        if let existing = player { p = existing } else { p = AVPlayer() }
+        p.automaticallyWaitsToMinimizeStalling = true
+        p.volume = prefVolume
+        player = p
+
+        var headers: [String: String] = [:]
+        let ua = userAgent.isEmpty ? Self.userAgentForStreamUrl(rawUrl) : userAgent
+        if !ua.isEmpty {
+            headers["User-Agent"] = ua
+        }
+        if rawUrl.contains("googlevideo.com") && !rawUrl.contains("c=ANDROID") && !rawUrl.contains("c=IOS") {
+            headers["Origin"] = "https://www.youtube.com"
+            headers["Referer"] = "https://www.youtube.com/"
+        }
+        let asset = AVURLAsset(url: streamUrl, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let item = AVPlayerItem(asset: asset)
+        item.audioTimePitchAlgorithm = .spectral
+        currentItem = item
+        errorSent = false
 
         NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -150,20 +250,34 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         if prefSpeed != 1.0 {
             p.rate = prefSpeed
         }
-
-        // NOTE: the web layer sends `duration` ALREADY IN MILLISECONDS
-        // (app.js: Math.round(durationSec * 1000)) and updateNowPlaying()
-        // divides by 1000 for MPMediaItemPropertyPlaybackDuration — the old
-        // `* 1000.0` here multiplied twice, inflating lock-screen remaining
-        // time ~1000× (e.g. "3 days left" on a 3-minute song).
-        updateNowPlaying(
-            title: call.getString("title") ?? "Muchi",
-            artist: call.getString("artist") ?? "",
-            artwork: call.getString("artwork") ?? "",
-            durationMs: fallbackDurationMs
-        )
         startTicker()
-        call.resolve()
+    }
+
+    private static func userAgentForStreamUrl(_ url: String) -> String {
+        if url.contains("c=ANDROID_VR") {
+            return url.contains("cver=1.61")
+                ? "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+                : "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+        }
+        if url.contains("c=ANDROID_TESTSUITE") {
+            return "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip"
+        }
+        if url.contains("c=ANDROID") {
+            return "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip"
+        }
+        if url.contains("c=IOS") {
+            return "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)"
+        }
+        return defaultUA
+    }
+
+    private static func extractVideoIdFromUrl(_ rawUrl: String) -> String {
+        if let range = rawUrl.range(of: "v=") {
+            let sub = String(rawUrl[range.upperBound...])
+            let part = sub.components(separatedBy: "&").first ?? sub
+            return part.removingPercentEncoding ?? part
+        }
+        return ""
     }
 
     private static func extractDurationMsFromUrl(_ rawUrl: String) -> Double {
@@ -306,6 +420,34 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self = self, let p = self.player, let item = self.currentItem else { return }
             if item.status == .failed && !self.errorSent {
+                if !self.currentVideoId.isEmpty {
+                    Self.invalidateResolvedCache(self.currentVideoId)
+                }
+                if !self.triedOnDeviceResolve && (!self.currentVideoId.isEmpty || !self.currentTitle.isEmpty) {
+                    self.triedOnDeviceResolve = true
+                    self.stopTicker()
+                    let seq = self.loadSeq
+                    let vid = self.currentVideoId
+                    let cands = self.currentCandidates
+                    let tTitle = self.currentTitle
+                    let tArtist = self.currentArtist
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
+                        DispatchQueue.main.async {
+                            guard let self = self, seq == self.loadSeq else { return }
+                            if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
+                                if rs.durationMs > 0 && self.fallbackDurationMs <= 0 {
+                                    self.fallbackDurationMs = rs.durationMs
+                                }
+                                self.startPlayer(with: streamUrl, rawUrl: rs.url, userAgent: rs.userAgent)
+                            } else {
+                                self.errorSent = true
+                                self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
+                            }
+                        }
+                    }
+                    return
+                }
                 self.errorSent = true
                 self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
                 return
@@ -420,5 +562,289 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     deinit {
         stopTicker()
+    }
+
+    /* ── On-device YouTube InnerTube + Piped m4a resolver (iOS) ────── */
+
+    public struct ResolvedStream {
+        public let url: String
+        public let userAgent: String
+        public let durationMs: Double
+        public let mimeType: String
+    }
+
+    private struct CachedStream {
+        let stream: ResolvedStream
+        let expiresAt: Date
+    }
+
+    private static let cacheLock = NSLock()
+    private static var resolvedCache: [String: CachedStream] = [:]
+    private static let cacheTTL: TimeInterval = 20 * 60
+
+    public static func invalidateResolvedCache(_ videoId: String) {
+        let key = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        cacheLock.lock()
+        resolvedCache.removeValue(forKey: key)
+        cacheLock.unlock()
+    }
+
+    private static func getCachedStream(_ videoId: String) -> ResolvedStream? {
+        let key = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard let hit = resolvedCache[key] else { return nil }
+        if hit.expiresAt <= Date() {
+            resolvedCache.removeValue(forKey: key)
+            return nil
+        }
+        return hit.stream
+    }
+
+    private static func putCachedStream(_ videoId: String, _ stream: ResolvedStream) {
+        let key = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !stream.url.isEmpty else { return }
+        cacheLock.lock()
+        if resolvedCache.count > 200 {
+            resolvedCache.removeAll()
+        }
+        resolvedCache[key] = CachedStream(stream: stream, expiresAt: Date().addingTimeInterval(cacheTTL))
+        cacheLock.unlock()
+    }
+
+    public static func preloadStream(videoId: String, candidates: String, title: String, artist: String) {
+        let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if vid.isEmpty && title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
+        if !vid.isEmpty && getCachedStream(vid) != nil { return }
+        DispatchQueue.global(qos: .utility).async {
+            _ = resolveStreamForDownload(videoId: vid, candidates: candidates, title: title, artist: artist)
+        }
+    }
+
+    public static func resolveStreamForDownload(videoId: String, candidates: String, title: String, artist: String) -> ResolvedStream? {
+        let primary = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !primary.isEmpty, let hit = getCachedStream(primary) {
+            return hit
+        }
+        var vids: [String] = []
+        if !primary.isEmpty { vids.append(primary) }
+        for part in candidates.components(separatedBy: ",") {
+            let c = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !c.isEmpty && !vids.contains(c) { vids.append(c) }
+        }
+        for vid in vids {
+            if let hit = getCachedStream(vid) {
+                if !primary.isEmpty { putCachedStream(primary, hit) }
+                return hit
+            }
+            if let rs = probeInnertubeForVideo(vid) {
+                putCachedStream(vid, rs)
+                if !primary.isEmpty { putCachedStream(primary, rs) }
+                return rs
+            }
+        }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanTitle.isEmpty {
+            let q = "\(cleanTitle) \(artist.trimmingCharacters(in: .whitespacesAndNewlines)) official audio".trimmingCharacters(in: .whitespacesAndNewlines)
+            for svid in searchInnertubeVideoIds(q) where !vids.contains(svid) {
+                if let rs = probeInnertubeForVideo(svid) {
+                    putCachedStream(svid, rs)
+                    if !primary.isEmpty { putCachedStream(primary, rs) }
+                    return rs
+                }
+            }
+        }
+        for vid in vids {
+            if let rs = probePipedForVideo(vid) {
+                putCachedStream(vid, rs)
+                if !primary.isEmpty { putCachedStream(primary, rs) }
+                return rs
+            }
+        }
+        return nil
+    }
+
+    private static func probeInnertubeForVideo(_ videoId: String) -> ResolvedStream? {
+        guard !videoId.isEmpty, let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false") else { return nil }
+        let profiles: [(id: String, ver: String, ua: String, body: String)] = [
+            (
+                "5",
+                "20.10.4",
+                "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
+                "{\"context\":{\"client\":{\"clientName\":\"IOS\",\"clientVersion\":\"20.10.4\",\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.2.22D82\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            ),
+            (
+                "28",
+                "1.61.48",
+                "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.61.48\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            ),
+            (
+                "3",
+                "20.10.38",
+                "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            ),
+            (
+                "28",
+                "1.60.19",
+                "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.60.19\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            )
+        ]
+
+        let lock = NSLock()
+        var winner: ResolvedStream?
+        let doneSem = DispatchSemaphore(value: 0)
+        var remaining = profiles.count
+
+        for prof in profiles {
+            var req = URLRequest(url: endpoint, timeoutInterval: 3.2)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue(prof.id, forHTTPHeaderField: "X-YouTube-Client-Name")
+            req.setValue(prof.ver, forHTTPHeaderField: "X-YouTube-Client-Version")
+            req.setValue(prof.ua, forHTTPHeaderField: "User-Agent")
+            req.httpBody = prof.body.data(using: .utf8)
+
+            URLSession.shared.dataTask(with: req) { data, response, _ in
+                var found: ResolvedStream?
+                if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                   let data = data,
+                   let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    let playability = root["playabilityStatus"] as? [String: Any]
+                    let status = (playability?["status"] as? String) ?? "OK"
+                    if status == "OK", let streaming = root["streamingData"] as? [String: Any] {
+                        let adaptive = (streaming["adaptiveFormats"] as? [[String: Any]]) ?? []
+                        let formats = (streaming["formats"] as? [[String: Any]]) ?? []
+                        var bestM4aUrl = ""
+                        var bestM4aBr = -1
+                        for fmt in (adaptive + formats) {
+                            guard let u = fmt["url"] as? String, !u.isEmpty,
+                                  let mime = (fmt["mimeType"] as? String)?.lowercased(),
+                                  mime.hasPrefix("audio/") else { continue }
+                            // iOS AVPlayer + AVAssetReader require MP4/M4A/AAC/MP3 (WebM/Opus is not supported by AVFoundation)
+                            if mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") || mime.contains("mpeg") || mime.contains("mp3") {
+                                let br = (fmt["bitrate"] as? Int) ?? 0
+                                if br > bestM4aBr {
+                                    bestM4aBr = br
+                                    bestM4aUrl = u
+                                }
+                            }
+                        }
+                        if !bestM4aUrl.isEmpty {
+                            var durMs: Double = 0
+                            if let vd = root["videoDetails"] as? [String: Any],
+                               let lenStr = vd["lengthSeconds"] as? String,
+                               let sec = Double(lenStr), sec > 0 {
+                                durMs = sec * 1000.0
+                            }
+                            if durMs <= 0 {
+                                durMs = extractDurationMsFromUrl(bestM4aUrl)
+                            }
+                            found = ResolvedStream(url: bestM4aUrl, userAgent: prof.ua, durationMs: durMs, mimeType: "audio/mp4")
+                        }
+                    }
+                }
+                lock.lock()
+                if let f = found, winner == nil {
+                    winner = f
+                    lock.unlock()
+                    doneSem.signal()
+                    return
+                }
+                remaining -= 1
+                let allDone = (remaining <= 0 && winner == nil)
+                lock.unlock()
+                if allDone {
+                    doneSem.signal()
+                }
+            }.resume()
+        }
+
+        _ = doneSem.wait(timeout: .now() + 3.5)
+        lock.lock()
+        let result = winner
+        lock.unlock()
+        return result
+    }
+
+    private static func searchInnertubeVideoIds(_ query: String) -> [String] {
+        guard let url = URL(string: "https://www.youtube.com/youtubei/v1/search?prettyPrint=false") else { return [] }
+        var req = URLRequest(url: url, timeoutInterval: 4.5)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        req.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
+        req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
+        let safeQ = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeQ)\"}"
+        req.httpBody = payload.data(using: .utf8)
+
+        var out: [String] = []
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            defer { sem.signal() }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let data = data, let text = String(data: data, encoding: .utf8),
+                  let regex = try? NSRegularExpression(pattern: "\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"") else { return }
+            let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            for m in matches {
+                if let r = Range(m.range(at: 1), in: text) {
+                    let vid = String(text[r])
+                    if !out.contains(vid) {
+                        out.append(vid)
+                        if out.count >= 4 { break }
+                    }
+                }
+            }
+        }.resume()
+        _ = sem.wait(timeout: .now() + 4.8)
+        return out
+    }
+
+    private static func probePipedForVideo(_ videoId: String) -> ResolvedStream? {
+        let hosts = [
+            "https://api.piped.private.coffee",
+            "https://pipedapi.kavin.rocks",
+            "https://pipedapi.adminforge.de"
+        ]
+        for h in hosts {
+            guard let url = URL(string: "\(h)/streams/\(videoId)") else { continue }
+            var req = URLRequest(url: url, timeoutInterval: 4.0)
+            req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
+            var found: ResolvedStream?
+            let sem = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { data, response, _ in
+                defer { sem.signal() }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let data = data,
+                      let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      let streams = root["audioStreams"] as? [[String: Any]] else { return }
+                var bestUrl = ""
+                var bestBr = -1
+                for s in streams {
+                    guard let u = s["url"] as? String, !u.isEmpty else { continue }
+                    let mime = ((s["mimeType"] as? String) ?? "").lowercased()
+                    let fmt = ((s["format"] as? String) ?? "").lowercased()
+                    if mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") || fmt.contains("m4a") || mime.contains("mpeg") {
+                        let br = (s["bitrate"] as? Int) ?? 0
+                        if br > bestBr {
+                            bestBr = br
+                            bestUrl = u
+                        }
+                    }
+                }
+                if !bestUrl.isEmpty {
+                    let durSec = (root["duration"] as? Double) ?? 0
+                    found = ResolvedStream(url: bestUrl, userAgent: defaultUA, durationMs: durSec * 1000.0, mimeType: "audio/mp4")
+                }
+            }.resume()
+            _ = sem.wait(timeout: .now() + 4.2)
+            if let f = found { return f }
+        }
+        return nil
     }
 }

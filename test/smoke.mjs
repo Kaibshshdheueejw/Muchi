@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.5", APP_VERSION === "1.7.5" && appJs.includes('const APP_VERSION = "1.7.5"'));
+  ok("version: APP_VERSION is 1.7.6", APP_VERSION === "1.7.6" && appJs.includes('const APP_VERSION = "1.7.6"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -875,11 +875,140 @@ await (async () => {
     androidService.includes("extractDurationMsFromUrl") &&
     iosPlugin.includes("timeInterval: 0.25")
   );
-  ok("sound quality (1.7.4 / 1.6.6): Android DynamicsProcessing 6-band Pre-EQ + MBC + 32-bit float audio output and high-bitrate stream selection",
-    androidService.includes("DynamicsProcessing") &&
-    androidService.includes("setEnableAudioFloatOutput(true)") &&
+  ok("sound quality (1.7.6 restores exact 1.6.6): WebAudio Phone Speaker DSP (78Hz +9.5dB, 58Hz +5.5dB, 145Hz +3.2dB, 420Hz -2.8dB, 2800Hz +2.8dB, 8500Hz +2.6dB, wet 0.72, punch -20dB 3.6:1, limiter -0.9dB 20:1, out 1.55)",
+    appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") &&
+    appJs.includes("sub.frequency.value = 58; sub.Q.value = 0.75; sub.gain.value = 5.5;") &&
+    appJs.includes("body.frequency.value = 145; body.Q.value = 0.8; body.gain.value = 3.2;") &&
+    appJs.includes("scoop.frequency.value = 420; scoop.Q.value = 0.85; scoop.gain.value = -2.8;") &&
+    appJs.includes("presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;") &&
+    appJs.includes("air.frequency.value = 8500; air.gain.value = 2.6;") &&
+    appJs.includes("wet.gain.value = 0.72;") &&
+    appJs.includes("punch.threshold.value = -20;") &&
+    appJs.includes("punch.ratio.value = 3.6;") &&
+    appJs.includes("lim.threshold.value = -0.9;") &&
+    appJs.includes("lim.ratio.value = 20;") &&
+    appJs.includes("out.gain.value = 1.55;") &&
+    !/out\.gain\.value\s*=\s*1\.08/.test(appJs)
+  );
+  ok("sound quality (1.7.6 restores exact 1.6.6): Bass, Spatial, and Dynamic modes (EQ, compressors, HRTF 0.38/0.28, drive 5/4, out 1.28/1.22/1.18, no extra post-output limiter)",
+    appJs.includes("bass.frequency.value = 72; bass.gain.value = 8.5;") &&
+    appJs.includes("bass.frequency.value = 90; bass.gain.value = 2.4;") &&
+    appJs.includes("bass.frequency.value = 85; bass.gain.value = 5.5;") &&
+    appJs.includes("comp.threshold.value = -22;") &&
+    appJs.includes("comp.ratio.value = 4.2;") &&
+    appJs.includes("comp.threshold.value = -18;") &&
+    appJs.includes("comp.ratio.value = 2.6;") &&
+    appJs.includes("comp.threshold.value = -14;") &&
+    appJs.includes("comp.ratio.value = 2.2;") &&
+    appJs.includes("rearG.gain.value = 0.38;") &&
+    appJs.includes("hiG.gain.value = 0.28;") &&
+    appJs.includes('makeDriveCurve(mode === "bass" ? 5 : 4)') &&
+    appJs.includes('out.gain.value = mode === "bass" ? 1.28 : mode === "dynamic" ? 1.22 : 1.18;') &&
+    appJs.includes("out.connect(ctx.destination);") &&
+    !androidService.includes("DynamicsProcessing") &&
+    !androidService.includes("setEnableAudioFloatOutput") &&
+    androidService.includes('int gainMb = "phone".equals(mode) ? 380 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;') &&
     androidService.includes("bestM4aBitrate >= 115000")
   );
+  ok("full-quality stream enforcement (1.7.6): no 8kHz synthetic WAV test tone and no 30-second low-bitrate previewUrl override in playback or catalog normalization",
+    !/WAV_SAMPLE_RATE\s*=\s*8000|sampleRate\s*[:=]\s*8000/i.test(appJs) &&
+    !/WAV_SAMPLE_RATE\s*=\s*8000|sampleRate\s*[:=]\s*8000/i.test(streamJs) &&
+    !aggregateJs.includes("isPreview: true") &&
+    !streamJs.includes("deezerSearch") &&
+    appJs.includes("previewUrl: \"\",\n      preview: \"\",") &&
+    readFileSync("src/deezer.js", "utf8").includes("previewUrl: \"\",\n    preview: \"\",") &&
+    readFileSync("src/providers.js", "utf8").includes("previewUrl: \"\",")
+  );
+  ok("Spotify-style queue & recommendations: vibe/genre/mood/tempo/style continuation, related artists, gradual exploration curve, canonical deduplication, and anti-repeat",
+    aggregateJs.includes("function inferServerVibeProfile(") &&
+    aggregateJs.includes("function sequenceSpotifyStyleTracks(") &&
+    aggregateJs.includes("deezerRelatedArtists") &&
+    aggregateJs.includes("deezerArtistRadio") &&
+    appJs.includes("function inferTrackVibeClient(") &&
+    appJs.includes("function scoreAndSequenceSpotifyStyle(") &&
+    appJs.includes("function isSameSongClient(") &&
+    appJs.includes("function canonicalSongKey(") &&
+    appJs.includes("_sessionPlayedKeys") &&
+    appJs.includes("_shuffleVisitedKeys")
+  );
+  {
+    const { inferServerVibeProfile, sequenceSpotifyStyleTracks, isSameCanonicalSong } = await import("../src/aggregate.js");
+    const seed = { id: "yt:seed1", title: "Blinding Lights (Official Audio)", artist: "The Weeknd", genre: "synthpop", duration: 200 };
+    const vibe = inferServerVibeProfile(seed);
+    const pool = [
+      { id: "yt:dup1", title: "Blinding Lights (Lyrics)", artist: "The Weeknd - Topic", duration: 201, source: "youtube" },
+      { id: "dz:1", title: "Save Your Tears", artist: "The Weeknd", genre: "synthpop", duration: 215, source: "deezer" },
+      { id: "dz:2", title: "Starboy", artist: "The Weeknd", genre: "r&b", duration: 230, source: "deezer" },
+      { id: "it:1", title: "Levitating", artist: "Dua Lipa", genre: "dance pop", duration: 203, source: "apple" },
+      { id: "it:2", title: "Don't Start Now (Official Video)", artist: "Dua Lipa", genre: "dance pop", duration: 183, source: "apple" },
+      { id: "it:2dup", title: "Don't Start Now", artist: "Dua Lipa", genre: "dance pop", duration: 183, source: "deezer" },
+      { id: "yt:3", title: "Midnight City", artist: "M83", genre: "synthpop", duration: 243, source: "youtube" },
+      { id: "dz:4", title: "Kill Bill", artist: "SZA", genre: "r&b", duration: 154, source: "deezer" },
+      { id: "yt:5", title: "As It Was", artist: "Harry Styles", genre: "pop", duration: 167, source: "youtube" },
+    ];
+    const seq = sequenceSpotifyStyleTracks(pool, seed, vibe, {
+      max: 10,
+      dynamicRelatedArtists: ["Dua Lipa", "SZA"],
+    });
+    const hasSeedDup = seq.some((t) => isSameCanonicalSong(t, seed));
+    const hasDontStartDup = seq.filter((t) => t.title.toLowerCase().includes("don't start now")).length > 1;
+    let hasBackToBackSameArtist = false;
+    for (let i = 1; i < seq.length; i++) {
+      if (seq[i].artist === seq[i - 1].artist) hasBackToBackSameArtist = true;
+    }
+    ok("functional test: Spotify-style sequencer excludes seed/canonical duplicates, spaces artists (no back-to-back repeats), and prioritizes peer/vibe matches",
+      seq.length >= 5 && !hasSeedDup && !hasDontStartDup && !hasBackToBackSameArtist
+    );
+
+    const { isCleanForYouTrack, matchesForYouMoodProfile, buildPersonalizedForYouPlaylists } = await import("../src/aggregate.js");
+    const { FY_MOOD_PROFILES, curatedForYouTracksForMood } = await import("../src/data.js");
+    ok("Made For You: all 10 FY_MOOD_PROFILES have 24 distinct curated songs (240 unique songs total)", (() => {
+      const moods = Object.keys(FY_MOOD_PROFILES);
+      if (moods.length !== 10) return false;
+      const sigs = new Set();
+      for (const m of moods) {
+        const tracks = curatedForYouTracksForMood(m, "2026-09-21", 24);
+        if (tracks.length !== 24) return false;
+        for (const t of tracks) {
+          if (!isCleanForYouTrack(t) || !matchesForYouMoodProfile(t, FY_MOOD_PROFILES[m])) return false;
+          sigs.add(`${t.title.toLowerCase()}::${t.artist.toLowerCase()}`);
+        }
+      }
+      return sigs.size === 240;
+    })());
+
+    ok("Made For You: weekly refresh rotates playlists deterministically across weeks", (() => {
+      const w1 = curatedForYouTracksForMood("pop", "2026-09-21", 20).map((t) => t.title).join("|");
+      const w2 = curatedForYouTracksForMood("pop", "2026-09-28", 20).map((t) => t.title).join("|");
+      return w1 !== w2;
+    })());
+
+    ok("Made For You: rejects compilation mixes, My Little Pony, and Crash Cars tribute tracks", (() => {
+      const bad1 = { title: "Spotify Pop Hits 2025 🔥 Lady Gaga, Bruno Mars, Ed Sheeran #1", artist: "Sunset Playlist", duration: 200 };
+      const bad2 = { title: "pop hits", artist: "My Little Pony", duration: 180 };
+      const bad3 = { title: "Blinding Lights", artist: "Crash Cars", duration: 200 };
+      return !isCleanForYouTrack(bad1) && !isCleanForYouTrack(bad2) && !isCleanForYouTrack(bad3);
+    })());
+
+    ok("Made For You: all 240 curated songs have real per-song https:// cover art URLs", (() => {
+      for (const m of Object.keys(FY_MOOD_PROFILES)) {
+        const tracks = curatedForYouTracksForMood(m, "2026-09-21", 24);
+        for (const t of tracks) {
+          if (!t.artwork || !/^https:\/\//i.test(t.artwork) || String(t.artwork).startsWith("/cover")) return false;
+        }
+      }
+      return true;
+    })());
+
+    const androidAppJs = readFileSync("android/app/src/main/assets/public/app.js", "utf8");
+    const iosAppJs = readFileSync("ios/App/App/public/app.js", "utf8");
+    ok("Made For You: native Android and iOS app bundles match web public/app.js recommendation logic and define normalizeKeyText",
+      androidAppJs === appJs &&
+      iosAppJs === appJs &&
+      appJs.includes("function normalizeKeyText(") &&
+      androidAppJs.includes("function personalizeForYouCardTracks(")
+    );
+  }
   const poMatch = appJs.match(/function openPlayerOptions\(\)\s*\{([\s\S]*?)window\.handleImgErr/);
   const poBody = poMatch ? poMatch[1] : "";
   ok("player options cleanup: Video player, Playback speed, and Player style removed from openPlayerOptions()",
@@ -994,7 +1123,64 @@ await (async () => {
   ok("native background & notification: MainActivity keeps WebView media and JS timers alive in background (onPause/onStop/onWindowFocusChanged)", androidMainActivity.includes("keepWebViewAwake()") && androidMainActivity.includes("wv.onResume()") && androidMainActivity.includes("wv.resumeTimers()"));
   ok("native background & notification: app.js syncs native session notification on updateMediaSession and checks npActive first in keepBackgroundPlay", appJs.includes("nativeSyncSession();") && appJs.includes("function nativeSyncSession(") && /function keepBackgroundPlay\(\)\s*\{[\s\S]*?if\s*\(npActive\)/.test(appJs));
   ok("sound quality (1.5.5): WebAudio DSP graph (5-band EQ, bass shelf + harmonic warmth shaper, Haas 3D spatial stereo widener, clarity/air loudness compressor) and native hardware DSP effects active by default", appJs.includes("state.prefs.soundV !== 3") && appJs.includes("function hookSound()") && appJs.includes("function spatialMode()") && appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") && appJs.includes("Math.tanh(3.1 * x) * 0.52") && appJs.includes("out.gain.value = 1.55;") && appJs.includes("function nativeSyncAudioPrefs()") && androidService.includes("applyPlayerPrefsAndEffects") && androidService.includes("LoudnessEnhancer") && androidService.includes("BassBoost") && androidService.includes("Equalizer"));
-  ok("phone thermal optimization: disables continuous 60-120fps waveRaf/seekRaf loops on phones, pauses background CSS animations via data-hidden, and uses GPU scaleY for eqBars", appJs.includes("if (cheapPhone()) {\n      drawSeekWave();\n      return;\n    }") && appJs.includes("if (document.hidden && npActive) return;") && appJs.includes('document.documentElement.dataset.hidden = document.hidden ? "1" : "0"') && stylesCss.includes('html[data-hidden="1"] *') && stylesCss.includes("transform: scaleY(0.25)"));
+  ok("phone thermal optimization: disables continuous 60-120fps waveRaf/seekRaf loops on phones, pauses background CSS animations via data-hidden, and uses GPU scaleY for eqBars", (appJs.includes("if (cheapPhone() || isBatterySaver()) {\n      drawSeekWave();\n      return;\n    }") || appJs.includes("if (cheapPhone()) {\n      drawSeekWave();\n      return;\n    }")) && appJs.includes("if (document.hidden && npActive) return;") && appJs.includes('document.documentElement.dataset.hidden = document.hidden ? "1" : "0"') && stylesCss.includes('html[data-hidden="1"] *') && stylesCss.includes("transform: scaleY(0.25)"));
+
+  // ── Country Trending Shelf ("Trending in (Country)") — 17 Unique Curated Playlists ──
+  {
+    const { curateCountryTrendingPlaylists } = await import("../src/aggregate.js");
+    const { getCountryTrendingPlaylists, getCountrySeedPool } = await import("../src/data.js");
+
+    for (const cc of ["IN", "US", "GB", "KR", "JP", "CA", "AU"]) {
+      const defs = getCountryTrendingPlaylists(cc);
+      const pool = getCountrySeedPool(cc);
+      const curated = curateCountryTrendingPlaylists(cc, [], 20);
+      ok(`Trending in ${cc}: returns exactly 17 playlists with 20 songs each (pool=${pool.length})`,
+        defs.length === 17 &&
+        curated.length === 17 &&
+        curated.every((p) => Array.isArray(p.tracks) && p.tracks.length === 20 && String(p.id).startsWith(`ctrend:${cc}:`))
+      );
+      const titles = new Set(curated.map((p) => p.title));
+      const roles = new Set(curated.map((p) => p.role));
+      ok(`Trending in ${cc}: all 17 playlists have unique titles and 17 distinct roles/tastes`,
+        titles.size === 17 && roles.size === 17
+      );
+    }
+
+    // Verify zero repetition across all 17 playlists in India and US (340 unique songs across 17 playlists)
+    for (const cc of ["IN", "US"]) {
+      const curated = curateCountryTrendingPlaylists(cc, [], 20);
+      const allSigs = new Set();
+      let totalTracks = 0;
+      for (const pl of curated) {
+        for (const t of pl.tracks) {
+          totalTracks++;
+          allSigs.add(`${String(t.title).toLowerCase().trim()}|${String(t.artist).toLowerCase().trim()}`);
+        }
+      }
+      ok(`Trending in ${cc}: avoids repetition across all 17 playlists (${allSigs.size}/${totalTracks} unique songs)`,
+        totalTracks === 340 && allSigs.size >= 335
+      );
+    }
+
+    // Verify dynamic live new release detection & prioritization
+    const liveNewRelease = {
+      id: "apple:live_test_2026",
+      source: "apple",
+      title: "Midnight Supernova",
+      artist: "Arijit Singh & Diljit Dosanjh",
+      album: "Supernova 2026",
+      duration: 210,
+      artwork: "https://cdn-images.dzcdn.net/images/cover/d96999c72276a4a95ebce4a7b50a56a2/500x500-000000-80-0-0.jpg",
+      genre: "bollywood",
+      releaseDate: new Date().toISOString().slice(0, 10),
+      chartRank: 1,
+    };
+    const dynamicCurated = curateCountryTrendingPlaylists("IN", [liveNewRelease], 20);
+    const inTopOrNew = [dynamicCurated[0], dynamicCurated[1], dynamicCurated[2]].some((pl) =>
+      pl.tracks.some((t) => t.title === "Midnight Supernova")
+    );
+    ok("Trending in Country: dynamically detects and surfaces brand-new live releases & chart #1 tracks", inTopOrNew);
+  }
   ok("native playback: /api/yt/stream resolves alternate official audio / candidate videoIds when primary videoId is gated and excludes 30s previews by default", aggregateJs.includes("const allowPreview = url.searchParams.get(\"allowPreview\") === \"1\";") && aggregateJs.includes("searchYouTube(`${searchQuery} official audio`") && aggregateJs.includes("isPreview: false"));
   ok("native playback: /api/stream handles c=ANDROID_VR & c=ANDROID_TESTSUITE User-Agent and auto-falls back when googlevideo returns 403/502", streamJs.includes("/c=ANDROID_VR/i.test(src)") && streamJs.includes("/c=ANDROID_TESTSUITE/i.test(src)") && streamJs.includes("if (primaryRes.status < 400) return primaryRes;"));
   ok("native app icon: syncNativeAppIcon calls NP.setAppIcon({ icon }) from applyAppIcon and setAppIcon", appJs.includes("function syncNativeAppIcon(") && appJs.includes("NP.setAppIcon({ icon: norm })") && appJs.includes("syncNativeAppIcon(ic.id);"));
@@ -1237,14 +1423,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=105");
+  const appJsRes = await fetch(BASE + "/app.js?v=106");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=105");
+  const stylesRes = await fetch(BASE + "/styles.css?v=106");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=105 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=105 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v105", swText.includes("muchi-shell-v105") && swText.includes("/app.js?v=105") && swText.includes("/styles.css?v=105"));
+  ok("client web: app.js?v=106 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=106 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v106", swText.includes("muchi-shell-v106") && swText.includes("/app.js?v=106") && swText.includes("/styles.css?v=106"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────

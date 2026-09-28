@@ -41,8 +41,8 @@ async function runAudit() {
 
   assert("Version check across all platform targets", !vErrors || vErrors.length === 0, `Version: ${pkg.version}`);
   const gradleCode = Number(gradle.match(/versionCode\s+(\d+)/)?.[1]);
-  assert("Android target is 1.5.7 (code: 12)", pkg.version === "1.5.7" && gradleCode === 12, `versionCode: ${gradleCode}`);
-  assert("iOS target is 1.5.7", pbx.includes("MARKETING_VERSION = 1.5.7;"));
+  assert("Android target is 1.7.6 (code: 30)", pkg.version === "1.7.6" && gradleCode === 30, `versionCode: ${gradleCode}`);
+  assert("iOS target is 1.7.6", pbx.includes("MARKETING_VERSION = 1.7.6;"));
 
   // 2. Equalizer & Dolby Atmos Complete Removal Audit
   console.log("\n--- 2. Equalizer & Dolby Atmos Removal Audit ---");
@@ -67,7 +67,7 @@ async function runAudit() {
     assert("itunesSearch returns songs array", Array.isArray(itunesRes.songs) && itunesRes.songs.length > 0, `Found: ${itunesRes.songs.length} songs`);
     if (itunesRes.songs && itunesRes.songs[0]) {
       const s0 = itunesRes.songs[0];
-      assert("iTunes song structure valid", !!s0.id && !!s0.title && !!s0.artist && !!s0.previewUrl, `Title: ${s0.title} by ${s0.artist}`);
+      assert("iTunes song structure valid", !!s0.id && !!s0.title && !!s0.artist && !!s0.playQuery, `Title: ${s0.title} by ${s0.artist}`);
     }
   } catch (err) {
     assert("itunesSearch executed without exception", false, err.message);
@@ -78,7 +78,7 @@ async function runAudit() {
     assert("deezerSearch returns songs array", Array.isArray(deezerRes.songs) && deezerRes.songs.length > 0, `Found: ${deezerRes.songs.length} songs`);
     if (deezerRes.songs && deezerRes.songs[0]) {
       const s0 = deezerRes.songs[0];
-      assert("Deezer song structure valid", !!s0.id && !!s0.title && !!s0.artist && !!s0.previewUrl, `Title: ${s0.title} by ${s0.artist}`);
+      assert("Deezer song structure valid", !!s0.id && !!s0.title && !!s0.artist && !!s0.playQuery, `Title: ${s0.title} by ${s0.artist}`);
     }
   } catch (err) {
     assert("deezerSearch executed without exception", false, err.message);

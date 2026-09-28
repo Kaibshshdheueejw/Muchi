@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.5";
+  const APP_VERSION = "1.7.6";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -171,7 +171,7 @@
     if (icon) icon.classList.add("spin");
     toast("Checking connection to server…");
     try {
-      const res = await fetch("/api/version", { cache: "no-store", signal: AbortSignal.timeout(4500) });
+      const res = await fetch(`${API_BASE}/api/version`, { cache: "no-store", signal: AbortSignal.timeout(4500) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       state.isNetworkOffline = false;
       state.offlineMode = false;
@@ -967,6 +967,9 @@
     if (v === "zigzag") return "glow";
     return VALID_SEEK_WIGGLES.includes(v) ? v : "sine";
   }
+  function isBatterySaver() {
+    return Boolean(state.prefs && state.prefs.batterySaver);
+  }
   function applyUi() {
     const ui = normalizeUiMode(state.prefs.ui);
     document.documentElement.dataset.ui = ui;
@@ -974,6 +977,7 @@
     document.documentElement.dataset.player = ps;
     const wg = normalizeSeekWiggle(state.prefs.seekWiggle);
     document.documentElement.dataset.wiggle = wg;
+    document.documentElement.dataset.batterySaver = isBatterySaver() ? "1" : "0";
     const icons = ["small", "default", "medium", "large"].includes(state.prefs.iconSize) ? state.prefs.iconSize : "default";
     document.documentElement.dataset.icons = icons;
     // "Interface size" drives the WHOLE app, not just icon glyphs: pick a
@@ -1017,11 +1021,11 @@
   }
   function themeCardHTML(th, on) {
     const bg = th.surface || (window.matchMedia("(prefers-color-scheme: light)").matches ? "#e6eae6" : "#101413");
-    return `<button type="button" class="theme-card ${on ? "on" : ""}" data-set-theme="${th.id}">
+    return `<button type="button" class="theme-card ${on ? "on" : ""}" data-set-theme="${th.id}" style="--mood:${th.a};--tp-bg:${bg};--tp-a:${th.a};--tp-b:${th.b}">
       <div class="theme-preview" style="background:${bg};--tp-a:${th.a};--tp-b:${th.b}">
         <i class="tp-bar"></i><i class="tp-row"></i><i class="tp-row dim"></i><i class="tp-pill"></i>
       </div>
-      <span><strong>${th.name}</strong><em>${th.blurb}</em></span>
+      <span><strong>${th.name}</strong></span>
     </button>`;
   }
 
@@ -1682,9 +1686,128 @@
     if (state.view === "library") render();
   }
 
+  // Session-level anti-repeat & shuffle tracking so the queue and recommendations
+  // never play the same song twice in a row or repeat songs too often.
+  const _sessionPlayedKeys = [];
+  const _sessionPlayedSet = new Set();
+  const _sessionAutoQueuedKeys = [];
+  const _sessionAutoQueuedSet = new Set();
+  const _shuffleVisitedKeys = new Set();
+
+  function normalizeKeyText(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function canonicalSongTitleClient(rawTitle, rawArtist = "") {
+    let s = String(rawTitle || "").toLowerCase().trim();
+    if (!s) return "";
+    let mod = "";
+    if (/\b(remix|vip\s*mix|club\s*mix|extended\s*mix)\b/i.test(s)) mod = "remix";
+    else if (/\b(acoustic|unplugged|stripped)\b/i.test(s)) mod = "acoustic";
+    else if (/\b(live)\b/i.test(s)) mod = "live";
+    else if (/\b(slowed|sped\s*up|nightcore)\b/i.test(s)) mod = "edit";
+    const aNorm = String(rawArtist || "").toLowerCase().replace(/\s*-\s*topic\b/gi, "").trim();
+    if (aNorm && s.includes(" - ")) {
+      const parts = s.split(/\s+-\s+/);
+      if (parts.length >= 2) {
+        const p0 = parts[0].trim();
+        const pLast = parts[parts.length - 1].trim();
+        if (p0 === aNorm || p0.includes(aNorm)) s = parts.slice(1).join(" ").trim();
+        else if (pLast === aNorm || pLast.includes(aNorm)) s = parts.slice(0, -1).join(" ").trim();
+      }
+    }
+    s = s
+      .replace(/\((?:official|lyric|lyrics|audio|video|music\s*video|visualizer|hd|hq|4k|remaster(?:ed)?|explicit|clean|version|edit|feat\.?|ft\.?|with|prod\.?)[^)]*\)/gi, " ")
+      .replace(/\[(?:official|lyric|lyrics|audio|video|music\s*video|visualizer|hd|hq|4k|remaster(?:ed)?|explicit|clean|version|edit|feat\.?|ft\.?|with|prod\.?)[^\]]*\]/gi, " ")
+      .replace(/\b(?:feat\.?|ft\.?|featuring)\s+[^-–—()[\]]+/gi, " ")
+      .replace(/\b(?:official\s+(?:music\s+)?(?:video|audio|lyric\s+video|visualizer)|full\s+song|lyric\s+video|lyrics|audio|hd|hq|4k|remastered\s*\d*)\b/gi, " ")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return mod ? `${s} ${mod}`.trim() : s;
+  }
+
+  function canonicalPrimaryArtistClient(tOrArtist) {
+    const raw = typeof tOrArtist === "string"
+      ? tOrArtist
+      : (tOrArtist && (tOrArtist.artist || (tOrArtist.user && tOrArtist.user.name) || tOrArtist.author)) || "";
+    let s = String(raw || "").toLowerCase().trim();
+    if (!s) return "";
+    s = s
+      .replace(/\s*-\s*topic\b/gi, "")
+      .replace(/\bvevo\b/gi, "")
+      .replace(/\bofficial\b/gi, "")
+      .split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bfeaturing\b|\bx\b|\bwith\b|\/|;|\band\b)\s*/i)[0]
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return s;
+  }
+
+  function canonicalSongKey(t) {
+    if (!t) return "";
+    const titleNorm = canonicalSongTitleClient(t.title || "", t.artist || "");
+    const artistNorm = canonicalPrimaryArtistClient(t);
+    if (titleNorm && artistNorm) return `${titleNorm}__${artistNorm}`;
+    if (titleNorm) return `${titleNorm}__`;
+    return String(t.id || t.videoId || t.trackId || "").toLowerCase().trim();
+  }
+
+  function isSameSongClient(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (a.id && b.id && String(a.id) === String(b.id)) return true;
+    if (a.videoId && b.videoId && String(a.videoId) === String(b.videoId)) return true;
+    if (a.trackId && b.trackId && String(a.trackId) === String(b.trackId) && a.source === b.source) return true;
+    const ka = canonicalSongKey(a);
+    const kb = canonicalSongKey(b);
+    if (ka && kb && ka === kb) return true;
+    const ta = canonicalSongTitleClient(a.title || "", a.artist || "");
+    const tb = canonicalSongTitleClient(b.title || "", b.artist || "");
+    if (ta && tb && ta === tb) {
+      const aa = canonicalPrimaryArtistClient(a);
+      const ab = canonicalPrimaryArtistClient(b);
+      if (!aa || !ab || aa === ab || aa.includes(ab) || ab.includes(aa)) return true;
+    }
+    return false;
+  }
+
+  function recordSessionPlayed(t) {
+    const k = canonicalSongKey(t);
+    if (!k) return;
+    _shuffleVisitedKeys.add(k);
+    if (!_sessionPlayedSet.has(k)) {
+      _sessionPlayedSet.add(k);
+      _sessionPlayedKeys.unshift(k);
+      while (_sessionPlayedKeys.length > 80) {
+        const old = _sessionPlayedKeys.pop();
+        if (old) _sessionPlayedSet.delete(old);
+      }
+    }
+  }
+
+  function recordSessionAutoQueued(t) {
+    const k = canonicalSongKey(t);
+    if (!k) return;
+    if (!_sessionAutoQueuedSet.has(k)) {
+      _sessionAutoQueuedSet.add(k);
+      _sessionAutoQueuedKeys.unshift(k);
+      while (_sessionAutoQueuedKeys.length > 90) {
+        const old = _sessionAutoQueuedKeys.pop();
+        if (old) _sessionAutoQueuedSet.delete(old);
+      }
+    }
+  }
+
   function pushRecent(track) {
+    if (!track) return;
+    recordSessionPlayed(track);
     const item = { ...track, playedAt: Date.now() };
-    state.recents = [item, ...state.recents.filter((t) => t.id !== track.id)].slice(0, 200);
+    state.recents = [item, ...state.recents.filter((t) => !isSameSongClient(t, track))].slice(0, 200);
     save("aura.recents", state.recents);
     // Taste-adaptive "Made for you": a fresh play shifts the taste profile, so
     // re-render the home row to reorder the mood cards around the listener.
@@ -2411,8 +2534,14 @@
       const a = artistName(t);
       if (a && a !== "YouTube" && a !== "Live radio") artists[a] = (artists[a] || 0) + 1;
       sources[t.source || "other"] = (sources[t.source || "other"] || 0) + 1;
-      const g = t.genre || t._tag || t.mood || (t.album && t.source === "audius" ? t.album : "");
-      if (g) genres[g] = (genres[g] || 0) + 1;
+      const tag = String(t._tag || t.mood || t.genre || (t.album && t.source === "audius" ? t.album : "") || "").toLowerCase();
+      if (tag) {
+        genres[tag] = (genres[tag] || 0) + 1;
+      } else {
+        const v = inferTrackVibeClient(t);
+        if (v && v.genre) genres[v.genre] = (genres[v.genre] || 0) + 1;
+        if (v && v.mood) genres[v.mood] = (genres[v.mood] || 0) + 1;
+      }
     }
     const rank = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
     const hasTaste = Boolean(
@@ -2524,8 +2653,12 @@
       toast("Playing now", true, "success");
       return;
     }
-    const rest = state.queue.filter((t, i) => i !== state.index && t.id !== track.id);
     const cur = current();
+    if (cur && isSameSongClient(cur, track)) {
+      toast("Already playing this song");
+      return;
+    }
+    const rest = state.queue.filter((t, i) => i !== state.index && !isSameSongClient(t, track));
     state.queue = [cur, track, ...rest].filter(Boolean);
     state.index = 0;
     renderQueue();
@@ -2537,7 +2670,7 @@
       playFromList([track], 0);
       return;
     }
-    if (state.queue.some((t) => t.id === track.id)) {
+    if (state.queue.some((t) => isSameSongClient(t, track))) {
       toast("Already in queue");
       return;
     }
@@ -3632,6 +3765,7 @@
     audio.setAttribute("playsinline", "");
     audio.setAttribute("webkit-playsinline", "");
     audio.preload = "auto";
+    audio.crossOrigin = "anonymous";
   } catch {}
 
   // ── Adaptive Audio Buffering Strategy ─────────────────────────────────
@@ -4009,15 +4143,82 @@
     if (!img) return;
     const src = img.getAttribute("src") || "";
     if (src && !src.startsWith("data:") && !src.includes("/cover-default.jpg") && !src.includes("/api/img?url=")) {
-      img.onerror = function() { this.src = "/cover-default.jpg"; };
+      img.onerror = function() {
+        const el = this;
+        el.onerror = null;
+        const holder = el.closest("[data-title]");
+        const title = (holder && holder.getAttribute("data-title")) || "";
+        const artist = (holder && holder.getAttribute("data-artist")) || "";
+        el.src = "/cover-default.jpg";
+        if (title) {
+          resolveRealSongCoverClient(title, artist).then((art) => {
+            if (art) el.src = art;
+          }).catch(() => {});
+        }
+      };
       img.src = `${API_BASE}/api/img?url=${encodeURIComponent(src)}`;
     } else {
+      img.onerror = null;
       img.src = "/cover-default.jpg";
     }
   };
 
   function artUrl(t) {
-    return t && t.artwork ? t.artwork : "/cover-default.jpg";
+    if (!t || !t.artwork) return "/cover-default.jpg";
+    const a = String(t.artwork);
+    if (a.startsWith("/") && API_BASE && !a.includes("/cover-default.jpg")) {
+      return `${API_BASE}${a}`;
+    }
+    return a;
+  }
+
+  const _songCoverMemCache = new Map();
+  async function resolveRealSongCoverClient(title, artist) {
+    const cleanTitle = String(title || "").trim();
+    const cleanArtist = String(artist || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0].trim();
+    const q = `${cleanTitle} ${cleanArtist}`.trim();
+    if (!q) return "";
+    const key = q.toLowerCase();
+    if (_songCoverMemCache.has(key)) return _songCoverMemCache.get(key);
+    let art = "";
+    try {
+      const r = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=2&country=US`, { signal: AbortSignal.timeout(4500) });
+      if (r.ok) {
+        const d = await r.json();
+        const hit = d && d.results && d.results[0];
+        if (hit && hit.artworkUrl100) art = String(hit.artworkUrl100).replace("100x100bb", "400x400bb");
+      }
+    } catch {}
+    if (!art) {
+      try {
+        const d = await api(`/api/deezer/search?q=${encodeURIComponent(q)}&limit=2`, 4500);
+        const rows = (d && (d.songs || d.data)) || [];
+        const hit = rows[0];
+        if (hit) {
+          art = hit.artwork || (hit.album && (hit.album.cover_big || hit.album.cover_medium)) || "";
+        }
+      } catch {}
+    }
+    if (art && /^https?:\/\//i.test(art)) {
+      _songCoverMemCache.set(key, art);
+      return art;
+    }
+    return "";
+  }
+
+  async function hydrateMissingTrackCovers(tracks, onUpdated) {
+    if (!Array.isArray(tracks) || !tracks.length) return;
+    const targets = tracks.filter((t) => t && t.title && (!t.artwork || String(t.artwork).startsWith("/cover")));
+    if (!targets.length) return;
+    let changed = false;
+    await Promise.all(targets.slice(0, 20).map(async (t) => {
+      const art = await resolveRealSongCoverClient(t.title, artistName(t) || t.artist);
+      if (art) {
+        t.artwork = art;
+        changed = true;
+      }
+    }));
+    if (changed && typeof onUpdated === "function") onUpdated();
   }
 
   function cardHTML(t) {
@@ -4158,28 +4359,41 @@
     const same = !!(next && cur && cur.id === next.id);
     let src = Array.isArray(list) ? list.slice() : [];
     let idx = Number.isInteger(index) ? index : 0;
+    const wanted = src[idx];
     // Queue hygiene: keep mixes/compilations/podcasts out of the queue so it
-    // lists real songs (Spotify-style) — but never drop the track the user
-    // actually tapped.
-    if (src.some((t) => !looksLikeSong(t))) {
-      const wanted = src[idx];
+    // lists real songs (Spotify-style) and strip any accidental consecutive duplicate
+    // songs so the same song never plays twice in a row.
+    if (src.length > 0) {
       const clean = [];
       for (let i = 0; i < src.length; i++) {
-        if (i === idx || looksLikeSong(src[i])) clean.push(src[i]);
+        const item = src[i];
+        if (!item) continue;
+        if (i !== idx && !looksLikeSong(item)) continue;
+        // Never allow the exact same song twice in a row in the queue
+        if (clean.length > 0 && isSameSongClient(clean[clean.length - 1], item) && i !== idx) {
+          continue;
+        }
+        if (clean.length > 0 && isSameSongClient(clean[clean.length - 1], item) && i === idx) {
+          clean[clean.length - 1] = item;
+          continue;
+        }
+        clean.push(item);
       }
       if (clean.length) {
         src = clean;
-        idx = wanted ? Math.max(0, src.findIndex((t) => t && t.id === wanted.id)) : 0;
-        // The rest of the context was all junk — line up good similar songs
-        // after the one the user tapped (Spotify-style "up next").
-        if (clean.length === 1 && list.length > 1 && wanted && wanted.source !== "radio") {
-          fillRelatedQueue(wanted);
-        }
+        idx = wanted ? Math.max(0, src.findIndex((t) => t && (t === wanted || t.id === wanted.id))) : 0;
       }
     }
+    _shuffleVisitedKeys.clear();
+    if (wanted) _shuffleVisitedKeys.add(canonicalSongKey(wanted));
     state.queue = src.slice();
     state.index = idx;
     state.playerReady = true;
+    // If the user played a single track or the last track of a list, immediately
+    // line up Spotify-style similar songs after it so Up Next is ready.
+    if (wanted && wanted.source !== "radio" && state.index + 1 >= state.queue.length) {
+      fillRelatedQueue(wanted);
+    }
     if (same) {
       const hasResolvedMedia = Boolean(
         cur.videoId || cur.streamUrl || cur.url || cur.source === "audius" || cur.source === "radio"
@@ -4231,7 +4445,6 @@
       "/cover-default.jpg"
     ).trim();
     const slug = `${title.toLowerCase().replace(/[^a-z0-9]/g, "")}_${artist.toLowerCase().replace(/[^a-z0-9]/g, "")}` || "track";
-    const preview = String(t.preview || t.previewUrl || "").trim();
     const inferredVideoId = t.videoId || (/^yt:/i.test(String(t.id || "")) && /^[A-Za-z0-9_-]{11}$/.test(cleanId) ? cleanId : "");
     return {
       id: cleanId ? `deezer:${cleanId}` : `deezer:${slug}`,
@@ -4243,8 +4456,8 @@
       duration,
       artwork,
       streamUrl: t.streamUrl || "",
-      previewUrl: preview,
-      preview,
+      previewUrl: "",
+      preview: "",
       playQuery: t.playQuery || `${title} ${artist} official audio`.trim(),
       videoId: inferredVideoId,
     };
@@ -4478,7 +4691,7 @@
       album,
       duration,
       artwork,
-      previewUrl: item.previewUrl || "",
+      previewUrl: "",
       playQuery: `${title} ${artist} official audio`.trim(),
       trackId: cleanId || item.trackId,
       trackName: title,
@@ -4717,21 +4930,462 @@
     return true;
   }
 
+  // ── Spotify-Style Vibe, Genre, Mood, Tempo & Style Engine (Client) ────────
+  const CLIENT_GENRE_CLUSTERS = {
+    pop: ["pop", "dance pop", "synthpop", "electropop", "indie pop", "teen pop", "disco", "funk", "new wave"],
+    hiphop: ["hip-hop", "hip hop", "rap", "trap", "drill", "melodic rap", "boom bap", "r&b", "rnb", "contemporary r&b"],
+    rnb: ["r&b", "rnb", "soul", "neo-soul", "funk", "contemporary r&b", "afrobeats", "alt r&b", "pop"],
+    electronic: ["electronic", "edm", "house", "tech house", "deep house", "techno", "trance", "drum and bass", "dnb", "dubstep", "future bass", "synthwave", "dance", "phonk"],
+    rock: ["rock", "alt rock", "alternative", "indie rock", "classic rock", "hard rock", "punk", "pop punk", "grunge", "metal", "post-punk", "emo"],
+    indie: ["indie", "indie pop", "indie rock", "bedroom pop", "dream pop", "shoegaze", "lo-fi", "folk", "singer-songwriter", "alternative"],
+    latin: ["latin", "reggaeton", "urbano", "bachata", "salsa", "corridos", "latin pop", "afrobeats", "dancehall"],
+    afro: ["afrobeats", "amapiano", "afropop", "dancehall", "reggae", "r&b"],
+    kpop: ["k-pop", "kpop", "j-pop", "jpop", "dance pop", "pop"],
+    desi: ["bollywood", "hindi", "punjabi", "desi", "indian pop", "sufi", "tamil", "telugu"],
+    chill: ["lo-fi", "lofi", "ambient", "chill", "chillhop", "downtempo", "acoustic", "jazz", "classical", "instrumental", "indie"],
+    country: ["country", "americana", "folk", "bluegrass", "singer-songwriter", "soft rock"],
+  };
+
+  function inferTrackVibeClient(t = {}) {
+    const rawGenre = String(t.genre || "").toLowerCase().trim();
+    const rawTitle = String(t.title || "").toLowerCase().trim();
+    const rawArtist = String(artistName(t) || t.artist || "").toLowerCase().trim();
+    const blob = `${rawTitle} ${rawArtist} ${rawGenre} ${String(t.album || "").toLowerCase()}`;
+
+    let cluster = "pop";
+    let genre = rawGenre || "pop";
+    if (/\b(bollywood|hindi|punjabi|arijit|pritam|diljit|ap dhillon|karan aujla|shreya|atif|anuv jain|rahman|tamil|telugu|desi)\b/i.test(blob)) {
+      cluster = "desi";
+      genre = /\bpunjabi|diljit|ap dhillon|karan aujla\b/i.test(blob) ? "punjabi" : "bollywood";
+    } else if (/\b(k-pop|kpop|bts|blackpink|newjeans|stray kids|twice|aespa|seventeen|jungkook|le sserafim|ive|illit|ateez|enhypen)\b/i.test(blob)) {
+      cluster = "kpop";
+      genre = "k-pop";
+    } else if (/\b(afrobeats|amapiano|burna boy|wizkid|rema|tem|tems|ayra starr|davido|asake|tyla|omah lay)\b/i.test(blob)) {
+      cluster = "afro";
+      genre = "afrobeats";
+    } else if (/\b(reggaeton|latin|bad bunny|karol g|feid|peso pluma|rauw alejandro|j balvin|ozuna|maluma|shakira|rosalia|romeo santos)\b/i.test(blob)) {
+      cluster = "latin";
+      genre = "latin";
+    } else if (/\b(hip[\s-]?hop|rap|trap|drill|drake|kendrick|travis scott|kanye|eminem|future|metro boomin|21 savage|j\.?\s*cole|playboi carti|central cee|nicki minaj|cardi b|lil |gunna|don toliver|asap rocky|tyler, the creator)\b/i.test(blob)) {
+      cluster = "hiphop";
+      genre = /\b(drill)\b/i.test(blob) ? "drill" : /\b(trap)\b/i.test(blob) ? "trap" : "hip-hop";
+    } else if (/\b(r&b|rnb|soul|neo[\s-]?soul|sza|the weeknd|frank ocean|daniel caesar|brent faiyaz|usher|chris brown|alicia keys|kehlani|summer walker|h\.e\.r\.|giveon|bryson tiller|khalid)\b/i.test(blob)) {
+      cluster = "rnb";
+      genre = "r&b";
+    } else if (/\b(edm|electronic|house|techno|trance|dubstep|dnb|drum and bass|phonk|synthwave|calvin harris|david guetta|tiesto|martin garrix|avicii|marshmello|skrillex|fred again|kygo|zedd|alesso|daft punk|odesza|flume|alan walker|chainsmokers|disclosure|peggy gou)\b/i.test(blob)) {
+      cluster = "electronic";
+      genre = /\b(phonk)\b/i.test(blob) ? "phonk" : /\b(house)\b/i.test(blob) ? "house" : "electronic";
+    } else if (/\b(rock|metal|punk|grunge|alternative|nirvana|linkin park|queen|ac\/dc|metallica|arctic monkeys|green day|foo fighters|red hot chili peppers|oasis|coldplay|imagine dragons|radiohead|the killers|muse|blink-182|paramore|bring me the horizon|slipknot|deftones|strokes|fleetwood mac)\b/i.test(blob)) {
+      cluster = "rock";
+      genre = /\b(metal|slipknot|metallica|deftones)\b/i.test(blob) ? "metal" : /\b(indie|arctic monkeys|strokes)\b/i.test(blob) ? "indie rock" : "rock";
+    } else if (/\b(indie|bedroom pop|dream pop|shoegaze|tame impala|lana del rey|mitski|clairo|beabadoobee|cigars? after sex|phoebe bridgers|hozier|bon iver|mac demarco|wallows|men i trust|laufey|conan gray|girl in red|boygenius|the 1975|glass animals|vampire weekend)\b/i.test(blob)) {
+      cluster = "indie";
+      genre = "indie pop";
+    } else if (/\b(country|americana|folk|morgan wallen|luke combs|zach bryan|chris stapleton|kacey musgraves|dolly parton|johnny cash|shania twain|taylor swift.*fearless|noah kahan)\b/i.test(blob)) {
+      cluster = "country";
+      genre = "country";
+    } else if (/\b(lo[\s-]?fi|lofi|chillhop|ambient|study|sleep|meditation|piano|classical|jazz|instrumental|rain)\b/i.test(blob)) {
+      cluster = "chill";
+      genre = "lo-fi";
+    } else {
+      cluster = "pop";
+      genre = rawGenre && rawGenre !== "music" ? rawGenre : "pop";
+    }
+
+    let mood = "upbeat";
+    let tempo = "mid";
+    if (/\b(sad|heartbreak|cry|tears|lonely|broken|hurt|miss you|goodbye|alone|melanchol|grief|blue)\b/i.test(blob)) {
+      mood = "melancholic";
+      tempo = "slow";
+    } else if (/\b(chill|lofi|lo-fi|relax|calm|peace|dream|soft|sunday|coffee|sunset|late night|midnight|sleep|ambient|acoustic)\b/i.test(blob) || cluster === "chill") {
+      mood = "chill";
+      tempo = "slow";
+    } else if (/\b(love|romantic|romance|kiss|heart|baby|darling|forever|yours|valentine|slow dance)\b/i.test(blob)) {
+      mood = "romantic";
+      tempo = "slow";
+    } else if (/\b(gym|workout|hype|beast|phonk|rage|hard|pump|power|energy|banger|turnt|club|party|dance|festival|rave|fast)\b/i.test(blob) || genre === "phonk" || genre === "drill") {
+      mood = "hype";
+      tempo = "fast";
+    } else if (/\b(dark|night|shadow|afterhours|after hours|toxic|sin|devil|villain|obsess)\b/i.test(blob)) {
+      mood = "dark";
+      tempo = "mid";
+    } else if (/\b(focus|study|coding|work|instrumental|deep)\b/i.test(blob)) {
+      mood = "focus";
+      tempo = "slow";
+    } else if (cluster === "electronic" || cluster === "kpop" || cluster === "latin" || cluster === "afro") {
+      mood = "upbeat";
+      tempo = "fast";
+    } else if (cluster === "indie" || cluster === "rnb") {
+      mood = "chill";
+      tempo = "mid";
+    }
+
+    let style = "modern";
+    if (/\b(acoustic|unplugged|stripped|piano|guitar|singer[\s-]?songwriter|folk)\b/i.test(blob)) {
+      style = "acoustic";
+      if (tempo === "fast") tempo = "mid";
+    } else if (/\b(remix|club|synth|electronic|edm|house|techno|bass|phonk|beat)\b/i.test(blob) || cluster === "electronic") {
+      style = "electronic";
+    } else if (/\b(live|concert|session|mtv unplugged)\b/i.test(blob)) {
+      style = "live";
+    } else if (/\b(80s|90s|70s|retro|classic|throwback|oldies|vintage|disco)\b/i.test(blob)) {
+      style = "retro";
+    } else if (/\b(soundtrack|ost|score|cinematic|orchestra|theme)\b/i.test(blob)) {
+      style = "cinematic";
+    }
+
+    return { genre, cluster, mood, tempo, style };
+  }
+
+  function areClustersCompatibleClient(c1, c2) {
+    if (!c1 || !c2) return false;
+    if (c1 === c2) return true;
+    const compat = {
+      pop: ["rnb", "indie", "electronic", "kpop", "latin", "afro"],
+      hiphop: ["rnb", "afro", "latin", "electronic"],
+      rnb: ["hiphop", "pop", "afro", "chill", "indie"],
+      electronic: ["pop", "hiphop", "kpop", "latin"],
+      rock: ["indie", "pop", "country"],
+      indie: ["rock", "pop", "chill", "rnb", "country"],
+      latin: ["pop", "afro", "hiphop", "electronic"],
+      afro: ["rnb", "hiphop", "latin", "pop"],
+      kpop: ["pop", "electronic", "rnb", "hiphop"],
+      desi: ["pop", "chill", "indie"],
+      chill: ["indie", "rnb", "pop", "country"],
+      country: ["indie", "rock", "pop", "chill"],
+    };
+    return (compat[c1] || []).includes(c2);
+  }
+
+  function areMoodsCompatibleClient(m1, m2) {
+    if (!m1 || !m2) return false;
+    if (m1 === m2) return true;
+    const adj = {
+      chill: ["romantic", "melancholic", "focus", "dark"],
+      melancholic: ["chill", "romantic", "dark"],
+      romantic: ["chill", "melancholic", "upbeat"],
+      upbeat: ["hype", "romantic", "chill"],
+      hype: ["upbeat", "dark"],
+      dark: ["hype", "melancholic", "chill", "upbeat"],
+      focus: ["chill", "melancholic"],
+    };
+    return (adj[m1] || []).includes(m2);
+  }
+
+  function areTemposSmoothClient(t1, t2) {
+    if (!t1 || !t2 || t1 === t2) return 2;
+    if (t1 === "mid" || t2 === "mid") return 1;
+    return 0;
+  }
+
+  // Sequences candidate songs like a human-made Spotify playlist:
+  // 1) Phase 1 (first ~35%): close similarity (same vibe, genre, mood, tempo, style, related/seed artists)
+  // 2) Phase 2 (middle ~40%): core vibe & style continuation across varied artists
+  // 3) Phase 3 (final ~25%): gradual exploration into compatible genres/moods
+  // Strictly prevents duplicate songs, recently played repeats, and back-to-back same artist.
+  function scoreAndSequenceSpotifyStyle(seedTrack, candidates, opts = {}) {
+    const max = opts.max || 20;
+    const maxPerArtist = opts.maxPerArtist || 2;
+    const seedVibe = seedTrack ? inferTrackVibeClient(seedTrack) : (opts.vibe || { genre: "pop", cluster: "pop", mood: "upbeat", tempo: "mid", style: "modern" });
+    const seedArtist = seedTrack ? canonicalPrimaryArtistClient(seedTrack) : "";
+    const seedKey = seedTrack ? canonicalSongKey(seedTrack) : "";
+    const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
+    const prefGenres = Array.isArray(state.prefs && state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
+    const allowIndian =
+      countryCode === "IN" || countryCode === "PK" || countryCode === "BD" ||
+      seedVibe.cluster === "desi" ||
+      prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
+
+    const taste = tasteProfile();
+    const favArtistSet = new Set([
+      ...(taste.artists || []).map((x) => canonicalPrimaryArtistClient(Array.isArray(x) ? x[0] : x)),
+      ...((state.following || []).map((f) => canonicalPrimaryArtistClient(f && f.name))),
+    ].filter(Boolean));
+    const relatedArtistSet = new Set(
+      Array.isArray(opts.relatedArtists) ? opts.relatedArtists.map((a) => canonicalPrimaryArtistClient(a)).filter(Boolean) : []
+    );
+
+    const excludeKeys = new Set();
+    const excludeIds = new Set();
+    if (seedKey) excludeKeys.add(seedKey);
+    if (seedTrack && seedTrack.id) excludeIds.add(String(seedTrack.id));
+    if (seedTrack && seedTrack.videoId) excludeIds.add(String(seedTrack.videoId));
+    for (const ex of (opts.excludeTracks || [])) {
+      if (!ex) continue;
+      const k = canonicalSongKey(ex);
+      if (k) excludeKeys.add(k);
+      if (ex.id) excludeIds.add(String(ex.id));
+      if (ex.videoId) excludeIds.add(String(ex.videoId));
+    }
+
+    const recentPlayKeys = new Set(_sessionPlayedKeys.slice(0, 25));
+    const recentAutoKeys = new Set(_sessionAutoQueuedKeys.slice(0, 35));
+
+    const seenKeys = new Set();
+    const seenIds = new Set();
+    const scored = [];
+
+    for (let i = 0; i < (candidates || []).length; i++) {
+      const t = candidates[i];
+      if (!t || !t.title || !looksLikeSong(t)) continue;
+      if (!allowIndian && isUnwantedIndianTrackClient(t, countryCode)) continue;
+      if (seedTrack && isSameSongClient(t, seedTrack)) continue;
+
+      const key = canonicalSongKey(t);
+      const idStr = String(t.id || "");
+      const vidStr = String(t.videoId || "");
+      if (!key) continue;
+      if (excludeKeys.has(key) || (idStr && excludeIds.has(idStr)) || (vidStr && excludeIds.has(vidStr))) continue;
+      if (seenKeys.has(key) || (idStr && seenIds.has(idStr)) || (vidStr && seenIds.has(vidStr))) continue;
+      seenKeys.add(key);
+      if (idStr) seenIds.add(idStr);
+      if (vidStr) seenIds.add(vidStr);
+
+      const artistNorm = canonicalPrimaryArtistClient(t);
+      const tv = inferTrackVibeClient(t);
+      let score = 0;
+      let tier = 2;
+
+      const isSameArtist = Boolean(seedArtist && artistNorm && (artistNorm === seedArtist || artistNorm.includes(seedArtist) || seedArtist.includes(artistNorm)));
+      const isRelArtist = Boolean(artistNorm && relatedArtistSet.has(artistNorm));
+      const isFavArtist = Boolean(artistNorm && favArtistSet.has(artistNorm));
+
+      if (isSameArtist) {
+        score += 32;
+        tier = 1;
+      } else if (isRelArtist) {
+        score += 30;
+        tier = 1;
+      } else if (isFavArtist) {
+        score += 16;
+      }
+
+      if (tv.genre === seedVibe.genre) {
+        score += 28;
+        if (tier > 1 && (isRelArtist || tv.mood === seedVibe.mood)) tier = 1;
+      } else if (tv.cluster === seedVibe.cluster) {
+        score += 22;
+        if (tier > 2) tier = 2;
+      } else if (areClustersCompatibleClient(seedVibe.cluster, tv.cluster)) {
+        score += 10;
+        tier = 3;
+      } else {
+        score -= 14;
+        tier = 3;
+      }
+
+      if (tv.mood === seedVibe.mood) score += 16;
+      else if (areMoodsCompatibleClient(seedVibe.mood, tv.mood)) score += 9;
+      else score -= 5;
+
+      const tempoFit = areTemposSmoothClient(seedVibe.tempo, tv.tempo);
+      if (tempoFit === 2) score += 12;
+      else if (tempoFit === 1) score += 6;
+      else score -= 6;
+
+      if (tv.style === seedVibe.style) score += 10;
+
+      if (recentPlayKeys.has(key)) score -= 45;
+      else if (recentAutoKeys.has(key)) score -= 22;
+
+      score += Math.max(0, 12 - Math.floor(i / 4));
+
+      scored.push({
+        track: t,
+        key,
+        artistNorm: artistNorm || `unknown_${i}`,
+        vibe: tv,
+        tier,
+        score,
+      });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+
+    const sequenced = [];
+    const artistCounts = new Map();
+    const artistLastSlot = new Map();
+    if (seedArtist) {
+      artistCounts.set(seedArtist, 1);
+      artistLastSlot.set(seedArtist, -1);
+    }
+
+    const remaining = scored.slice();
+    let prevVibe = seedVibe;
+    let prevArtist = seedArtist;
+
+    while (sequenced.length < max && remaining.length > 0) {
+      const slot = sequenced.length;
+      const progress = max > 1 ? slot / (max - 1) : 0;
+      const targetTier = progress < 0.35 ? 1 : progress < 0.75 ? 2 : 3;
+
+      let bestIdx = -1;
+      let bestSlotScore = -Infinity;
+
+      for (let i = 0; i < remaining.length; i++) {
+        const cand = remaining[i];
+        const aCount = artistCounts.get(cand.artistNorm) || 0;
+        const capForArtist = (seedArtist && cand.artistNorm === seedArtist) ? Math.min(2, maxPerArtist) : maxPerArtist;
+        if (aCount >= capForArtist) continue;
+        if (cand.artistNorm && cand.artistNorm === prevArtist) continue;
+        const lastIdx = artistLastSlot.get(cand.artistNorm);
+        if (lastIdx !== undefined && slot - lastIdx < 3) continue;
+
+        let slotScore = cand.score;
+        const tierDiff = Math.abs(cand.tier - targetTier);
+        if (tierDiff === 0) slotScore += 18;
+        else if (tierDiff === 1) slotScore += 6;
+        else slotScore -= 8;
+
+        const tFit = areTemposSmoothClient(prevVibe.tempo, cand.vibe.tempo);
+        if (tFit === 2) slotScore += 10;
+        else if (tFit === 1) slotScore += 5;
+        else slotScore -= 8;
+
+        if (cand.vibe.mood === prevVibe.mood) slotScore += 8;
+        else if (areMoodsCompatibleClient(prevVibe.mood, cand.vibe.mood)) slotScore += 4;
+
+        if (aCount === 0) slotScore += 9;
+
+        if (slotScore > bestSlotScore) {
+          bestSlotScore = slotScore;
+          bestIdx = i;
+        }
+      }
+
+      if (bestIdx < 0) {
+        bestIdx = remaining.findIndex(
+          (c) => c.artistNorm !== prevArtist && (artistCounts.get(c.artistNorm) || 0) < maxPerArtist + 1
+        );
+      }
+      if (bestIdx < 0) {
+        bestIdx = remaining.findIndex((c) => c.artistNorm !== prevArtist);
+      }
+      if (bestIdx < 0) bestIdx = 0;
+
+      const [picked] = remaining.splice(bestIdx, 1);
+      sequenced.push(picked.track);
+      artistCounts.set(picked.artistNorm, (artistCounts.get(picked.artistNorm) || 0) + 1);
+      artistLastSlot.set(picked.artistNorm, slot);
+      prevArtist = picked.artistNorm;
+      prevVibe = picked.vibe;
+    }
+
+    return sequenced;
+  }
+
+  function localRelatedTracks(t, max = 24) {
+    const pool = [].concat(
+      homeTrackPool(),
+      (state.discovery && state.discovery.tracks) || [],
+      state.tasteTracks || [],
+      state.followedArtistTracks || [],
+      state.liked || [],
+      state.recents || []
+    );
+    return pool
+      .filter((cand) => cand && cand.id && cand.title && cand.source !== "radio" && looksLikeSong(cand) && (!t || !isSameSongClient(cand, t)))
+      .slice(0, max * 4);
+  }
+
   async function fetchRelated(seed, extraSkip) {
     if (!seed || seed.source === "radio") return [];
     const artist = artistName(seed);
     const title = seed.title || "";
-    const skip = [relatedSkip(seed), extraSkip || ""].filter(Boolean).join(",");
-    const data = await api(
-      `/api/related?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}&skip=${encodeURIComponent(skip)}&${glq()}`,
-      14000
-    );
+    const vibe = inferTrackVibeClient(seed);
+    const taste = tasteProfile();
+    const skipParts = [
+      relatedSkip(seed),
+      canonicalSongKey(seed),
+      extraSkip || "",
+      ..._sessionPlayedKeys.slice(0, 20),
+      ..._sessionAutoQueuedKeys.slice(0, 20),
+    ].filter(Boolean);
+    const skip = [...new Set(skipParts)].slice(0, 35).join(",");
+    const qs = new URLSearchParams({
+      title,
+      artist,
+      genre: seed.genre || vibe.genre || "",
+      mood: vibe.mood || "",
+      tempo: vibe.tempo || "",
+      style: vibe.style || "",
+      artists: taste.artists.slice(0, 4).map((x) => x[0]).join(","),
+      genres: taste.genres.slice(0, 3).map((x) => x[0]).join(","),
+      skip,
+    });
+    const data = await api(`/api/related?${qs}&${glq()}`, 14000);
     return (data && data.tracks) || [];
+  }
+
+  // Supplements related candidates with artist catalog + Deezer related artists + iTunes
+  // and sequences them through the Spotify-style similarity -> gradual exploration engine.
+  async function gatherSmartRelatedCandidates(seed, excludeTracks = [], max = 18) {
+    if (!seed || seed.source === "radio") return [];
+    const skipKeys = [];
+    for (const ex of excludeTracks) {
+      if (!ex) continue;
+      const k = canonicalSongKey(ex);
+      if (k) skipKeys.push(k);
+      if (ex.id) skipKeys.push(String(ex.id));
+    }
+    let raw = await fetchRelated(seed, skipKeys.slice(0, 25).join(",")).catch(() => []);
+    const relatedArtists = [];
+    const art = artistName(seed);
+
+    if (raw.length < 10 && art && !/^(various artists|unknown)$/i.test(art)) {
+      try {
+        const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
+        const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
+        raw = raw.concat(artTracks.slice(0, 12));
+      } catch {}
+    }
+
+    if (raw.length < 10) {
+      const searchQ = art || seed.title || "";
+      if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
+        try {
+          const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
+          const itList = (itRes && itRes.results) || [];
+          raw = raw.concat(itList);
+        } catch {}
+        if (raw.length < 10) {
+          try {
+            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
+            const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
+            for (const t of dzList) {
+              const s = normalizeClientDeezerTrack(t);
+              if (s) raw.push(s);
+            }
+          } catch {}
+        }
+      }
+    }
+
+    if (raw.length < 10) {
+      try {
+        const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
+        const discTracks = (disc && disc.tracks) || [];
+        raw = raw.concat(discTracks);
+      } catch {}
+    }
+
+    if (raw.length < 12) {
+      raw = raw.concat(localRelatedTracks(seed, 24));
+    }
+
+    return scoreAndSequenceSpotifyStyle(seed, raw, {
+      max,
+      maxPerArtist: 2,
+      relatedArtists,
+      excludeTracks,
+    });
   }
 
   let isQueueRecsLoading = false;
   async function loadQueueRecs(force = false) {
-    const cur = current() || (state.recent && state.recent[0]) || (state.queue && state.queue[0]) || (state.liked && state.liked[0]);
+    const isSeedTrack = force && typeof force === "object" && force.title;
+    const forceRefresh = force === true;
+    const cur = (isSeedTrack ? force : null) || current() || (state.recents && state.recents[0]) || (state.queue && state.queue[0]) || (state.liked && state.liked[0]);
     if (!cur || cur.source === "radio") {
       if (!cur) {
         state.queueRecs = [];
@@ -4739,8 +5393,8 @@
       }
       return;
     }
-    const seedKey = `${cur.id || cur.videoId || ""}:${cur.title || ""}:${cur.artist || ""}`;
-    if (!force && state._queueRecsSeed === seedKey && Array.isArray(state.queueRecs) && state.queueRecs.length > 0) {
+    const seedKey = canonicalSongKey(cur);
+    if (!forceRefresh && state._queueRecsSeed === seedKey && Array.isArray(state.queueRecs) && state.queueRecs.length >= 4) {
       return;
     }
     if (isQueueRecsLoading) return;
@@ -4749,104 +5403,15 @@
     if (refBtn) refBtn.classList.add("rotating");
     renderQueue();
     try {
-      const skipSet = new Set();
-      (state.queue || []).forEach((t) => {
-        if (!t) return;
-        if (t.id) skipSet.add(t.id);
-        if (t.videoId) skipSet.add(t.videoId);
-      });
-      (state.recent || []).slice(0, 20).forEach((t) => {
-        if (!t) return;
-        if (t.id) skipSet.add(t.id);
-        if (t.videoId) skipSet.add(t.videoId);
-      });
-      const extraSkip = Array.from(skipSet).slice(0, 25).join(",");
-      let tracks = await fetchRelated(cur, extraSkip).catch(() => []);
-      const filtered = [];
-      const seenIds = new Set(skipSet);
-
-      const addTrack = (t) => {
-        if (!t || !looksLikeSong(t)) return false;
-        const k = t.id || t.videoId;
-        if (!k || seenIds.has(k)) return false;
-        // Skip identical title matching seed song
-        const cleanT = String(t.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
-        const cleanCur = String(cur.title || "").toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
-        if (cleanT && cleanCur && cleanT === cleanCur) return false;
-        seenIds.add(k);
-        filtered.push(t);
-        return true;
-      };
-
-      for (const t of tracks || []) {
-        addTrack(t);
-        if (filtered.length >= 15) break;
+      const excludeTracks = [
+        ...(state.queue || []),
+        ...(state.recents || []).slice(0, 12),
+      ];
+      if (forceRefresh && Array.isArray(state.queueRecs)) {
+        excludeTracks.push(...state.queueRecs);
       }
-
-      // If related returned fewer than 6 songs, fetch artist catalog recommendations
-      if (filtered.length < 6 && cur.artist) {
-        const art = artistName(cur);
-        if (art && !/^(various artists|unknown)$/i.test(art)) {
-          try {
-            const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
-            const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
-            for (const t of artTracks) {
-              addTrack(t);
-              if (filtered.length >= 15) break;
-            }
-          } catch {}
-        }
-      }
-
-      // If still fewer than 6, supplement from iTunes / Apple Music catalog
-      if (filtered.length < 6) {
-        const art = artistName(cur);
-        const searchQ = art || cur.title || "";
-        if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
-          try {
-            const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
-            const itList = (itRes && itRes.results) || [];
-            for (const t of itList) {
-              addTrack(t);
-              if (filtered.length >= 15) break;
-            }
-          } catch {}
-          if (filtered.length < 6) {
-            try {
-              const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
-              const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
-              for (const t of dzList) {
-                const s = {
-                  id: `deezer:${t.id}`,
-                  source: "deezer",
-                  title: t.title || t.trackName || "Song",
-                  artist: (t.artist && (t.artist.name || t.artist)) || t.artistName || "Artist",
-                  album: (t.album && (t.album.title || t.album)) || t.collectionName || "",
-                  duration: Number(t.duration || 0),
-                  artwork: (t.album && (t.album.cover_big || t.album.cover_medium)) || t.artwork || "/cover-default.jpg",
-                  playQuery: `${t.title || ""} ${(t.artist && (t.artist.name || t.artist)) || ""} official audio`.trim(),
-                };
-                addTrack(s);
-                if (filtered.length >= 15) break;
-              }
-            } catch {}
-          }
-        }
-      }
-
-      // If still fewer than 6, pull from discovery / shelf
-      if (filtered.length < 6) {
-        try {
-          const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
-          const discTracks = (disc && disc.tracks) || [];
-          for (const t of discTracks) {
-            addTrack(t);
-            if (filtered.length >= 15) break;
-          }
-        } catch {}
-      }
-
-      state.queueRecs = filtered;
+      const sequenced = await gatherSmartRelatedCandidates(cur, excludeTracks, 15);
+      state.queueRecs = sequenced.filter((t) => !isSameSongClient(t, cur) && !(state.queue || []).some((q) => isSameSongClient(q, t)));
       state._queueRecsSeed = seedKey;
     } catch (err) {
       console.warn("loadQueueRecs failed:", err);
@@ -4861,79 +5426,49 @@
   let isRefillingQueue = false;
   async function ensureQueueRefill(seed) {
     if (isRefillingQueue) return false;
-    const targetSeed = seed || current() || (state.queue && state.queue[state.queue.length - 1]) || (state.recent && state.recent[0]);
+    const targetSeed = seed || current() || (state.queue && state.queue[state.queue.length - 1]) || (state.recents && state.recents[0]);
     if (!targetSeed || targetSeed.source === "radio") return false;
     isRefillingQueue = true;
     try {
-      // 1. If we already have fresh Spotify-style recommendations, use them first for instantaneous queue extension!
+      // 1. If we already have fresh Spotify-style recommendations matching the current vibe,
+      // filter out any song already in the queue or identical to the current song, and append!
       if (Array.isArray(state.queueRecs) && state.queueRecs.length >= 4) {
-        const toAdd = state.queueRecs.slice(0, 8);
-        state.queueRecs = state.queueRecs.slice(8);
-        state.queue = state.queue.concat(toAdd);
-        renderQueue();
-        renderChrome();
-        // Background refresh next batch
-        loadQueueRecs(true);
-        return true;
+        const validRecs = state.queueRecs.filter(
+          (r) => r && !isSameSongClient(r, targetSeed) && !(state.queue || []).some((q) => isSameSongClient(q, r))
+        );
+        if (validRecs.length >= 4) {
+          const toAdd = validRecs.slice(0, 10);
+          for (const f of toAdd) recordSessionAutoQueued(f);
+          state.queueRecs = state.queueRecs.filter((r) => !toAdd.some((a) => isSameSongClient(a, r)));
+          state.queue = state.queue.concat(toAdd);
+          renderQueue();
+          renderChrome();
+          loadQueueRecs(true);
+          return true;
+        }
       }
-      const rows = await fetchRelated(targetSeed);
-      const have = new Set();
-      (state.queue || []).forEach((t) => {
-        if (!t) return;
-        if (t.id) have.add(t.id);
-        if (t.videoId) have.add(t.videoId);
-        if (t.trackId) have.add(String(t.trackId));
-      });
-      (state.recent || []).slice(0, 20).forEach((t) => {
-        if (!t) return;
-        if (t.id) have.add(t.id);
-        if (t.videoId) have.add(t.videoId);
-        if (t.trackId) have.add(String(t.trackId));
-      });
 
-      let candidates = Array.isArray(rows) ? [...rows] : [];
+      const excludeTracks = [
+        ...(state.queue || []),
+        ...(state.recents || []).slice(0, 15),
+      ];
+      let extra = await gatherSmartRelatedCandidates(targetSeed, excludeTracks, 16);
 
-      // If target seed is Audius, also add trending/popular Audius tracks to candidate pool
-      if (targetSeed.source === "audius") {
+      // If target seed is Audius and extra is sparse, also blend Audius tracks
+      if (extra.length < 6 && targetSeed.source === "audius") {
         try {
           const gData = await api(`/api/home?${glq()}`, 4000);
           const audList = (gData && gData.audius) || [];
-          for (const a of audList) {
-            if (a && (a.id || a.trackId)) candidates.push(a);
-          }
+          extra = scoreAndSequenceSpotifyStyle(targetSeed, [...extra, ...audList], {
+            max: 16,
+            excludeTracks,
+          });
         } catch {}
       }
 
-      // If candidates are sparse, query search for more songs by the same artist or title genre
-      if (candidates.length < 8) {
-        try {
-          const a = artistName(targetSeed) || targetSeed.artist;
-          if (a) {
-            const sData = await api(`/api/search?q=${encodeURIComponent(a)}&${glq()}`, 4000);
-            if (sData && Array.isArray(sData.youtube)) {
-              candidates = candidates.concat(sData.youtube);
-            }
-          }
-        } catch {}
-      }
-
-      const extra = [];
-      for (const t of candidates) {
-        if (!t || !looksLikeSong(t)) continue;
-        const tid = t.id;
-        const vid = t.videoId;
-        const trk = t.trackId ? String(t.trackId) : "";
-        if (tid && have.has(tid)) continue;
-        if (vid && have.has(vid)) continue;
-        if (trk && have.has(trk)) continue;
-        if (tid) have.add(tid);
-        if (vid) have.add(vid);
-        if (trk) have.add(trk);
-        extra.push(t);
-        if (extra.length >= 20) break;
-      }
-
+      extra = extra.filter((t) => t && !isSameSongClient(t, targetSeed) && !(state.queue || []).some((q) => isSameSongClient(q, t)));
       if (!extra.length) return false;
+      for (const f of extra) recordSessionAutoQueued(f);
       state.queue = state.queue.concat(extra);
       renderQueue();
       renderChrome();
@@ -4958,30 +5493,25 @@
     const key = `${plIndex}:${p.tracks.map((t) => t.id).slice(0, 10).join("|")}`;
     if (plRecs.key === key) return;
     plRecs = { key, tracks: [], loading: true };
-    const have = new Set(p.tracks.map((t) => t.id).filter(Boolean));
-    p.tracks.forEach((t) => { if (t && t.videoId) have.add(t.videoId); });
-    const seeds = [];
     const ts = p.tracks;
-    seeds.push(ts[ts.length - 1]);
-    if (ts[0] && ts[0].id !== seeds[0].id) seeds.push(ts[0]);
+    const seeds = [ts[ts.length - 1]];
+    if (ts[0] && !isSameSongClient(ts[0], seeds[0])) seeds.push(ts[0]);
     if (ts.length > 2) {
       const mid = ts[Math.floor(ts.length / 2)];
-      if (mid && !seeds.some((s) => s.id === mid.id)) seeds.push(mid);
+      if (mid && !seeds.some((s) => isSameSongClient(s, mid))) seeds.push(mid);
     }
-    const out = [];
+    let raw = [];
     for (const seed of seeds.slice(0, 3)) {
       try {
-        const rows = await fetchRelated(seed, [...have].join(","));
-        for (const t of rows) {
-          if (!t || !looksLikeSong(t) || have.has(t.id) || (t.videoId && have.has(t.videoId))) continue;
-          have.add(t.id);
-          if (t.videoId) have.add(t.videoId);
-          out.push(t);
-          if (out.length >= 10) break;
-        }
+        const rows = await fetchRelated(seed, ts.map((t) => canonicalSongKey(t)).filter(Boolean).slice(0, 25).join(","));
+        raw = raw.concat(rows || []);
       } catch {}
-      if (out.length >= 10) break;
     }
+    const out = scoreAndSequenceSpotifyStyle(seeds[0], raw, {
+      max: 10,
+      maxPerArtist: 2,
+      excludeTracks: ts,
+    });
     if (plRecs.key !== key) return;
     plRecs = { key, tracks: out, loading: false };
     if (state.view === "library" && state.activePlaylist === plIndex) render();
@@ -5047,6 +5577,7 @@
       timeoutMs
     ).then((d) => {
       if (d && d.url && !d.isPreview) {
+        if (d.url.startsWith("/")) d.url = API_BASE + d.url;
         warmStreamMap.set(vid, { data: d, promise: null, exp: Date.now() + 12 * 60 * 1000 });
         return d;
       }
@@ -5093,7 +5624,7 @@
       try {
         const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0`, 10000);
         if (sData && sData.url && !sData.isPreview) {
-          t.streamUrl = sData.url;
+          t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
           t._isPreviewStream = false;
           if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
           if (sData.duration && !t.duration) t.duration = Number(sData.duration);
@@ -5109,7 +5640,7 @@
       try {
         const sData = await api(`/api/yt/stream?title=${encodeURIComponent(q)}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0&refresh=1`, 9000);
         if (sData && sData.url && !sData.isPreview) {
-          t.streamUrl = sData.url;
+          t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
           t._isPreviewStream = false;
           if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
           if (sData.duration && !t.duration) t.duration = Number(sData.duration);
@@ -5236,7 +5767,7 @@
       return t;
     }
 
-    // 5. Direct audio fallback (fresh Deezer track preview / iTunes preview) so a clicked Deezer song ALWAYS plays
+    // 5. Direct full-quality audio stream fallback via /api/yt/stream so a clicked catalog song ALWAYS plays
     const fallbackUrl = await resolveFallbackStreamUrl(t);
     if (fallbackUrl) {
       t.streamUrl = fallbackUrl;
@@ -5329,12 +5860,17 @@
       try { ensureYT(t.videoId || ""); } catch {}
     }
 
+    // Strip any accidental duplicate of the current song sitting right next in the queue
+    // so MUCHI never plays the same song twice in a row.
+    while (state.index + 1 < state.queue.length && isSameSongClient(state.queue[state.index + 1], t)) {
+      state.queue.splice(state.index + 1, 1);
+    }
     // Always load lyrics (uses IndexedDB / saved download cache when offline)
     loadLyrics(t);
     if (!isNetworkOff) {
-      loadQueueRecs();
-      const hasQueueFollowers = Array.isArray(state.queue) && (state.index + 1 < state.queue.length);
-      if (!hasQueueFollowers && t.source !== "radio") {
+      loadQueueRecs(t);
+      const remainingUpcoming = Array.isArray(state.queue) ? (state.queue.length - 1 - state.index) : 0;
+      if (remainingUpcoming <= 2 && t.source !== "radio") {
         fillRelatedQueue(t);
       }
     }
@@ -5433,8 +5969,8 @@
         return;
       }
       console.error(err);
-      // Try direct/preview audio fallback before giving up on a metadata track
-      if (gen === playGen && (t.source === "deezer" || t.source === "apple" || t.source === "itunes" || t.previewUrl || t.preview)) {
+      // Try secondary full-quality audio stream resolution before giving up on a metadata track
+      if (gen === playGen && (t.source === "deezer" || t.source === "apple" || t.source === "itunes")) {
         try {
           const okAudio = await playFallbackAudioForTrack(t);
           if (okAudio) {
@@ -5476,33 +6012,28 @@
     let url = (!t._isPreviewStream && !t._nativeRefreshTried && t.streamUrl) ? t.streamUrl : "";
     let dur = t.duration || 0;
     if (!url) {
-      try {
-        // Race the backend stream cache/fast-tier (1.5s budget) before handing off
-        // to on-device residential IP resolution inside MuchiAudioService.
-        const data = await getWarmStream(t.videoId, t.title || "", t.artist || "", t._ytCandidates || [], 1500, true);
-        if (data && data.url && !data.isPreview) {
-          url = data.url;
-          if (data.videoId) t.videoId = data.videoId;
-          if (data.duration) dur = Number(data.duration);
-        }
-      } catch { url = ""; }
+      const warmHit = warmStreamMap.get(String(t.videoId || "").trim());
+      if (warmHit && warmHit.data && warmHit.data.url && warmHit.exp > Date.now()) {
+        url = warmHit.data.url;
+        if (warmHit.data.videoId) t.videoId = warmHit.data.videoId;
+        if (warmHit.data.duration) dur = Number(warmHit.data.duration);
+      }
     }
-    // If the Worker's datacenter IP was gated by YouTube or timed out,
-    // hand "yt:<videoId>" to the Android native foreground service so MuchiAudioService
-    // resolves the stream directly on the user's residential phone IP in parallel
-    // and plays it with full OS media notification + background playback.
-    const isAndroidNative = IS_NATIVE && window.Capacitor && typeof window.Capacitor.getPlatform === "function" && window.Capacitor.getPlatform() === "android";
-    if (!url && isAndroidNative && nativePlayer() && !t._nativeOnDeviceTried) {
+    // Hand "yt:<videoId>" immediately to the native player (Android MuchiAudioService /
+    // iOS MuchiAudioPlugin) so it resolves the stream directly on the user's residential
+    // phone IP in parallel (~250ms, or 0ms if preloaded) with zero datacenter-IP delay,
+    // and plays with full OS media notification + background playback.
+    if (!url && nativePlayer() && !t._nativeOnDeviceTried) {
       t._nativeOnDeviceTried = true;
       url = `yt:${t.videoId}`;
     }
     if (!url) {
       try {
-        const fullData = await getWarmStream(t.videoId, t.title || "", t.artist || "", t._ytCandidates || [], 6500, false);
-        if (fullData && fullData.url && !fullData.isPreview) {
-          url = fullData.url;
-          if (fullData.videoId) t.videoId = fullData.videoId;
-          if (fullData.duration) dur = Number(fullData.duration);
+        const data = await getWarmStream(t.videoId, t.title || "", t.artist || "", t._ytCandidates || [], 6500, false);
+        if (data && data.url && !data.isPreview) {
+          url = data.url;
+          if (data.videoId) t.videoId = data.videoId;
+          if (data.duration) dur = Number(data.duration);
         }
       } catch {}
     }
@@ -5675,6 +6206,7 @@
   async function playAudioWeb(url) {
     const t = current();
     if (!t || !url) return;
+    if (url.startsWith("/")) url = API_BASE + url;
     t._playingViaAudio = true;
     const seq = ++audioPlaySeq;
     adaptiveBuffer.buffering = false;
@@ -6167,24 +6699,96 @@
       return;
     }
     if (state.repeat === "one" && !force) return playCurrent(true);
+
+    const cur = current();
+    const curArtist = cur ? canonicalPrimaryArtistClient(cur) : "";
+    const curVibe = cur ? inferTrackVibeClient(cur) : null;
+
     if (state.shuffle) {
-      state.index = Math.floor(Math.random() * state.queue.length);
-    } else if (state.index + 1 < state.queue.length) {
-      state.index += 1;
-    } else if (state.repeat === "all") {
-      state.index = 0;
-    } else {
-      const refilled = await ensureQueueRefill();
-      if (refilled && state.index + 1 < state.queue.length) {
-        state.index += 1;
+      // Smart Spotify-like shuffle: never pick the current song, avoid songs already
+      // visited in this shuffle cycle, avoid back-to-back same artist when possible,
+      // and prefer smooth vibe/tempo continuation.
+      let candidates = [];
+      for (let i = 0; i < state.queue.length; i++) {
+        const cand = state.queue[i];
+        if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+        const k = canonicalSongKey(cand);
+        if (!_shuffleVisitedKeys.has(k)) candidates.push({ idx: i, track: cand, key: k });
+      }
+      if (!candidates.length && state.repeat !== "all" && cur && cur.source !== "radio") {
+        const refilled = await ensureQueueRefill(cur);
+        if (refilled) {
+          for (let i = 0; i < state.queue.length; i++) {
+            const cand = state.queue[i];
+            if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+            const k = canonicalSongKey(cand);
+            if (!_shuffleVisitedKeys.has(k)) candidates.push({ idx: i, track: cand, key: k });
+          }
+        }
+      }
+      if (!candidates.length) {
+        _shuffleVisitedKeys.clear();
+        if (cur) _shuffleVisitedKeys.add(canonicalSongKey(cur));
+        for (let i = 0; i < state.queue.length; i++) {
+          const cand = state.queue[i];
+          if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+          candidates.push({ idx: i, track: cand, key: canonicalSongKey(cand) });
+        }
+      }
+      if (candidates.length) {
+        const diffArtist = candidates.filter((c) => canonicalPrimaryArtistClient(c.track) !== curArtist);
+        const pool = diffArtist.length ? diffArtist : candidates;
+        // Weight toward smooth vibe/tempo continuation while keeping natural shuffle variety
+        const scoredPool = pool.map((c) => {
+          const v = inferTrackVibeClient(c.track);
+          let w = 10 + Math.random() * 12;
+          if (curVibe) {
+            if (v.cluster === curVibe.cluster) w += 10;
+            else if (areClustersCompatibleClient(curVibe.cluster, v.cluster)) w += 5;
+            if (areTemposSmoothClient(curVibe.tempo, v.tempo) >= 1) w += 6;
+          }
+          return { ...c, w };
+        });
+        scoredPool.sort((a, b) => b.w - a.w);
+        const topPickCount = Math.min(3, scoredPool.length);
+        const chosen = scoredPool[Math.floor(Math.random() * topPickCount)];
+        state.index = chosen.idx;
+        _shuffleVisitedKeys.add(chosen.key);
         playCurrent(true);
         return;
       }
-      state.playing = false;
-      renderChrome();
+    }
+
+    // Sequential mode: skip any accidental consecutive duplicate of the current song
+    while (state.index + 1 < state.queue.length && cur && isSameSongClient(state.queue[state.index + 1], cur)) {
+      state.queue.splice(state.index + 1, 1);
+    }
+
+    if (state.index + 1 < state.queue.length) {
+      state.index += 1;
+      playCurrent(true);
       return;
     }
-    playCurrent(true);
+
+    if (state.repeat === "all") {
+      if (state.queue.length > 1 && cur && isSameSongClient(state.queue[0], cur)) {
+        state.index = 1;
+      } else {
+        state.index = 0;
+      }
+      playCurrent(true);
+      return;
+    }
+
+    // End of queue reached: seamlessly continue the current song's vibe, genre, mood, tempo & style
+    const refilled = await ensureQueueRefill(cur);
+    if (refilled && state.index + 1 < state.queue.length) {
+      state.index += 1;
+      playCurrent(true);
+      return;
+    }
+    state.playing = false;
+    renderChrome();
   }
 
   function prev() {
@@ -6304,15 +6908,15 @@
   }
   function restartWaveLoop() {
     if (!state.playing || waveRaf || document.hidden) return;
-    // On phones/native shells, updateProgress() drives drawSeekWave() directly
-    // at 250ms so we never hold a 60-120Hz rAF loop open during playback.
-    if (cheapPhone()) {
+    // On phones/native shells or in Battery Saver, updateProgress() drives
+    // drawSeekWave() directly so we never hold a rAF loop open during playback.
+    if (cheapPhone() || isBatterySaver()) {
       drawSeekWave();
       return;
     }
     const interval = 80;
     const loop = (now) => {
-      if (!state.playing) {
+      if (!state.playing || isBatterySaver()) {
         waveRaf = 0;
         drawSeekWave();
         return;
@@ -6331,7 +6935,8 @@
   }
   function startTimer() {
     stopTimer();
-    state.timer = setInterval(updateProgress, 250);
+    const pollMs = isBatterySaver() ? 1000 : 250;
+    state.timer = setInterval(updateProgress, pollMs);
     restartWaveLoop();
     updateProgress();
     renderChrome();
@@ -6367,17 +6972,30 @@
     // Audio playback optimization: pre-resolve next track stream and pre-warm for gapless playback
     if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
       const nextT = state.queue[state.index + 1];
-      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
-        nextT._resolving = true;
-        api(`/api/yt/stream?v=${encodeURIComponent(nextT.videoId)}&title=${encodeURIComponent(nextT.title || "")}&artist=${encodeURIComponent(nextT.artist || "")}`, 8000).then((res) => {
-          if (res && res.url) {
-            nextT.streamUrl = res.url;
-            if (!nextT._prefetched) {
-              nextT._prefetched = true;
-              fetch(res.url, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving && !nextT._nativePreloaded) {
+        const NP = nativePlayer();
+        if (IS_NATIVE && NP && typeof NP.preload === "function") {
+          nextT._nativePreloaded = true;
+          const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
+          NP.preload({
+            videoId: String(nextT.videoId),
+            candidates: cands,
+            title: String(nextT.title || ""),
+            artist: String(artistName(nextT) || nextT.artist || ""),
+          }).catch(() => {});
+        } else {
+          nextT._resolving = true;
+          getWarmStream(nextT.videoId, nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
+            if (res && res.url) {
+              const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
+              nextT.streamUrl = fullUrl;
+              if (!nextT._prefetched) {
+                nextT._prefetched = true;
+                fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+              }
             }
-          }
-        }).catch(() => {}).finally(() => { nextT._resolving = false; });
+          }).catch(() => {}).finally(() => { nextT._resolving = false; });
+        }
       } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
         nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
         if (!nextT._prefetched) {
@@ -6386,7 +7004,19 @@
         }
       } else if (nextT && !nextT.videoId && !nextT.streamUrl && !nextT._resolving && (nextT.source === "apple" || nextT.source === "deezer" || nextT.source === "itunes")) {
         nextT._resolving = true;
-        resolveYouTubePlay(nextT).catch(() => {}).finally(() => { nextT._resolving = false; });
+        resolveYouTubePlay(nextT).then(() => {
+          const NP = nativePlayer();
+          if (IS_NATIVE && NP && typeof NP.preload === "function" && nextT.videoId && !nextT._nativePreloaded) {
+            nextT._nativePreloaded = true;
+            const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
+            NP.preload({
+              videoId: String(nextT.videoId),
+              candidates: cands,
+              title: String(nextT.title || ""),
+              artist: String(artistName(nextT) || nextT.artist || ""),
+            }).catch(() => {});
+          }
+        }).catch(() => {}).finally(() => { nextT._resolving = false; });
       }
     }
 
@@ -6404,7 +7034,7 @@
       if (activeScrub) {
         seekCur = -1; seekTgt = -1;
         if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
-      } else if (cheapPhone() || prefersReducedMotion()) {
+      } else if (cheapPhone() || prefersReducedMotion() || isBatterySaver()) {
         seek.value = tv;
       } else {
         seekTgt = tv;
@@ -6943,7 +7573,7 @@
             .then((fresh) => {
               if (current() !== cur) return;
               if (fresh && fresh.url && !fresh.isPreview) {
-                cur.streamUrl = fresh.url;
+                cur.streamUrl = fresh.url.startsWith("/") ? API_BASE + fresh.url : fresh.url;
                 cur._isPreviewStream = false;
                 if (fresh.videoId) cur.videoId = fresh.videoId;
                 if (fresh.duration && !cur.duration) cur.duration = Number(fresh.duration);
@@ -7092,7 +7722,10 @@
               }
             }
           }
-          updateProgress();
+          if (!isBatterySaver() || !NP._lastUiProgAt || (now - NP._lastUiProgAt >= 900)) {
+            NP._lastUiProgAt = now;
+            updateProgress();
+          }
         });
       } catch {}
     }
@@ -7820,11 +8453,12 @@
     if (!on || (!lyFollow && !forceScroll)) return;
     lyProg = true;
     if (box) {
+      const scrollBehavior = isBatterySaver() ? "auto" : "smooth";
       try {
-        on.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+        on.scrollIntoView({ behavior: scrollBehavior, block: "center", inline: "nearest" });
       } catch {
         const top = on.offsetTop - (box.clientHeight / 2) + (on.clientHeight / 2);
-        box.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+        box.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior });
       }
     }
     clearTimeout(highlightLyric._t);
@@ -7878,7 +8512,8 @@
     // With a remote API base the sandbox/edge proxy can't reach artwork hosts —
     // load artwork directly from the browser instead.
     const src = raw.startsWith("http") ? (API_BASE ? raw : `/api/img?url=${encodeURIComponent(raw)}`) : raw;
-    if (wash) wash.style.backgroundImage = `url("${src}")`;
+    if (wash) wash.style.backgroundImage = isBatterySaver() ? "" : `url("${src}")`;
+    if (isBatterySaver()) return;
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
@@ -8439,7 +9074,7 @@
           <span class="badge yt">Playlist</span>
         </div>
         <h3>${escapeHTML(p.title || "Playlist")}</h3>
-        <p>${escapeHTML(p.artist || "Daily mix")}</p>
+        <p>${escapeHTML(p.subtitle || p.artist || "Daily mix")}</p>
       </button>
     </div>`;
   }
@@ -8448,7 +9083,7 @@
     const rows = playlists || [];
     if (!rows.length) {
       const skelPls = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel" style="height:190px;border-radius:var(--md-shape-lg);background:var(--md-surface-variant);opacity:0.35;"></div></div>`).join("");
-      return `<div class="section"><div class="section-head"><h2>${title}</h2><span>12</span></div><div class="row">${skelPls}</div></div>`;
+      return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${group === "country" ? 17 : 12}</span></div><div class="row">${skelPls}</div></div>`;
     }
     return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${rows.length}</span></div><div class="row">${rows.map((p, i) => plCardHTML(p, group, i)).join("")}</div></div>`;
   }
@@ -8510,9 +9145,138 @@
     return score;
   }
 
+  const CLIENT_FY_MOOD_SPEC = {
+    pop: { genres: ["pop"], moods: ["upbeat", "feelgood"], disallow: ["rock", "lofi", "lo-fi", "desi"], energy: 0.74 },
+    hiphop: { genres: ["hiphop", "hip-hop", "rap", "trap", "drill"], moods: ["upbeat", "workout", "party"], disallow: ["rock", "indie", "country", "lofi", "lo-fi", "desi"], energy: 0.80 },
+    rnb: { genres: ["rnb", "r&b", "soul"], moods: ["chill", "romantic", "late_night"], disallow: ["rock", "dance", "electronic", "country", "desi"], energy: 0.56 },
+    rock: { genres: ["rock", "indie rock", "metal"], moods: ["feelgood", "upbeat", "workout"], disallow: ["hiphop", "hip-hop", "rnb", "r&b", "dance", "electronic", "lofi", "lo-fi", "desi"], energy: 0.78 },
+    dance: { genres: ["dance", "electronic", "house", "edm"], moods: ["party", "upbeat", "workout"], disallow: ["rock", "lofi", "lo-fi", "country", "desi"], energy: 0.86 },
+    indie: { genres: ["indie", "indie pop", "indie rock"], moods: ["chill", "feelgood", "focus"], disallow: ["hiphop", "hip-hop", "dance", "electronic", "desi"], energy: 0.55 },
+    trending: { genres: ["pop", "hiphop", "hip-hop", "rnb", "r&b", "dance", "electronic", "indie", "afrobeats", "afro"], moods: ["upbeat", "party", "feelgood"], disallow: ["lofi", "lo-fi", "desi"], energy: 0.76 },
+    chill: { genres: ["indie", "indie pop", "rnb", "r&b", "lofi", "lo-fi", "chill", "pop"], moods: ["chill", "focus", "late_night"], disallow: ["rock", "workout", "dance", "electronic", "desi"], energy: 0.44 },
+    workout: { genres: ["hiphop", "hip-hop", "rock", "dance", "electronic"], moods: ["workout", "party", "upbeat"], disallow: ["lofi", "lo-fi", "indie", "country", "desi"], energy: 0.90 },
+    throwback: { genres: ["throwback", "pop", "rnb", "r&b", "hiphop", "hip-hop", "rock"], moods: ["retro", "feelgood", "upbeat"], disallow: ["lofi", "lo-fi", "desi"], energy: 0.75 },
+  };
+
+  const CLIENT_FY_JUNK_RE = /\b(playlist|mixtape|mix\s*20\d\d|hits\s*20\d\d|songs\s*20\d\d|best\s+of\s+\d{4}|hip\s*hop\s*mix|r\s*&\s*b\s*mix|rap\s*mix|pop\s*mix|chill\s*mix|workout\s*mix|throwback\s*mix|old\s*school\s+rap\s+songs|top\s+\d+\s+songs|nonstop|non\s*stop|megamix|mashup|full\s+album|1\s+hour|2\s+hours|3\s+hours|karaoke|tribute|in\s+the\s+style\s+of|made\s+famous\s+by|crash\s+cars|my\s+little\s+pony|equestria|kidz\s+bop|peppa\s+pig|cocomelon|nursery\s+rhyme|lullaby|hatsune\s+miku|vocaloid|sunset\s+playlist|chill\s+soul\s+radio|dj\s+noize|west\s+coast\s+finest|r&b\s+hit)\b/i;
+
+  function clientMatchesForYouMood(t, moodKey) {
+    if (!t || !t.title || !t.artist || t.source === "radio") return false;
+    const titleStr = String(t.title || "");
+    const hay = `${titleStr} ${t.artist || ""} ${t.album || ""}`;
+    if (CLIENT_FY_JUNK_RE.test(hay) || /[🔥🎧|【】~]|#\d+\b/.test(titleStr)) return false;
+    if ((titleStr.match(/,/g) || []).length >= 3) return false;
+    if (/\b(spotify|billboard|tiktok)\b.*\b(hits|playlist|viral|chart)\b/i.test(titleStr)) return false;
+    const dur = Number(t.duration) || 0;
+    if (dur > 0 && (dur < 70 || dur > 600)) return false;
+    if (!isEnglishTrack(t) || isUnwantedIndianTrackClient(t, "US")) return false;
+    const cleanMood = String(moodKey || "pop").toLowerCase().replace(/^mod:/, "");
+    const key = cleanMood === "throw" ? "throwback" : cleanMood;
+    const tag = String(t._tag || t.mood || "").toLowerCase().replace(/^mod:/, "");
+    if (tag && (tag === key || (tag === "throw" && key === "throwback"))) return true;
+    const spec = CLIENT_FY_MOOD_SPEC[key] || CLIENT_FY_MOOD_SPEC.pop;
+    const vibe = inferTrackVibeClient(t);
+    if (!vibe) return false;
+    if (spec.disallow.includes(vibe.genre) || spec.disallow.includes(vibe.cluster) || spec.disallow.includes(vibe.mood)) return false;
+    if (spec.genres.includes(vibe.genre) || spec.genres.includes(vibe.cluster)) {
+      if (key === "chill" && vibe.tempo === "fast") return false;
+      if ((key === "workout" || key === "dance") && vibe.tempo === "slow") return false;
+      return true;
+    }
+    return false;
+  }
+
+  function personalizeForYouCardTracks(p, globalUsedSigs) {
+    const moodKey = String((p && p.mood) || "pop").toLowerCase().replace(/^mod:/, "");
+    const rawList = Array.isArray(p && p.tracks) ? p.tracks : [];
+    const strictBase = rawList.filter((t) => clientMatchesForYouMood(t, moodKey));
+    const cleanBase = rawList.filter((t) => t && t.title && t.artist && !CLIENT_FY_JUNK_RE.test(`${t.title || ""} ${t.artist || ""}`) && !/[🔥🎧|【】~]|#\d+\b/.test(String(t.title || "")) && isEnglishTrack(t) && !isUnwantedIndianTrackClient(t, "US"));
+    const baseTracks = (strictBase.length >= 6 ? strictBase : cleanBase).map((t) => (t && (t.previewUrl || t.preview) ? { ...t, previewUrl: "", preview: "" } : t));
+    if (!baseTracks.length) return baseTracks;
+    const familiarPool = [...(state.liked || []), ...(state.recents || [])].filter((t) => clientMatchesForYouMood(t, moodKey));
+    const discoveryPool = [
+      ...(state.tasteTracks || []),
+      ...(state.followedArtistTracks || []),
+      ...(state.forYou || []),
+      ...((state.discovery && state.discovery.tracks) || []),
+    ].filter((t) => clientMatchesForYouMood(t, moodKey));
+
+    // If user has no mood-matching personal tracks and no cross-playlist collisions, keep sequenced base tracks
+    const merged = [...familiarPool.slice(0, 6), ...baseTracks, ...discoveryPool.slice(0, 8)];
+    const httpArtBySig = new Map();
+    const httpArtByArtist = new Map();
+    let fallbackHttpArt = "";
+    for (const t of merged) {
+      if (!t || !t.title || !t.artist) continue;
+      if (t.artwork && /^https?:\/\//i.test(String(t.artwork))) {
+        if (!fallbackHttpArt) fallbackHttpArt = t.artwork;
+        const s = canonicalSongKey(t) || String(t.id || "");
+        if (s && !httpArtBySig.has(s)) httpArtBySig.set(s, t.artwork);
+        const pa = canonicalPrimaryArtistClient(t);
+        if (pa && !httpArtByArtist.has(pa)) httpArtByArtist.set(pa, t.artwork);
+      }
+    }
+    const unique = [];
+    const localSigs = new Set();
+    for (const t of merged) {
+      if (!t || !t.title || !t.artist) continue;
+      const sig = canonicalSongKey(t) || String(t.id || "");
+      if (!sig || localSigs.has(sig) || (globalUsedSigs && globalUsedSigs.has(sig))) continue;
+      localSigs.add(sig);
+      const pa = canonicalPrimaryArtistClient(t);
+      const bestArt = (t.artwork && /^https?:\/\//i.test(String(t.artwork)))
+        ? t.artwork
+        : (httpArtBySig.get(sig) || (pa && httpArtByArtist.get(pa)) || fallbackHttpArt || t.artwork);
+      unique.push(bestArt !== t.artwork ? { ...t, artwork: bestArt } : t);
+    }
+    // Top up from baseTracks if globalUsedSigs filtered too aggressively
+    if (unique.length < 20) {
+      for (const t of baseTracks) {
+        if (unique.length >= 20) break;
+        const sig = canonicalSongKey(t) || String(t.id || "");
+        if (!sig || localSigs.has(sig)) continue;
+        localSigs.add(sig);
+        unique.push(t);
+      }
+    }
+    // Sequence with artist spacing (no back-to-back same artist)
+    const normFyArtist = (c) =>
+      normalizeKeyText(String(artistName(c) || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\swith\s|\/)\s*/i)[0]);
+    const out = [];
+    const rem = unique.slice();
+    let lastArt = "";
+    const artCounts = new Map();
+    while (out.length < 20 && rem.length) {
+      let idx = rem.findIndex((c) => {
+        const a = normFyArtist(c);
+        return a !== lastArt && (artCounts.get(a) || 0) < 2;
+      });
+      if (idx < 0) idx = rem.findIndex((c) => normFyArtist(c) !== lastArt);
+      if (idx < 0) idx = 0;
+      const [picked] = rem.splice(idx, 1);
+      const a = normFyArtist(picked);
+      if (a) {
+        lastArt = a;
+        artCounts.set(a, (artCounts.get(a) || 0) + 1);
+      }
+      const sig = canonicalSongKey(picked) || String(picked.id || "");
+      if (sig && globalUsedSigs) globalUsedSigs.add(sig);
+      out.push(picked);
+    }
+    return out;
+  }
+
   function forYouPlaylistList() {
     const h = state.home || {};
-    let pls = (h.forYouPlaylists || []).slice();
+    const globalUsedSigs = new Set();
+    let pls = (h.forYouPlaylists || []).slice(0, 10).map((p) => {
+      const tracks = personalizeForYouCardTracks(p, globalUsedSigs);
+      return {
+        ...p,
+        artwork: (tracks[0] && tracks[0].artwork && !String(tracks[0].artwork).startsWith("/cover")) ? tracks[0].artwork : (p.artwork || (tracks[0] && tracks[0].artwork) || ""),
+        tracks,
+      };
+    });
     const taste = tasteProfile();
     // Taste-adaptive: reorder the cards so the moods matching the listener's
     // profile (their recent plays + likes) lead. Stable sort keeps the rest of
@@ -8943,6 +9707,7 @@
       // fetch then refreshes/verifies. Always a distinct, mood-matched set.
       tracks: (p.tracks || []).slice(),
       forYouMix: p.kind === "mix",
+      fyMood: p.mood || "",
       fyIndex: i,
     });
   }
@@ -9027,7 +9792,7 @@
   async function hydrateForYouCards() {
     const h = state.home;
     if (!h || fyHydrated) return;
-    const cards = forYouPlaylistList().filter((p) => p.kind === "yt" && !p.playlistId && p.query);
+    const cards = forYouPlaylistList().filter((p) => p.kind === "yt" && (!p.tracks || p.tracks.length < 10) && !p.playlistId && p.query);
     if (!cards.length) return;
     fyHydrated = true;
     const cache = fyCardCache();
@@ -9646,6 +10411,15 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.7.6",
+      title: "Muchi 1.7.6",
+      notes: [
+        "Restored exact v1.6.6 Phone Speaker, Bass, Spatial, and Dynamic Sound Stage DSP across WebAudio and Android (LoudnessEnhancer + BassBoost + Equalizer) with 1.55x post-limiter output gain and 0.72 harmonic sub-bass exciter.",
+        "Removed extra post-output brickwall limiting and multiband compression that dulled highs and reduced dynamic punch on phone speakers.",
+        "Removed all 30-second low-bitrate previewUrl overrides and synthetic test-tone playback fallbacks so tracks always stream at full quality.",
+      ],
+    },
+    {
       ver: "1.7.5",
       title: "Muchi 1.7.5",
       notes: [
@@ -10198,7 +10972,6 @@
     const p = state.prefs;
     const c = customTheme();
     const skins = THEMES.filter((t) => !isBaseThemeId(t.id));
-    const color = THEMES.filter((t) => t.group === "color");
     const customOn = p.theme === "custom";
     const ap = p.appearance || "system";
     const apBtn = (id, label) => `<button type="button" class="seg-btn${ap === id ? " on" : ""}" data-appearance="${id}" role="radio" aria-checked="${ap === id}">${label}</button>`;
@@ -10210,13 +10983,11 @@
             Back
           </button>
           <h1>Appearance</h1>
-          <p>Now using ${escapeHTML(themeLabel())}.</p>
         </div>
       </div>
       <div class="settings">
         <div class="set-card">
           <h3><span class="material-symbols-outlined">contrast</span>Light / Dark / System</h3>
-          <p class="set-lead">Choose how MUCHI appears. System follows this device — and keeps following it live, without a restart.</p>
           <div class="seg" role="radiogroup" aria-label="Appearance">
             ${apBtn("light", "Light")}
             ${apBtn("dark", "Dark")}
@@ -10225,25 +10996,23 @@
         </div>
         <div class="set-card">
           <h3><span class="material-symbols-outlined">palette</span>Theme skins</h3>
-          <p class="set-lead">Optional color skins on top of the appearance above. ${color.length} colorful + classic skins.</p>
           <div class="theme-grid">${skins.map((th) => themeCardHTML(th, p.theme === th.id)).join("")}</div>
         </div>
         <div class="set-card">
           <h3><span class="material-symbols-outlined">brush</span>Custom theme</h3>
-          <p class="set-lead">Build your own. Colors apply live; they’re saved on this device.</p>
           <button type="button" class="theme-card custom-use ${customOn ? "on" : ""}" data-set-theme="custom">
             <div class="theme-preview" style="background:${c.surface};--tp-a:${c.primary};--tp-b:${c.accent}">
               <i class="tp-bar"></i><i class="tp-row"></i><i class="tp-row dim"></i><i class="tp-pill"></i>
             </div>
-            <span><strong>${escapeHTML(c.name || "My theme")}</strong><em>${customOn ? "In use" : "Tap to use this mix"}</em></span>
+            <span><strong>${escapeHTML(c.name || "My theme")}</strong></span>
           </button>
           <label class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="violet">badge</span><div><strong>Name</strong><p>Shown on the Settings row.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="violet">badge</span><div><strong>Name</strong></div></div>
             <input id="customName" type="text" maxlength="24" value="${escapeAttr(c.name)}" />
           </label>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span><div><strong>Base</strong><p>Dark or light starting point.</p></div></div>
-            <div class="chip-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span><div><strong>Base</strong></div></div>
+            <div class="set-actions">
               <button type="button" class="chip ${c.mode === "dark" ? "active" : ""}" data-custom-mode="dark">Dark</button>
               <button type="button" class="chip ${c.mode === "light" ? "active" : ""}" data-custom-mode="light">Light</button>
             </div>
@@ -10254,23 +11023,23 @@
             ["primary", "Accent", "Buttons and highlights", "palette", "pink"],
             ["accent", "Glow", "Second color and wash", "flare", "amber"],
             ["text", "Text", "Titles and labels", "text_fields", "emerald"],
-          ].map(([key, title, hint, ico, colorAttr]) => `
+          ].map(([key, title, _hint, ico, colorAttr]) => `
             <label class="set-row color-row">
-              <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="${colorAttr}">${ico}</span><div><strong>${title}</strong><p>${hint}</p></div></div>
+              <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="${colorAttr}">${ico}</span><div><strong>${title}</strong></div></div>
               <span class="color-field">
                 <input type="color" data-custom-color="${key}" value="${c[key]}" />
                 <code>${c[key]}</code>
               </span>
             </label>`).join("")}
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset mix</strong><p>Back to the starter purple.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset mix</strong></div></div>
             <button class="chip-btn" id="resetCustom" type="button">Reset</button>
           </div>
         </div>
         <div class="set-card">
           <h3><span class="material-symbols-outlined">apps</span>App Icon</h3>
           <button type="button" class="set-row set-go" id="openAppIconFromAppearance">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">apps</span><div><strong>Customize App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">apps</span><div><strong>Customize App Icon</strong></div></div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
         </div>
@@ -10512,12 +11281,11 @@
 
   function renderUiPage() {
     const ui = normalizeUiMode(state.prefs.ui);
-    const card = (id, name, blurb, extra) => `
+    const card = (id, name, _blurb, extra) => `
       <button type="button" class="ui-pick ${ui === id ? "on" : ""}" data-set-ui="${id}">
         <div class="ui-pick-preview ${id}">${extra}</div>
         <span>
           <strong>${name}</strong>
-          <em>${blurb}</em>
         </span>
         ${ui === id ? `<span class="ui-pick-on">On</span>` : ""}
       </button>`;
@@ -10529,13 +11297,18 @@
             Back
           </button>
           <h1>UI</h1>
-          <p>How Muchi is drawn. Colors still come from Appearance.</p>
         </div>
       </div>
       <div class="settings">
         <div class="set-card">
+          <h3><span class="material-symbols-outlined">battery_saver</span>Performance</h3>
+          <div class="set-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">battery_saver</span><div><strong>Battery Saver</strong></div></div>
+            <button class="switch ${state.prefs.batterySaver ? "on" : ""}" data-pref="batterySaver" type="button" aria-label="Battery Saver"><i></i></button>
+          </div>
+        </div>
+        <div class="set-card">
           <h3><span class="material-symbols-outlined">format_size</span>Interface size</h3>
-          <p class="set-lead">Scales the whole app — text, spacing, buttons and icons.</p>
           <div class="chip-row icon-size-row">
             ${[["small", "Small"], ["default", "Default"], ["medium", "Medium"], ["large", "Large"]].map(([id, label]) =>
               `<button type="button" class="chip ${(state.prefs.iconSize || "default") === id ? "active" : ""}" data-set-icons="${id}">${label}</button>`
@@ -10544,13 +11317,12 @@
         </div>
         <div class="set-card">
           <h3><span class="material-symbols-outlined">dashboard_customize</span>Layout</h3>
-          <p class="set-lead">Pick one. Saved on this device.</p>
           <div class="ui-pick-list">
-            ${card("material", "Material 3", "Default — filled cards, You-style player.", `<i></i><i></i><i></i>`)}
-            ${card("glass", "Glass UI", "iPhone frosted glass — blur, thin borders, floating bars.", `<i></i><i></i><i></i>`)}
-            ${card("winter", "Winter UI", "Alaskan frost — icy crystal glass, aurora & outdoor pine snowfall hero.", `<i></i><i></i><i></i>`)}
-            ${card("christmas", "Christmas UI", "Festive holiday — warm gold & crimson glass, Santa & reindeer night sky hero.", `<i></i><i></i><i></i>`)}
-            ${card("autumn", "Autumn UI", "Golden harvest — warm amber glass, maple forest & drifting autumn leaves hero.", `<i></i><i></i><i></i>`)}
+            ${card("material", "Material 3", "", `<i></i><i></i><i></i>`)}
+            ${card("glass", "Glass UI", "", `<i></i><i></i><i></i>`)}
+            ${card("winter", "Winter UI", "", `<i></i><i></i><i></i>`)}
+            ${card("christmas", "Christmas UI", "", `<i></i><i></i><i></i>`)}
+            ${card("autumn", "Autumn UI", "", `<i></i><i></i><i></i>`)}
           </div>
         </div>
       </div>`;
@@ -10573,7 +11345,6 @@
       return `
         <div class="set-card">
           <h3><span class="material-symbols-outlined">account_circle</span>Account</h3>
-          <p class="set-hint">Sign in with Google to bring your YouTube likes and playlists into your Library. By continuing, you agree to the <a href="/terms.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Terms of Service</a> and <a href="/privacy.html" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">Privacy Policy</a>.</p>
           <button type="button" class="filled-btn" id="gSignInBtn" style="width:100%;justify-content:center">
             <span class="material-symbols-outlined filled">login</span> Continue with Google
           </button>
@@ -10588,30 +11359,32 @@
       <div class="set-card">
         <h3><span class="material-symbols-outlined">account_circle</span>Account</h3>
         <div class="set-row">
-          <div class="acct-user">${pic}<div><strong>${escapeHTML(pr.name || pr.email || "Google user")}</strong><p>${escapeHTML(pr.email || "")}</p></div></div>
+          <div class="acct-user">${pic}<div><strong>${escapeHTML(pr.name || pr.email || "Google user")}</strong></div></div>
         </div>
         ${yt ? `
         <div class="set-row">
-          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong><p>Likes and playlists sync to your Library.</p></div></div>
-          <button type="button" class="chip-btn" id="gYtRefresh">Refresh</button>
-          <button type="button" class="chip-btn" id="gYtDisconnect">Disconnect</button>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong></div></div>
+          <div class="set-actions">
+            <button type="button" class="chip-btn" id="gYtRefresh">Refresh</button>
+            <button type="button" class="chip-btn" id="gYtDisconnect">Disconnect</button>
+          </div>
         </div>` : `
         <div class="set-row">
-          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong><p>Authorize MUCHI to read your liked videos and playlists.</p></div></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>YouTube</strong></div></div>
           <button type="button" class="chip-btn" id="gYtConnect">Connect</button>
         </div>`}
         <div class="set-row">
-          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">cloud_sync</span><div><strong>Cloud Library Sync</strong><p>Your liked tracks, playlists, and follows sync automatically.</p></div></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">cloud_sync</span><div><strong>Cloud Library Sync</strong></div></div>
           <button type="button" class="chip-btn" id="syncLibraryBtn">Sync now</button>
         </div>
         <div class="set-row">
-          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">logout</span><div><strong>Sign out</strong><p>Removes your Google session and YouTube data from this device.</p></div></div>
+          <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">logout</span><div><strong>Sign out</strong></div></div>
           <button type="button" class="chip-btn" id="gSignOut">Sign out</button>
         </div>
       </div>`;
   }
 
-  function settingsSubChrome(title, sub) {
+  function settingsSubChrome(title) {
     return `
       <div class="hero">
         <div>
@@ -10620,7 +11393,6 @@
             Back
           </button>
           <h1>${title}</h1>
-          <p>${sub}</p>
         </div>
       </div>`;
   }
@@ -10629,37 +11401,36 @@
     const cur = normalizePlayerStyle(state.prefs.playerStyle);
     const curWiggle = normalizeSeekWiggle(state.prefs.seekWiggle);
     const types = [
-      ["pill", "Glass pill", "Floating capsule with liquid shine."],
-      ["wave", "Wave", "Live wiggly seek line while music plays."],
-      ["vinyl", "Vinyl", "Spinning vinyl disc cover with warm studio deck trim."],
-      ["aura", "Aura", "Ambient song-color halo glow with frosted crystal trim."],
+      ["pill", "Glass pill"],
+      ["wave", "Wave"],
+      ["vinyl", "Vinyl"],
+      ["aura", "Aura"],
     ];
     const wiggles = [
-      ["sine", "Smooth Sine", "Classic flowing sine wave between timestamps.", "M 4 12 Q 18 3, 32 12 T 60 12 T 88 12 T 116 12"],
-      ["ribbon", "Harmonic Ribbon", "Silky multi-layered acoustic wave with gentle swell.", "M 4 12 C 16 4, 28 20, 42 12 C 56 4, 70 19, 84 12 C 96 6, 106 16, 116 12"],
-      ["glow", "Laser Glow", "Sleek glowing studio beam with subtle breathing shimmer.", "M 4 12 C 26 9, 52 15, 78 11 C 94 9, 106 13, 116 12"],
-      ["orbit", "Dual Helix", "Braided double-strand phase wave with glowing depth.", "M 4 12 C 20 2, 36 22, 52 12 C 68 2, 84 22, 100 12 C 108 7, 112 10, 116 12"],
+      ["sine", "Smooth Sine", "M 4 12 Q 18 3, 32 12 T 60 12 T 88 12 T 116 12"],
+      ["ribbon", "Harmonic Ribbon", "M 4 12 C 16 4, 28 20, 42 12 C 56 4, 70 19, 84 12 C 96 6, 106 16, 116 12"],
+      ["glow", "Laser Glow", "M 4 12 C 26 9, 52 15, 78 11 C 94 9, 106 13, 116 12"],
+      ["orbit", "Dual Helix", "M 4 12 C 20 2, 36 22, 52 12 C 68 2, 84 22, 100 12 C 108 7, 112 10, 116 12"],
     ];
     const fade = Number(state.prefs.crossfade || 0);
     return `
-      ${settingsSubChrome("Player", "Four looks for the bar, timestamp wiggle styles, and crossfading.")}
+      ${settingsSubChrome("Player")}
       <div class="settings">
         <div class="set-card">
           <h3><span class="material-symbols-outlined">dock_to_bottom</span>Player style</h3>
           <div class="ui-pick-list">
-            ${types.map(([id, name, blurb]) => `
+            ${types.map(([id, name]) => `
               <button type="button" class="ui-pick ${cur === id ? "on" : ""}" data-set-player="${id}">
                 <div class="ui-pick-preview player-${id}"><i></i><i></i><i></i></div>
-                <span><strong>${name}</strong><em>${blurb}</em></span>
+                <span><strong>${name}</strong></span>
                 ${cur === id ? `<span class="ui-pick-on">On</span>` : ""}
               </button>`).join("")}
           </div>
         </div>
         <div class="set-card">
           <h3><span class="material-symbols-outlined">timeline</span>Timestamp wiggle</h3>
-          <p class="set-lead">Choose how the animated progress line wiggles between the current and total timestamps.</p>
           <div class="ui-pick-list">
-            ${wiggles.map(([id, name, blurb, svgPath]) => `
+            ${wiggles.map(([id, name, svgPath]) => `
               <button type="button" class="ui-pick ${curWiggle === id ? "on" : ""}" data-set-wiggle="${id}">
                 <div class="ui-pick-preview wiggle-preview wiggle-${id}">
                   <span class="wiggle-time">1:24</span>
@@ -10668,20 +11439,17 @@
                   </svg>
                   <span class="wiggle-time">3:45</span>
                 </div>
-                <span><strong>${name}</strong><em>${blurb}</em></span>
+                <span><strong>${name}</strong></span>
                 ${curWiggle === id ? `<span class="ui-pick-on">On</span>` : ""}
               </button>`).join("")}
           </div>
         </div>
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-            <div>
-              <h3 style="margin:0"><span class="material-symbols-outlined">linear_scale</span>Crossfade</h3>
-              <p class="set-lead" style="margin:4px 0 0">Smoothly blend songs together without silence between tracks.</p>
-            </div>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">linear_scale</span>Crossfade</h3>
             <span class="chip active" id="playerFadeBadge">${fade ? fade + "s" : "Off"}</span>
           </div>
-          <div class="eq-presets-grid" style="margin-top:12px">
+          <div class="eq-presets-grid">
             ${[0, 2, 4, 6, 8, 12].map((n) => `
               <button type="button" class="chip ${fade === n ? "active" : ""}" data-player-fade="${n}">
                 ${n ? n + "s" : "Off"}
@@ -10695,31 +11463,31 @@
   function renderPlaybackPage() {
     const p = state.prefs;
     return `
-      ${settingsSubChrome("Playback", "How tracks start, fade, and stream.")}
+      ${settingsSubChrome("Playback")}
       <div class="settings">
         <div class="set-card">
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">playlist_play</span><div><strong>Autoplay</strong><p>Play the next song when one ends.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">playlist_play</span><div><strong>Autoplay</strong></div></div>
             <button class="switch ${p.autoplay ? "on" : ""}" data-pref="autoplay" type="button"><i></i></button>
           </div>
           <label class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="cyan">linear_scale</span><div><strong>Crossfade</strong><p>Audius only. YouTube is skipped.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="cyan">linear_scale</span><div><strong>Crossfade</strong></div></div>
             <select id="setFade">
               ${[0, 3, 6, 12].map((n) => `<option value="${n}" ${Number(p.crossfade) === n ? "selected" : ""}>${n ? n + "s" : "Off"}</option>`).join("")}
             </select>
           </label>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">graphic_eq</span><div><strong>Even volume</strong><p>Consistent headroom so loud tracks don't clip.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">graphic_eq</span><div><strong>Even volume</strong></div></div>
             <button class="switch ${p.normalize ? "on" : ""}" data-pref="normalize" type="button"><i></i></button>
           </div>
           <label class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">speed</span><div><strong>Speed</strong><p>Audius, radio, and YouTube when allowed.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">speed</span><div><strong>Speed</strong></div></div>
             <select id="setSpeed">
               ${[0.75, 1, 1.25, 1.5].map((n) => `<option value="${n}" ${Number(p.speed) === n ? "selected" : ""}>${n}×</option>`).join("")}
             </select>
           </label>
           <label class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">surround_sound</span><div><strong>Sound stage</strong><p>Speakers, bass, or headphone spatial. YouTube stays in Google’s player.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">surround_sound</span><div><strong>Sound stage</strong></div></div>
             <select id="setSpatial">
               <option value="phone" ${spatialMode() === "phone" ? "selected" : ""}>Phone · feel it</option>
               <option value="bass" ${spatialMode() === "bass" ? "selected" : ""}>Super Bass</option>
@@ -10728,16 +11496,16 @@
               <option value="off" ${spatialMode() === "off" ? "selected" : ""}>Off</option>
             </select>
           </label>
-          <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">high_quality</span><div><strong>Stream quality</strong><p>YouTube resolution + radio bitrate. Audius is always 320 kbps.</p></div></div>
-          </div>
-          <div class="chip-row quality-row">
-            ${[["auto", "Auto · network"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["highest", "Highest"]].map(([id, label]) =>
-              `<button type="button" class="chip ${(p.quality || "high") === id ? "active" : ""}" data-set-quality="${id}">${label}</button>`
-            ).join("")}
+          <div class="set-row set-row-stack">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="pink">high_quality</span><div><strong>Stream quality</strong></div></div>
+            <div class="chip-row quality-row">
+              ${[["auto", "Auto · network"], ["low", "Low"], ["standard", "Standard"], ["high", "High"], ["highest", "Highest"]].map(([id, label]) =>
+                `<button type="button" class="chip ${(p.quality || "high") === id ? "active" : ""}" data-set-quality="${id}">${label}</button>`
+              ).join("")}
+            </div>
           </div>
           <label class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="teal">audio_file</span><div><strong>Audio codec</strong><p>Radio only.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="teal">audio_file</span><div><strong>Audio codec</strong></div></div>
             <select id="setCodec">
               <option value="auto" ${(p.codec || "auto") === "auto" ? "selected" : ""}>Any</option>
               <option value="mp3" ${p.codec === "mp3" ? "selected" : ""}>MP3</option>
@@ -10752,11 +11520,11 @@
   function renderListeningPage() {
     const p = state.prefs;
     return `
-      ${settingsSubChrome("Listening", "Sleep timer, resume, and the video pane.")}
+      ${settingsSubChrome("Listening")}
       <div class="settings">
         <div class="set-card">
           <label class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="indigo">bedtime</span><div><strong>Sleep timer</strong><p>${sleepLabel()}. Also on the moon button in the player.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="indigo">bedtime</span><div><strong>Sleep timer</strong></div></div>
             <select id="setSleep">
               <option value="off" ${state.sleep.mode === "off" ? "selected" : ""}>Off</option>
               <option value="15">15 min</option>
@@ -10767,15 +11535,19 @@
             </select>
           </label>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">restore</span><div><strong>Resume last song</strong><p>Load the last queue when you open Muchi. Won’t auto-play.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">restore</span><div><strong>Resume last song</strong></div></div>
             <button class="switch ${p.resume ? "on" : ""}" data-pref="resume" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">light_mode</span><div><strong>Keep screen on</strong><p>While something is playing.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">light_mode</span><div><strong>Keep screen on</strong></div></div>
             <button class="switch ${p.wake ? "on" : ""}" data-pref="wake" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>Show YouTube video</strong><p>Pop the official player when a YouTube track starts.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">battery_saver</span><div><strong>Battery Saver</strong></div></div>
+            <button class="switch ${p.batterySaver ? "on" : ""}" data-pref="batterySaver" type="button" aria-label="Battery Saver"><i></i></button>
+          </div>
+          <div class="set-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">smart_display</span><div><strong>Show YouTube video</strong></div></div>
             <button class="switch ${p.autoVideo ? "on" : ""}" data-pref="autoVideo" type="button"><i></i></button>
           </div>
         </div>
@@ -10803,7 +11575,7 @@
     });
 
     return `
-      ${settingsSubChrome("App Icon", "Customize your app icon with anime, gaming, and vibrant themes. Changes the in-app icon and browser tab instantly.")}
+      ${settingsSubChrome("App Icon")}
       <div class="settings">
         <div class="set-card">
           <div class="app-icon-active-preview">
@@ -10815,8 +11587,7 @@
                 <h3 style="margin:0">${escapeHTML(curIcon.title)}</h3>
                 <span class="active-badge-pill"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle;margin-right:2px">check</span>In use</span>
               </div>
-              <p style="margin:4px 0 0;font-size:0.82rem;color:var(--md-sys-color-on-surface-variant)">${escapeHTML(curIcon.desc)}</p>
-              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
                 <button type="button" class="chip-btn sm" id="previewSplashBtn">
                   <span class="material-symbols-outlined" style="font-size:16px">play_arrow</span>
                   Preview Opening Screen
@@ -10827,13 +11598,10 @@
         </div>
 
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-            <div>
-              <h3 style="margin:0">Icon Styles</h3>
-              <p class="set-lead" style="margin:4px 0 0">Choose from ${APP_ICONS.length} handcrafted icons across anime, gaming, and vibrant themes.</p>
-            </div>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">apps</span>Icon Styles</h3>
           </div>
-          <div class="chip-row" style="margin:8px 0 14px;flex-wrap:wrap">
+          <div class="chip-row set-sub-chips">
             <button type="button" class="chip ${cat === "all" ? "active" : ""}" data-icon-cat="all">All (${APP_ICONS.length})</button>
             <button type="button" class="chip ${cat === "anime" ? "active" : ""}" data-icon-cat="anime">Anime (${animeCount})</button>
             <button type="button" class="chip ${cat === "gaming" ? "active" : ""}" data-icon-cat="gaming">Gaming & Arcade (${gamingCount})</button>
@@ -10844,13 +11612,12 @@
             ${filtered.map((ic) => {
               const isCur = ic.id === curId;
               return `
-                <div class="app-icon-card ${isCur ? "active" : ""}" data-set-app-icon="${escapeAttr(ic.id)}" role="button" tabindex="0" title="${escapeAttr(ic.title + ' — ' + ic.desc)}">
+                <div class="app-icon-card ${isCur ? "active" : ""}" data-set-app-icon="${escapeAttr(ic.id)}" role="button" tabindex="0" title="${escapeAttr(ic.title)}">
                   ${isCur ? `<span class="app-icon-badge"><span class="material-symbols-outlined" style="font-size:13px">check</span></span>` : ""}
                   <div class="app-icon-preview" style="display:grid;place-items:center;background:${ic.bg}">
                     ${renderAppIconPreview(ic, 58)}
                   </div>
                   <strong class="app-icon-title">${escapeHTML(ic.title)}</strong>
-                  <span class="app-icon-desc">${escapeHTML(ic.desc)}</span>
                 </div>
               `;
             }).join("")}
@@ -10876,26 +11643,23 @@
     ].filter((name) => !state.following.some((f) => f.name.toLowerCase() === name.toLowerCase()));
 
     return `
-      ${settingsSubChrome("Following & Alerts", "Follow your favorite artists and get notified whenever they drop new music.")}
+      ${settingsSubChrome("Following & Alerts")}
       <div class="settings">
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-            <div>
-              <h3 style="margin:0"><span class="material-symbols-outlined">notifications_active</span>Release Notifications</h3>
-              <p class="set-lead" style="margin:4px 0 0">Get notified when any followed artist releases new songs.</p>
-            </div>
-            <div>${permBadge}</div>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">notifications_active</span>Release Notifications</h3>
+            <div class="set-actions">${permBadge}</div>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">notifications</span><div><strong>New-release notifications</strong><p>System notification when a followed artist releases a new track.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">notifications</span><div><strong>New-release notifications</strong></div></div>
             <button class="switch ${p.notifyFollows ? "on" : ""}" data-pref="notifyFollows" type="button"><i></i></button>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">campaign</span><div><strong>In-app release banners</strong><p>Show a toast notification inside Muchi when new tracks are detected.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">campaign</span><div><strong>In-app release banners</strong></div></div>
             <button class="switch ${p.notifyInApp !== false ? "on" : ""}" data-pref="notifyInApp" type="button"><i></i></button>
           </div>
-          <div class="set-row" style="padding-top:12px">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">sync</span><div><strong>Check for new releases</strong><p>Scan all followed artists now for their latest tracks.</p></div></div>
+          <div class="set-row">
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">sync</span><div><strong>Check for new releases</strong></div></div>
             <button class="chip-btn" id="checkNewReleasesBtn" type="button">
               <span class="material-symbols-outlined">sync</span>
               Check Now
@@ -10905,36 +11669,37 @@
 
         <div class="set-card">
           <h3><span class="material-symbols-outlined">person_add</span>Follow an Artist</h3>
-          <p class="set-lead">Search for any artist to follow and start tracking their new releases.</p>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-            <div class="search-wrap" style="flex:1">
-              <span class="material-symbols-outlined">person_add</span>
-              <input id="newFollowArtistInput" type="text" placeholder="Type artist name (e.g. Taylor Swift, Coldplay)…" autocomplete="off" />
-            </div>
-            <button class="chip-btn" id="newFollowArtistBtn" type="button" style="white-space:nowrap">
-              Follow
-            </button>
-          </div>
-          ${popularSuggestions.length ? `
-            <div style="margin-top:14px">
-              <span style="font-size:0.78rem;color:var(--md-sys-color-on-surface-variant);font-weight:600;display:block;margin-bottom:8px">Quick Suggestions:</span>
-              <div class="chip-row" style="flex-wrap:wrap;gap:6px">
-                ${popularSuggestions.slice(0, 8).map((name) => `
-                  <button type="button" class="chip" data-quick-follow="${escapeAttr(name)}">
-                    <span class="material-symbols-outlined" style="font-size:14px;margin-right:2px">add</span>
-                    ${escapeHTML(name)}
-                  </button>
-                `).join("")}
+          <div class="set-sub-body">
+            <div class="set-follow-search">
+              <div class="search-wrap" style="flex:1">
+                <span class="material-symbols-outlined">person_add</span>
+                <input id="newFollowArtistInput" type="text" placeholder="Type artist name (e.g. Taylor Swift, Coldplay)…" autocomplete="off" />
               </div>
+              <button class="chip-btn" id="newFollowArtistBtn" type="button">
+                Follow
+              </button>
             </div>
-          ` : ""}
+            ${popularSuggestions.length ? `
+              <div class="set-Quick-suggest">
+                <span class="set-sub-kicker">Quick Suggestions</span>
+                <div class="chip-row set-sub-chips">
+                  ${popularSuggestions.slice(0, 8).map((name) => `
+                    <button type="button" class="chip" data-quick-follow="${escapeAttr(name)}">
+                      <span class="material-symbols-outlined" style="font-size:14px;margin-right:2px">add</span>
+                      ${escapeHTML(name)}
+                    </button>
+                  `).join("")}
+                </div>
+              </div>
+            ` : ""}
+          </div>
         </div>
 
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <h3 style="margin:0"><span class="material-symbols-outlined">group</span>Followed Artists (${state.following.length})</h3>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">group</span>Followed Artists (${state.following.length})</h3>
           </div>
-          <div class="list">
+          <div class="list set-sub-list">
             ${state.following.map((f) => `
               <div class="track-row" style="align-items:center">
                 <img src="${escapeAttr(f.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
@@ -10942,7 +11707,7 @@
                   <div class="t-title">${escapeHTML(f.name)}</div>
                   <div class="t-sub">${escapeHTML(f.source || "Catalog")}${f.handle ? " · @" + escapeHTML(f.handle) : ""}</div>
                 </div>
-                <div style="display:flex;gap:6px;align-items:center">
+                <div class="set-actions">
                   <button type="button" class="chip-btn sm" data-open-followed-artist="${escapeAttr(f.name)}" data-artist-name="${escapeAttr(f.name)}" title="View artist discography">View</button>
                   <button type="button" class="chip-btn sm" data-unfollow="${escapeAttr(f.key)}">Unfollow</button>
                 </div>
@@ -10961,30 +11726,30 @@
     const plCount = (state.playlists || []).length;
 
     return `
-      ${settingsSubChrome("Data & Storage", "Storage usage, offline files, cache management, and library backups.")}
+      ${settingsSubChrome("Data & Storage")}
       <div class="settings">
         <div class="set-card">
           <h3><span class="material-symbols-outlined">pie_chart</span>Storage Usage</h3>
-          <p class="set-lead">Disk space used on this device for offline playback and cached audio streams.</p>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">hard_drive</span><div><strong>Browser storage estimate</strong><p id="cacheHint">Measuring…</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">hard_drive</span><div><strong>Browser storage estimate</strong></div></div>
+            <span id="cacheHint" class="set-meta-val">Measuring…</span>
           </div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(110px, 1fr));gap:8px;margin-top:12px">
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${dls.length}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Offline songs</span>
+          <div class="set-stats-grid">
+            <div class="set-stat-tile">
+              <strong>${dls.length}</strong>
+              <span>Offline songs</span>
             </div>
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${recentsCount}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">History plays</span>
+            <div class="set-stat-tile">
+              <strong>${recentsCount}</strong>
+              <span>History plays</span>
             </div>
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${likesCount}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Liked songs</span>
+            <div class="set-stat-tile">
+              <strong>${likesCount}</strong>
+              <span>Liked songs</span>
             </div>
-            <div style="padding:10px;border-radius:12px;background:var(--md-sys-color-surface-container, rgba(255,255,255,0.05));text-align:center">
-              <strong style="font-size:1.2rem;display:block;color:var(--md-sys-color-primary)">${plCount}</strong>
-              <span style="font-size:0.75rem;color:var(--md-sys-color-on-surface-variant)">Mixes created</span>
+            <div class="set-stat-tile">
+              <strong>${plCount}</strong>
+              <span>Mixes created</span>
             </div>
           </div>
         </div>
@@ -10992,32 +11757,31 @@
         <div class="set-card">
           <h3><span class="material-symbols-outlined">cleaning_services</span>Cache & Offline Data</h3>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">cached</span><div><strong>App shell & cache</strong><p>Cached web assets, search hits, and home feed. Likes and mixes stay safe.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">cached</span><div><strong>App shell & cache</strong></div></div>
             <button class="chip-btn" data-clear="sw" type="button">Clear Cache</button>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">history</span><div><strong>Listening history</strong><p>Recently played tracks list (${recentsCount} songs).</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="purple">history</span><div><strong>Listening history</strong></div></div>
             <button class="chip-btn" data-clear="recents" type="button">Clear History</button>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">download_for_offline</span><div><strong>Offline downloads</strong><p>Saved audio files on disk (${dls.length} songs).</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="rose">download_for_offline</span><div><strong>Offline downloads</strong></div></div>
             <button class="chip-btn" data-clear="dl" type="button">Delete Downloads</button>
           </div>
         </div>
 
         <div class="set-card">
           <h3><span class="material-symbols-outlined">cloud_upload</span>Backup & Restore</h3>
-          <p class="set-lead">Export your playlists, likes, followed artists, and preferences as a portable JSON backup.</p>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">download</span><div><strong>Export library backup</strong><p>Download a snapshot of your playlists and liked music.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="emerald">download</span><div><strong>Export library backup</strong></div></div>
             <button class="chip-btn" id="exportDataBtn" type="button">
               <span class="material-symbols-outlined">download</span>
               Export Backup
             </button>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">upload</span><div><strong>Import library backup</strong><p>Restore playlists and liked music from a backup file.</p></div></div>
-            <div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="blue">upload</span><div><strong>Import library backup</strong></div></div>
+            <div class="set-actions">
               <button class="chip-btn" id="importDataBtn" type="button">
                 <span class="material-symbols-outlined">upload</span>
                 Import Backup
@@ -11026,7 +11790,7 @@
             </div>
           </div>
           <div class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset settings</strong><p>Reset themes, player styling, and playback preferences to defaults.</p></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="orange">restart_alt</span><div><strong>Reset settings</strong></div></div>
             <button class="chip-btn" id="resetPrefsBtn" type="button">Reset Preferences</button>
           </div>
         </div>
@@ -11037,25 +11801,24 @@
   function renderOfflinePage() {
     const dls = state.downloads || [];
     return `
-      ${settingsSubChrome("Offline & Downloads", "Manage offline playback mode and your downloaded songs stored on disk.")}
+      ${settingsSubChrome("Offline & Downloads")}
       <div class="settings">
         <div class="set-card">
           <h3><span class="material-symbols-outlined">offline_pin</span>Offline Mode (Android & iOS)</h3>
-          <p class="set-lead">Play music without using mobile data or Wi-Fi by streaming directly from your device's local disk cache.</p>
           <div class="set-row">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="teal">cloud_off</span>
-              <div><strong>Offline Mode</strong><p>Force offline playback only using downloaded songs from IndexedDB cache.</p></div>
+              <div><strong>Offline Mode</strong></div>
             </div>
             <button class="switch ${state.offlineMode ? "on" : ""}" id="toggleOfflineMode" type="button"><i></i></button>
           </div>
         </div>
 
         <div class="set-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-            <h3 style="margin:0"><span class="material-symbols-outlined">download_done</span>Downloads on disk (${dls.length})</h3>
+          <div class="set-card-head">
+            <h3><span class="material-symbols-outlined">download_done</span>Downloads on disk (${dls.length})</h3>
             ${dls.length ? `
-              <div style="display:flex;gap:8px;align-items:center">
+              <div class="set-actions">
                 <button class="chip-btn sm" id="playDownloads" type="button">
                   <span class="material-symbols-outlined">play_arrow</span>Play All
                 </button>
@@ -11068,12 +11831,12 @@
           <div class="set-row">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="emerald">download_done</span>
-              <div><strong>Downloads on disk</strong><p>Your saved songs live here and play offline — even without a connection.</p></div>
+              <div><strong>Downloads on disk</strong></div>
             </div>
-            <span>${dls.length}</span>
+            <span class="set-meta-val">${dls.length}</span>
           </div>
           ${renderDlManager()}
-          <div class="list">${dls.map((t, i) => `
+          <div class="list set-sub-list">${dls.map((t, i) => `
             <div class="track-row ${current() && current().id === t.id ? "active" : ""}">
               <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
               <button type="button" data-play="${escapeAttr(t.id)}" data-idx="${i}" style="all:unset;cursor:pointer;flex:1;min-width:0">
@@ -11101,7 +11864,6 @@
     if (state.settingsPage === "data") return renderDataPage();
     const p = state.prefs;
     const opts = COUNTRIES.map(([c, n]) => `<option value="${c}" ${p.country === c ? "selected" : ""}>${n}</option>`).join("");
-    const dls = state.downloads || [];
     const gh = String(p.github || "").replace(/\/$/, "");
     const ghOk = /^https?:\/\/github\.com\/[\w.-]+\/[\w.-]+/i.test(gh);
     return `
@@ -11112,7 +11874,6 @@
             Back
           </button>
           <h1>Settings</h1>
-          <p>Only the controls you need while listening.</p>
         </div>
       </div>
       <div class="settings">
@@ -11122,45 +11883,52 @@
           <button type="button" class="set-row set-go" id="openUi">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="violet">dashboard_customize</span>
-              <div><strong>UI</strong><p>${escapeHTML(uiLabel())} — Material 3, Glass, Winter, Christmas or Autumn.</p></div>
+              <div><strong>UI</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openAppearance">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="amber">dark_mode</span>
-              <div><strong>Appearance</strong><p>${escapeHTML(themeLabel())} — themes and a custom mix.</p></div>
+              <div><strong>Appearance</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openAppIcon">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="pink">apps</span>
-              <div><strong>App Icon</strong><p>${escapeHTML(appIconLabel())} — 25 Anime, Gaming & Vibrant styles.</p></div>
+              <div><strong>App Icon</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openPlayer">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="cyan">equalizer</span>
-              <div><strong>Player</strong><p>${escapeHTML(playerStyleLabel())} — bar shape and the seek line.</p></div>
+              <div><strong>Player</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
+          <div class="set-row">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="emerald">battery_saver</span>
+              <div><strong>Battery Saver</strong></div>
+            </div>
+            <button class="switch ${p.batterySaver ? "on" : ""}" data-pref="batterySaver" type="button" aria-label="Battery Saver"><i></i></button>
+          </div>
         </div>
         <div class="set-card">
           <h3><span class="material-symbols-outlined">graphic_eq</span>Sound</h3>
           <button type="button" class="set-row set-go" id="openPlayback">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="emerald">tune</span>
-              <div><strong>Playback</strong><p>Autoplay, fade, speed, quality.</p></div>
+              <div><strong>Playback</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
           <button type="button" class="set-row set-go" id="openListening">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="purple">headphones</span>
-              <div><strong>Listening</strong><p>Background play, lock screen, sleep.</p></div>
+              <div><strong>Listening</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
@@ -11170,7 +11938,7 @@
           <label class="set-row">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="blue">language</span>
-              <div><strong>Country</strong><p>One local row on Home plus search ranking. The rest of Home is English hits.</p></div>
+              <div><strong>Country</strong></div>
             </div>
             <select id="setCountry">${opts}</select>
           </label>
@@ -11180,7 +11948,7 @@
           <button type="button" class="set-row set-go" id="openFollowing">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="orange">notifications_active</span>
-              <div><strong>Following & Alerts</strong><p>${state.following.length} followed · get notified when artists drop new music.</p></div>
+              <div><strong>Following & Alerts</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
@@ -11190,7 +11958,7 @@
           <button type="button" class="set-row set-go" id="openOffline">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="teal">download_for_offline</span>
-              <div><strong>Offline Mode & Downloads</strong><p>${state.offlineMode ? "Offline mode on" : "Online mode"} · ${dls.length} song${dls.length === 1 ? "" : "s"} on disk.</p></div>
+              <div><strong>Offline Mode & Downloads</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
@@ -11200,7 +11968,7 @@
           <button type="button" class="set-row set-go" id="openData">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="indigo">folder_special</span>
-              <div><strong>Data & Storage</strong><p>Manage offline downloads, cache, and backup your library.</p></div>
+              <div><strong>Data & Storage</strong></div>
             </div>
             <span class="material-symbols-outlined">chevron_right</span>
           </button>
@@ -11210,15 +11978,15 @@
           <div class="set-row">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="violet">verified</span>
-              <div><strong>Muchi ${APP_VERSION}</strong><p>${updateLine()}</p></div>
+              <div><strong>Muchi ${APP_VERSION}</strong></div>
             </div>
           </div>
           <div class="set-row">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="blue">system_update</span>
-              <div><strong>Updates</strong><p>Check for a new version, or restart the app.</p></div>
+              <div><strong>Updates</strong></div>
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="set-actions">
               <button class="chip-btn" id="updateBtn" type="button"><span class="material-symbols-outlined">system_update</span>Update</button>
               <button class="chip-btn" id="reloadApp" type="button"><span class="material-symbols-outlined">refresh</span>Reload App</button>
             </div>
@@ -11226,9 +11994,9 @@
           <div class="set-row">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="amber">help</span>
-              <div><strong>Help</strong><p>What’s new in this version, or send a note if something’s off.</p></div>
+              <div><strong>Help</strong></div>
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="set-actions">
               <button class="chip-btn" id="ghRelease" type="button" ${ghOk ? "" : "disabled"}>What's new</button>
               <button class="chip-btn" id="ghBug" type="button" ${ghOk ? "" : "disabled"}>Send feedback</button>
             </div>
@@ -11236,9 +12004,9 @@
           <div class="set-row">
             <div class="set-label">
               <span class="material-symbols-outlined set-ico" data-ico="teal">policy</span>
-              <div><strong>Legal &amp; Privacy</strong><p>Read the Muchi Privacy Policy and Terms of Service.</p></div>
+              <div><strong>Legal &amp; Privacy</strong></div>
             </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="set-actions">
               <a class="chip-btn" href="/privacy.html" target="_blank" rel="noopener" style="text-decoration:none">Privacy Policy</a>
               <a class="chip-btn" href="/terms.html" target="_blank" rel="noopener" style="text-decoration:none">Terms of Service</a>
             </div>
@@ -12175,6 +12943,7 @@
           speed: 1,
           notifyFollows: true,
           notifyInApp: true,
+          batterySaver: false,
         };
         savePrefs();
         applyTheme();
@@ -12294,6 +13063,13 @@
         const key = el.dataset.pref;
         state.prefs[key] = !state.prefs[key];
         savePrefs();
+        if (key === "batterySaver") {
+          applyUi();
+          themedId = "";
+          themeFromTrack(current());
+          if (state.playing) startTimer();
+          else drawSeekWave();
+        }
         applyPlaybackPrefs();
         render();
       });
@@ -13478,16 +14254,22 @@
     const rawPreview = cleanPlaylistTracks(Array.isArray(meta.tracks) ? meta.tracks.slice() : []);
     const playlistId = meta.playlistId || "";
     const fallbackQ = meta.query || meta.title || "";
-    const shelfId = meta.shelfId || "";
-    const preview = (shelfId === "audius" || shelfId === "radio" || !rawPreview.length)
-      ? rawPreview
-      : mixThreeSourcesClient(rawPreview, homeCatalogPool(), rawPreview.length);
+    const isCountryTrendPl = String(meta.id || meta.shelfId || "").startsWith("ctrend:");
+    const shelfId = meta.shelfId || (isCountryTrendPl ? meta.id : "") || "";
     const forYouMix = !!meta.forYouMix;
     const fyIndex = meta.fyIndex != null ? Number(meta.fyIndex) : null;
-    const needFill = !!(forYouMix || shelfId || playlistId || fallbackQ);
+    const fyMood = String(meta.fyMood || (fyIndex != null && forYouPlaylistList()[fyIndex] ? forYouPlaylistList()[fyIndex].mood : "") || "");
+    const preview = (shelfId === "audius" || shelfId === "radio" || !rawPreview.length)
+      ? rawPreview
+      : (fyIndex != null
+          ? personalizeForYouCardTracks({ mood: fyMood, tracks: rawPreview }, null)
+          : mixThreeSourcesClient(rawPreview, isCountryTrendPl ? [] : homeCatalogPool(), rawPreview.length));
+    const needFill = (isCountryTrendPl && preview.length >= 15)
+      ? false
+      : !!(forYouMix || fyIndex != null || shelfId || playlistId || fallbackQ);
     state.catalogPlaylist = {
       title: meta.title || "Playlist",
-      artist: meta.artist || "",
+      artist: meta.subtitle || meta.artist || "",
       artwork: meta.artwork || (preview[0] && preview[0].artwork) || "",
       playlistId,
       query: fallbackQ,
@@ -13495,6 +14277,9 @@
       tracks: preview,
       loading: needFill,
     };
+    hydrateMissingTrackCovers(preview, () => {
+      if (state.view === "library" && state.activePlaylist === "catalog") render();
+    });
     // Small, JSON-safe meta so a history restore can re-fetch this exact
     // playlist if the in-memory data was ever lost.
     state.catalogMeta = {
@@ -13503,6 +14288,7 @@
       query: fallbackQ,
       shelfId,
       forYouMix,
+      fyMood,
       fyIndex,
     };
     if (!refill) {
@@ -13519,18 +14305,27 @@
     let got = [];
     let shelfTitle = "";
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    // 0) Taste-driven mix ("Made for you" mixes) — fetch the auto-mix catalog.
-    if (forYouMix) {
+    // 0) Taste-driven mix or "Made for you" mood playlist — fetch from /api/for-you.
+    if (forYouMix || fyIndex != null) {
+      const moodParam = fyMood ? `&mood=${encodeURIComponent(fyMood)}` : "";
       const fetchMix = async () => {
-        const data = await api(`/api/for-you?${forYouQs()}&${glq()}`, 25000);
+        const data = await api(`/api/for-you?${forYouQs()}${moodParam}&${glq()}`, 25000);
+        if (fyMood && data && Array.isArray(data.playlists)) {
+          const matched = data.playlists.find((pl) => pl && pl.mood === fyMood);
+          if (matched && Array.isArray(matched.tracks) && matched.tracks.length) return matched.tracks;
+        }
+        if (fyMood && (!data || !Array.isArray(data.playlists))) return [];
         return (data && data.tracks) || [];
       };
       try { got = await fetchMix(); } catch {}
+      if (!got.length && preview.length) {
+        got = preview.slice();
+      }
       if (!got.length) {
         try { await wait(1200); got = await fetchMix(); } catch {}
       }
     }
-    if (!forYouMix && (shelfId || (fallbackQ && !playlistId))) {
+    if (!forYouMix && fyIndex == null && (shelfId || (fallbackQ && !playlistId))) {
       const q = fallbackQ || "";
       const countryGl = encodeURIComponent((state.home && state.home.country) || state.prefs.country || "US");
       const fetchShelf = async (full, timeoutMs) => {
@@ -13599,7 +14394,8 @@
           }
         } catch {}
       }
-      got = mixThreeSourcesClient(got, [...preview, ...homeCatalogPool()], Math.max(got.length, preview.length, 20));
+      const fallbackMixPool = fyIndex != null ? preview : [...preview, ...homeCatalogPool()];
+      got = mixThreeSourcesClient(got, fallbackMixPool, Math.max(got.length, preview.length, 20));
     }
     if (state.activePlaylist !== "catalog" || !state.catalogPlaylist) return;
     if (got.length) {
@@ -13609,9 +14405,14 @@
       const cleaned = cleanPlaylistTracks(filtered);
       const tracks = (shelfId === "audius" || shelfId === "radio")
         ? cleaned
-        : mixThreeSourcesClient(cleaned, [...preview, ...homeCatalogPool()], Math.max(cleaned.length, 20));
+        : (fyIndex != null
+            ? personalizeForYouCardTracks({ mood: fyMood, tracks: [...cleaned, ...preview] }, null)
+            : mixThreeSourcesClient(cleaned, [...preview, ...homeCatalogPool()], Math.max(cleaned.length, 20)));
       state.catalogPlaylist.tracks = tracks;
       if (!state.catalogPlaylist.artwork && tracks[0]) state.catalogPlaylist.artwork = tracks[0].artwork;
+      hydrateMissingTrackCovers(tracks, () => {
+        if (state.view === "library" && state.activePlaylist === "catalog") render();
+      });
       // "Made for you" card covers follow the first song inside the playlist.
       if (fyIndex != null) {
         const card = forYouPlaylistList()[fyIndex];
@@ -14060,9 +14861,15 @@
         const cached = localStorage.getItem("aura.home_cache");
         if (cached) {
           const parsed = JSON.parse(cached);
-          if (parsed && parsed.country === targetCountry && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
+          const hasStaleFyCovers = parsed && Array.isArray(parsed.forYouPlaylists) && parsed.forYouPlaylists.some((pl) =>
+            Array.isArray(pl && pl.tracks) && pl.tracks.some((tr) => !tr || !tr.artwork || String(tr.artwork).startsWith("/cover"))
+          );
+          const hasStaleCountryPls = !parsed || !Array.isArray(parsed.countryPlaylists) || parsed.countryPlaylists.length !== 17 || !parsed.countryPlaylists.every((pl) => pl && String(pl.id || "").startsWith("ctrend:"));
+          if (!hasStaleFyCovers && !hasStaleCountryPls && parsed && parsed.country === targetCountry && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
             state.home = parsed;
             if (state.view === "home") render();
+          } else if (hasStaleFyCovers || hasStaleCountryPls) {
+            localStorage.removeItem("aura.home_cache");
           }
         }
       } catch {}
@@ -14123,9 +14930,9 @@
         const bestCharts = keepBestTracks((state.home.youtubeCharts || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
         state.home.youtubeCharts = bestCharts.length ? mixThreeSourcesClient(bestCharts, homeCatalogPool(), bestCharts.length) : bestCharts;
         if (Array.isArray(state.home.countryPlaylists)) {
-          state.home.countryPlaylists = state.home.countryPlaylists.map((p) => ({
+          state.home.countryPlaylists = state.home.countryPlaylists.slice(0, 17).map((p) => ({
             ...p,
-            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeLocal || [], 20),
+            tracks: mixThreeSourcesClient(p.tracks || [], [], 20),
           }));
         }
         if (Array.isArray(state.home.globalPlaylists)) {
@@ -14135,10 +14942,14 @@
           }));
         }
         if (Array.isArray(state.home.forYouPlaylists)) {
-          state.home.forYouPlaylists = state.home.forYouPlaylists.map((p) => ({
-            ...p,
-            tracks: mixThreeSourcesClient(p.tracks || [], state.home.youtubeCharts || [], 20),
-          }));
+          state.home.forYouPlaylists = state.home.forYouPlaylists.map((p) => {
+            const trs = mixThreeSourcesClient(p.tracks || [], [], 20);
+            hydrateMissingTrackCovers(trs, () => paintHomeSoon());
+            return {
+              ...p,
+              tracks: trs,
+            };
+          });
         }
         if (Array.isArray(state.home.viralPlaylists)) {
           state.home.viralPlaylists = state.home.viralPlaylists.map((p) => ({
@@ -14244,15 +15055,16 @@
           target.youtubeIndia = tracks;
           if (!target.countryPlaylists || !target.countryPlaylists.length) {
             target.countryPlaylists = [
-              "Trending Now", "Top Hits", "Viral Chart", "Mega Mix",
-              "Daily Mix 1", "Daily Mix 2", "Daily Mix 3", "Daily Mix 4",
-              "Daily Mix 5", "Daily Mix 6", "Daily Mix 7", "Daily Mix 8",
-              "Daily Mix 9", "Daily Mix 10", "Daily Mix 11", "Daily Mix 12",
-            ].slice(0, 12).map((title, idx) => ({
+              "Top 50", "New Music Friday", "Viral 50", "Pop Rising",
+              "Hip-Hop & Rap", "Cinema & Soundtracks", "Regional Wave", "Desi & Global Beats",
+              "Indie Radar", "Soul & Acoustic", "Dance & Electronic", "Late Night Vibes",
+              "All-Time Icons", "Workout & Gym Hype", "Love & Heartbreak", "Next Up: Breakout Artists",
+              "Roots & Culture",
+            ].slice(0, 17).map((title, idx) => ({
               id: `cpl:${idx}:${title}`,
               kind: "playlist",
               title,
-              artist: "Daily mix",
+              artist: "Trending mix",
               artwork: (tracks[idx % tracks.length] && tracks[idx % tracks.length].artwork) || "",
               source: "youtube",
               playlistId: "",
@@ -14268,9 +15080,29 @@
 
   function forYouQs() {
     const taste = tasteProfile();
+    const cur = current() || state.recents[0] || null;
+    const curVibe = cur ? inferTrackVibeClient(cur) : null;
+    const prefMoods = Array.isArray(state.prefs && state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+    const prefStyles = Array.isArray(state.prefs && state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
+    const followedNames = (state.following || []).map((f) => f && f.name).filter(Boolean).slice(0, 6);
+    const likedPairs = (state.liked || [])
+      .slice(0, 8)
+      .map((t) => (t && t.title && t.artist ? `${t.title} - ${artistName(t)}` : ""))
+      .filter(Boolean);
+    const historyPairs = (state.recents || [])
+      .slice(0, 8)
+      .map((t) => (t && t.title && t.artist ? `${t.title} - ${artistName(t)}` : ""))
+      .filter(Boolean);
+    const skipKeys = _sessionPlayedKeys.slice(0, 25);
     const qs = new URLSearchParams({
-      artists: taste.artists.slice(0, 4).map((x) => x[0]).join(","),
-      genres: taste.genres.slice(0, 3).map((x) => x[0]).join(","),
+      artists: taste.artists.slice(0, 6).map((x) => x[0]).join(","),
+      followed: followedNames.join(","),
+      genres: taste.genres.slice(0, 4).map((x) => x[0]).join(","),
+      moods: [...new Set([curVibe && curVibe.mood, ...prefMoods].filter(Boolean))].slice(0, 3).join(","),
+      styles: [...new Set([curVibe && curVibe.style, ...prefStyles].filter(Boolean))].slice(0, 2).join(","),
+      liked: likedPairs.join(","),
+      history: historyPairs.join(","),
+      skip: skipKeys.join(","),
       week: mondayWeekKey(),
     });
     return qs.toString();
@@ -14278,10 +15110,22 @@
 
   async function loadForYou() {
     const taste = tasteProfile();
-    if (!taste.artists.length && !taste.genres.length) return;
+    const curWeek = mondayWeekKey();
+    const homeFy = (state.home && Array.isArray(state.home.forYouPlaylists)) ? state.home.forYouPlaylists : [];
+    const needsWeeklyRefresh = homeFy.length === 10 && homeFy.some((p) => p && p.week && p.week !== curWeek);
+    if (!taste.hasTaste && !taste.artists.length && !taste.genres.length && !needsWeeklyRefresh) return;
     try {
       const data = await api(`/api/for-you?${forYouQs()}&${glq()}`);
-      state.forYou = data.tracks || [];
+      const raw = (data && data.tracks) || [];
+      const seed = current() || state.recents[0] || null;
+      state.forYou = raw.length ? scoreAndSequenceSpotifyStyle(seed, raw, { max: 24, maxPerArtist: 2 }) : [];
+      if (data && Array.isArray(data.playlists) && data.playlists.length === 10 && state.home) {
+        state.home.forYouPlaylists = data.playlists.map((p) => ({
+          ...p,
+          tracks: mixThreeSourcesClient(p.tracks || [], [], 20),
+        }));
+        persistHomeCache();
+      }
       if (state.view === "home") render();
     } catch { state.forYou = []; }
   }
@@ -14292,14 +15136,22 @@
     if (have && !force) return;
     const taste = tasteProfile();
     try {
+      const cur = current() || state.recents[0] || null;
+      const curVibe = cur ? inferTrackVibeClient(cur) : null;
+      const prefMoods = Array.isArray(state.prefs && state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+      const prefStyles = Array.isArray(state.prefs && state.prefs.tasteStyles) ? state.prefs.tasteStyles : [];
       const qs = new URLSearchParams({
         artists: taste.artists.slice(0, 4).map((x) => x[0]).join(","),
         genres: taste.genres.slice(0, 3).map((x) => x[0]).join(","),
+        moods: [...new Set([curVibe && curVibe.mood, ...prefMoods].filter(Boolean))].slice(0, 2).join(","),
+        styles: [...new Set([curVibe && curVibe.style, ...prefStyles].filter(Boolean))].slice(0, 2).join(","),
+        skip: _sessionPlayedKeys.slice(0, 25).join(","),
         week,
       });
       const data = await api(`/api/discover?${qs}&${glq()}`, 18000);
-      const tracks = data.tracks || [];
-      if (!tracks.length) return;
+      const raw = (data && data.tracks) || [];
+      if (!raw.length) return;
+      const tracks = scoreAndSequenceSpotifyStyle(cur, raw, { max: 30, maxPerArtist: 2 });
       state.discovery = { week, tracks, savedAt: Date.now() };
       save("aura.discovery", state.discovery);
       paintHomeSoon();
@@ -14922,9 +15774,10 @@
         const rec = state.queueRecs && state.queueRecs[idx];
         if (rec) {
           addToQueue(rec);
-          state.queueRecs.splice(idx, 1);
+          state.queueRecs = (state.queueRecs || []).filter((r, i) => i !== idx && !isSameSongClient(r, rec));
           renderQueue();
           toast(`Added "${rec.title}" to queue`);
+          if ((state.queueRecs || []).length < 4) loadQueueRecs(true);
         }
         return;
       }
@@ -14934,9 +15787,9 @@
         const idx = Number(playRec.dataset.recPlay);
         const rec = state.queueRecs && state.queueRecs[idx];
         if (rec) {
-          state.queueRecs.splice(idx, 1);
+          state.queueRecs = (state.queueRecs || []).filter((r, i) => i !== idx && !isSameSongClient(r, rec));
           playNext(rec);
-          const newIdx = state.queue.indexOf(rec);
+          const newIdx = state.queue.findIndex((t) => isSameSongClient(t, rec));
           if (newIdx >= 0) {
             state.index = newIdx;
             playCurrent(true);
@@ -15374,9 +16227,7 @@
   renderPlaylistsNav();
   try { history.replaceState(navSnap(), ""); } catch {}
   function weaveDiverseTracks(buckets, max = 24, maxPerArtist = 2, countryCode = "US", allowIndian = false) {
-    const seenTrack = new Set();
-    const artistCount = new Map();
-    const out = [];
+    const flat = [];
     const maxLen = Math.max(0, ...buckets.map((b) => (Array.isArray(b) ? b.length : 0)));
     for (let i = 0; i < maxLen; i++) {
       for (const bucket of buckets) {
@@ -15384,22 +16235,16 @@
         const t = bucket[i];
         if (!t || !t.title || !looksLikeSong(t)) continue;
         if (!allowIndian && isUnwantedIndianTrackClient(t, countryCode)) continue;
-        const aNorm = String(artistName(t) || "").toLowerCase().trim();
-        const tNorm = String(t.title || "").toLowerCase().trim();
-        const key = `${tNorm}__${aNorm}`;
-        if (seenTrack.has(key)) continue;
-        const count = artistCount.get(aNorm) || 0;
-        if (aNorm && count >= maxPerArtist) continue;
-        // Avoid placing the exact same artist back-to-back when other songs exist
-        const prevArtist = out.length ? String(artistName(out[out.length - 1]) || "").toLowerCase().trim() : "";
-        if (aNorm && aNorm === prevArtist && buckets.length > 1) continue;
-        seenTrack.add(key);
-        if (aNorm) artistCount.set(aNorm, count + 1);
-        out.push(t);
-        if (out.length >= max) return out;
+        flat.push(t);
       }
     }
-    return out;
+    const seed = current() || state.recents[0] || flat[0] || null;
+    const sequenced = scoreAndSequenceSpotifyStyle(seed, flat, {
+      max,
+      maxPerArtist,
+    });
+    if (sequenced && sequenced.length) return sequenced;
+    return flat.slice(0, max);
   }
 
   let _tasteLoadInFlight = false;

@@ -360,32 +360,32 @@ const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=fa
 // (this is what /api/yt/stream's error field used to hide).
 const INNERTUBE_PROFILES = [
   {
+    tag: "ANDROID_VR-1.61",
+    clientId: "28",
+    ua: "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    client: { clientName: "ANDROID_VR", clientVersion: "1.61.48", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
+  },
+  {
+    tag: "IOS-19.09",
+    clientId: "5",
+    ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
+    client: { clientName: "IOS", clientVersion: "20.10.4", deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "18.3.2.22D82", hl: "en", gl: "US" },
+  },
+  {
+    tag: "ANDROID-19.09",
+    clientId: "3",
+    ua: "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
+    client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 34, osName: "Android", osVersion: "14", hl: "en", gl: "US" },
+  },
+  {
     tag: "ANDROID_VR-1.60",
+    clientId: "28",
     ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
     client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
   },
   {
-    tag: "ANDROID_TESTSUITE-1.9",
-    ua: "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
-    client: { clientName: "ANDROID_TESTSUITE", clientVersion: "1.9", androidSdkVersion: 30, hl: "en", gl: "US" },
-  },
-  {
-    tag: "ANDROID-19.09",
-    ua: "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-    client: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" },
-  },
-  {
-    tag: "ANDROID-20.10",
-    ua: "com.google.android.youtube/20.10.44 (Linux; U; Android 14) gzip",
-    client: { clientName: "ANDROID", clientVersion: "20.10.44", androidSdkVersion: 34, hl: "en", gl: "US" },
-  },
-  {
-    tag: "IOS-19.09",
-    ua: "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X) gzip",
-    client: { clientName: "IOS", clientVersion: "19.09.3", deviceModel: "iPhone16,2", hl: "en", gl: "US" },
-  },
-  {
     tag: "TV_EMBED-2.0",
+    clientId: "85",
     ua: "Mozilla/5.0 (PlayStation; PlayStation 4/11.50) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
     client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" },
     thirdParty: { embedUrl: "https://www.youtube.com/" },
@@ -397,14 +397,21 @@ const INNERTUBE_PROFILES = [
 async function innertubeProbe(spec, videoId) {
   const ctx = { client: spec.client };
   if (spec.thirdParty) ctx.thirdParty = spec.thirdParty;
+  const headers = {
+    "Content-Type": "application/json",
+    "User-Agent": spec.ua,
+  };
+  if (spec.clientId) {
+    headers["X-YouTube-Client-Name"] = spec.clientId;
+    headers["X-YouTube-Client-Version"] = spec.client.clientVersion;
+  }
+  if (spec.thirdParty) {
+    headers.Origin = "https://www.youtube.com";
+    headers.Referer = "https://www.youtube.com/";
+  }
   const data = await fetchJSON(INNERTUBE_API, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Origin: "https://www.youtube.com",
-      Referer: "https://www.youtube.com/",
-      "User-Agent": spec.ua,
-    },
+    headers,
     body: JSON.stringify({
       context: ctx,
       videoId,
@@ -494,6 +501,7 @@ export function pickInnertubeStream(data) {
 
 export function mapAudiusTrack(t) {
   if (!t || !t.id) return null;
+  if (t.is_delete || t.is_streamable === false || (t.access && t.access.stream === false)) return null;
   const user = t.user || {};
   const art = t.artwork || {};
   return {
@@ -515,6 +523,7 @@ export function mapAudiusTrack(t) {
 
 const itunesCache = new Map();
 const ITUNES_CACHE_TTL = 10 * 60 * 1000;
+let itunesRateLimitedUntil = 0;
 
 export async function itunesSearch(query, { includeExtra = true, country = "" } = {}) {
   const cleanQ = String(query || "").trim().slice(0, 80);
@@ -529,26 +538,27 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
 
   const countryParam = country ? `&country=${encodeURIComponent(country)}` : "";
   const fetchItunes = async (url) => {
+    if (Date.now() < itunesRateLimitedUntil) return null;
+    const ctrl = new AbortController();
+    const tm = setTimeout(() => ctrl.abort(), 2500);
     try {
-      return await fetchJSON(url, {}, 5000);
-    } catch {
-      const ctrl = new AbortController();
-      const tm = setTimeout(() => ctrl.abort(), 4500);
-      try {
-        const r = await fetch(url, {
-          signal: ctrl.signal,
-          headers: {
-            Accept: "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          },
-        });
-        if (!r.ok) return null;
-        return await r.json();
-      } catch {
+      const r = await fetch(url, {
+        signal: ctrl.signal,
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        },
+      });
+      if (r.status === 403 || r.status === 429) {
+        itunesRateLimitedUntil = Date.now() + 45000;
         return null;
-      } finally {
-        clearTimeout(tm);
       }
+      if (!r.ok) return null;
+      return await r.json();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(tm);
     }
   };
 
@@ -621,7 +631,10 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
         album: t.collectionName || "",
         duration: Math.round((t.trackTimeMillis || 0) / 1000),
         artwork: art400,
-        previewUrl: t.previewUrl || "",
+        genre: t.primaryGenreName || "",
+        year: t.releaseDate ? String(t.releaseDate).slice(0, 4) : "",
+        releaseDate: t.releaseDate || "",
+        previewUrl: "",
         playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
         trackId: t.trackId,
         trackName: t.trackName || "Song",
@@ -648,9 +661,9 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
     }
   }
   // Secondary fallback if specific entity search returned empty
-  if (!songs.length) {
+  if (!songs.length && Date.now() >= itunesRateLimitedUntil) {
     try {
-      const fb = await fetchJSON(`https://itunes.apple.com/search?term=${q}&media=music&limit=30`, {}, 6000);
+      const fb = await fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&limit=30`);
       for (const t of (fb && fb.results) || []) {
         if (!t.trackId || !t.trackName) continue;
         const art400 = String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
@@ -662,7 +675,10 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
           album: t.collectionName || "",
           duration: Math.round((t.trackTimeMillis || 0) / 1000),
           artwork: art400,
-          previewUrl: t.previewUrl || "",
+          genre: t.primaryGenreName || "",
+          year: t.releaseDate ? String(t.releaseDate).slice(0, 4) : "",
+          releaseDate: t.releaseDate || "",
+          previewUrl: "",
           playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
           trackId: t.trackId,
           trackName: t.trackName,
@@ -673,6 +689,90 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
         });
         if (t.artistName) {
           upsertArtist(t.artistName, t.artistId || t.artistName, art400);
+        }
+      }
+    } catch {}
+  }
+  // Tertiary studio catalog fallback when itunes.apple.com rate-limits the server IP
+  if (!songs.length) {
+    try {
+      const dzFb = await fetchJSON(`https://api.deezer.com/search?q=${q}&limit=30`, {}, 5000);
+      for (const d of (dzFb && dzFb.data) || []) {
+        if (!d || !d.id || !d.title) continue;
+        const aName = (d.artist && d.artist.name) || "Artist";
+        const cName = (d.album && d.album.title) || "";
+        const artUrl = (d.album && (d.album.cover_big || d.album.cover_medium)) || (d.artist && d.artist.picture_big) || "/cover-default.jpg";
+        const durSec = Number(d.duration) || 0;
+        songs.push({
+          id: `apple:${d.id}`,
+          source: "apple",
+          title: d.title,
+          artist: aName,
+          album: cName,
+          duration: durSec,
+          artwork: artUrl,
+          genre: "",
+          year: "",
+          previewUrl: "",
+          playQuery: `${d.title} ${aName} official audio`.trim(),
+          trackId: d.id,
+          trackName: d.title,
+          artistName: aName,
+          collectionName: cName,
+          trackTimeMillis: durSec * 1000,
+          artworkUrl100: artUrl,
+        });
+        upsertArtist(aName, (d.artist && d.artist.id) || aName, (d.artist && (d.artist.picture_big || d.artist.picture_medium)) || artUrl);
+        if (d.album && d.album.id && cName && !seenAlb.has(String(d.album.id))) {
+          seenAlb.add(String(d.album.id));
+          playlists.push({
+            id: `album:${d.album.id}`,
+            kind: "playlist",
+            title: cName,
+            artist: aName,
+            artwork: artUrl,
+            source: "apple",
+            query: `${cName} ${aName}`.trim(),
+          });
+        }
+      }
+    } catch {}
+  }
+  // Quaternary YouTube Music catalog fallback when both iTunes and Deezer rate-limit datacenter IPs
+  if (!songs.length) {
+    try {
+      const ytFb = await searchYouTube(`${cleanQ} official audio`, country || "US", true);
+      if (Array.isArray(ytFb)) {
+        for (const yt of ytFb) {
+          if (!yt || !yt.title) continue;
+          const trackId = yt.videoId || String(yt.id || "").replace(/^yt:/, "") || cleanQ;
+          const aName = yt.artist || "Artist";
+          const cName = yt.album || "";
+          const artUrl = yt.artwork || "/cover-default.jpg";
+          const durSec = Number(yt.duration) || 0;
+          songs.push({
+            id: `apple:${trackId}`,
+            source: "apple",
+            title: yt.title,
+            artist: aName,
+            album: cName,
+            duration: durSec,
+            artwork: artUrl,
+            genre: "",
+            year: "",
+            previewUrl: "",
+            playQuery: `${yt.title} ${aName} official audio`.trim(),
+            trackId,
+            trackName: yt.title,
+            artistName: aName,
+            collectionName: cName,
+            trackTimeMillis: durSec * 1000,
+            artworkUrl100: artUrl,
+          });
+          if (aName && !/^(youtube|unknown|various artists)$/i.test(aName)) {
+            upsertArtist(aName, aName, artUrl);
+          }
+          if (songs.length >= 30) break;
         }
       }
     } catch {}
@@ -726,6 +826,68 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   return res;
 }
 
+const appleRssCache = new Map();
+const APPLE_RSS_TTL = 20 * 60 * 1000;
+
+export async function appleRssMostPlayed(country = "IN", limit = 50) {
+  const cc = String(country || "IN").toLowerCase().trim();
+  const n = Math.max(10, Math.min(50, Number(limit) || 50));
+  const cacheKey = `${cc}:${n}`;
+  const hit = appleRssCache.get(cacheKey);
+  if (hit && hit.exp > Date.now()) return hit.val;
+
+  try {
+    const data = await fetchJSON(
+      `https://rss.applemarketingtools.com/api/v2/${encodeURIComponent(cc)}/music/most-played/${n}/songs.json`,
+      {},
+      5000
+    );
+    const results = (data && data.feed && Array.isArray(data.feed.results)) ? data.feed.results : [];
+    const songs = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (!r || !r.name) continue;
+      const trackId = String(r.id || `${cc}_${i}`);
+      const title = String(r.name || "Song").trim();
+      const artist = String(r.artistName || "Artist").trim();
+      const art400 = String(r.artworkUrl100 || "").replace(/\d+x\d+bb/, "600x600bb") || "/cover-default.jpg";
+      const genreName = (Array.isArray(r.genres) && r.genres[0] && r.genres[0].name) ? String(r.genres[0].name) : "";
+      const relDate = String(r.releaseDate || "").trim();
+      songs.push({
+        id: `apple:${trackId}`,
+        source: "apple",
+        title,
+        artist,
+        album: "",
+        duration: 210,
+        artwork: art400,
+        genre: genreName,
+        year: relDate ? relDate.slice(0, 4) : "",
+        releaseDate: relDate,
+        chartRank: i + 1,
+        previewUrl: "",
+        playQuery: `${title} ${artist} official audio`.trim(),
+        trackId,
+        trackName: title,
+        artistName: artist,
+        collectionName: "",
+        trackTimeMillis: 210000,
+        artworkUrl100: art400,
+      });
+    }
+    if (songs.length) {
+      if (appleRssCache.size > 100) {
+        const firstKey = appleRssCache.keys().next().value;
+        if (firstKey) appleRssCache.delete(firstKey);
+      }
+      appleRssCache.set(cacheKey, { val: songs, exp: Date.now() + APPLE_RSS_TTL });
+    }
+    return songs;
+  } catch {
+    return [];
+  }
+}
+
 export async function audiusSearch(query) {
   const data = await fetchJSON(
     `https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(query)}&app_name=${APP_NAME}&limit=50`,
@@ -770,14 +932,13 @@ export async function audiusStreamUrl(trackId) {
   // Audius stream endpoint redirects (302) to an active, load-balanced validator node in ~150ms.
   const endpoints = [
     `https://api.audius.co/v1/tracks/${id}/stream?app_name=${APP_NAME}`,
-    `https://audius-discovery-1.cultur3stake.com/v1/tracks/${id}/stream?app_name=${APP_NAME}`,
     `https://discoveryprovider.audius.co/v1/tracks/${id}/stream?app_name=${APP_NAME}`,
   ];
 
   for (const ep of endpoints) {
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 3500);
+      const timer = setTimeout(() => ctrl.abort(), 2500);
       const res = await fetch(ep, {
         redirect: "manual",
         headers: { "User-Agent": `${APP_NAME}/${APP_VERSION}` },
@@ -789,13 +950,16 @@ export async function audiusStreamUrl(trackId) {
         if (loc) return loc;
       }
       if (res.status === 200) return ep;
+      // If primary gateway explicitly reports 404/410 (deleted or non-existent track), fail fast
+      if (res.status === 404 || res.status === 410) break;
     } catch {}
   }
 
-  // Fallback: check track metadata
+  // Fallback: check track metadata if stream redirect wasn't returned directly
   try {
-    const data = await fetchJSON(`https://api.audius.co/v1/tracks/${id}?app_name=${APP_NAME}`, {}, 3000);
+    const data = await fetchJSON(`https://api.audius.co/v1/tracks/${id}?app_name=${APP_NAME}`, {}, 2500);
     const t = (data && data.data) || {};
+    if (t.is_delete || t.is_streamable === false) return "";
     if (t.stream && t.stream.url) return t.stream.url;
   } catch {}
 
