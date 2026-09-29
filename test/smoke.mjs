@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.8", APP_VERSION === "1.7.8" && appJs.includes('const APP_VERSION = "1.7.8"'));
+  ok("version: APP_VERSION is 1.7.9", APP_VERSION === "1.7.9" && appJs.includes('const APP_VERSION = "1.7.9"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1298,7 +1298,17 @@ await (async () => {
           Plugins: { MuchiAudio: MuchiAudioMock },
         },
         MediaMetadata: class { constructor(init) { Object.assign(this, init); } },
-        AudioContext: undefined,
+        AudioContext: class {
+          constructor() { this.state = "running"; this.destination = {}; }
+          resume() { return Promise.resolve(); }
+          createMediaElementSource() { return { connect() {}, disconnect() {} }; }
+          createBiquadFilter() { return { frequency: {}, Q: {}, gain: {}, connect() {}, disconnect() {} }; }
+          createGain() { return { gain: {}, connect() {}, disconnect() {} }; }
+          createDynamicsCompressor() { return { threshold: {}, knee: {}, ratio: {}, attack: {}, release: {}, connect() {}, disconnect() {} }; }
+          createWaveShaper() { return { connect() {}, disconnect() {} }; }
+          createDelay() { return { delayTime: {}, connect() {}, disconnect() {} }; }
+          createPanner() { return { positionX: {}, positionY: {}, positionZ: {}, setPosition() {}, connect() {}, disconnect() {} }; }
+        },
         webkitAudioContext: undefined,
         Audio: function() { return makeEl("audio-inst"); },
         Image: function() { return makeEl("img-inst"); },
@@ -1549,7 +1559,23 @@ await (async () => {
   ok("native app icon: Android mipmap-anydpi-v26, mipmap-hdpi, and drawable launcher icon resources exist", Boolean(readFileSync("android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_anime_cyber.xml", "utf8")) && Boolean(readFileSync("android/app/src/main/res/drawable/ic_launcher_bg_anime_cyber.xml", "utf8")) && Boolean(readFileSync("android/app/src/main/res/drawable/ic_launcher_fg_anime_cyber.xml", "utf8")) && readFileSync("android/app/src/main/res/mipmap-hdpi/ic_launcher_anime_cyber.png").length > 100);
   ok("native app icon: iOS Info.plist, project.pbxproj, Assets.xcassets, and MuchiAudioPlugin.swift support setAlternateIconName for all 25 icons", iosPlist.includes("CFBundleAlternateIcons") && iosPlist.includes("AppIcon-anime_cyber") && iosPbxproj.includes("ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;") && iosPlugin.includes("setAlternateIconName") && Boolean(readFileSync("ios/App/App/Assets.xcassets/AppIcon-anime_cyber.appiconset/Contents.json", "utf8")));
   ok("deezer playback: findTrack searches Deezer pools and resolveFallbackStreamUrl supports fresh Deezer/iTunes preview streams", appJs.includes("resolveFallbackStreamUrl(t, skipYtStream = false)") && appJs.includes("state.search.deezer") && appJs.includes("findTrack(id, fallbackMeta)"));
-  ok("ui modes: Settings UI supports material, glass, winter, christmas, and autumn", appJs.includes('const VALID_UI_MODES = ["material", "glass", "winter", "christmas", "autumn"]') && appJs.includes('card("winter", "Winter UI"') && appJs.includes('card("christmas", "Christmas UI"') && appJs.includes('card("autumn", "Autumn UI"'));
+  ok("ui modes: Settings UI supports material, glass, winter, christmas, autumn, and genshin in 2-column stacked layout",
+    appJs.includes('const VALID_UI_MODES = ["material", "glass", "winter", "christmas", "autumn", "genshin"]') &&
+    appJs.includes('animCard("winter", "Winter UI"') &&
+    appJs.includes('animCard("christmas", "Christmas UI"') &&
+    appJs.includes('animCard("autumn", "Autumn UI"') &&
+    appJs.includes('animCard("genshin", "Genshin Impact"') &&
+    appJs.includes('class="ui-anim-row"') &&
+    stylesCss.includes(".ui-anim-row")
+  );
+  ok("genshin animated UI & offline synced lyrics: interactive greeting letters with Paimon/Aether/Lumine and LRC + ID3 USLT / MP4 ©lyr embedding",
+    appJs.includes("function heroGreetingHTML(") &&
+    appJs.includes('class="hero-scene hero-scene-genshin"') &&
+    appJs.includes("function formatSyncedLrc(") &&
+    appJs.includes("function parseLrcText(") &&
+    appJs.includes("function hasOfflineSyncedLyrics(") &&
+    readFileSync("public/meta.js", "utf8").includes("usltFrame(")
+  );
   ok("hero scenes: homepage Still up? bar renders scoped winter, christmas, and autumn scenes behind text", appJs.includes("homeHeroSceneHTML()") && appJs.includes('class="hero-scene hero-scene-winter"') && appJs.includes('class="winter-forest-svg"') && appJs.includes('class="hero-scene hero-scene-christmas"') && appJs.includes('class="xmas-sleigh-svg"') && appJs.includes('class="hero-scene hero-scene-autumn"') && appJs.includes('class="autumn-forest-svg"') && appJs.includes('class="autumn-leaves"') && appJs.includes('class="home-hero-copy"'));
   ok("styles: app-wide winter, christmas & autumn UI overhaul, mood color preservation, and mobile optimizations present in styles.css", stylesCss.includes('html[data-ui="winter"]') && stylesCss.includes('html[data-ui="christmas"]') && stylesCss.includes('html[data-ui="autumn"]') && stylesCss.includes('html[data-ui="autumn"] .mood') && stylesCss.includes("@keyframes santaNightSkyFlight") && stylesCss.includes("@keyframes alaskaSnowLoopFront") && stylesCss.includes("@keyframes autumnLeafDrift"));
   ok("homepage: 'Customize taste' and Settings 'Music Taste & Setup' removed (onboarding is 1-time only for new users)", !appJs.includes("customizeTasteHomeBtn") && !appJs.includes(">Customize taste<") && !appJs.includes("openTasteSetup") && !appJs.includes("Music Taste & Setup"));

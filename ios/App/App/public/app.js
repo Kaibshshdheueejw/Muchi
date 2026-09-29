@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.8";
+  const APP_VERSION = "1.7.9";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1802,7 +1802,21 @@
         return !daNorm || daNorm === aNorm || daNorm.includes(aNorm) || aNorm.includes(daNorm);
       });
     }
+    if (!hit && t.title) {
+      const cKey = canonicalSongKey(t);
+      if (cKey) {
+        hit = downloads.find((d) => d && canonicalSongKey(d) === cKey);
+      }
+    }
     return hit || null;
+  }
+
+  function hasOfflineSyncedLyrics(t) {
+    const saved = findSavedTrack(t) || t;
+    if (!saved) return false;
+    if (Array.isArray(saved.synced) && saved.synced.length) return true;
+    if (saved.lrc && /\[\d+:\d+/.test(String(saved.lrc))) return true;
+    return Boolean(saved.lyrics && String(saved.lyrics).trim());
   }
 
   function isSaved(track) {
@@ -1878,7 +1892,8 @@
     const inLiked = where === "liked";
     const inPl = where === "playlist" && typeof state.activePlaylist === "number";
     const inDl = where === "downloads" || isSaved(track);
-    const canDl = !!(track && (track.trackId || track.videoId));
+    const canDl = !!(track && (track.trackId || track.videoId || track.source === "apple" || track.source === "itunes" || track.source === "deezer"));
+    const hasOfflineLyr = hasOfflineSyncedLyrics(track);
     showModal({
       title: track.title,
       body: `<p>${escapeHTML(track.artist)}</p>
@@ -1894,6 +1909,8 @@
           ${inPl ? sheetItem("rempl", "playlist_remove", "Remove from this playlist") : ""}
           ${track.source !== "radio" ? sheetItem("follow", isFollowing(track) ? "person_remove" : "person_add", isFollowing(track) ? "Unfollow artist" : "Follow artist") : ""}
           ${inDl ? sheetItem("deldl", "delete", "Delete download") : (canDl ? sheetItem("dl", "download", "Save offline") : "")}
+          ${track.source !== "radio" ? sheetItem("savelyrics", "subtitles", hasOfflineLyr ? "Update offline synced lyrics" : "Save synced lyrics offline") : ""}
+          ${hasOfflineLyr ? sheetItem("exportlrc", "description", "Export synced lyrics (.lrc)") : ""}
           ${ytConnected() && track.videoId ? sheetItem("ytlike", "thumb_up", "Add to YouTube Liked") : ""}
           ${ytConnected() && track.videoId ? sheetItem("ytpl", "playlist_add", "Add to YouTube playlist") : ""}
           ${IS_NATIVE ? sheetItem("share", "share", "Share") : ""}
@@ -1914,6 +1931,8 @@
         else if (act === "follow") toggleFollow(track);
         else if (act === "dl") downloadTrack(track);
         else if (act === "deldl") removeDownload(track.id);
+        else if (act === "savelyrics") saveSyncedLyricsForTrackInteractive(track);
+        else if (act === "exportlrc") exportTrackLrc(track);
         else if (act === "share") shareTrack(track);
         else if (act === "ytlike") ytToggleLike(track);
         else if (act === "ytpl") ytAddToPlaylist(track);
@@ -3232,6 +3251,7 @@
     if (t.artwork) s.artwork = t.artwork;
     if (t.lyrics) s.lyrics = t.lyrics;
     if (Array.isArray(t.synced) && t.synced.length) s.synced = t.synced;
+    if (t.lrc) s.lrc = t.lrc;
     return s;
   }
   function isPreviewOrPlaceholderStream(u, t) {
@@ -3403,6 +3423,7 @@
 
   async function saveDownloadToDisk(meta, t, job, onProgress) {
     const ND = nativeDownloader();
+    const embeddedLrcText = (t && (t.lrc || (Array.isArray(t.synced) && t.synced.length ? formatSyncedLrc(t.synced, t.lyrics || "", t) : (t.lyrics || "")))) || "";
     if (ND) {
       // Resolve cover art to a base64 data URI so the native plugin can embed
       // the picture into the file (best-effort; title/artist/album always tag).
@@ -3417,6 +3438,8 @@
         artist: t.artist || "",
         album: t.album || "",
         genre: t.genre || "",
+        lyrics: embeddedLrcText,
+        syncedLyrics: embeddedLrcText,
         artwork: (t.artwork && typeof t.artwork === "string") ? t.artwork : "",
         artworkData: artURI || "",
         mime: meta.mime,
@@ -3608,7 +3631,12 @@
           } catch {}
         }
         taggedBytes = MM.embed(rawAudioBytes, ext, {
-          title: t.title || "", artist: t.artist || "", album: t.album || "", genre: t.genre || "", picture,
+          title: t.title || "",
+          artist: t.artist || "",
+          album: t.album || "",
+          genre: t.genre || "",
+          lyrics: embeddedLrcText,
+          picture,
         });
       } catch (metaErr) {
         console.warn("MuchiMeta embed failed, keeping raw audio bytes:", metaErr);
@@ -3616,20 +3644,32 @@
       }
     }
     const blobType = ctype || "audio/webm";
-    // Always persist untouched raw audio bytes into IndexedDB first under all candidate keys
-    // so in-app offline playback and timestamp seeking work with 100% original sample offsets.
+    // Always persist untouched raw audio bytes + synced lyrics payload into IndexedDB first under all candidate keys
+    // so in-app offline playback, timestamp seeking, and offline synced lyrics work with 100% reliability.
     const blob = new Blob([rawAudioBytes], { type: blobType });
     const exportBlob = new Blob([taggedBytes], { type: blobType });
+    const offlineRecord = {
+      blob,
+      fname,
+      mime: blobType,
+      title: t.title || "",
+      artist: t.artist || "",
+      lyrics: t.lyrics || "",
+      synced: Array.isArray(t.synced) ? t.synced : [],
+      lrc: embeddedLrcText,
+      savedAt: Date.now(),
+    };
     const keysToPersist = [
       t.id,
       trackKey(t),
+      canonicalSongKey(t),
       t.videoId ? `yt:${t.videoId}` : "",
       t.videoId || "",
       t.trackId ? `audius:${t.trackId}` : "",
       t.trackId || "",
-    ].filter(Boolean);
+    ].filter((k, idx, arr) => k && arr.indexOf(k) === idx);
     for (const k of keysToPersist) {
-      try { await idbPut(k, blob); } catch {}
+      try { await idbPut(k, offlineRecord); } catch {}
     }
 
     // File System Access API (showSaveFilePicker) requires active user gesture,
@@ -3641,10 +3681,10 @@
         const writable = await handle.createWritable();
         await writable.write(taggedBytes);
         await writable.close();
-        // IMPORTANT: preserve { blob, handle, fname } so offline playback works
+        // IMPORTANT: preserve { ...offlineRecord, handle } so offline playback and synced lyrics work
         // even if browser revokes file handle permission on page reload / offline!
         for (const k of keysToPersist) {
-          try { await idbPut(k, { blob, handle, fname }); } catch {}
+          try { await idbPut(k, { ...offlineRecord, handle }); } catch {}
         }
         return `fsp:${fname}`;
       } catch (pickerErr) {
@@ -3667,10 +3707,19 @@
 
   async function downloadTrack(t) {
     if (!t) return;
-    // Already fully saved?
-    const existing = state.downloads.find((d) => trackKey(d) === trackKey(t));
+    // Already fully saved? Ensure synced lyrics are also saved offline alongside it!
+    const existing = findSavedTrack(t);
     if (existing && existing.uri) {
-      toast("Already saved on this device");
+      if (!hasOfflineSyncedLyrics(existing)) {
+        toast("Saving synced lyrics for offline access…");
+        const lyr = await ensureOfflineLyricsForTrack(existing).catch(() => null);
+        if (lyr && (lyr.lyrics || (lyr.synced && lyr.synced.length))) {
+          toast("Saved offline with synced lyrics", true, "success");
+          if (state.view === "settings" || state.view === "library" || state.view === "now") render();
+          return;
+        }
+      }
+      toast("Already saved on this device (with offline lyrics)");
       return;
     }
     // Job id follows the track id so the native downloader can map the saved
@@ -3683,14 +3732,9 @@
     }
     // Item 7 — ask for storage permission once, at the moment of saving.
     if (IS_NATIVE) nativeEnsureStoragePermission();
-    // (v1.5.4) The notification-permission ask that used to sit here is gone:
-    // POST_NOTIFICATIONS is handled by the native plugin path (asked at first
-    // play) and downloads don't post notifications by themselves.
-    // Resolve a usable stream first, so downloads don't depend on the volatile
-    // Piped resolver at the moment of the request. If the track already carries
-    // a streamUrl (e.g. it was just played), reuse it. Otherwise ask the same
-    // /api/yt/stream endpoint playback uses (the server caches the resolved URL
-    // for 15 min), so a download on a never-played YouTube track still lands.
+    // Kick off offline synced lyrics fetch in parallel with stream resolution
+    // so synced lyrics are ready to be embedded into the audio file & IndexedDB record!
+    const lyricsPromise = ensureOfflineLyricsForTrack(t).catch(() => null);
     const resolved = await ensureStreamForDownload(t);
     if (resolved && t && t.id) resolved.id = t.id;
     const path = downloadFilePath(resolved);
@@ -3718,28 +3762,65 @@
     try {
       const onProgress = (p) => { job.bytes = p.bytes || 0; job.total = p.total || 0; job.progress = p.progress || 0; saveDlJob(job); };
       job.status = "downloading"; saveDlJob(job);
+      // Wait briefly for lyricsPromise if it already resolved or finishes during stream prep,
+      // and also resolve it after download if still pending.
+      let dlLyrics = await Promise.race([
+        lyricsPromise,
+        new Promise((r) => setTimeout(() => r(null), 1200)),
+      ]);
+      if (dlLyrics && (dlLyrics.lyrics || (dlLyrics.synced && dlLyrics.synced.length))) {
+        resolved.lyrics = dlLyrics.lyrics || "";
+        resolved.synced = dlLyrics.synced || [];
+        resolved.lrc = dlLyrics.lrc || formatSyncedLrc(resolved.synced, resolved.lyrics, resolved);
+      }
       const uri = await saveDownloadToDisk(meta, resolved, job, onProgress);
       if (job.status === "cancelled" || !uri) throw new Error("cancelled");
+      job.status = "saving"; saveDlJob(job);
+      // Ensure offline synced lyrics finished fetching and are persisted alongside the downloaded audio
+      if (!dlLyrics) {
+        try {
+          dlLyrics = await lyricsPromise || await ensureOfflineLyricsForTrack(resolved);
+        } catch {}
+      }
+      const finalLyricsText = (dlLyrics && dlLyrics.lyrics) || resolved.lyrics || "";
+      const finalSyncedArr = (dlLyrics && Array.isArray(dlLyrics.synced) && dlLyrics.synced.length)
+        ? dlLyrics.synced
+        : (Array.isArray(resolved.synced) ? resolved.synced : []);
+      const finalLrc = (dlLyrics && dlLyrics.lrc) || resolved.lrc || formatSyncedLrc(finalSyncedArr, finalLyricsText, resolved);
       job.status = "done"; job.progress = 1; saveDlJob(job);
-      // Pre-fetch and persist synced lyrics alongside the offline download so lyrics move offline.
-      let dlLyrics = null;
-      try {
-        dlLyrics = await ensureOfflineLyricsForTrack(resolved);
-      } catch {}
-      // Record metadata + the local uri + cached lyrics so it can replay offline with moving lyrics.
+      // Record metadata + the local uri + cached synced lyrics & LRC so it replays offline with moving lyrics.
       const dl = {
         ...slimTrack(resolved),
         uri,
         streamMime: meta.mime,
         savedAt: Date.now(),
-        ...(dlLyrics && (dlLyrics.lyrics || (dlLyrics.synced && dlLyrics.synced.length))
-          ? { lyrics: dlLyrics.lyrics || "", synced: dlLyrics.synced || [] }
+        ...(finalLyricsText || finalSyncedArr.length
+          ? {
+              lyrics: finalLyricsText,
+              synced: finalSyncedArr,
+              lrc: finalLrc,
+              hasOfflineLyrics: true,
+            }
           : {}),
       };
       delete dl.streamUrl;
-      state.downloads = [dl, ...state.downloads.filter((d) => d.id !== dl.id)];
+      state.downloads = [dl, ...state.downloads.filter((d) => d.id !== dl.id && trackKey(d) !== trackKey(dl))];
       save("aura.downloads", state.downloads);
-      toast("Saved to your files", true, "success");
+      if (finalLyricsText || finalSyncedArr.length) {
+        await saveOfflineLyrics(dl, {
+          lyrics: finalLyricsText,
+          synced: finalSyncedArr,
+          lrc: finalLrc,
+          _synthesized: Boolean(dlLyrics && dlLyrics._synthesized),
+        }).catch(() => {});
+      }
+      toast(
+        finalSyncedArr.length
+          ? "Saved offline with synced lyrics"
+          : "Saved to your files",
+        true,
+        "success"
+      );
       if (IS_NATIVE && document.hidden) nativeNotifySaved(t.title);
       // Clear the finished job from the active queue shortly after.
       setTimeout(() => {
@@ -4714,13 +4795,14 @@
 
   function libTrackHTML(t, i, opt = {}) {
     const isDl = Boolean(opt.isDownload || opt.where === "downloads" || state.activePlaylist === "downloads" || (state.view === "library" && state.libFilter === "downloaded") || isSaved(t));
+    const hasLyr = isDl && hasOfflineSyncedLyrics(t);
     return `
       <div class="track-row lib-track ${current() && current().id === t.id ? "active" : ""}">
         <button type="button" class="lib-track-main" data-play="${escapeAttr(t.id)}" data-idx="${i}" data-source="${escapeAttr(t.source || "")}" data-title="${escapeAttr(t.title || "")}" data-artist="${escapeAttr(t.artist || "")}">
           <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
           <div>
             <div class="t-title">${escapeHTML(t.title)}</div>
-            <div class="t-sub">${escapeHTML(t.artist)}</div>
+            <div class="t-sub">${escapeHTML(t.artist)}${hasLyr ? ` · <span class="dl-lyr-pill" title="Synced lyrics saved for offline access">Synced lyrics</span>` : ""}</div>
           </div>
         </button>
         <div class="lib-track-actions">
@@ -8736,23 +8818,96 @@
     }));
   }
 
+  function formatSyncedLrc(synced, plainText = "", trackMeta = null) {
+    const lines = [];
+    if (trackMeta) {
+      if (trackMeta.title) lines.push(`[ti:${String(trackMeta.title).replace(/[\r\n\]]/g, " ").trim()}]`);
+      if (trackMeta.artist) lines.push(`[ar:${String(trackMeta.artist).replace(/[\r\n\]]/g, " ").trim()}]`);
+      if (trackMeta.album) lines.push(`[al:${String(trackMeta.album).replace(/[\r\n\]]/g, " ").trim()}]`);
+      if (trackMeta.duration) {
+        const d = Math.max(0, Math.round(Number(trackMeta.duration) || 0));
+        if (d > 0) {
+          const dm = String(Math.floor(d / 60)).padStart(2, "0");
+          const ds = String(d % 60).padStart(2, "0");
+          lines.push(`[length:${dm}:${ds}]`);
+        }
+      }
+    }
+    if (Array.isArray(synced) && synced.length) {
+      for (const row of synced) {
+        if (!row) continue;
+        const sec = Math.max(0, Number(row.t) || 0);
+        const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+        const ss = (sec % 60).toFixed(2).padStart(5, "0");
+        lines.push(`[${mm}:${ss}]${String(row.text || "").replace(/\r?\n/g, " ").trim()}`);
+      }
+      return lines.join("\n");
+    }
+    if (plainText) {
+      if (lines.length) lines.push("");
+      lines.push(String(plainText).trim());
+      return lines.join("\n");
+    }
+    return "";
+  }
+
+  function parseLrcText(rawText) {
+    const str = String(rawText || "").trim();
+    if (!str) return null;
+    const synced = [];
+    const plainLines = [];
+    for (const rawLine of str.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (/^\[(ti|ar|al|au|by|length|offset|re|ve):/i.test(line)) continue;
+      const m = line.match(/^\[(\d+):(\d+(?:\.\d+)?)\](.*)$/);
+      if (m) {
+        const t = Number(m[1]) * 60 + Number(m[2]);
+        const text = m[3].trim();
+        synced.push({ t: Number(t.toFixed(2)), text });
+        if (text) plainLines.push(text);
+      } else {
+        plainLines.push(line);
+      }
+    }
+    const lyrics = plainLines.join("\n").trim();
+    if (!synced.length && !lyrics) return null;
+    return { lyrics, synced };
+  }
+
   function candidateLyricsKeys(t) {
     if (!t) return [];
     const meta = cleanLyricsMeta(t);
-    return [
+    const saved = findSavedTrack(t);
+    const rawKeys = [
       lyricsKey(t),
       t.id || "",
       trackKey(t),
+      canonicalSongKey(t),
       t.videoId ? `yt:${t.videoId}` : "",
+      t.videoId || "",
+      t.trackId ? `audius:${t.trackId}` : "",
+      t.trackId || "",
+      saved ? lyricsKey(saved) : "",
+      saved ? saved.id || "" : "",
+      saved ? trackKey(saved) : "",
+      saved ? canonicalSongKey(saved) : "",
+      saved && saved.videoId ? `yt:${saved.videoId}` : "",
       meta.cleanTitle ? `${meta.cleanTitle.toLowerCase()}|${(meta.cleanArtist || "").toLowerCase()}` : "",
-    ].filter(Boolean);
+      meta.coreTitle ? `${meta.coreTitle.toLowerCase()}|${(meta.cleanArtist || "").toLowerCase()}` : "",
+    ];
+    return rawKeys.filter((k, idx, arr) => k && arr.indexOf(k) === idx);
   }
 
   async function saveOfflineLyrics(t, data) {
     if (!t || !data || (!data.lyrics && (!Array.isArray(data.synced) || !data.synced.length))) return;
+    const syncedArr = Array.isArray(data.synced) ? data.synced : [];
+    const plainStr = String(data.lyrics || (syncedArr.length ? syncedArr.map((x) => x.text).filter(Boolean).join("\n") : ""));
+    const lrcStr = String(data.lrc || formatSyncedLrc(syncedArr, plainStr, t));
     const payload = {
-      lyrics: String(data.lyrics || ""),
-      synced: Array.isArray(data.synced) ? data.synced : [],
+      lyrics: plainStr,
+      synced: syncedArr,
+      lrc: lrcStr,
       _synthesized: Boolean(data._synthesized),
       updatedAt: Date.now(),
     };
@@ -8760,29 +8915,116 @@
     for (const k of keys) {
       try { await idbPut(`lyrics:${k}`, payload); } catch {}
     }
+    // Also attach synced lyrics directly onto any stored IndexedDB audio record for this track
     const saved = findSavedTrack(t);
+    const audioKeys = [
+      t.id,
+      trackKey(t),
+      canonicalSongKey(t),
+      t.videoId ? `yt:${t.videoId}` : "",
+      t.videoId || "",
+      t.trackId ? `audius:${t.trackId}` : "",
+      t.trackId || "",
+      saved ? saved.id : "",
+      saved ? trackKey(saved) : "",
+    ].filter((k, idx, arr) => k && arr.indexOf(k) === idx);
+    for (const ak of audioKeys) {
+      try {
+        const existingAudioRec = await idbGet(ak);
+        if (existingAudioRec && typeof existingAudioRec === "object" && !(existingAudioRec instanceof Blob) && (existingAudioRec.blob || existingAudioRec.handle || existingAudioRec.data)) {
+          await idbPut(ak, {
+            ...existingAudioRec,
+            lyrics: payload.lyrics,
+            synced: payload.synced,
+            lrc: payload.lrc,
+          });
+        }
+      } catch {}
+    }
     if (saved) {
       saved.lyrics = payload.lyrics;
       saved.synced = payload.synced;
+      saved.lrc = payload.lrc;
+      saved.hasOfflineLyrics = true;
       save("aura.downloads", state.downloads);
     }
+    t.lyrics = payload.lyrics;
+    t.synced = payload.synced;
+    t.lrc = payload.lrc;
   }
 
   async function getOfflineLyrics(t) {
     if (!t) return null;
     if (Array.isArray(t.synced) && t.synced.length) {
-      return { lyrics: t.lyrics || "", synced: t.synced };
+      return { lyrics: t.lyrics || "", synced: t.synced, lrc: t.lrc || "" };
+    }
+    if (t.lrc) {
+      const parsedT = parseLrcText(t.lrc);
+      if (parsedT && (parsedT.synced.length || parsedT.lyrics)) return { ...parsedT, lrc: t.lrc };
     }
     const saved = findSavedTrack(t);
-    if (saved && ((Array.isArray(saved.synced) && saved.synced.length) || saved.lyrics)) {
-      return { lyrics: saved.lyrics || "", synced: Array.isArray(saved.synced) ? saved.synced : [] };
+    if (saved) {
+      if ((Array.isArray(saved.synced) && saved.synced.length) || saved.lyrics) {
+        return {
+          lyrics: saved.lyrics || "",
+          synced: Array.isArray(saved.synced) ? saved.synced : [],
+          lrc: saved.lrc || "",
+        };
+      }
+      if (saved.lrc) {
+        const parsedSaved = parseLrcText(saved.lrc);
+        if (parsedSaved && (parsedSaved.synced.length || parsedSaved.lyrics)) return { ...parsedSaved, lrc: saved.lrc };
+      }
     }
     const keys = candidateLyricsKeys(t);
     for (const k of keys) {
       try {
         const rec = await idbGet(`lyrics:${k}`);
-        if (rec && ((Array.isArray(rec.synced) && rec.synced.length) || rec.lyrics)) {
-          return { lyrics: rec.lyrics || "", synced: Array.isArray(rec.synced) ? rec.synced : [], _synthesized: Boolean(rec._synthesized) };
+        if (rec) {
+          if ((Array.isArray(rec.synced) && rec.synced.length) || rec.lyrics) {
+            return {
+              lyrics: rec.lyrics || "",
+              synced: Array.isArray(rec.synced) ? rec.synced : [],
+              lrc: rec.lrc || "",
+              _synthesized: Boolean(rec._synthesized),
+            };
+          }
+          if (rec.lrc) {
+            const parsedRec = parseLrcText(rec.lrc);
+            if (parsedRec) return { ...parsedRec, lrc: rec.lrc };
+          }
+        }
+      } catch {}
+    }
+    // Also check the downloaded audio record in IndexedDB (which stores { blob, lyrics, synced, lrc } or embedded ID3/MP4 tags)
+    for (const k of keys) {
+      try {
+        const audioRec = await idbGet(k);
+        if (!audioRec) continue;
+        if (typeof audioRec === "object" && !(audioRec instanceof Blob)) {
+          if ((Array.isArray(audioRec.synced) && audioRec.synced.length) || audioRec.lyrics) {
+            return {
+              lyrics: audioRec.lyrics || "",
+              synced: Array.isArray(audioRec.synced) ? audioRec.synced : [],
+              lrc: audioRec.lrc || "",
+            };
+          }
+          if (audioRec.lrc) {
+            const parsedAudioLrc = parseLrcText(audioRec.lrc);
+            if (parsedAudioLrc) return { ...parsedAudioLrc, lrc: audioRec.lrc };
+          }
+        }
+        // Fallback: read embedded USLT / ©lyr metadata directly from the downloaded audio blob if present
+        const blobObj = audioRec instanceof Blob ? audioRec : (audioRec && audioRec.blob instanceof Blob ? audioRec.blob : null);
+        if (blobObj && window.MuchiMeta && typeof window.MuchiMeta.read === "function") {
+          const u8 = new Uint8Array(await blobObj.arrayBuffer());
+          const tags = window.MuchiMeta.read(u8);
+          if (tags && tags.lyrics) {
+            const parsedTag = parseLrcText(tags.lyrics);
+            if (parsedTag && (parsedTag.synced.length || parsedTag.lyrics)) {
+              return { ...parsedTag, lrc: tags.lyrics };
+            }
+          }
         }
       } catch {}
     }
@@ -8811,6 +9053,17 @@
         found = { lyrics: data.lyrics || "", synced: data.synced || [] };
       }
     } catch {}
+    if (!found && meta.altTitle) {
+      try {
+        const dataAlt = await api(
+          `/api/lyrics?title=${encodeURIComponent(meta.altTitle)}&artist=${encodeURIComponent(meta.altArtist)}${dur ? `&duration=${dur}` : ""}`,
+          7000
+        );
+        if (dataAlt && (dataAlt.lyrics || (Array.isArray(dataAlt.synced) && dataAlt.synced.length))) {
+          found = { lyrics: dataAlt.lyrics || "", synced: dataAlt.synced || [] };
+        }
+      } catch {}
+    }
     if (!found) {
       try {
         found = await fetchLyricsBrowserFallback(meta, dur);
@@ -8822,9 +9075,113 @@
         found.synced = synthesizeSyncedLyrics(found.lyrics, dur || 180);
         found._synthesized = true;
       }
+      if (!found.lyrics && Array.isArray(found.synced) && found.synced.length) {
+        found.lyrics = found.synced.map((r) => r.text).filter(Boolean).join("\n");
+      }
+      found.lrc = formatSyncedLrc(found.synced, found.lyrics, t);
       await saveOfflineLyrics(t, found);
     }
     return found;
+  }
+
+  async function saveSyncedLyricsForTrackInteractive(t) {
+    if (!t || t.source === "radio") return;
+    toast(`Saving synced lyrics for "${t.title}"…`);
+    try {
+      const res = await ensureOfflineLyricsForTrack(t);
+      if (res && ((Array.isArray(res.synced) && res.synced.length) || res.lyrics)) {
+        toast("Synced lyrics saved for offline access", true, "success");
+        if (current() && isSameSongClient(current(), t)) {
+          loadLyrics(current());
+        }
+        if (state.view === "library" || state.view === "settings" || state.view === "now") render();
+      } else {
+        toast("Couldn't find lyrics for this track", true, "error");
+      }
+    } catch {
+      toast("Couldn't save lyrics right now", true, "error");
+    }
+  }
+
+  async function exportTrackLrc(t) {
+    if (!t) return;
+    let lyr = await getOfflineLyrics(t);
+    if (!lyr || (!lyr.lyrics && (!Array.isArray(lyr.synced) || !lyr.synced.length))) {
+      toast("Fetching synced lyrics…");
+      lyr = await ensureOfflineLyricsForTrack(t);
+    }
+    if (!lyr || (!lyr.lyrics && (!Array.isArray(lyr.synced) || !lyr.synced.length))) {
+      toast("No lyrics available to export", true, "error");
+      return;
+    }
+    const synced = Array.isArray(lyr.synced) && lyr.synced.length
+      ? lyr.synced
+      : synthesizeSyncedLyrics(lyr.lyrics || "", Number(t.duration || duration() || 180));
+    const lrcText = lyr.lrc || formatSyncedLrc(synced, lyr.lyrics || "", t);
+    const fname = `${sanitizeName(`${t.title || "track"} - ${artistName(t) || t.artist || ""}`)}.lrc`;
+    const blob = new Blob([lrcText], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast(`Saved ${fname}`, true, "success");
+  }
+
+  let _syncingAllOfflineLyrics = false;
+  async function syncAllOfflineLyrics(interactive = false) {
+    if (_syncingAllOfflineLyrics) {
+      if (interactive) toast("Already syncing offline lyrics…");
+      return;
+    }
+    const dls = state.downloads || [];
+    if (!dls.length) {
+      if (interactive) toast("No downloaded songs yet");
+      return;
+    }
+    const isNetworkOff = Boolean(
+      state.offlineMode ||
+      state.isNetworkOffline ||
+      (typeof navigator !== "undefined" && navigator.onLine === false)
+    );
+    if (isNetworkOff) {
+      if (interactive) toast("Connect to the internet to fetch missing lyrics", true, "error");
+      return;
+    }
+    const targets = interactive ? dls : dls.filter((d) => d && !hasOfflineSyncedLyrics(d));
+    if (!targets.length) {
+      if (interactive) toast("All downloaded songs have synced lyrics saved offline", true, "success");
+      return;
+    }
+    _syncingAllOfflineLyrics = true;
+    if (interactive) toast(`Saving synced lyrics for ${targets.length} downloaded song${targets.length === 1 ? "" : "s"}…`);
+    let savedCount = 0;
+    try {
+      for (const d of targets) {
+        if (!d) continue;
+        try {
+          const res = await ensureOfflineLyricsForTrack(d);
+          if (res && ((Array.isArray(res.synced) && res.synced.length) || res.lyrics)) {
+            savedCount += 1;
+          }
+        } catch {}
+      }
+      save("aura.downloads", state.downloads);
+      if (interactive) {
+        toast(
+          savedCount > 0
+            ? `Saved offline synced lyrics for ${savedCount} song${savedCount === 1 ? "" : "s"}`
+            : "Offline lyrics check complete",
+          true,
+          "success"
+        );
+      }
+      if (state.view === "library" || state.view === "settings" || state.view === "now") render();
+    } finally {
+      _syncingAllOfflineLyrics = false;
+    }
   }
 
   function lyricsBodyHTML() {
@@ -10859,6 +11216,7 @@
     }
     if (pl === "downloads") {
       const tracks = state.downloads || [];
+      const withLyricsCount = tracks.filter((d) => hasOfflineSyncedLyrics(d)).length;
       return `
         <div class="lib-detail">
           <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
@@ -10867,10 +11225,11 @@
             <div class="lib-hero-copy">
               <p class="lib-kicker">Playlist</p>
               <h1>Downloads</h1>
-              <p class="lib-stats">${trackStats(tracks)}</p>
-              <p class="lib-note">Saved on this device for offline listening</p>
+              <p class="lib-stats">${trackStats(tracks)}${tracks.length ? ` · ${withLyricsCount}/${tracks.length} with synced lyrics` : ""}</p>
+              <p class="lib-note">Saved on this device with synced lyrics for offline listening</p>
               <div class="lib-hero-actions">
                 ${tracks.length ? `<button class="filled-btn" id="playDownloads" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+                ${tracks.length ? `<button class="chip-btn" id="syncOfflineLyricsBtn" type="button"><span class="material-symbols-outlined">subtitles</span> Sync Lyrics</button>` : ""}
                 ${tracks.length ? `<button class="chip-btn" id="clearDownloads" type="button"><span class="material-symbols-outlined">delete_sweep</span> Delete all</button>` : ""}
               </div>
             </div>
@@ -11119,6 +11478,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.7.9",
+      title: "Muchi 1.7.9",
+      notes: [
+        "New Genshin Impact Animated UI with Paimon, Aether & Lumine interactive greeting letters.",
+        "Offline synced lyrics download and time-aligned playback without an internet connection.",
+        "Updated 2-column Animated UI theme cards in Settings.",
+      ],
+    },
     {
       ver: "1.7.8",
       title: "Muchi 1.7.8",
@@ -12452,6 +12820,7 @@
 
   function renderOfflinePage() {
     const dls = state.downloads || [];
+    const withLyricsCount = dls.filter((d) => hasOfflineSyncedLyrics(d)).length;
     return `
       ${settingsSubChrome("Offline & Downloads")}
       <div class="settings">
@@ -12463,6 +12832,15 @@
               <div><strong>Offline Mode</strong></div>
             </div>
             <button class="switch ${state.offlineMode ? "on" : ""}" id="toggleOfflineMode" type="button"><i></i></button>
+          </div>
+          <div class="set-row">
+            <div class="set-label">
+              <span class="material-symbols-outlined set-ico" data-ico="purple">subtitles</span>
+              <div><strong>Offline Synced Lyrics</strong><div style="font-size:12px;opacity:.75">${dls.length ? `${withLyricsCount} of ${dls.length} downloaded songs have synced lyrics saved` : "Automatically saved alongside downloaded audio"}</div></div>
+            </div>
+            <button class="chip-btn sm" id="syncOfflineLyricsBtn" type="button">
+              <span class="material-symbols-outlined">sync</span>Sync Lyrics
+            </button>
           </div>
         </div>
 
@@ -12488,17 +12866,23 @@
             <span class="set-meta-val">${dls.length}</span>
           </div>
           ${renderDlManager()}
-          <div class="list set-sub-list">${dls.map((t, i) => `
+          <div class="list set-sub-list">${dls.map((t, i) => {
+            const hasLyr = hasOfflineSyncedLyrics(t);
+            return `
             <div class="track-row ${current() && current().id === t.id ? "active" : ""}">
               <img src="${escapeAttr(artUrl(t))}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
               <button type="button" data-play="${escapeAttr(t.id)}" data-idx="${i}" style="all:unset;cursor:pointer;flex:1;min-width:0">
                 <div class="t-title">${escapeHTML(t.title)}</div>
-                <div class="t-sub">${escapeHTML(t.artist)}</div>
+                <div class="t-sub">${escapeHTML(t.artist)}${hasLyr ? ` · <span class="dl-lyr-pill">Synced lyrics</span>` : ""}</div>
+              </button>
+              <button type="button" class="icon-btn" data-save-lyr="${escapeAttr(t.id)}" title="${hasLyr ? "Synced lyrics saved offline (tap to export .lrc)" : "Save synced lyrics offline"}">
+                <span class="material-symbols-outlined" style="${hasLyr ? "color:var(--md-sys-color-primary)" : ""}">subtitles</span>
               </button>
               <button type="button" class="icon-btn" data-del-dl="${escapeAttr(t.id)}" title="Remove">
                 <span class="material-symbols-outlined">delete</span>
               </button>
-            </div>`).join("") || "<p class='empty' style='padding:16px'>Save a track from Now Playing.</p>"}</div>
+            </div>`;
+          }).join("") || "<p class='empty' style='padding:16px'>Save a track from Now Playing.</p>"}</div>
         </div>
       </div>
     `;
@@ -12751,6 +13135,7 @@
     }
     const art = artUrl(t);
     const saved = isSaved(t);
+    const hasOfflineLyr = hasOfflineSyncedLyrics(t) || Boolean(state.lyrics && state.lyrics.key === lyricsKey(t) && ((state.lyrics.synced && state.lyrics.synced.length) || state.lyrics.lyrics));
     const followingNow = t.source !== "radio" && isFollowing(t);
     const canVideo = t.source !== "radio" && t.source !== "audius";
     return `
@@ -12769,8 +13154,11 @@
           </div>
           <div class="ly-head-actions">
             ${t.source !== "radio" ? `
-            <button class="icon-btn ${saved ? "on" : ""}" id="nowDlBtn" type="button" title="${saved ? "Saved offline" : "Download song"}">
+            <button class="icon-btn ${saved ? "on" : ""}" id="nowDlBtn" type="button" title="${saved ? "Saved offline with synced lyrics" : "Download song & synced lyrics"}">
               <span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span>
+            </button>
+            <button class="icon-btn ${hasOfflineSyncedLyrics(t) ? "on" : ""}" id="nowSaveLyrBtn" type="button" title="${hasOfflineSyncedLyrics(t) ? "Synced lyrics saved offline (tap to export .lrc)" : "Save synced lyrics offline"}">
+              <span class="material-symbols-outlined">subtitles</span>
             </button>
             <button class="icon-btn ${followingNow ? "on" : ""}" id="nowFollowBtn" type="button" title="${followingNow ? "Following artist" : "Follow artist"}">
               <span class="material-symbols-outlined">${followingNow ? "how_to_reg" : "person_add"}</span>
@@ -13085,6 +13473,18 @@
         if (cur) downloadTrack(cur);
       });
     }
+    const nowSaveLyrBtn = viewEl.querySelector("#nowSaveLyrBtn");
+    if (nowSaveLyrBtn) {
+      nowSaveLyrBtn.addEventListener("click", () => {
+        const cur = current();
+        if (!cur) return;
+        if (hasOfflineSyncedLyrics(cur)) {
+          exportTrackLrc(cur);
+        } else {
+          saveSyncedLyricsForTrackInteractive(cur);
+        }
+      });
+    }
     const nowFollowBtn = viewEl.querySelector("#nowFollowBtn");
     if (nowFollowBtn) {
       nowFollowBtn.addEventListener("click", () => {
@@ -13222,6 +13622,22 @@
     if (playLiked) playLiked.addEventListener("click", () => { if (state.liked[0]) playFromList(state.liked, 0); });
     const playDownloads = viewEl.querySelector("#playDownloads");
     if (playDownloads) playDownloads.addEventListener("click", () => { if (state.downloads && state.downloads[0]) playFromList(state.downloads, 0); });
+    const syncOfflineLyricsBtn = viewEl.querySelector("#syncOfflineLyricsBtn");
+    if (syncOfflineLyricsBtn) {
+      syncOfflineLyricsBtn.addEventListener("click", () => {
+        syncAllOfflineLyrics(true);
+      });
+    }
+    viewEl.querySelectorAll("[data-save-lyr]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = el.dataset.saveLyr;
+        const tr = (state.downloads || []).find((d) => d && d.id === id) || findTrack(id);
+        if (!tr) return;
+        if (hasOfflineSyncedLyrics(tr)) exportTrackLrc(tr);
+        else saveSyncedLyricsForTrackInteractive(tr);
+      });
+    });
     const clearDownloads = viewEl.querySelector("#clearDownloads");
     if (clearDownloads) {
       clearDownloads.addEventListener("click", () => {
@@ -17589,6 +18005,10 @@
   loadTasteRecommendations();
   maybeShowFirstLaunchOnboarding();
   checkUpdates(true);
+  // Automatically ensure any previously downloaded tracks have synced lyrics cached for offline playback
+  setTimeout(() => {
+    syncAllOfflineLyrics(false).catch(() => {});
+  }, 3500);
   const homeStale = () => Date.now() - homeFetchedAt > 86400000 || (state.home && state.home.day !== utcDayClient());
   setInterval(() => {
     if (!document.hidden && homeStale()) loadHome(true);

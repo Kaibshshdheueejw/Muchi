@@ -51,6 +51,19 @@
     f.set(latin("APIC"), 0); f.set(u32be(payload.length), 4); f.set(payload, 10);
     return f;
   }
+  function usltFrame(lyricsText) {
+    var txtBytes = utf8(lyricsText || "");
+    var lang = latin("eng");
+    // encoding(1: 0x03 UTF-8) + language(3: "eng") + content descriptor(1: 0x00) + lyrics text
+    var payload = new Uint8Array(1 + 3 + 1 + txtBytes.length);
+    payload[0] = 0x03;
+    payload.set(lang, 1);
+    payload[4] = 0x00;
+    payload.set(txtBytes, 5);
+    var f = new Uint8Array(10 + payload.length);
+    f.set(latin("USLT"), 0); f.set(u32be(payload.length), 4); f.set(payload, 10);
+    return f;
+  }
   function id3v2Tag(audio, meta) {
     meta = meta || {};
     var frames = [];
@@ -58,6 +71,7 @@
     if (meta.artist) frames.push(textFrame("TPE1", meta.artist));
     if (meta.album) frames.push(textFrame("TALB", meta.album));
     if (meta.genre) frames.push(textFrame("TCON", meta.genre));
+    if (meta.lyrics) frames.push(usltFrame(meta.lyrics));
     if (meta.picture && meta.picture.data && meta.picture.data.length) frames.push(apicFrame(meta.picture.mime, meta.picture.data));
     var bodyLen = 0, i; for (i = 0; i < frames.length; i++) bodyLen += frames[i].length;
     var header = new Uint8Array(10);
@@ -71,7 +85,7 @@
   }
   function readId3v2(bytes) {
     if (bytes.length < 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null;
-    var total = findId3v2Size(bytes), out = { container: "mp3", title: "", artist: "", album: "", genre: "", picture: null };
+    var total = findId3v2Size(bytes), out = { container: "mp3", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null };
     var o = 10, end = Math.min(bytes.length, total);
     while (o + 10 <= end) {
       var id = latinstr(u8slice(bytes, o, o + 4));
@@ -86,6 +100,18 @@
         else if (data[0] === 1) text = utf16lestr(raw);
         else text = latinstr(raw);
         if (id === "TIT2") out.title = text; else if (id === "TPE1") out.artist = text; else if (id === "TALB") out.album = text; else out.genre = text;
+      } else if (id === "USLT" && data.length > 4) {
+        var enc = data[0];
+        var pU = 4;
+        if (enc === 1 || enc === 2) {
+          while (pU + 1 < data.length && (data[pU] !== 0 || data[pU + 1] !== 0)) pU += 2;
+          pU += 2;
+        } else {
+          while (pU < data.length && data[pU] !== 0) pU++;
+          pU++;
+        }
+        var lyrRaw = u8slice(data, pU);
+        out.lyrics = enc === 3 ? utf8str(lyrRaw) : enc === 1 ? utf16lestr(lyrRaw) : latinstr(lyrRaw);
       } else if (id === "APIC") {
         var p = 1, mime = "";
         while (p < data.length && data[p] !== 0) { mime += String.fromCharCode(data[p]); p++; }
@@ -136,9 +162,11 @@
     if (m.artist) items.push(box(COPY + "ART", ilstDataItem(m.artist)));
     if (m.album) items.push(box(COPY + "alb", ilstDataItem(m.album)));
     if (m.genre) items.push(box(COPY + "gen", ilstDataItem(m.genre)));
-    if (m.picture && m.picture.data && m.picture.data.length) items.push(box("covr", ilstDataItem(m.picture.data, /png/i.test(m.picture.mime || "") ? "png" : "jpeg")));
+    if (m.lyrics) items.push(box(COPY + "lyr", ilstDataItem(m.lyrics)));
+    if (m.picture && m.picture.data && metaPicOk(m.picture)) items.push(box("covr", ilstDataItem(m.picture.data, /png/i.test(m.picture.mime || "") ? "png" : "jpeg")));
     return box("ilst", concat.apply(null, items));
   }
+  function metaPicOk(pic) { return Boolean(pic && pic.data && pic.data.length); }
   function buildMeta(m) {
     var ilst = buildIlst(m);
     var hdlr = box("hdlr", u8slice(concat(new Uint8Array(u32be(0)), new Uint8Array(u32be(0)), latin("mdir"), new Uint8Array(12), new Uint8Array([0]))));
@@ -248,10 +276,10 @@
     if (bytes.length >= 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return readId3v2(bytes);
     var top = parseBoxes(bytes, 0, bytes.length), moov = null, i;
     for (i = 0; i < top.length; i++) if (top[i].type === "moov") { moov = top[i]; break; }
-    if (!moov) return { container: "unknown", title: "", artist: "", album: "", genre: "", picture: null };
+    if (!moov) return { container: "unknown", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null };
     var inner = parseBoxes(bytes, moov.payloadStart, moov.payloadEnd), udta = null;
     for (i = 0; i < inner.length; i++) if (inner[i].type === "udta") { udta = inner[i]; break; }
-    var out = { container: "mp4", title: "", artist: "", album: "", genre: "", picture: null };
+    var out = { container: "mp4", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null };
     if (!udta) return out;
     var udtai = parseBoxes(bytes, udta.payloadStart, udta.payloadEnd), meta = null;
     for (i = 0; i < udtai.length; i++) if (udtai[i].type === "meta") { meta = udtai[i]; break; }
@@ -270,6 +298,7 @@
       else if (items[i].type === COPY + "ART") out.artist = utf8str(value);
       else if (items[i].type === COPY + "alb") out.album = utf8str(value);
       else if (items[i].type === COPY + "gen") out.genre = utf8str(value);
+      else if (items[i].type === COPY + "lyr") out.lyrics = utf8str(value);
       else if (items[i].type === "covr") out.picture = { mime: tCode === 0x0e ? "image/png" : "image/jpeg", data: value };
     }
     return out;

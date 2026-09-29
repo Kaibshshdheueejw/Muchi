@@ -9043,8 +9043,13 @@ html[data-native="1"] body[data-view="now"] .ly-scroll {
   box-sizing: border-box !important;
 }
 
-
-
-
-
+.dl-lyr-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--md-sys-color-primary);
+  opacity: 0.92;
+}
 

@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.8";
+  const APP_VERSION = "1.7.9";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -11478,6 +11478,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.7.9",
+      title: "Muchi 1.7.9",
+      notes: [
+        "New Genshin Impact Animated UI with Paimon, Aether & Lumine interactive greeting letters.",
+        "Offline synced lyrics download and time-aligned playback without an internet connection.",
+        "Updated 2-column Animated UI theme cards in Settings.",
+      ],
+    },
     {
       ver: "1.7.8",
       title: "Muchi 1.7.8",
