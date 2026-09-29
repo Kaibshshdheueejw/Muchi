@@ -212,10 +212,10 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         }
 
         if (service != null) {
-            // Promote the bound service to a started service without re-sending ACTION_PLAY
-            // so onStartCommand does not execute handlePlayIntent a second time.
-            startService(new Intent(getContext(), MuchiAudioService.class));
             try {
+                if (!service.isForegroundStarted()) {
+                    startService(i);
+                }
                 service.playIntent(i);
                 call.resolve();
                 return;
@@ -309,8 +309,13 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     @PluginMethod
     public void resume(PluginCall call) {
+        if (service != null && service.isForegroundStarted()) {
+            service.resumePlayback();
+            call.resolve();
+            return;
+        }
         Intent i = new Intent(getContext(), MuchiAudioService.class);
-        i.setAction(MuchiAudioService.ACTION_PLAY);
+        i.setAction(MuchiAudioService.ACTION_RESUME);
         startService(i);
         ensureService(() -> { if (service != null) service.resumePlayback(); });
         call.resolve();
@@ -502,6 +507,13 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     @Override
     public void onControls(String message, long positionMs) {
+        try {
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                android.webkit.WebView wv = getBridge().getWebView();
+                wv.onResume();
+                wv.resumeTimers();
+            }
+        } catch (Exception ignored) {}
         JSObject data = new JSObject();
         data.put("message", message);
         data.put("position", positionMs);

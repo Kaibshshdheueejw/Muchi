@@ -191,18 +191,26 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
         var offset: Int64 = 0
         var detectedMime: String?
         let session = URLSession(configuration: .ephemeral)
+        var chunkRn: Int = 1
 
         while true {
             let end = clen > 0 ? min(clen - 1, offset + chunkSize - 1) : (offset + chunkSize - 1)
             var chunkData: Data?
             var httpResp: HTTPURLResponse?
             var lastErr: String?
+            var usedQueryRange = false
 
-            for _ in 0..<3 {
-                var req = URLRequest(url: u, timeoutInterval: 25.0)
+            for attempt in 0..<3 {
+                let useQueryRange = (attempt == 1 && urlStr.contains("googlevideo.com"))
+                let sep = urlStr.contains("?") ? "&" : "?"
+                let reqUrlStr = useQueryRange ? "\(urlStr)\(sep)range=\(offset)-\(end)&rn=\(chunkRn)" : urlStr
+                guard let reqUrl = URL(string: reqUrlStr) else { continue }
+                var req = URLRequest(url: reqUrl, timeoutInterval: 25.0)
                 req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
                 req.setValue("audio/*,*/*", forHTTPHeaderField: "Accept")
-                req.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+                if !useQueryRange {
+                    req.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+                }
 
                 let sem = DispatchSemaphore(value: 0)
                 var gotData: Data?
@@ -237,6 +245,7 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
                 if let d = gotData, !d.isEmpty {
                     chunkData = d
                     httpResp = resp
+                    usedQueryRange = useQueryRange
                     break
                 }
             }
@@ -258,12 +267,13 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
                     let totStr = cr[cr.index(after: slash)...].trimmingCharacters(in: .whitespaces)
                     if let parsed = Int64(totStr), parsed > 0 { clen = parsed }
                 }
-                if clen <= 0, resp.statusCode == 200, resp.expectedContentLength > 0 {
+                if clen <= 0, resp.statusCode == 200, !usedQueryRange, resp.expectedContentLength > 0 {
                     clen = resp.expectedContentLength
                 }
             }
             handle.write(data)
             offset += Int64(data.count)
+            chunkRn += 1
             let progress = clen > 0 ? Float(offset) / Float(clen) : 0
             DispatchQueue.main.async { [weak self] in
                 self?.notifyListeners("progress", data: [
@@ -273,13 +283,13 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
                     "progress": progress
                 ])
             }
-            if resp.statusCode == 200 { break }
+            if resp.statusCode == 200 && !usedQueryRange { break }
             if clen > 0 && offset >= clen { break }
             if Int64(data.count) < (end - (offset - Int64(data.count)) + 1) { break }
         }
 
-        if offset < 16384 {
-            return (false, nil, "downloaded file is incomplete (\(offset) bytes)")
+        if offset < 65536 || (clen > 0 && offset < clen) {
+            return (false, nil, "downloaded file is incomplete (\(offset)/\(clen) bytes)")
         }
         return (true, detectedMime, nil)
     }

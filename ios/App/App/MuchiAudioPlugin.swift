@@ -51,6 +51,34 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var currentTitle: String = ""
     private var currentArtist: String = ""
     private var triedOnDeviceResolve = false
+    private var bgTask: UIBackgroundTaskIdentifier = .invalid
+
+    private func beginAudioBackgroundTask() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.bgTask != .invalid {
+                UIApplication.shared.endBackgroundTask(self.bgTask)
+                self.bgTask = .invalid
+            }
+            self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "MuchiAudioTransition") { [weak self] in
+                guard let self = self else { return }
+                if self.bgTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(self.bgTask)
+                    self.bgTask = .invalid
+                }
+            }
+        }
+    }
+
+    private func endAudioBackgroundTask() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.bgTask != .invalid {
+                UIApplication.shared.endBackgroundTask(self.bgTask)
+                self.bgTask = .invalid
+            }
+        }
+    }
 
     private static let defaultUA =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1"
@@ -112,6 +140,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
             }
         }
+
+        center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if self.currentItem != nil || (self.player?.rate ?? 0) > 0 {
+                self.configureAudioSession()
+                if (self.player?.rate ?? 0) == 0 {
+                    self.beginAudioBackgroundTask()
+                }
+            }
+        }
     }
 
     /* ── JS → native ───────────────────────────────────────────────── */
@@ -142,6 +181,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         configureAudioSession()
+        beginAudioBackgroundTask()
 
         let title = call.getString("title") ?? "Muchi"
         let artist = call.getString("artist") ?? ""
@@ -186,8 +226,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             player?.pause()
             let vid = currentVideoId
             let cands = currentCandidates
+            let tTitle = currentTitle
+            let tArtist = currentArtist
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let rs = Self.resolveStreamFast(videoId: vid, candidates: cands)
+                let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
                 DispatchQueue.main.async {
                     guard let self = self, seq == self.loadSeq else { return }
                     if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
@@ -241,6 +283,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             object: item,
             queue: .main
         ) { [weak self] _ in
+            self?.beginAudioBackgroundTask()
             self?.notifyListeners("muchiControls", data: ["message": "ended", "position": 0])
         }
 
@@ -391,6 +434,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private func doStop(notifyJs: Bool = false) {
         stopTicker()
+        endAudioBackgroundTask()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -425,11 +469,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 if !self.triedOnDeviceResolve && (!self.currentVideoId.isEmpty || !self.currentTitle.isEmpty) {
                     self.triedOnDeviceResolve = true
                     self.stopTicker()
+                    self.beginAudioBackgroundTask()
                     let seq = self.loadSeq
                     let vid = self.currentVideoId
                     let cands = self.currentCandidates
+                    let tTitle = self.currentTitle
+                    let tArtist = self.currentArtist
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                        let rs = Self.resolveStreamFast(videoId: vid, candidates: cands)
+                        let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
                         DispatchQueue.main.async {
                             guard let self = self, seq == self.loadSeq else { return }
                             if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
@@ -448,6 +495,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.errorSent = true
                 self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
                 return
+            }
+            if p.rate > 0 && item.status == .readyToPlay {
+                self.endAudioBackgroundTask()
             }
             let pos = p.currentTime()
             let posSec = pos.isNumeric && pos.seconds.isFinite && pos.seconds >= 0 ? pos.seconds : 0
@@ -516,6 +566,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.changePlaybackPositionCommand.isEnabled = true
 
         cc.playCommand.addTarget { [weak self] _ in
+            self?.beginAudioBackgroundTask()
+            self?.configureAudioSession()
             self?.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
             self?.player?.play()
             self?.updateRate()
@@ -533,6 +585,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
                 self.player?.pause()
             } else {
+                self.beginAudioBackgroundTask()
+                self.configureAudioSession()
                 self.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
                 self.player?.play()
             }
@@ -541,10 +595,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         // Web layer owns the queue — only echo the intent, don't advance locally.
         cc.nextTrackCommand.addTarget { [weak self] _ in
+            self?.beginAudioBackgroundTask()
+            self?.configureAudioSession()
             self?.notifyListeners("muchiControls", data: ["message": "next", "position": 0])
             return .success
         }
         cc.previousTrackCommand.addTarget { [weak self] _ in
+            self?.beginAudioBackgroundTask()
+            self?.configureAudioSession()
             self?.notifyListeners("muchiControls", data: ["message": "previous", "position": 0])
             return .success
         }
@@ -621,33 +679,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     public static func resolveStreamFast(videoId: String, candidates: String) -> ResolvedStream? {
-        let primary = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !primary.isEmpty, let hit = getCachedStream(primary) {
-            return hit
-        }
-        var vids: [String] = []
-        if !primary.isEmpty { vids.append(primary) }
-        if vids.isEmpty {
-            for part in candidates.components(separatedBy: ",") {
-                let c = part.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !c.isEmpty {
-                    vids.append(c)
-                    break
-                }
-            }
-        }
-        for vid in vids {
-            if let hit = getCachedStream(vid) {
-                if !primary.isEmpty { putCachedStream(primary, hit) }
-                return hit
-            }
-            if let rs = probeInnertubeForVideo(vid) {
-                putCachedStream(vid, rs)
-                if !primary.isEmpty { putCachedStream(primary, rs) }
-                return rs
-            }
-        }
-        return nil
+        return resolveStreamForDownload(videoId: videoId, candidates: candidates, title: "", artist: "")
     }
 
     public static func resolveStreamForDownload(videoId: String, candidates: String, title: String, artist: String) -> ResolvedStream? {
@@ -721,6 +753,12 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 "20.10.38",
                 "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            ),
+            (
+                "30",
+                "1.9",
+                "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_TESTSUITE\",\"clientVersion\":\"1.9\",\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             )
         ]
 

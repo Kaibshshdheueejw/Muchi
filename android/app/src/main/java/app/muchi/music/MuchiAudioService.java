@@ -71,6 +71,7 @@ public class MuchiAudioService extends Service {
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
 
     public static final String ACTION_PLAY = "app.muchi.music.action.PLAY";
+    public static final String ACTION_RESUME = "app.muchi.music.action.RESUME";
     public static final String ACTION_SESSION = "app.muchi.music.action.SESSION";
     public static final String ACTION_PREFS = "app.muchi.music.action.PREFS";
     public static final String ACTION_STOP = "app.muchi.music.action.STOP";
@@ -106,6 +107,7 @@ public class MuchiAudioService extends Service {
      * main-thread-affine and FIFO-ordered.
      */
     public class LocalBinder extends Binder {
+        public boolean isForegroundStarted() { return isForegroundStarted; }
         public void setListener(PluginListener l) { ticker.post(() -> listener = l); }
         public void playIntent(Intent i) { ticker.post(() -> handlePlayIntent(i)); }
         public void sessionIntent(Intent i) { ticker.post(() -> handleSessionIntent(i)); }
@@ -195,11 +197,13 @@ public class MuchiAudioService extends Service {
     private String trackArtworkUrl = "";
     private Bitmap artworkBitmap;
     private String currentUrl;
+    private String currentRequestedUrl;
     private String currentVideoId = "";
     private String currentCandidates = "";
     private long currentDurationMs = 0L;
     private boolean triedOnDeviceResolve = false;
     private volatile boolean resolvingOnDevice = false;
+    private volatile boolean isForegroundStarted = false;
 
     // Mirror mode: active when WebView (YouTube IFrame or WebAudio <audio>) is
     // playing so the Foreground Service notification + WakeLock still run.
@@ -307,6 +311,23 @@ public class MuchiAudioService extends Service {
         }
         if (ACTION_PLAY.equals(action)) {
             handlePlayIntent(intent);
+        } else if (ACTION_RESUME.equals(action)) {
+            if (mirrorMode) {
+                mirrorPlaying = true;
+                startInForeground();
+                updatePlaybackState(true, mirrorPositionMs);
+                showNotification();
+                updateLocks(true);
+            } else if (player != null) {
+                startInForeground();
+                player.play();
+                showNotification();
+                updateLocks(true);
+            } else {
+                startInForeground();
+                showNotification();
+                updateLocks(true);
+            }
         } else if (ACTION_SESSION.equals(action)) {
             handleSessionIntent(intent);
         } else if (ACTION_PREFS.equals(action)) {
@@ -332,7 +353,7 @@ public class MuchiAudioService extends Service {
             emitControls("next", 0L);
         } else if (ACTION_PREV.equals(action)) {
             emitControls("previous", 0L);
-        } else if (intent == null && ((player != null && (player.isPlaying() || player.getPlayWhenReady())) || (mirrorMode && mirrorPlaying))) {
+        } else if (intent == null && ((player != null && (player.isPlaying() || player.getPlayWhenReady())) || (mirrorMode && mirrorPlaying) || resolvingOnDevice)) {
             // START_STICKY restart: the OS recreated us. Re-attach the
             // foreground notification so background playback survives a
             // system-initiated process restart.
@@ -343,6 +364,11 @@ public class MuchiAudioService extends Service {
         } else if (intent == null) {
             stopSelf();
             return START_NOT_STICKY;
+        } else {
+            // Ensure any startForegroundService() invocation satisfies Android's
+            // mandatory startForeground() contract inside onStartCommand.
+            startInForeground();
+            showNotification();
         }
         return START_STICKY;
     }
@@ -356,7 +382,20 @@ public class MuchiAudioService extends Service {
         if ((url == null || url.isEmpty()) && !videoId.isEmpty()) {
             url = "yt:" + videoId;
         }
-        if (url == null || url.isEmpty()) return;
+        if (url == null || url.isEmpty()) {
+            startInForeground();
+            if (mirrorMode) {
+                mirrorPlaying = true;
+                updatePlaybackState(true, mirrorPositionMs);
+                showNotification();
+                updateLocks(true);
+            } else if (player != null) {
+                player.play();
+                showNotification();
+                updateLocks(true);
+            }
+            return;
+        }
 
         readPrefsFromIntent(intent);
         String title = intent.getStringExtra(EXTRA_TITLE);
@@ -678,7 +717,7 @@ public class MuchiAudioService extends Service {
         mirrorMode = false;
 
         // Deduplicate rapid double-invocation (e.g. startForegroundService + binder.playIntent)
-        if (player != null && currentUrl != null && currentUrl.equals(url)
+        if (player != null && currentUrl != null && (currentUrl.equals(url) || (currentRequestedUrl != null && currentRequestedUrl.equals(url)))
                 && (resolvingOnDevice || player.isPlaying() || player.getPlayWhenReady() || player.getPlaybackState() == Player.STATE_BUFFERING)) {
             ensureSession();
             session.setMetadata(buildMetadata(currentDurationMs));
@@ -692,6 +731,7 @@ public class MuchiAudioService extends Service {
             return;
         }
 
+        currentRequestedUrl = url;
         currentUrl = url;
         endedNotified = false;
         final int seq = ++loadSeq;
@@ -1026,37 +1066,7 @@ public class MuchiAudioService extends Service {
     }
 
     private ResolvedStream resolveYoutubeStreamOnDevice(String primaryVid, String candidatesCsv, String title, String artist) {
-        if (primaryVid != null && !primaryVid.trim().isEmpty()) {
-            ResolvedStream cachedHit = getCachedStream(primaryVid);
-            if (cachedHit != null) return cachedHit;
-        }
-        List<String> vids = new ArrayList<>();
-        if (primaryVid != null && !primaryVid.trim().isEmpty()) {
-            vids.add(primaryVid.trim());
-        }
-        if (candidatesCsv != null && !candidatesCsv.isEmpty() && vids.isEmpty()) {
-            for (String part : candidatesCsv.split(",")) {
-                String c = part.trim();
-                if (!c.isEmpty()) {
-                    vids.add(c);
-                    break;
-                }
-            }
-        }
-        for (String vid : vids) {
-            ResolvedStream cachedCand = getCachedStream(vid);
-            if (cachedCand != null) {
-                if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, cachedCand);
-                return cachedCand;
-            }
-            ResolvedStream rs = probeInnertubeForVideoStatic(vid, resolveExecutor);
-            if (rs != null) {
-                putCachedStream(vid, rs);
-                if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, rs);
-                return rs;
-            }
-        }
-        return null;
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, resolveExecutor);
     }
 
     private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist, ExecutorService pool) {
@@ -1142,6 +1152,12 @@ public class MuchiAudioService extends Service {
                 "20.10.38",
                 "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            },
+            {
+                "30",
+                "1.9",
+                "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_TESTSUITE\",\"clientVersion\":\"1.9\",\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             }
         };
 
@@ -1367,6 +1383,7 @@ public class MuchiAudioService extends Service {
         artworkBitmap = null;
         trackArtworkUrl = "";
         currentUrl = null;
+        currentRequestedUrl = null;
         currentVideoId = "";
         if (notifyJs) {
             emitControls("stop", 0L);
@@ -1463,6 +1480,7 @@ public class MuchiAudioService extends Service {
             } else {
                 startForeground(NOTIFICATION_ID, notification);
             }
+            isForegroundStarted = true;
         } catch (Exception ignored) {
             try {
                 notificationManager.notify(NOTIFICATION_ID, notification);
@@ -1498,6 +1516,7 @@ public class MuchiAudioService extends Service {
     }
 
     private void stopInForeground() {
+        isForegroundStarted = false;
         try {
             if (Build.VERSION.SDK_INT >= 33) {
                 stopForeground(Service.STOP_FOREGROUND_REMOVE);

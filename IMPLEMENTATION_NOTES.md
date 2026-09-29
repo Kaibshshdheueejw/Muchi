@@ -199,3 +199,20 @@ Googlevideo). What I could do, I did — and it caught **three real bugs**, all 
     the Files app → `Muchi`. Kill the app and replay → plays from disk.
 - **PWA/web**: the download button uses the File System Access picker; saved
   files are real files on the user's disk.
+
+---
+
+## 6. v1.7.8 — Native Background Playback Regression Fix (vs v1.7.0)
+
+### Root Cause of the v1.7.7 Regression
+1. **`playYtWithAudio` dead-coded `getWarmStream` (`public/app.js`)**:
+   In v1.7.0, `playYtWithAudio(t, reset)` resolved a verified HTTP audio stream URL via `getWarmStream(t.videoId, t.title, artistName(t), t._ytCandidates)` (`/api/yt/stream`) before falling back to `url = "yt:" + t.videoId`. In v1.7.7, `url = "yt:" + t.videoId` was placed *before* `getWarmStream(...)`, making `getWarmStream` unreachable dead code on initial play and forcing every un-cached track into raw `"yt:<videoId>"` on-device resolution.
+2. **Truncated On-Device Stream Resolution (`MuchiAudioService.java` & `MuchiAudioPlugin.swift`)**:
+   In v1.7.7, `MuchiAudioService.resolveYoutubeStreamOnDevice` (Android) and `MuchiAudioPlugin.resolveStreamFast` (iOS) were stripped down so they only probed `primaryVid` (ignoring `candidatesCsv` whenever `primaryVid` was non-empty), dropped the on-device InnerTube `"<title> <artist> official audio"` fallback search, dropped `ANDROID_TESTSUITE` (`clientId: "30"`), and dropped Piped stream fallback. Any VEVO-gated primary `videoId` immediately failed on-device resolution and emitted `muchiControls: { message: "error" }`.
+3. **`nativeHandleControls("error")` Immediately Abandoned Native Audio for WebView YouTube IFrame (`public/app.js`)**:
+   In v1.7.7, `nativeHandleControls` reordered its `"error"` recovery so `!cur._nativeYtFallbackTried` ran *first* (before `/api/yt/stream?...&refresh=1` and `playFallbackAudioForTrack`). As soon as `"yt:<videoId>"` failed on-device resolution, `npActive` was set to `false` and playback switched to the WebView YouTube IFrame (`playYouTube(cur)`), which is paused/throttled by Android `WebView` and iOS `WKWebView` whenever the app is backgrounded, the screen is locked, or another app is opened.
+4. **Android `startForegroundService` Empty-Action Intent Race (`MuchiAudioPlugin.java` & `MuchiAudioService.java`)**:
+   In v1.7.7, `MuchiAudioPlugin.play()` called `startService(new Intent(getContext(), MuchiAudioService.class))` (an empty-action Intent) alongside `service.playIntent(i)`, and `MuchiAudioService.onStartCommand` did not call `startInForeground()` for empty-action Intents or `ACTION_PLAY` Intents without a URL (`resume()`).
+5. **iOS Background Track-Transition Suspension (`MuchiAudioPlugin.swift`) & WebView `AudioContext` Contention (`public/app.js`)**:
+   `MuchiAudioPlugin.swift` lacked `UIApplication.shared.beginBackgroundTask` assertions across `AVPlayerItemDidPlayToEndTime` and lock-screen Next/Previous track transitions, and `keepBackgroundPlay()` in `public/app.js` called `unlockSound()` (`fx.ctx.resume()`) on `visibilitychange` when entering the background while `npActive` was true.
+

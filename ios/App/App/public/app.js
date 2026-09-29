@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.7";
+  const APP_VERSION = "1.7.8";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -953,7 +953,7 @@
     watchSystemTheme();
     applyUi();
   }
-  const VALID_UI_MODES = ["material", "glass", "winter", "christmas", "autumn"];
+  const VALID_UI_MODES = ["material", "glass", "winter", "christmas", "autumn", "genshin"];
   function normalizeUiMode(v) {
     return VALID_UI_MODES.includes(v) ? v : "glass";
   }
@@ -1009,6 +1009,7 @@
       winter: "Winter UI",
       christmas: "Christmas UI",
       autumn: "Autumn UI",
+      genshin: "Genshin Impact",
     };
     return map[normalizeUiMode(state.prefs.ui)] || "Glass UI";
   }
@@ -1475,6 +1476,257 @@
     if (h < 17) return "Good afternoon";
     if (h < 21) return "Good evening";
     return "Late night listening";
+  }
+
+  function heroGreetingHTML() {
+    const text = greeting();
+    if (normalizeUiMode(state.prefs.ui) !== "genshin") {
+      return escapeHTML(text);
+    }
+    // Split greeting (e.g. "Good morning") into interactive letters so:
+    // 1. Lumine (Female Traveler) sits perched on top of the first word ("Good"), swinging her legs & bouncing the letters underneath.
+    // 2. Paimon floats & sits/bounces playfully on the middle letters ("mor"), squishing the letter beneath her.
+    // 3. Aether (Male Traveler) braces at the right end and physically pulls out the last letter ("g") with an Anemo/Geo starlight tether.
+    const chars = Array.from(text);
+    const len = chars.length;
+    const spaceIdx = chars.indexOf(" ");
+    const lumineSeatA = 1;
+    const lumineSeatB = Math.min(2, Math.max(1, (spaceIdx > 1 ? spaceIdx - 1 : 2)));
+    const paimonSeat = spaceIdx > 0 && spaceIdx + 2 < len - 1 ? spaceIdx + 2 : Math.max(3, Math.floor(len * 0.55));
+    const pulledIdx = len - 1;
+
+    const lumineRigSVG = `
+      <span class="gi-char-rig gi-lumine-rig" aria-hidden="true">
+        <svg class="gi-char-svg gi-lumine-svg" viewBox="0 0 88 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- Floating Anemo/Geo Starlight Sparkles around Lumine -->
+          <g class="gi-sparkle-group">
+            <path d="M14,22 L16,27 L21,29 L16,31 L14,36 L12,31 L7,29 L12,27 Z" fill="#fef08a"/>
+            <path d="M74,16 L75.5,20 L79.5,21.5 L75.5,23 L74,27 L72.5,23 L68.5,21.5 L72.5,20 Z" fill="#7dd3fc"/>
+          </g>
+          <g class="gi-lumine-body-bounce">
+            <!-- Flowing White & Gold Scarf / Dress Back Drapes -->
+            <path class="gi-lumine-cape" d="M28,48 Q16,58 13,70 Q21,69 29,58 Z" fill="#e0f2fe" stroke="#fbbf24" stroke-width="1.2"/>
+            <path class="gi-lumine-cape r" d="M58,48 Q69,57 73,68 Q64,68 56,57 Z" fill="#e0f2fe" stroke="#fbbf24" stroke-width="1.2"/>
+            <!-- Lumine Seated Skirt & Gold Trim resting on top of the letters -->
+            <path d="M27,56 Q44,51 61,56 L65,70 Q44,74 23,70 Z" fill="#f8fafc" stroke="#eab308" stroke-width="1.5"/>
+            <path d="M33,57 L44,69 L55,57" fill="#1e293b" stroke="#fbbf24" stroke-width="1.2"/>
+            <!-- Lumine Torso: White & Navy Gold-Trimmed Traveler Bodice -->
+            <path d="M32,40 Q44,38 56,40 L58,57 Q44,60 30,57 Z" fill="#ffffff" stroke="#d97706" stroke-width="1.4"/>
+            <path d="M37,42 L44,53 L51,42 Z" fill="#1e3a5f"/>
+            <!-- Glowing Chest Elemental Diamond (Anemo/Geo) -->
+            <polygon points="44,44 47.5,48 44,52 40.5,48" fill="#38bdf8" stroke="#fef08a" stroke-width="1"/>
+            <!-- Detached White & Gold Sleeves + Waving Arm -->
+            <path d="M31,42 Q23,48 26,56" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>
+            <path d="M31,42 Q23,48 26,56" stroke="#fbbf24" stroke-width="1.3" stroke-linecap="round"/>
+            <g class="gi-lumine-wave-arm">
+              <path d="M56,42 Q67,35 70,25" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>
+              <path d="M56,42 Q67,35 70,25" stroke="#fbbf24" stroke-width="1.4" stroke-linecap="round"/>
+              <circle cx="70.5" cy="24" r="2.8" fill="#fde68a"/>
+            </g>
+            <!-- Lumine Head & Golden Blonde Twin Side-Locks -->
+            <g class="gi-lumine-head">
+              <!-- Back Golden Bob Hair -->
+              <path d="M25,25 Q24,9 44,9 Q64,9 63,25 Q64,36 57,40 L31,40 Q24,36 25,25 Z" fill="#fde047" stroke="#ca8a04" stroke-width="1.3"/>
+              <!-- Face -->
+              <path d="M30,22 Q30,39 44,40 Q58,39 58,22 Q58,14 44,14 Q30,14 30,22 Z" fill="#fff1e6"/>
+              <!-- Golden Anime Eyes + Star Highlights -->
+              <ellipse cx="38" cy="27" rx="3.2" ry="3.8" fill="#b45309"/>
+              <ellipse cx="50" cy="27" rx="3.2" ry="3.8" fill="#b45309"/>
+              <circle cx="38" cy="28" r="2.1" fill="#fbbf24"/>
+              <circle cx="50" cy="28" r="2.1" fill="#fbbf24"/>
+              <circle cx="36.8" cy="25.8" r="1.1" fill="#ffffff"/>
+              <circle cx="48.8" cy="25.8" r="1.1" fill="#ffffff"/>
+              <path d="M34,23.5 Q38,21.5 41.5,23.5" stroke="#78350f" stroke-width="1.4" stroke-linecap="round"/>
+              <path d="M46.5,23.5 Q50,21.5 54,23.5" stroke="#78350f" stroke-width="1.4" stroke-linecap="round"/>
+              <!-- Soft Blush & Happy Smile -->
+              <ellipse cx="33.5" cy="31" rx="2.4" ry="1.2" fill="#fda4af" opacity="0.65"/>
+              <ellipse cx="54.5" cy="31" rx="2.4" ry="1.2" fill="#fda4af" opacity="0.65"/>
+              <path d="M41,33 Q44,36 47,33" stroke="#9a3412" stroke-width="1.4" stroke-linecap="round" fill="none"/>
+              <!-- Iconic Blonde Bangs & Ahoge -->
+              <path d="M43,9 Q46,2 51,6 Q47,8 45,10" fill="#fef08a" stroke="#ca8a04" stroke-width="1.1"/>
+              <path d="M27,22 Q33,12 44,13 Q55,12 61,22 Q56,17 51,23 Q44,15 37,23 Q32,17 27,22 Z" fill="#fef08a" stroke="#ca8a04" stroke-width="1.2"/>
+              <!-- Twin Long Blonde Front Side-Locks (framing face) -->
+              <path class="gi-hair-lock l" d="M27,23 Q23,36 25,50 Q29,46 30,34 Z" fill="#fde047" stroke="#ca8a04" stroke-width="1.1"/>
+              <path class="gi-hair-lock r" d="M61,23 Q65,36 63,50 Q59,46 58,34 Z" fill="#fde047" stroke="#ca8a04" stroke-width="1.1"/>
+              <!-- Iconic Inteyvat Hair Flowers (Blue & White 5-petal Teyvat blooms + Twin Feathers) -->
+              <path d="M25,16 Q15,10 13,16 Q18,19 25,19 Z" fill="#ffffff" stroke="#93c5fd" stroke-width="0.9"/>
+              <path d="M24,19 Q14,17 14,22 Q19,23 25,21 Z" fill="#e0f2fe" stroke="#93c5fd" stroke-width="0.9"/>
+              <circle cx="28" cy="17" r="5" fill="#eff6ff" stroke="#38bdf8" stroke-width="1.2"/>
+              <circle cx="28" cy="17" r="2" fill="#fbbf24"/>
+            </g>
+            <!-- Dangling & Swinging White-Gold Traveler Boots (hanging over the top of "Good") -->
+            <g class="gi-lumine-leg l">
+              <path d="M37,68 L35,85" stroke="#fff1e6" stroke-width="4.6" stroke-linecap="round"/>
+              <path d="M35,74 L34,87" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+              <path d="M33,74 L37,74" stroke="#fbbf24" stroke-width="2" stroke-linecap="round"/>
+              <ellipse cx="33.5" cy="88.5" rx="4.2" ry="2.6" fill="#1e293b" stroke="#fbbf24" stroke-width="1.2"/>
+            </g>
+            <g class="gi-lumine-leg r">
+              <path d="M51,68 L53,85" stroke="#fff1e6" stroke-width="4.6" stroke-linecap="round"/>
+              <path d="M53,74 L54,87" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+              <path d="M51,74 L55,74" stroke="#fbbf24" stroke-width="2" stroke-linecap="round"/>
+              <ellipse cx="54.5" cy="88.5" rx="4.2" ry="2.6" fill="#1e293b" stroke="#fbbf24" stroke-width="1.2"/>
+            </g>
+          </g>
+        </svg>
+      </span>`;
+
+    const paimonRigSVG = `
+      <span class="gi-char-rig gi-paimon-rig" aria-hidden="true">
+        <svg class="gi-char-svg gi-paimon-svg" viewBox="0 0 92 98" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <g class="gi-paimon-float">
+            <!-- Paimon's Iconic Starry Night-Sky Constellation Cape -->
+            <g class="gi-paimon-cape">
+              <path d="M24,45 Q10,56 12,75 Q24,78 33,66 L59,66 Q68,78 80,75 Q82,56 68,45 Z" fill="#1e1b4b" stroke="#fbbf24" stroke-width="1.3"/>
+              <circle cx="20" cy="62" r="1.5" fill="#fef08a"/>
+              <circle cx="26" cy="70" r="1.2" fill="#7dd3fc"/>
+              <circle cx="71" cy="61" r="1.5" fill="#fef08a"/>
+              <circle cx="65" cy="70" r="1.2" fill="#7dd3fc"/>
+              <path d="M20,62 L26,70 M71,61 L65,70" stroke="#fde047" stroke-width="0.7" opacity="0.75"/>
+            </g>
+            <!-- Paimon's Levitating Rose-Gold Crown Halo -->
+            <g class="gi-paimon-crown">
+              <ellipse cx="46" cy="11" rx="14" ry="3.5" fill="none" stroke="#fbbf24" stroke-width="2"/>
+              <path d="M33,10 L36,3 L41,9 L46,1 L51,9 L56,3 L59,10" fill="#fde68a" stroke="#d97706" stroke-width="1.3" stroke-linejoin="round"/>
+              <circle cx="46" cy="5" r="1.5" fill="#38bdf8"/>
+            </g>
+            <!-- Paimon Seated / Bouncing Puffy White Romper & Gold Triquetra Emblem -->
+            <path d="M31,47 Q46,43 61,47 Q65,61 57,68 Q46,71 35,68 Q27,61 31,47 Z" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5"/>
+            <!-- Rose-Gold Scarf Collar -->
+            <path d="M32,46 Q46,52 60,46 Q57,54 46,55 Q35,54 32,46 Z" fill="#1e293b" stroke="#fbbf24" stroke-width="1.2"/>
+            <!-- Iconic Gold Triquetra Knot on Chest -->
+            <circle cx="46" cy="58" r="5" fill="none" stroke="#eab308" stroke-width="1.6"/>
+            <circle cx="46" cy="58" r="1.8" fill="#fbbf24"/>
+            <!-- Paimon's Excited Waving Little Arms -->
+            <g class="gi-paimon-arm l">
+              <path d="M32,49 Q20,42 18,33" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>
+              <circle cx="17.5" cy="32" r="2.8" fill="#fde68a" stroke="#d97706" stroke-width="1"/>
+            </g>
+            <g class="gi-paimon-arm r">
+              <path d="M60,49 Q72,42 74,33" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>
+              <circle cx="74.5" cy="32" r="2.8" fill="#fde68a" stroke="#d97706" stroke-width="1"/>
+            </g>
+            <!-- Paimon's Fluffy Silver-White Bob Hair & Starry Hairpin -->
+            <g class="gi-paimon-head">
+              <path d="M24,31 Q23,15 46,15 Q69,15 68,31 Q70,44 60,47 L32,47 Q22,44 24,31 Z" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+              <path d="M31,26 Q31,44 46,45 Q61,44 61,26 Q61,18 46,18 Q31,18 31,26 Z" fill="#fff1e6"/>
+              <!-- Big Sparkling Dark-Indigo Anime Eyes -->
+              <ellipse cx="39.5" cy="32" rx="3.5" ry="4.2" fill="#1e1b4b"/>
+              <ellipse cx="52.5" cy="32" rx="3.5" ry="4.2" fill="#1e1b4b"/>
+              <circle cx="39.5" cy="33" r="2.2" fill="#6366f1"/>
+              <circle cx="52.5" cy="33" r="2.2" fill="#6366f1"/>
+              <circle cx="38.2" cy="30.5" r="1.3" fill="#ffffff"/>
+              <circle cx="51.2" cy="30.5" r="1.3" fill="#ffffff"/>
+              <!-- Cheerful Open Paimon Smile -->
+              <path d="M42.5,37.5 Q46,42 49.5,37.5 Z" fill="#fb7185" stroke="#be123c" stroke-width="1"/>
+              <ellipse cx="34.5" cy="35.5" rx="2.5" ry="1.3" fill="#fda4af" opacity="0.75"/>
+              <ellipse cx="57.5" cy="35.5" rx="2.5" ry="1.3" fill="#fda4af" opacity="0.75"/>
+              <!-- Fluffy Silver-White Bangs + Iconic Black/Gold Star Hairclip -->
+              <path d="M25,28 Q33,16 46,17 Q59,16 67,28 Q60,22 54,28 Q46,19 38,28 Q32,22 25,28 Z" fill="#ffffff" stroke="#94a3b8" stroke-width="1.3"/>
+              <polygon points="31,21 37,19 39,24 32,26" fill="#0f172a" stroke="#fbbf24" stroke-width="1.1"/>
+            </g>
+            <!-- Paimon's Kicking Little White & Gold Boots sitting on the word -->
+            <g class="gi-paimon-leg l">
+              <path d="M39,67 L36,82" stroke="#1e1b4b" stroke-width="4.2" stroke-linecap="round"/>
+              <path d="M36,75 L35,84" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+              <circle cx="34.5" cy="85" r="3.2" fill="#fbbf24"/>
+            </g>
+            <g class="gi-paimon-leg r">
+              <path d="M53,67 L56,82" stroke="#1e1b4b" stroke-width="4.2" stroke-linecap="round"/>
+              <path d="M56,75 L57,84" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+              <circle cx="57.5" cy="85" r="3.2" fill="#fbbf24"/>
+            </g>
+          </g>
+        </svg>
+      </span>`;
+
+    const aetherRigSVG = `
+      <span class="gi-char-rig gi-aether-rig" aria-hidden="true">
+        <svg class="gi-char-svg gi-aether-svg" viewBox="0 0 118 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- Glowing Golden & Anemo Elemental Tether Rope attached to the pulled letter -->
+          <g class="gi-aether-tether">
+            <path d="M2,54 Q24,49 46,52" stroke="#38bdf8" stroke-width="3.4" stroke-linecap="round" opacity="0.55"/>
+            <path d="M2,54 Q24,49 46,52" stroke="#fef08a" stroke-width="2" stroke-dasharray="4 3" stroke-linecap="round"/>
+            <circle cx="8" cy="53" r="3.2" fill="#fef08a"/>
+            <path d="M16,42 L18,46 L22,48 L18,50 L16,54 L14,50 L10,48 L14,46 Z" fill="#7dd3fc"/>
+          </g>
+          <!-- Aether's Full Articulated Body Leaning Back & Tugging the Letter Out -->
+          <g class="gi-aether-tug-body">
+            <!-- Iconic Long Golden Braided Ponytail whipping back as he pulls -->
+            <g class="gi-aether-braid">
+              <path d="M68,31 Q86,34 99,45 Q108,53 113,62" stroke="#eab308" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+              <path d="M68,31 Q86,34 99,45 Q108,53 113,62" stroke="#fef08a" stroke-width="2.5" stroke-dasharray="5 4" stroke-linecap="round" fill="none"/>
+              <circle cx="113" cy="62" r="3.2" fill="#38bdf8" stroke="#fbbf24" stroke-width="1.2"/>
+            </g>
+            <!-- Flowing White & Gold Traveler Scarf Cape Tails -->
+            <path class="gi-aether-scarf" d="M66,42 Q88,38 105,47 Q93,55 72,50 Z" fill="#f8fafc" stroke="#fbbf24" stroke-width="1.3"/>
+            <!-- Braced Legs & Boots pulling backward -->
+            <path d="M56,66 L43,88" stroke="#1c1917" stroke-width="6" stroke-linecap="round"/>
+            <path d="M66,66 L78,88" stroke="#1c1917" stroke-width="6" stroke-linecap="round"/>
+            <!-- Gold Knee Guards & Boots -->
+            <path d="M46,79 L41,89" stroke="#f8fafc" stroke-width="5.5" stroke-linecap="round"/>
+            <path d="M74,79 L79,89" stroke="#f8fafc" stroke-width="5.5" stroke-linecap="round"/>
+            <ellipse cx="39" cy="90" rx="5.5" ry="2.8" fill="#292524" stroke="#fbbf24" stroke-width="1.2"/>
+            <ellipse cx="81" cy="90" rx="5.5" ry="2.8" fill="#292524" stroke="#fbbf24" stroke-width="1.2"/>
+            <!-- Aether's Cropped Dark Tunic, Midriff & Gold Armor Sash -->
+            <path d="M52,56 L70,56 L72,68 L50,68 Z" fill="#fff1e6"/>
+            <path d="M50,61 L72,61 L73,69 L49,69 Z" fill="#292524" stroke="#fbbf24" stroke-width="1.4"/>
+            <path d="M49,39 Q61,36 73,39 L71,57 Q61,59 51,57 Z" fill="#1c1917" stroke="#f59e0b" stroke-width="1.5"/>
+            <!-- Glowing Anemo/Geo Diamond Core on Aether's Chest -->
+            <polygon points="61,43 65,48 61,53 57,48" fill="#fde047" stroke="#38bdf8" stroke-width="1.1"/>
+            <!-- Both Arms Reaching Left to Grip & Pull the Tether -->
+            <path d="M53,45 L34,51" stroke="#1c1917" stroke-width="5" stroke-linecap="round"/>
+            <path d="M58,49 L38,54" stroke="#fff1e6" stroke-width="4.5" stroke-linecap="round"/>
+            <circle cx="34" cy="52" r="3.4" fill="#292524" stroke="#fbbf24" stroke-width="1.2"/>
+            <!-- Aether's Head, Golden Spiky Hair & Determined Anime Eyes -->
+            <g class="gi-aether-head">
+              <path d="M45,23 Q45,8 61,8 Q77,8 77,23 Q78,34 71,38 L51,38 Q44,34 45,23 Z" fill="#facc15" stroke="#b45309" stroke-width="1.3"/>
+              <path d="M49,21 Q49,37 61,38 Q73,37 73,21 Q73,14 61,14 Q49,14 49,21 Z" fill="#fff1e6"/>
+              <!-- Golden Amber Eyes Looking at the Pulled Letter -->
+              <ellipse cx="55" cy="26" rx="2.9" ry="3.4" fill="#92400e"/>
+              <ellipse cx="66" cy="26" rx="2.9" ry="3.4" fill="#92400e"/>
+              <circle cx="54.5" cy="26.8" r="1.9" fill="#fbbf24"/>
+              <circle cx="65.5" cy="26.8" r="1.9" fill="#fbbf24"/>
+              <circle cx="53.8" cy="25" r="1" fill="#ffffff"/>
+              <circle cx="64.8" cy="25" r="1" fill="#ffffff"/>
+              <!-- Determined Brows & Effort Grin -->
+              <path d="M51.5,22 L58,23.2" stroke="#78350f" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M63,23.2 L69.5,22" stroke="#78350f" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M58,32 Q61,34.5 64.5,31.8" stroke="#9a3412" stroke-width="1.4" stroke-linecap="round" fill="none"/>
+              <!-- Iconic Golden Spiky Bangs & Ahoge + Left Ear Gold Ring -->
+              <path d="M60,8 Q65,1 70,5 Q65,7 63,9" fill="#fef08a" stroke="#b45309" stroke-width="1.1"/>
+              <path d="M45,22 Q51,11 61,12 Q72,11 78,22 Q72,17 67,22 Q61,14 55,22 Q49,17 45,22 Z" fill="#fef08a" stroke="#b45309" stroke-width="1.2"/>
+              <circle cx="74.5" cy="29" r="2" fill="#fbbf24"/>
+            </g>
+          </g>
+        </svg>
+      </span>`;
+
+    let out = `<span class="gi-greeting-stage" title="Paimon, Lumine &amp; Aether interacting with ${escapeAttr(text)}">`;
+    for (let i = 0; i < len; i++) {
+      const ch = chars[i];
+      if (ch === " ") {
+        out += `<span class="gi-space">&nbsp;</span>`;
+        continue;
+      }
+      const isLumineAnchor = i === lumineSeatA;
+      const isLumineSeat = i === lumineSeatA || i === lumineSeatB;
+      const isPaimonAnchor = i === paimonSeat;
+      const isPulled = i === pulledIdx;
+
+      if (isPulled) {
+        out += `<span class="gi-word-anchor gi-anchor-aether"><span class="gi-letter gi-letter-pulled">${escapeHTML(ch)}</span>${aetherRigSVG}</span>`;
+      } else if (isLumineAnchor) {
+        out += `<span class="gi-word-anchor gi-anchor-lumine">${lumineRigSVG}<span class="gi-letter gi-letter-seat-lumine">${escapeHTML(ch)}</span></span>`;
+      } else if (isPaimonAnchor) {
+        out += `<span class="gi-word-anchor gi-anchor-paimon">${paimonRigSVG}<span class="gi-letter gi-letter-seat-paimon">${escapeHTML(ch)}</span></span>`;
+      } else {
+        const seatCls = isLumineSeat ? " gi-letter-seat-lumine" : "";
+        out += `<span class="gi-letter${seatCls}">${escapeHTML(ch)}</span>`;
+      }
+    }
+    out += `</span>`;
+    return out;
   }
 
   async function api(path, timeoutMs = 18000, opts) {
@@ -3060,7 +3312,15 @@
   }
   function downloadFilePath(t) {
     const rawSid = String((t && t.streamUrl) || "");
-    const sid = isPreviewOrPlaceholderStream(rawSid, t) ? "" : rawSid;
+    let sid = isPreviewOrPlaceholderStream(rawSid, t) ? "" : rawSid;
+    if (sid && t && t.videoId) {
+      try {
+        const decSid = decodeURIComponent(sid);
+        if (/[?&]c=(?:ANDROID|IOS)(?:&|$)/i.test(decSid) && /[?&]svpuc=1/i.test(decSid)) {
+          sid = "";
+        }
+      } catch {}
+    }
     const nm = encodeURIComponent(t.title || "track");
     const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
     const artistParam = t && t.artist ? `&artist=${encodeURIComponent(t.artist)}` : "";
@@ -3229,7 +3489,42 @@
       }
       const combined = concatBytes(parts);
       if (!isLikelyAudioBytes(combined)) return null;
+      if (totalBytes > 0 && combined.byteLength < totalBytes) return null;
       return { bytes: combined, mime: detectedMime, disp: detectedDisp, total: combined.byteLength };
+    };
+
+    const readFullResponseBody = async (r) => {
+      const expectedTotal = Number(r.headers.get("content-length") || 0);
+      const collect = [];
+      if (r.body && typeof r.body.getReader === "function") {
+        const reader = r.body.getReader();
+        let buf = 0;
+        let cancelled = false;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (job.status === "cancelled") { cancelled = true; break; }
+          if (value && value.byteLength) {
+            collect.push(value);
+            buf += value.byteLength;
+            onProgress({ bytes: buf, total: expectedTotal || buf, progress: expectedTotal ? Math.min(1, buf / expectedTotal) : 0 });
+          }
+        }
+        if (cancelled) throw new Error("cancelled");
+      } else {
+        const ab = await r.arrayBuffer();
+        collect.push(new Uint8Array(ab));
+        onProgress({ bytes: ab.byteLength, total: expectedTotal || ab.byteLength, progress: 1 });
+      }
+      const bytes = concatBytes(collect);
+      if (!isLikelyAudioBytes(bytes)) return null;
+      if (expectedTotal > 0 && bytes.byteLength < expectedTotal) return null;
+      return {
+        bytes,
+        mime: r.headers.get("content-type") || "",
+        disp: r.headers.get("content-disposition") || "",
+        total: bytes.byteLength,
+      };
     };
 
     const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
@@ -3250,27 +3545,37 @@
       : "";
 
     const candidateUrls = [meta.url, fallbackUrl, qUrl].filter((u, idx, arr) => u && arr.indexOf(u) === idx);
-    let res = null;
     let preloadedChunked = null;
     for (const tryUrl of candidateUrls) {
+      if (job.status === "cancelled") throw new Error("cancelled");
       const r = await fetch(tryUrl, { credentials: "same-origin" }).catch(() => null);
       if (isValidAudioRes(r)) {
-        res = r;
-        break;
+        try {
+          const fullPayload = await readFullResponseBody(r);
+          if (fullPayload && isLikelyAudioBytes(fullPayload.bytes)) {
+            preloadedChunked = fullPayload;
+            break;
+          }
+        } catch (readErr) {
+          if (readErr && readErr.message === "cancelled") throw readErr;
+        }
       }
-      // If un-ranged fetch returned 403/5xx on a Googlevideo-backed endpoint, try 960KB bounded Range chunks
-      const chunked = await fetchChunkedAudio(tryUrl).catch(() => null);
+      // If un-ranged fetch returned 403/5xx or aborted mid-stream, try 960KB bounded Range chunks
+      const chunked = await fetchChunkedAudio(tryUrl).catch((chunkErr) => {
+        if (chunkErr && chunkErr.message === "cancelled") throw chunkErr;
+        return null;
+      });
       if (chunked && isLikelyAudioBytes(chunked.bytes)) {
         preloadedChunked = chunked;
         break;
       }
     }
-    if (!res && !preloadedChunked) throw new Error("download failed: could not retrieve valid audio stream");
-    const total = preloadedChunked ? preloadedChunked.total : Number(res.headers.get("content-length") || 0);
-    const cd = preloadedChunked ? (preloadedChunked.disp || "") : (res.headers.get("content-disposition") || "");
+    if (!preloadedChunked) throw new Error("download failed: could not retrieve valid audio stream");
+    const total = preloadedChunked.total;
+    const cd = preloadedChunked.disp || "";
     const m = cd.match(/filename="?([^";]+)"?/i);
     let fname = (m && m[1]) ? m[1] : meta.filename;
-    const ctype = ((preloadedChunked ? preloadedChunked.mime : res.headers.get("content-type")) || meta.mime || "audio/mp4").split(";")[0].trim();
+    const ctype = (preloadedChunked.mime || meta.mime || "audio/mp4").split(";")[0].trim();
     // The pre-generated filename/extension can disagree with the actual bytes
     // (e.g. an unresolved stream guessed ".webm" while the server served
     // audio/mp4). Derive the extension from the REAL content type and reconcile
@@ -3286,31 +3591,7 @@
     // downloaded file shows title/artist/album/cover in any music app. The
     // native shells mirror the same frames (see public/meta.js).
     const MM = w.MuchiMeta;
-    let rawAudioBytes;
-    if (preloadedChunked) {
-      rawAudioBytes = preloadedChunked.bytes;
-    } else {
-      const collect = [];
-      if (res.body && typeof res.body.getReader === "function") {
-        const reader = res.body.getReader();
-        let buf = 0;
-        let cancelled = false;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (job.status === "cancelled") { cancelled = true; break; }
-          collect.push(value);
-          buf += value.byteLength;
-          onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
-        }
-        if (cancelled) throw new Error("cancelled");
-      } else {
-        const ab = await res.arrayBuffer();
-        collect.push(new Uint8Array(ab));
-        onProgress({ bytes: ab.byteLength, total: total || ab.byteLength, progress: 1 });
-      }
-      rawAudioBytes = concatBytes(collect);
-    }
+    const rawAudioBytes = preloadedChunked.bytes;
     if (!isLikelyAudioBytes(rawAudioBytes)) {
       throw new Error("download failed: invalid or non-audio payload received");
     }
@@ -3919,6 +4200,8 @@
   }
 
   function unlockSound() {
+    if (IS_NATIVE && npActive) return;
+    if (typeof document !== "undefined" && document.hidden) return;
     try {
       if (!fx.ctx) fx.ctx = new (window.AudioContext || window.webkitAudioContext)();
       if (fx.ctx.state === "suspended") fx.ctx.resume();
@@ -4212,16 +4495,100 @@
     if (poYtPl) poYtPl.addEventListener("click", () => { hideModal(); ytAddToPlaylist(t); });
   }
 
+  const VERIFIED_SONG_COVERS = {"28":"7060ea038f51fdeff23bc40eb5027663","360":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/cf/0b/2b/cf0b2bae-d4c1-49ce-de5c-b7c3fcd9e4cd/075679643087.jpg/500x500bb.jpg","aaj ki raat|sachin jigar":"1f8faf6b803911ad2d33ea66cacb3033","aaj ki raat":"1f8faf6b803911ad2d33ea66cacb3033","tauba tauba|karan aujla":"ff6bb1420d9fcd2671cf6f86c2e49658","tauba tauba":"ff6bb1420d9fcd2671cf6f86c2e49658","sajni|ram sampath":"407e34575dc610b6592fda6d8210be18","sajni":"407e34575dc610b6592fda6d8210be18","big dawgs|hanumankind":"2d00c5a1488deb77bc1faa958f355b54","big dawgs":"2d00c5a1488deb77bc1faa958f355b54","winning speech|karan aujla":"b6ff41520784c1c1b8cbff7925817cd8","winning speech":"b6ff41520784c1c1b8cbff7925817cd8","born to shine|diljit dosanjh":"87516b74e8e95b373c57a5b74ff2a769","born to shine":"87516b74e8e95b373c57a5b74ff2a769","husn|anuv jain":"bdcf70737dc185ef7ec866fb29591137","husn":"bdcf70737dc185ef7ec866fb29591137","jo tum mere ho|anuv jain":"d0e556f8fbdb2020f8cb4caf86611c2a","jo tum mere ho":"d0e556f8fbdb2020f8cb4caf86611c2a","akhiyaan gulaab|mitraz":"8d786df765556de281ac3c502e49f643","akhiyaan gulaab":"8d786df765556de281ac3c502e49f643","pehle bhi main|vishal mishra":"e8503eb01fce97c7427b794e8cd3c478","pehle bhi main":"e8503eb01fce97c7427b794e8cd3c478","khat|seedhe maut":"a9f93d7a3ab2ff3d1e2a6d4d1c47c105","khat":"a9f93d7a3ab2ff3d1e2a6d4d1c47c105","prarthana|kr na":"0c2035c5f905a7d31e192c2f113e2c6f","prarthana":"0c2035c5f905a7d31e192c2f113e2c6f","mirchi|divine":"209bb3f2ead009e3ea3c3265400a28cf","mirchi":"209bb3f2ead009e3ea3c3265400a28cf","maan meri jaan|king":"https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/90/9d/aa/909daa9a-3a47-9314-2855-39f5a157f1e3/5054197407734.jpg/500x500bb.jpg","maan meri jaan":"https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/90/9d/aa/909daa9a-3a47-9314-2855-39f5a157f1e3/5054197407734.jpg/500x500bb.jpg","samjho na|aditya rikhari":"8d54f8a03637b9f40ad387b6e46c8985","samjho na":"8d54f8a03637b9f40ad387b6e46c8985","wishes|hasan raheem":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c7/e5/02/c7e50222-40be-521e-b8e0-02df1aac4fde/17535.jpg/500x500bb.jpg","wishes":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c7/e5/02/c7e50222-40be-521e-b8e0-02df1aac4fde/17535.jpg/500x500bb.jpg","choo lo|the local train":"8b26bfc0975e7c19dc45b3a0ee9360c9","choo lo":"8b26bfc0975e7c19dc45b3a0ee9360c9","aaoge tum kabhi|the local train":"8b26bfc0975e7c19dc45b3a0ee9360c9","aaoge tum kabhi":"8b26bfc0975e7c19dc45b3a0ee9360c9","kasoor|prateek kuhad":"5703f7b99e90720b01978fbca7923e70","kasoor":"5703f7b99e90720b01978fbca7923e70","udd gaye|ritviz":"0d6a03d9ec7c93ad31203f09216cfbf1","udd gaye":"0d6a03d9ec7c93ad31203f09216cfbf1","one love|shubh":"9b315dd75419b5f893cb84a1ff2e8ef0","one love":"9b315dd75419b5f893cb84a1ff2e8ef0","king shit|shubh":"412f1e05bbbc1d5f17018e9a4e6b40ec","king shit":"412f1e05bbbc1d5f17018e9a4e6b40ec","with you|ap dhillon":"ff7878c3ecade62c69ea2e10d4ec1ce8","with you":"ff7878c3ecade62c69ea2e10d4ec1ce8","chaleya|arijit singh":"87965798331705639c8965c7fc100ffc","chaleya":"87965798331705639c8965c7fc100ffc","nadaaniyan|akshath":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b8/29/f1/b829f155-0534-0808-8a6d-f168f9df3d4a/24UMGIM56452.rgb.jpg/500x500bb.jpg","nadaaniyan":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b8/29/f1/b829f155-0534-0808-8a6d-f168f9df3d4a/24UMGIM56452.rgb.jpg/500x500bb.jpg","ishq|faheem abdullah":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a3/04/c1/a304c107-6887-c475-8377-d05e86cfe108/cover.jpg/500x500bb.jpg","ishq":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a3/04/c1/a304c107-6887-c475-8377-d05e86cfe108/cover.jpg/500x500bb.jpg","katchi sera|sai abhyankkar":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/80/df/08/80df0808-17e7-ab41-5972-fec5f83e3819/cover.jpg/500x500bb.jpg","katchi sera":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/80/df/08/80df0808-17e7-ab41-5972-fec5f83e3819/cover.jpg/500x500bb.jpg","illuminati|sushin shyam":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/88/4e/29/884e290c-29ed-25d5-7b25-243b89097220/cover.jpg/500x500bb.jpg","illuminati":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/88/4e/29/884e290c-29ed-25d5-7b25-243b89097220/cover.jpg/500x500bb.jpg","naina|diljit dosanjh":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/bd/7b/bf/bd7bbfbd-8711-b6da-473a-7dd35b2d753b/8901854099214.jpg/500x500bb.jpg","naina":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/bd/7b/bf/bd7bbfbd-8711-b6da-473a-7dd35b2d753b/8901854099214.jpg/500x500bb.jpg","soulmate|badshah":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a9/c7/32/a9c732cc-d880-1ee4-ff22-d01593ac6341/24UMGIM22464.rgb.jpg/500x500bb.jpg","soulmate":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a9/c7/32/a9c732cc-d880-1ee4-ff22-d01593ac6341/24UMGIM22464.rgb.jpg/500x500bb.jpg","millionaire|yo yo honey singh":"https://is1-ssl.mzstatic.com/image/thumb/Music128/v4/cf/cd/24/cfcd248a-cbbd-10dd-7d25-894bbf9b9f20/8902633288584.jpg/500x500bb.jpg","millionaire":"https://is1-ssl.mzstatic.com/image/thumb/Music128/v4/cf/cd/24/cfcd248a-cbbd-10dd-7d25-894bbf9b9f20/8902633288584.jpg/500x500bb.jpg","taras|sachin jigar":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/7d/91/c8/7d91c851-00b0-6d25-9af8-865c32a75393/8909024032016.png/500x500bb.jpg","taras":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/7d/91/c8/7d91c851-00b0-6d25-9af8-865c32a75393/8909024032016.png/500x500bb.jpg","khudaya|sagar bhatia":"53bdfe2ba9539665069498cf4a44da4d","khudaya":"53bdfe2ba9539665069498cf4a44da4d","soni soni|darshan raval":"86a67dbe69bd2769bf1e20f1f4a5ad27","soni soni":"86a67dbe69bd2769bf1e20f1f4a5ad27","khoobsurat|vishal mishra":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/2d/e2/f7/2de2f7e0-b66f-50e8-ba18-e0ab41bec525/198846028354.jpg/500x500bb.jpg","khoobsurat":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/2d/e2/f7/2de2f7e0-b66f-50e8-ba18-e0ab41bec525/198846028354.jpg/500x500bb.jpg","tumhare hi rahenge hum|varun jain":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/d3/37/eb/d337eb52-2663-826d-d213-335598b14743/198846005553.jpg/500x500bb.jpg","tumhare hi rahenge hum":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/d3/37/eb/d337eb52-2663-826d-d213-335598b14743/198846005553.jpg/500x500bb.jpg","aayi nai|sachin jigar":"c85e4d98787aa04833e9682f90e56fb5","aayi nai":"c85e4d98787aa04833e9682f90e56fb5","khel khel mein|guru randhawa":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/27/58/c3275887-784f-4ad4-e05d-215c5f9dfbbc/8903431009845_cover.jpg/500x500bb.jpg","khel khel mein":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/27/58/c3275887-784f-4ad4-e05d-215c5f9dfbbc/8903431009845_cover.jpg/500x500bb.jpg","hauli hauli|guru randhawa":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/27/58/c3275887-784f-4ad4-e05d-215c5f9dfbbc/8903431009845_cover.jpg/500x500bb.jpg","hauli hauli":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/27/58/c3275887-784f-4ad4-e05d-215c5f9dfbbc/8903431009845_cover.jpg/500x500bb.jpg","guli mata|saad lamjarred":"d2b0e3341b6cabf610dec963e3d527da","guli mata":"d2b0e3341b6cabf610dec963e3d527da","heeriye|jasleen royal":"6b06bbbf7c2d9c6bcb60763bccc0571d","heeriye":"6b06bbbf7c2d9c6bcb60763bccc0571d","satranga|arijit singh":"e8503eb01fce97c7427b794e8cd3c478","satranga":"e8503eb01fce97c7427b794e8cd3c478","arjan vailly|bhupinder babbal":"e8503eb01fce97c7427b794e8cd3c478","arjan vailly":"e8503eb01fce97c7427b794e8cd3c478","apna bana le|sachin jigar":"5e2aaa0f0a9b4bccfdf01c447f2e169c","apna bana le":"5e2aaa0f0a9b4bccfdf01c447f2e169c","lalkara|diljit dosanjh":"91d4d713bec4015e35798c409425e7b7","lalkara":"91d4d713bec4015e35798c409425e7b7","hass hass|diljit dosanjh":"664682cefadc721cc099f1e652276eca","hass hass":"664682cefadc721cc099f1e652276eca","softly|karan aujla":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/d3/08/bc/d308bc6a-20e1-6532-d933-35d1b429210e/5054197755538.jpg/500x500bb.jpg","softly":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/d3/08/bc/d308bc6a-20e1-6532-d933-35d1b429210e/5054197755538.jpg/500x500bb.jpg","admirin you|karan aujla":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/d3/08/bc/d308bc6a-20e1-6532-d933-35d1b429210e/5054197755538.jpg/500x500bb.jpg","admirin you":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/d3/08/bc/d308bc6a-20e1-6532-d933-35d1b429210e/5054197755538.jpg/500x500bb.jpg","idk how|karan aujla":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c2/ce/a0/c2cea088-dbde-43db-346f-e536058fdcfb/5063483978438_cover.jpg/500x500bb.jpg","idk how":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c2/ce/a0/c2cea088-dbde-43db-346f-e536058fdcfb/5063483978438_cover.jpg/500x500bb.jpg","100 million|divine":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/bf/e1/19/bfe1195d-18c3-4f40-0a18-19beef6de0ca/197190848762.jpg/500x500bb.jpg","100 million":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/bf/e1/19/bfe1195d-18c3-4f40-0a18-19beef6de0ca/197190848762.jpg/500x500bb.jpg","baazigar|divine":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/97/d9/cf/97d9cf4f-abb1-c6b0-f4ea-be275658cc9b/197338226643.jpg/500x500bb.jpg","baazigar":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/97/d9/cf/97d9cf4f-abb1-c6b0-f4ea-be275658cc9b/197338226643.jpg/500x500bb.jpg","joota japani|kr na":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/53/6e/3d/536e3d41-fe71-9b51-d242-239d3050d66a/197190909999.jpg/500x500bb.jpg","joota japani":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/53/6e/3d/536e3d41-fe71-9b51-d242-239d3050d66a/197190909999.jpg/500x500bb.jpg","namastute|seedhe maut":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/8c/3c/10/8c3c1016-be7e-666c-225d-00b671fb38e0/199066150108.jpg/500x500bb.jpg","namastute":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/8c/3c/10/8c3c1016-be7e-666c-225d-00b671fb38e0/199066150108.jpg/500x500bb.jpg","luka chuppi|seedhe maut":"a9f93d7a3ab2ff3d1e2a6d4d1c47c105","luka chuppi":"a9f93d7a3ab2ff3d1e2a6d4d1c47c105","tu hai kahan|aur":"12d66b492d1e4792fec0c4d0ad754ded","tu hai kahan":"12d66b492d1e4792fec0c4d0ad754ded","shikayat|aur":"525221c08c67990a64b3f7adb3c368c8","shikayat":"525221c08c67990a64b3f7adb3c368c8","alag aasmaan|anuv jain":"1ed1f36c80fe430ca97098f68fc074e6","alag aasmaan":"1ed1f36c80fe430ca97098f68fc074e6","baarishein|anuv jain":"b4fcda10b32a70d8b9248ca7f6459903","baarishein":"b4fcda10b32a70d8b9248ca7f6459903","co2|prateek kuhad":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/13/b2/5e/13b25e33-746d-9567-0c36-b11af5b55ab0/075679754943.jpg/500x500bb.jpg","co2":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/13/b2/5e/13b25e33-746d-9567-0c36-b11af5b55ab0/075679754943.jpg/500x500bb.jpg","dil mere|the local train":"8b26bfc0975e7c19dc45b3a0ee9360c9","dil mere":"8b26bfc0975e7c19dc45b3a0ee9360c9","khudi|the local train":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/6e/4c/59/6e4c59e9-342c-3da7-fc09-61959c95dcb5/197189936456.jpg/500x500bb.jpg","khudi":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/6e/4c/59/6e4c59e9-342c-3da7-fc09-61959c95dcb5/197189936456.jpg/500x500bb.jpg","roz|ritviz":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/b2/86/a6/b286a68d-3b65-499f-03f0-6f32d96f7eb7/859750782298_cover.jpg/500x500bb.jpg","roz":"https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/b2/86/a6/b286a68d-3b65-499f-03f0-6f32d96f7eb7/859750782298_cover.jpg/500x500bb.jpg","liggi|ritviz":"d5f7a76e0c682b5d17cdb9aee1aa4a14","liggi":"d5f7a76e0c682b5d17cdb9aee1aa4a14","khayaal|talwiinder":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/da/22/b8/da22b844-b237-c414-2111-79276423c340/196589947482.jpg/500x500bb.jpg","khayaal":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/da/22/b8/da22b844-b237-c414-2111-79276423c340/196589947482.jpg/500x500bb.jpg","dhundhala|yashraj":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/30/63/c3/3063c36c-8537-ce66-4451-e9de6c2a13dc/23UM1IM04836.rgb.jpg/500x500bb.jpg","dhundhala":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/30/63/c3/3063c36c-8537-ce66-4451-e9de6c2a13dc/23UM1IM04836.rgb.jpg/500x500bb.jpg","daku|chani nattan":"4f6b75ee8d72644714ae5254efb27631","daku":"4f6b75ee8d72644714ae5254efb27631","mvp|shubh":"412f1e05bbbc1d5f17018e9a4e6b40ec","mvp":"412f1e05bbbc1d5f17018e9a4e6b40ec","bandana|shubh":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f0/79/1d/f0791dcd-5415-61b1-cd67-94660c46e189/5021732271709.jpg/500x500bb.jpg","bandana":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f0/79/1d/f0791dcd-5415-61b1-cd67-94660c46e189/5021732271709.jpg/500x500bb.jpg","tu aake dekhle|king":"934455d83d61359aa0d904bdfe86e5f2","tu aake dekhle":"934455d83d61359aa0d904bdfe86e5f2","sarkaare|king":"04a936117dd468270341c0df589781ea","sarkaare":"04a936117dd468270341c0df589781ea","faasle|aditya rikhari":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/d5/29/29/d5292970-e6e4-1199-baed-22c8c9f60988/cover.jpg/500x500bb.jpg","faasle":"https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/d5/29/29/d5292970-e6e4-1199-baed-22c8c9f60988/cover.jpg/500x500bb.jpg","teri yaad|aditya rikhari":"https://is1-ssl.mzstatic.com/image/thumb/Music113/v4/3d/45/11/3d451107-117e-c7b1-340a-bb730846c3d3/23UMGIM07285.rgb.jpg/500x500bb.jpg","teri yaad":"https://is1-ssl.mzstatic.com/image/thumb/Music113/v4/3d/45/11/3d451107-117e-c7b1-340a-bb730846c3d3/23UMGIM07285.rgb.jpg/500x500bb.jpg","gulabi sadi|sanju rathod":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/13/2d/eb/132deb17-aee2-6b64-d0cc-6446c213375d/cover.jpg/500x500bb.jpg","gulabi sadi":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/13/2d/eb/132deb17-aee2-6b64-d0cc-6446c213375d/cover.jpg/500x500bb.jpg","aasa kooda|sai abhyankkar":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/39/42/ba/3942ba45-40bd-5d0a-d7ad-0595f1336f3f/cover.jpg/500x500bb.jpg","aasa kooda":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/39/42/ba/3942ba45-40bd-5d0a-d7ad-0595f1336f3f/cover.jpg/500x500bb.jpg","paon ki jutti|jyoti nooran":"6f88346b2818313ccadbde509a411832","paon ki jutti":"6f88346b2818313ccadbde509a411832","mah jinna sohna|darshan raval":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/4b/73/1e/4b731eb5-13ab-825a-d164-fc665b2f02e5/5054197730122.jpg/500x500bb.jpg","mah jinna sohna":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/4b/73/1e/4b731eb5-13ab-825a-d164-fc665b2f02e5/5054197730122.jpg/500x500bb.jpg","apt|rose":"258e6042338ce64bb4157c0c94b232ac","apt":"258e6042338ce64bb4157c0c94b232ac","luther|kendrick lamar":"da5256ff8cacfe9ad90521f6e3792259","luther":"da5256ff8cacfe9ad90521f6e3792259","tv off|kendrick lamar":"da5256ff8cacfe9ad90521f6e3792259","tv off":"da5256ff8cacfe9ad90521f6e3792259","squabble up|kendrick lamar":"da5256ff8cacfe9ad90521f6e3792259","squabble up":"da5256ff8cacfe9ad90521f6e3792259","sailor song|gigi perez":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/25/d4/96/25d49699-acc0-401f-a7cc-d7697339a474/24UM1IM03751.rgb.jpg/500x500bb.jpg","sailor song":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/25/d4/96/25d49699-acc0-401f-a7cc-d7697339a474/24UM1IM03751.rgb.jpg/500x500bb.jpg","messy|lola young":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/5a/c6/b1/5ac6b183-8ff1-55e3-fa59-8cce5db3fc87/24UMGIM52751.rgb.jpg/500x500bb.jpg","messy":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/5a/c6/b1/5ac6b183-8ff1-55e3-fa59-8cce5db3fc87/24UMGIM52751.rgb.jpg/500x500bb.jpg","that s so true|gracie abrams":"967769c4612d74e8f5c7da8798b28e13","that s so true":"967769c4612d74e8f5c7da8798b28e13","close to you|gracie abrams":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/52/9a/a7/529aa76f-5d60-cd81-9eb0-0eb521de861d/24UMGIM43968.rgb.jpg/500x500bb.jpg","close to you":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/52/9a/a7/529aa76f-5d60-cd81-9eb0-0eb521de861d/24UMGIM43968.rgb.jpg/500x500bb.jpg","denial is a river|doechii":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/5f/a3/e8/5fa3e8b9-9065-47af-63e1-f213d3074580/24UMGIM88644.rgb.jpg/500x500bb.jpg","denial is a river":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/5f/a3/e8/5fa3e8b9-9065-47af-63e1-f213d3074580/24UMGIM88644.rgb.jpg/500x500bb.jpg","nissan altima|doechii":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/ec/cc/d6/ecccd6d4-2250-5caf-a98d-1ba10baf67f5/24UMGIM88644.rgb.jpg/500x500bb.jpg","nissan altima":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/ec/cc/d6/ecccd6d4-2250-5caf-a98d-1ba10baf67f5/24UMGIM88644.rgb.jpg/500x500bb.jpg","sports car|tate mcrae":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/51/8a/29/518a29f3-5915-662a-d861-663e6d0fbfe4/196872648911.jpg/500x500bb.jpg","sports car":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/51/8a/29/518a29f3-5915-662a-d861-663e6d0fbfe4/196872648911.jpg/500x500bb.jpg","it s ok i m ok|tate mcrae":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/62/f6/6d/62f66d3b-9539-51b9-8b3a-31a7a9c598ca/196872470574.jpg/500x500bb.jpg","it s ok i m ok":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/62/f6/6d/62f66d3b-9539-51b9-8b3a-31a7a9c598ca/196872470574.jpg/500x500bb.jpg","the emptiness machine|linkin park":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/85/cf/a1/85cfa1ed-d8f6-d021-2a9e-cb541b2bbe87/artwork.jpg/500x500bb.jpg","the emptiness machine":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/85/cf/a1/85cfa1ed-d8f6-d021-2a9e-cb541b2bbe87/artwork.jpg/500x500bb.jpg","heavy is the crown|linkin park":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/69/21/cf/6921cff3-7074-118a-ece2-4012450e6c75/093624839811.jpg/500x500bb.jpg","heavy is the crown":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/69/21/cf/6921cff3-7074-118a-ece2-4012450e6c75/093624839811.jpg/500x500bb.jpg","love somebody|morgan wallen":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/0e/6d/e1/0e6de152-3ff5-84a3-7ce7-7dfbdcb2c3e1/24UMGIM96374.rgb.jpg/500x500bb.jpg","love somebody":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/0e/6d/e1/0e6de152-3ff5-84a3-7ce7-7dfbdcb2c3e1/24UMGIM96374.rgb.jpg/500x500bb.jpg","lies lies lies|morgan wallen":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/0e/6d/e1/0e6de152-3ff5-84a3-7ce7-7dfbdcb2c3e1/24UMGIM96374.rgb.jpg/500x500bb.jpg","lies lies lies":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/0e/6d/e1/0e6de152-3ff5-84a3-7ce7-7dfbdcb2c3e1/24UMGIM96374.rgb.jpg/500x500bb.jpg","timeless|the weeknd":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/9f/c8/c39fc847-2d00-1b7f-7327-264436bd9957/24UM1IM21421.rgb.jpg/500x500bb.jpg","timeless":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/9f/c8/c39fc847-2d00-1b7f-7327-264436bd9957/24UM1IM21421.rgb.jpg/500x500bb.jpg","dancing in the flames|the weeknd":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/9f/c8/c39fc847-2d00-1b7f-7327-264436bd9957/24UM1IM21421.rgb.jpg/500x500bb.jpg","dancing in the flames":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/9f/c8/c39fc847-2d00-1b7f-7327-264436bd9957/24UM1IM21421.rgb.jpg/500x500bb.jpg","abracadabra|lady gaga":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c5/43/8b/c5438b81-75e8-3a0a-05ee-4f29ae0b9bb3/25UMGIM07433.rgb.jpg/500x500bb.jpg","abracadabra":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c5/43/8b/c5438b81-75e8-3a0a-05ee-4f29ae0b9bb3/25UMGIM07433.rgb.jpg/500x500bb.jpg","disease|lady gaga":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c5/43/8b/c5438b81-75e8-3a0a-05ee-4f29ae0b9bb3/25UMGIM07433.rgb.jpg/500x500bb.jpg","disease":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c5/43/8b/c5438b81-75e8-3a0a-05ee-4f29ae0b9bb3/25UMGIM07433.rgb.jpg/500x500bb.jpg","sticky|tyler":"https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/6d/31/ab/6d31abaf-7a07-05f1-13ad-72ec520b6bfb/22UMGIM67374.rgb.jpg/500x500bb.jpg","sticky":"https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/6d/31/ab/6d31abaf-7a07-05f1-13ad-72ec520b6bfb/22UMGIM67374.rgb.jpg/500x500bb.jpg","st chroma|tyler":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b6/ef/ee/b6efeefa-fc99-37d1-ad21-0d769b2a4958/196872796971.jpg/500x500bb.jpg","st chroma":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b6/ef/ee/b6efeefa-fc99-37d1-ad21-0d769b2a4958/196872796971.jpg/500x500bb.jpg","wildflower|billie eilish":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/92/9f/69/929f69f1-9977-3a44-d674-11f70c852d1b/24UMGIM36186.rgb.jpg/500x500bb.jpg","wildflower":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/92/9f/69/929f69f1-9977-3a44-d674-11f70c852d1b/24UMGIM36186.rgb.jpg/500x500bb.jpg","chihiro|billie eilish":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/92/9f/69/929f69f1-9977-3a44-d674-11f70c852d1b/24UMGIM36186.rgb.jpg/500x500bb.jpg","chihiro":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/92/9f/69/929f69f1-9977-3a44-d674-11f70c852d1b/24UMGIM36186.rgb.jpg/500x500bb.jpg","bed chem|sabrina carpenter":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f6/15/d0/f615d0ab-e0c4-575d-907e-1cc084642357/24UMGIM61704.rgb.jpg/500x500bb.jpg","bed chem":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f6/15/d0/f615d0ab-e0c4-575d-907e-1cc084642357/24UMGIM61704.rgb.jpg/500x500bb.jpg","juno|sabrina carpenter":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a1/1c/ca/a11ccab6-7d4c-e041-d028-998bcebeb709/24UMGIM61704.rgb.jpg/500x500bb.jpg","juno":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a1/1c/ca/a11ccab6-7d4c-e041-d028-998bcebeb709/24UMGIM61704.rgb.jpg/500x500bb.jpg","pink pony club|chappell roan":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/41/bc/fb/41bcfb43-91d5-931d-5747-fb381803143f/23UMGIM21715.rgb.jpg/500x500bb.jpg","pink pony club":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/41/bc/fb/41bcfb43-91d5-931d-5747-fb381803143f/23UMGIM21715.rgb.jpg/500x500bb.jpg","hot to go|chappell roan":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/fb/65/cb/fb65cb0f-4260-d740-d6f5-bb80c9c27c1b/23UMGIM84225.rgb.jpg/500x500bb.jpg","hot to go":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/fb/65/cb/fb65cb0f-4260-d740-d6f5-bb80c9c27c1b/23UMGIM84225.rgb.jpg/500x500bb.jpg","diet pepsi|addison rae":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/01/ef/7a/01ef7a06-1b48-0460-efbf-983d6a0a37fa/196872309959.jpg/500x500bb.jpg","diet pepsi":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/01/ef/7a/01ef7a06-1b48-0460-efbf-983d6a0a37fa/196872309959.jpg/500x500bb.jpg","ordinary|alex warren":"f4246416b5e3e71a35adf1e2cbe98bfb","ordinary":"f4246416b5e3e71a35adf1e2cbe98bfb","carry you home|alex warren":"f4246416b5e3e71a35adf1e2cbe98bfb","carry you home":"f4246416b5e3e71a35adf1e2cbe98bfb","back to friends|sombr":"37a20b62f754b7ff5a9a29a8f2fe9d27","back to friends":"37a20b62f754b7ff5a9a29a8f2fe9d27","undressed|sombr":"37a20b62f754b7ff5a9a29a8f2fe9d27","undressed":"37a20b62f754b7ff5a9a29a8f2fe9d27","mutts|leon thomas":"1c318762a31c79bd28e9f7951bdab5b4","mutts":"1c318762a31c79bd28e9f7951bdab5b4","tgif|glorilla":"a65e86966cfd34b2aa292856136ef9ac","tgif":"a65e86966cfd34b2aa292856136ef9ac","whatchu kno about me|glorilla":"a65e86966cfd34b2aa292856136ef9ac","whatchu kno about me":"a65e86966cfd34b2aa292856136ef9ac","360|charli xcx":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/cf/0b/2b/cf0b2bae-d4c1-49ce-de5c-b7c3fcd9e4cd/075679643087.jpg/500x500bb.jpg","von dutch|charli xcx":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/cf/0b/2b/cf0b2bae-d4c1-49ce-de5c-b7c3fcd9e4cd/075679643087.jpg/500x500bb.jpg","von dutch":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/cf/0b/2b/cf0b2bae-d4c1-49ce-de5c-b7c3fcd9e4cd/075679643087.jpg/500x500bb.jpg","guess|charli xcx":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/cf/0b/2b/cf0b2bae-d4c1-49ce-de5c-b7c3fcd9e4cd/075679643087.jpg/500x500bb.jpg","guess":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/cf/0b/2b/cf0b2bae-d4c1-49ce-de5c-b7c3fcd9e4cd/075679643087.jpg/500x500bb.jpg","where you are|john summit":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/26/86/a9/2686a9dc-0a17-8e7f-82e3-9bb7c53c1494/23UMGIM19042.rgb.jpg/500x500bb.jpg","where you are":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/26/86/a9/2686a9dc-0a17-8e7f-82e3-9bb7c53c1494/23UMGIM19042.rgb.jpg/500x500bb.jpg","shiver|john summit":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/e7/21/67/e721675b-c3a3-9338-bf24-9adb295b7e90/24UMGIM58701.rgb.jpg/500x500bb.jpg","shiver":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/e7/21/67/e721675b-c3a3-9338-bf24-9adb295b7e90/24UMGIM58701.rgb.jpg/500x500bb.jpg","places to be|fred again":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/fc/e8/81/fce8814b-c3c2-3cf1-8294-791326b9801e/cover.jpg/500x500bb.jpg","places to be":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/fc/e8/81/fce8814b-c3c2-3cf1-8294-791326b9801e/cover.jpg/500x500bb.jpg","band4band|central cee":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/e1/2d/c5/e12dc546-b50d-5a06-58cf-94227b0c78b9/196872154931.jpg/500x500bb.jpg","band4band":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/e1/2d/c5/e12dc546-b50d-5a06-58cf-94227b0c78b9/196872154931.jpg/500x500bb.jpg","did it first|ice spice":"8508be30ca355ef44597e9be0f834232","did it first":"8508be30ca355ef44597e9be0f834232","kehlani|jordan adetunji":"1c318762a31c79bd28e9f7951bdab5b4","kehlani":"1c318762a31c79bd28e9f7951bdab5b4","after hours|kehlani":"1c318762a31c79bd28e9f7951bdab5b4","after hours":"1c318762a31c79bd28e9f7951bdab5b4","bmf|sza":"992cc838b5f0cf0eebbd83011a979571","bmf":"992cc838b5f0cf0eebbd83011a979571","30 for 30|sza":"992cc838b5f0cf0eebbd83011a979571","30 for 30":"992cc838b5f0cf0eebbd83011a979571","pink skies|zach bryan":"7060ea038f51fdeff23bc40eb5027663","pink skies":"7060ea038f51fdeff23bc40eb5027663","28|zach bryan":"7060ea038f51fdeff23bc40eb5027663","ain t no love in oklahoma|luke combs":"473abf39f40221437fb7c590e36b7282","ain t no love in oklahoma":"473abf39f40221437fb7c590e36b7282","pour me a drink|post malone":"473abf39f40221437fb7c590e36b7282","pour me a drink":"473abf39f40221437fb7c590e36b7282","guy for that|post malone":"473abf39f40221437fb7c590e36b7282","guy for that":"473abf39f40221437fb7c590e36b7282","i am not okay|jelly roll":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/95/b9/ca/95b9ca00-29cb-8edc-1ecb-5bda742f3177/24UMGIM62166.rgb.jpg/500x500bb.jpg","i am not okay":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/95/b9/ca/95b9ca00-29cb-8edc-1ecb-5bda742f3177/24UMGIM62166.rgb.jpg/500x500bb.jpg","good news|shaboozey":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/23/f2/d9/23f2d96d-b842-5f8b-1a09-bcc9a5cf7032/197342797344_cover.jpg/500x500bb.jpg","good news":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/23/f2/d9/23f2d96d-b842-5f8b-1a09-bcc9a5cf7032/197342797344_cover.jpg/500x500bb.jpg","austin boots stop workin|dasha":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/85/b5/b0/85b5b00b-ca94-dfa1-a3cf-2da4a1e3dd39/054391277657.jpg/500x500bb.jpg","austin boots stop workin":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/85/b5/b0/85b5b00b-ca94-dfa1-a3cf-2da4a1e3dd39/054391277657.jpg/500x500bb.jpg","wind up missin you|tucker wetmore":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a1/54/e2/a154e275-9a98-3491-26cf-a1c6f3fb4ea1/24UMGIM54949.rgb.jpg/500x500bb.jpg","wind up missin you":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a1/54/e2/a154e275-9a98-3491-26cf-a1c6f3fb4ea1/24UMGIM54949.rgb.jpg/500x500bb.jpg","am i okay|megan moroney":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/de/2a/43/de2a438b-bb7c-16db-64db-954057aca5aa/196872040302.jpg/500x500bb.jpg","am i okay":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/de/2a/43/de2a438b-bb7c-16db-64db-954057aca5aa/196872040302.jpg/500x500bb.jpg","juna|clairo":"6dfa4ea965a74b93870a85daa74b7ca3","juna":"6dfa4ea965a74b93870a85daa74b7ca3","nomad|clairo":"6dfa4ea965a74b93870a85daa74b7ca3","nomad":"6dfa4ea965a74b93870a85daa74b7ca3","take a bite|beabadoobee":"6dfa4ea965a74b93870a85daa74b7ca3","take a bite":"6dfa4ea965a74b93870a85daa74b7ca3","beaches|beabadoobee":"6dfa4ea965a74b93870a85daa74b7ca3","beaches":"6dfa4ea965a74b93870a85daa74b7ca3","sally when the wine runs out|role model":"6dfa4ea965a74b93870a85daa74b7ca3","sally when the wine runs out":"6dfa4ea965a74b93870a85daa74b7ca3","love me not|ravyn lenae":"1c318762a31c79bd28e9f7951bdab5b4","love me not":"1c318762a31c79bd28e9f7951bdab5b4","chest pain i love|malcolm todd":"37a20b62f754b7ff5a9a29a8f2fe9d27","chest pain i love":"37a20b62f754b7ff5a9a29a8f2fe9d27","alesis|mk gee":"37a20b62f754b7ff5a9a29a8f2fe9d27","alesis":"37a20b62f754b7ff5a9a29a8f2fe9d27","i like the way you kiss me|artemas":"ee890cf16d00c684be76b0087c7108c4","i like the way you kiss me":"ee890cf16d00c684be76b0087c7108c4","favourite|fontaines d c":"1e8ffbd401303b5693226c12ee0b84fb","favourite":"1e8ffbd401303b5693226c12ee0b84fb","starburster|fontaines d c":"1e8ffbd401303b5693226c12ee0b84fb","starburster":"1e8ffbd401303b5693226c12ee0b84fb","people watching|sam fender":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/bd/8c/24/bd8c2468-7978-cace-67b1-e0b3e5a643b8/24UM1IM05583.rgb.jpg/500x500bb.jpg","people watching":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/bd/8c/24/bd8c2468-7978-cace-67b1-e0b3e5a643b8/24UM1IM05583.rgb.jpg/500x500bb.jpg","nothing matters|the last dinner party":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/69/74/ab/6974abd9-0415-aa60-240c-b2fac4c62e1b/23UMGIM23237.rgb.jpg/500x500bb.jpg","nothing matters":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/69/74/ab/6974abd9-0415-aa60-240c-b2fac4c62e1b/23UMGIM23237.rgb.jpg/500x500bb.jpg","the summoning|sleep token":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/e2/c6/0f/e2c60f68-7cec-fa08-6dd3-891aa72c247e/5401148000849_cover.jpg/500x500bb.jpg","the summoning":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/e2/c6/0f/e2c60f68-7cec-fa08-6dd3-891aa72c247e/5401148000849_cover.jpg/500x500bb.jpg","just pretend|bad omens":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f0/ce/0d/f0ce0d9c-934d-770d-e62f-74564fc410e1/00810016765424_Cover.jpg/500x500bb.jpg","just pretend":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f0/ce/0d/f0ce0d9c-934d-770d-e62f-74564fc410e1/00810016765424_Cover.jpg/500x500bb.jpg","slow it down|benson boone":"e8947b2a3e00fde8763011ebee2a02fd","slow it down":"e8947b2a3e00fde8763011ebee2a02fd","bad dreams|teddy swims":"f4246416b5e3e71a35adf1e2cbe98bfb","bad dreams":"f4246416b5e3e71a35adf1e2cbe98bfb","the door|teddy swims":"f4246416b5e3e71a35adf1e2cbe98bfb","the door":"f4246416b5e3e71a35adf1e2cbe98bfb","from the start|laufey":"6dfa4ea965a74b93870a85daa74b7ca3","from the start":"6dfa4ea965a74b93870a85daa74b7ca3","goddess|laufey":"6dfa4ea965a74b93870a85daa74b7ca3","goddess":"6dfa4ea965a74b93870a85daa74b7ca3","whiplash|aespa":"258e6042338ce64bb4157c0c94b232ac","whiplash":"258e6042338ce64bb4157c0c94b232ac","mantra|jennie":"258e6042338ce64bb4157c0c94b232ac","mantra":"258e6042338ce64bb4157c0c94b232ac","chk chk boom|stray kids":"258e6042338ce64bb4157c0c94b232ac","chk chk boom":"258e6042338ce64bb4157c0c94b232ac","magnetic|illit":"258e6042338ce64bb4157c0c94b232ac","magnetic":"258e6042338ce64bb4157c0c94b232ac","bling bang bang born|creepy nuts":"74a47f9832735b37a41d8fd49cd23354","bling bang bang born":"74a47f9832735b37a41d8fd49cd23354","otonoke|creepy nuts":"74a47f9832735b37a41d8fd49cd23354","otonoke":"74a47f9832735b37a41d8fd49cd23354","lilac|mrs green apple":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/4c/3b/b2/4c3bb247-3be8-0c57-aa9a-7f1775a7b7a8/24UMGIM32931.rgb.jpg/500x500bb.jpg","lilac":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/4c/3b/b2/4c3bb247-3be8-0c57-aa9a-7f1775a7b7a8/24UMGIM32931.rgb.jpg/500x500bb.jpg","ozaka|rema":"cb415a59a7bc198ec4aab01f02600691","ozaka":"cb415a59a7bc198ec4aab01f02600691","active|asake":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/dc/b7/78/dcb7782e-3100-b227-ed40-985954cfc6c8/artwork.jpg/500x500bb.jpg","active":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/dc/b7/78/dcb7782e-3100-b227-ed40-985954cfc6c8/artwork.jpg/500x500bb.jpg","kese dance|wizkid":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/82/60/3b/82603b3c-1aad-6e37-3b81-d5451046accf/196872637434.jpg/500x500bb.jpg","kese dance":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/82/60/3b/82603b3c-1aad-6e37-3b81-d5451046accf/196872637434.jpg/500x500bb.jpg","push 2 start|tyla":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/2a/cc/48/2acc48c7-e092-6b83-ce65-ff80ac6eb51c/196872520118.jpg/500x500bb.jpg","push 2 start":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/2a/cc/48/2acc48c7-e092-6b83-ce65-ff80ac6eb51c/196872520118.jpg/500x500bb.jpg","tshwala bam|titom":"e70f7518f5dbe0b0be643cbabc87ca4b","tshwala bam":"e70f7518f5dbe0b0be643cbabc87ca4b","si antes te hubiera conocido|karol g":"2a769f6f0cce0ca9e129ce4b61f83973","si antes te hubiera conocido":"2a769f6f0cce0ca9e129ce4b61f83973","dtmf|bad bunny":"e4b16c1afe136140bba34368357e8f05","dtmf":"e4b16c1afe136140bba34368357e8f05","baile inolvidable|bad bunny":"e4b16c1afe136140bba34368357e8f05","baile inolvidable":"e4b16c1afe136140bba34368357e8f05","pantropiko|bini":"0fd6e3b346b959a8781ccfa89b63607a","pantropiko":"0fd6e3b346b959a8781ccfa89b63607a","salamin salamin|bini":"0fd6e3b346b959a8781ccfa89b63607a","salamin salamin":"0fd6e3b346b959a8781ccfa89b63607a","dilaw|maki":"37a20b62f754b7ff5a9a29a8f2fe9d27","dilaw":"37a20b62f754b7ff5a9a29a8f2fe9d27","palagi|tj monterde":"f4246416b5e3e71a35adf1e2cbe98bfb","palagi":"f4246416b5e3e71a35adf1e2cbe98bfb","2 hands|tate mcrae":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/62/f6/6d/62f66d3b-9539-51b9-8b3a-31a7a9c598ca/196872470574.jpg/500x500bb.jpg","2 hands":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/62/f6/6d/62f66d3b-9539-51b9-8b3a-31a7a9c598ca/196872470574.jpg/500x500bb.jpg","the giver|chappell roan":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/fb/65/cb/fb65cb0f-4260-d740-d6f5-bb80c9c27c1b/23UMGIM84225.rgb.jpg/500x500bb.jpg","the giver":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/fb/65/cb/fb65cb0f-4260-d740-d6f5-bb80c9c27c1b/23UMGIM84225.rgb.jpg/500x500bb.jpg","cry for me|the weeknd":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/13/fd/a3/13fda38d-fc63-ddc3-1cf2-c09251adc532/25UMGIM09489.rgb.jpg/500x500bb.jpg","cry for me":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/13/fd/a3/13fda38d-fc63-ddc3-1cf2-c09251adc532/25UMGIM09489.rgb.jpg/500x500bb.jpg","sao paulo|the weeknd":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/9f/c8/c39fc847-2d00-1b7f-7327-264436bd9957/24UM1IM21421.rgb.jpg/500x500bb.jpg","sao paulo":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/9f/c8/c39fc847-2d00-1b7f-7327-264436bd9957/24UM1IM21421.rgb.jpg/500x500bb.jpg","nokia|drake":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/23/7c/a2/237ca270-9926-4b78-be81-410b6fc85f47/50291.jpg/500x500bb.jpg","nokia":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/23/7c/a2/237ca270-9926-4b78-be81-410b6fc85f47/50291.jpg/500x500bb.jpg","gimme a hug|drake":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/23/7c/a2/237ca270-9926-4b78-be81-410b6fc85f47/50291.jpg/500x500bb.jpg","gimme a hug":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/23/7c/a2/237ca270-9926-4b78-be81-410b6fc85f47/50291.jpg/500x500bb.jpg","darling i|tyler":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b6/ef/ee/b6efeefa-fc99-37d1-ad21-0d769b2a4958/196872796971.jpg/500x500bb.jpg","darling i":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b6/ef/ee/b6efeefa-fc99-37d1-ad21-0d769b2a4958/196872796971.jpg/500x500bb.jpg","like him|tyler":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b6/ef/ee/b6efeefa-fc99-37d1-ad21-0d769b2a4958/196872796971.jpg/500x500bb.jpg","like him":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b6/ef/ee/b6efeefa-fc99-37d1-ad21-0d769b2a4958/196872796971.jpg/500x500bb.jpg","revolving door|tate mcrae":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/62/f6/6d/62f66d3b-9539-51b9-8b3a-31a7a9c598ca/196872470574.jpg/500x500bb.jpg","revolving door":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/62/f6/6d/62f66d3b-9539-51b9-8b3a-31a7a9c598ca/196872470574.jpg/500x500bb.jpg","number one girl|rose":"258e6042338ce64bb4157c0c94b232ac","number one girl":"258e6042338ce64bb4157c0c94b232ac","toxic till the end|rose":"258e6042338ce64bb4157c0c94b232ac","toxic till the end":"258e6042338ce64bb4157c0c94b232ac","born again|lisa":"258e6042338ce64bb4157c0c94b232ac","born again":"258e6042338ce64bb4157c0c94b232ac","new woman|lisa":"258e6042338ce64bb4157c0c94b232ac","new woman":"258e6042338ce64bb4157c0c94b232ac","love hangover|jennie":"258e6042338ce64bb4157c0c94b232ac","love hangover":"258e6042338ce64bb4157c0c94b232ac","extral|jennie":"258e6042338ce64bb4157c0c94b232ac","extral":"258e6042338ce64bb4157c0c94b232ac","stargazing|myles smith":"f4246416b5e3e71a35adf1e2cbe98bfb","stargazing":"f4246416b5e3e71a35adf1e2cbe98bfb","nice to meet you|myles smith":"f4246416b5e3e71a35adf1e2cbe98bfb","nice to meet you":"f4246416b5e3e71a35adf1e2cbe98bfb","fable|gigi perez":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/21/6f/68/216f6844-711c-84ea-a041-3f37635f6688/24UM1IM12889.rgb.jpg/500x500bb.jpg","fable":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/21/6f/68/216f6844-711c-84ea-a041-3f37635f6688/24UM1IM12889.rgb.jpg/500x500bb.jpg","two faced|linkin park":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/cd/7b/91/cd7b9189-5c62-5f99-c39a-e268a31ec7c2/093624821380.jpg/500x500bb.jpg","two faced":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/cd/7b/91/cd7b9189-5c62-5f99-c39a-e268a31ec7c2/093624821380.jpg/500x500bb.jpg","high road|koe wetzel":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a1/5a/2c/a15a2c42-ce9c-8c47-2b68-8cff0ab75708/196872445718.jpg/500x500bb.jpg","high road":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a1/5a/2c/a15a2c42-ce9c-8c47-2b68-8cff0ab75708/196872445718.jpg/500x500bb.jpg","liar|jelly roll":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/95/b9/ca/95b9ca00-29cb-8edc-1ecb-5bda742f3177/24UMGIM62166.rgb.jpg/500x500bb.jpg","liar":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/95/b9/ca/95b9ca00-29cb-8edc-1ecb-5bda742f3177/24UMGIM62166.rgb.jpg/500x500bb.jpg","4x4xu|lainey wilson":"473abf39f40221437fb7c590e36b7282","4x4xu":"473abf39f40221437fb7c590e36b7282","i never lie|zach top":"7060ea038f51fdeff23bc40eb5027663","i never lie":"7060ea038f51fdeff23bc40eb5027663","kiss my boots|bakar":"37a20b62f754b7ff5a9a29a8f2fe9d27","kiss my boots":"37a20b62f754b7ff5a9a29a8f2fe9d27","kisses|bl3ss":"e70f7518f5dbe0b0be643cbabc87ca4b","kisses":"e70f7518f5dbe0b0be643cbabc87ca4b","somedays|sonny fodera":"e70f7518f5dbe0b0be643cbabc87ca4b","somedays":"e70f7518f5dbe0b0be643cbabc87ca4b","espresso|sabrina carpenter":"e3221287a77eb262944e6528766eeba4","espresso":"e3221287a77eb262944e6528766eeba4","blinding lights|the weeknd":"fd00ebd6d30d7253f813dba3bb1c66a9","blinding lights":"fd00ebd6d30d7253f813dba3bb1c66a9","levitating|dua lipa":"f8364f090ba04f1b19b381ec0390f3e4","levitating":"f8364f090ba04f1b19b381ec0390f3e4","as it was|harry styles":"b0e936124f59e669ddba02ebe5893f95","as it was":"b0e936124f59e669ddba02ebe5893f95","cruel summer|taylor swift":"6111c5ab9729c8eac47883e4e50e9cf8","cruel summer":"6111c5ab9729c8eac47883e4e50e9cf8","we can t be friends wait for your love|ariana grande":"9349b2fcb4bd060060a33f054a619e83","we can t be friends wait for your love":"9349b2fcb4bd060060a33f054a619e83","vampire|olivia rodrigo":"4bb79214365c0049e031f5e2caae4752","vampire":"4bb79214365c0049e031f5e2caae4752","greedy|tate mcrae":"ef25b6bec265332a059879f45d33cd7e","greedy":"ef25b6bec265332a059879f45d33cd7e","flowers|miley cyrus":"98610629a40996b61b3d24bd5ab8c2e1","flowers":"98610629a40996b61b3d24bd5ab8c2e1","shape of you|ed sheeran":"107c2b43f10c249077c1f7618563bb63","shape of you":"107c2b43f10c249077c1f7618563bb63","attention|charlie puth":"da7eb4c99604b2fda5f123aba3897850","attention":"da7eb4c99604b2fda5f123aba3897850","bad guy|billie eilish":"6630083f454d48eadb6a9b53f035d734","bad guy":"6630083f454d48eadb6a9b53f035d734","24k magic|bruno mars":"012b27906b430a37ec1d8f793d5c4fa6","24k magic":"012b27906b430a37ec1d8f793d5c4fa6","anti hero|taylor swift":"f571cb780b339ec087201b1cea53c3d9","anti hero":"f571cb780b339ec087201b1cea53c3d9","watermelon sugar|harry styles":"346c524c15ecccbc4a8a78e8972a352c","watermelon sugar":"346c524c15ecccbc4a8a78e8972a352c","please please please|sabrina carpenter":"0fd6e3b346b959a8781ccfa89b63607a","please please please":"0fd6e3b346b959a8781ccfa89b63607a","save your tears|the weeknd":"fd00ebd6d30d7253f813dba3bb1c66a9","save your tears":"fd00ebd6d30d7253f813dba3bb1c66a9","houdini|dua lipa":"12c05200e9097af48e0ad4fc259cee25","houdini":"12c05200e9097af48e0ad4fc259cee25","into you|ariana grande":"1a8f399e9ddbb8ec2530232c0dfd953f","into you":"1a8f399e9ddbb8ec2530232c0dfd953f","deja vu|olivia rodrigo":"e68da86fd7976135c2d2d1715afaef7c","deja vu":"e68da86fd7976135c2d2d1715afaef7c","shivers|ed sheeran":"82f1bc61739e54407f05674256747ae4","shivers":"82f1bc61739e54407f05674256747ae4","stay|the kid laroi":"dd6fe7fa9267185c4b835bd4f155d1d2","stay":"dd6fe7fa9267185c4b835bd4f155d1d2","there s nothing holdin me back|shawn mendes":"35d5f7dd0b398bb37287b3454f0b05b9","there s nothing holdin me back":"35d5f7dd0b398bb37287b3454f0b05b9","rush|troye sivan":"025b8f193e9cb37b15c857956938ae4f","rush":"025b8f193e9cb37b15c857956938ae4f","not like us|kendrick lamar":"84345d29bc2ed8e713112425f8417e97","not like us":"84345d29bc2ed8e713112425f8417e97","sicko mode|travis scott":"b6fcb2355d00296ca037f17ed3463b40","sicko mode":"b6fcb2355d00296ca037f17ed3463b40","god s plan|drake":"b69d3bcbd130ad4cc9259de543889e30","god s plan":"b69d3bcbd130ad4cc9259de543889e30","like that|future":"2d20cf6d65607e406213afbb3b62ce0d","like that":"2d20cf6d65607e406213afbb3b62ce0d","no role modelz|j cole":"f45c8916970597d390313833a9db0c61","no role modelz":"f45c8916970597d390313833a9db0c61","redrum|21 savage":"d1efd9562706fbc4facf4e86cbe78be4","redrum":"d1efd9562706fbc4facf4e86cbe78be4","fe n|travis scott":"6d7164fecb39ddee0cb15952e750d907","fe n":"6d7164fecb39ddee0cb15952e750d907","superhero heroes villains|metro boomin":"862ab860ff69c30deeb5979db6e46b62","superhero heroes villains":"862ab860ff69c30deeb5979db6e46b62","earfquake|tyler":"041ab5ceb6fb6ebf9512966835be9e1b","earfquake":"041ab5ceb6fb6ebf9512966835be9e1b","praise the lord da shine|a ap rocky":"f3b412a4f69c59dfb46583a93995f565","praise the lord da shine":"f3b412a4f69c59dfb46583a93995f565","sprinter|dave":"d8cd79f825f1a87ec86443c934556df7","sprinter":"d8cd79f825f1a87ec86443c934556df7","lovin on me|jack harlow":"6d4d4cbd4990a644a184b5f64ee01ebf","lovin on me":"6d4d4cbd4990a644a184b5f64ee01ebf","bandit|don toliver":"bd7465c9bc2e952c83c7f168579aefcb","bandit":"bd7465c9bc2e952c83c7f168579aefcb","fukumean|gunna":"35446b14e181f0a3fe415c06fec08d0b","fukumean":"35446b14e181f0a3fe415c06fec08d0b","family ties|baby keem":"0681d0925e8463d1e7ad2377793cea81","family ties":"0681d0925e8463d1e7ad2377793cea81","first person shooter|drake":"868162e87da67d647789ed7b6456840c","first person shooter":"868162e87da67d647789ed7b6456840c","xo tour llif3|lil uzi vert":"77d464b429890070fecdf853bbe426ff","xo tour llif3":"77d464b429890070fecdf853bbe426ff","mask off|future":"5186078c5bd5623ebec9b2753d8aaebe","mask off":"5186078c5bd5623ebec9b2753d8aaebe","rockstar|post malone":"c000a4d39f31f3716bf3f11aa5fab080","rockstar":"c000a4d39f31f3716bf3f11aa5fab080","surround sound|jid":"52c49df999ccf2844238672acccf2b7b","surround sound":"52c49df999ccf2844238672acccf2b7b","money trees|kendrick lamar":"b5be27644d505bad7bdb516fe4165475","money trees":"b5be27644d505bad7bdb516fe4165475","drip too hard|lil baby":"3d845a35fd7849630324107baf07657b","drip too hard":"3d845a35fd7849630324107baf07657b","middle child|j cole":"9a0366a17a65c8479901b292a4077507","middle child":"9a0366a17a65c8479901b292a4077507","see you again|tyler":"a7a16b8f63b1ec0e9fbd327619966737","see you again":"a7a16b8f63b1ec0e9fbd327619966737","snooze|sza":"328d68300e654b21831b261e413780e0","snooze":"328d68300e654b21831b261e413780e0","pink white|frank ocean":"f798a866107715dd6dc1049e498ce21f","pink white":"f798a866107715dd6dc1049e498ce21f","best part|daniel caesar":"4dff56488d13d0b5e96d93d895c9624b","best part":"4dff56488d13d0b5e96d93d895c9624b","leave the door open|silk sonic":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/c5/33/dc/c533dc8e-2baa-94f9-22be-e6e28945f932/075679754134.jpg/500x500bb.jpg","leave the door open":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/c5/33/dc/c533dc8e-2baa-94f9-22be-e6e28945f932/075679754134.jpg/500x500bb.jpg","heartbreak anniversary|giveon":"5db10a9a3170871f3f4f9bbd01029b9a","heartbreak anniversary":"5db10a9a3170871f3f4f9bbd01029b9a","gravity|brent faiyaz":"51d0d130671262611c927bd63c192670","gravity":"51d0d130671262611c927bd63c192670","girls need love|summer walker":"4ba5878f51f5aa6f1995b2ba72878f0a","girls need love":"4ba5878f51f5aa6f1995b2ba72878f0a","exchange|bryson tiller":"adde8485c3484a602f8f8a51d954b4ba","exchange":"adde8485c3484a602f8f8a51d954b4ba","kill bill|sza":"328d68300e654b21831b261e413780e0","kill bill":"328d68300e654b21831b261e413780e0","sure thing|miguel":"23f94611c678b0c16b2a8336fa420e3f","sure thing":"23f94611c678b0c16b2a8336fa420e3f","nights like this|kehlani":"38f53c7ad2ef060d90f500a597e0f2f5","nights like this":"38f53c7ad2ef060d90f500a597e0f2f5","on my mama|victoria monet":"2c64ab2309b86a1c96896193ac833c40","on my mama":"2c64ab2309b86a1c96896193ac833c40","i want you around|snoh aalegra":"45579005ac5285cb351e5e7414267f82","i want you around":"45579005ac5285cb351e5e7414267f82","sativa|jhene aiko":"ad84a421d7190381989ea7a04f897381","sativa":"ad84a421d7190381989ea7a04f897381","die for you|the weeknd":"134778e4c4f19ea71c82408300925a9a","die for you":"134778e4c4f19ea71c82408300925a9a","get you|daniel caesar":"282e45bef1995c2c6f2901e34c4ab560","get you":"282e45bef1995c2c6f2901e34c4ab560","focus|h e r":"4dff56488d13d0b5e96d93d895c9624b","focus":"4dff56488d13d0b5e96d93d895c9624b","break from toronto|partynextdoor":"3046cd9e199255a7c9f64bf0f1cb246e","break from toronto":"3046cd9e199255a7c9f64bf0f1cb246e","over|lucky daye":"e66715b17e490fea982b66506d3a33b8","over":"e66715b17e490fea982b66506d3a33b8","boo d up|ella mai":"9747893d144d612424ec129b71648bb0","boo d up":"9747893d144d612424ec129b71648bb0","free mind|tems":"53e9db9663c87b34723c17bcf9c2a8e8","free mind":"53e9db9663c87b34723c17bcf9c2a8e8","talk|khalid":"f350b1fd2563c5f582d10914f8cbbe42","talk":"f350b1fd2563c5f582d10914f8cbbe42","thinkin bout you|frank ocean":"e545e4c96ae929e8cce56808afd7756f","thinkin bout you":"e545e4c96ae929e8cce56808afd7756f","good days|sza":"8aafccd5fc82acdebc88372bd1bef371","good days":"8aafccd5fc82acdebc88372bd1bef371","do i wanna know|arctic monkeys":"64e54e307bd5e2bdb27ffeb662fd910d","do i wanna know":"64e54e307bd5e2bdb27ffeb662fd910d","mr brightside|the killers":"64e54e307bd5e2bdb27ffeb662fd910d","mr brightside":"64e54e307bd5e2bdb27ffeb662fd910d","everlong|foo fighters":"266f01f1c7a04843d11cd08f9c07d11f","everlong":"266f01f1c7a04843d11cd08f9c07d11f","in the end|linkin park":"033a271b5ec10842c287827c39244fb5","in the end":"033a271b5ec10842c287827c39244fb5","smells like teen spirit|nirvana":"f0282817b697279e56df13909962a54a","smells like teen spirit":"f0282817b697279e56df13909962a54a","seven nation army|the white stripes":"ed0929a4c44d77c4dc524a10748fc2f6","seven nation army":"ed0929a4c44d77c4dc524a10748fc2f6","boulevard of broken dreams|green day":"4a2497e819405074b107b3bce1d95cf9","boulevard of broken dreams":"4a2497e819405074b107b3bce1d95cf9","californication|red hot chili peppers":"5e61e8290a4d1d64ca58920656c9602d","californication":"5e61e8290a4d1d64ca58920656c9602d","supermassive black hole|muse":"9169b09a2a789322d00b9a616a9f36b5","supermassive black hole":"9169b09a2a789322d00b9a616a9f36b5","the adults are talking|the strokes":"523ac3e61759f365b9306fc44dd53eea","the adults are talking":"523ac3e61759f365b9306fc44dd53eea","misery business|paramore":"1a48b36fe9dd29b2bef2f5058cbe0c25","misery business":"1a48b36fe9dd29b2bef2f5058cbe0c25","sex on fire|kings of leon":"a4d41f829fac22196b44e97824ee9180","sex on fire":"a4d41f829fac22196b44e97824ee9180","take me out|franz ferdinand":"f274cdbda80d97a785e001848378dd29","take me out":"f274cdbda80d97a785e001848378dd29","dreams|fleetwood mac":"9732751ce91d786dcf30069853697078","dreams":"9732751ce91d786dcf30069853697078","creep|radiohead":"1dd56fd8824492e1a5106c99a00a85ec","creep":"1dd56fd8824492e1a5106c99a00a85ec","lonely boy|the black keys":"f1e189eb93b8508d102931bcd9293ce8","lonely boy":"f1e189eb93b8508d102931bcd9293ce8","stressed out|twenty one pilots":"dbbde1014cda9b101412a8e27add0ad2","stressed out":"dbbde1014cda9b101412a8e27add0ad2","don t look back in anger|oasis":"c607d5443ca9db2ae550f2081a3904e6","don t look back in anger":"c607d5443ca9db2ae550f2081a3904e6","yellow|coldplay":"970dce98eeea6729244c0ae71707a83d","yellow":"970dce98eeea6729244c0ae71707a83d","r u mine|arctic monkeys":"64e54e307bd5e2bdb27ffeb662fd910d","r u mine":"64e54e307bd5e2bdb27ffeb662fd910d","numb|linkin park":"44df4f6fb2534768f4924365c103d0f7","numb":"44df4f6fb2534768f4924365c103d0f7","somebody told me|the killers":"38bb1c3329d465a3e6d4ebfe579df121","somebody told me":"38bb1c3329d465a3e6d4ebfe579df121","the pretender|foo fighters":"266f01f1c7a04843d11cd08f9c07d11f","the pretender":"266f01f1c7a04843d11cd08f9c07d11f","under the bridge|red hot chili peppers":"e3f1bee87b1d5d1313641762f375a3fb","under the bridge":"e3f1bee87b1d5d1313641762f375a3fb","one kiss|calvin harris":"0397baea24f861db7ee63fb1c70391f9","one kiss":"0397baea24f861db7ee63fb1c70391f9","wake me up|avicii":"ec97306735b46ec334e0ce562290775b","wake me up":"ec97306735b46ec334e0ce562290775b","titanium|david guetta":"52330286cb5008805253fd77c7111d3f","titanium":"52330286cb5008805253fd77c7111d3f","the business|tiesto":"664cd2e671f05f3f8f1e0bbd710e082d","the business":"664cd2e671f05f3f8f1e0bbd710e082d","delilah pull me out of this|fred again":"4417f9908f6657064dd554e8b64bcf2d","delilah pull me out of this":"4417f9908f6657064dd554e8b64bcf2d","latch|disclosure":"e44468007c45f2523d056a0b19eed80a","latch":"e44468007c45f2523d056a0b19eed80a","don t you worry child|swedish house mafia":"a6e59fada64940a751de6eaa01229e8b","don t you worry child":"a6e59fada64940a751de6eaa01229e8b","clarity|zedd":"6b8a51cd4d5e2a277c8a1c4f88d59489","clarity":"6b8a51cd4d5e2a277c8a1c4f88d59489","scared to be lonely|martin garrix":"8e6e0c8973442986572a2e8a5492fdd9","scared to be lonely":"8e6e0c8973442986572a2e8a5492fdd9","firestone|kygo":"28a8beab24b92bcbbd1e80df83c4bd24","firestone":"28a8beab24b92bcbbd1e80df83c4bd24","one more time|daft punk":"5718f7c81c27e0b2417e2a4c45224f8a","one more time":"5718f7c81c27e0b2417e2a4c45224f8a","it goes like nanana|peggy gou":"da81d86b3bc191357af8f86da1ad2751","it goes like nanana":"da81d86b3bc191357af8f86da1ad2751","rhyme dust|mk":"4ef99be8f99decc23a9e2bd2b3c891e6","rhyme dust":"4ef99be8f99decc23a9e2bd2b3c891e6","innerbloom|rufus du sol":"b3e3bc9f13817bd7878fb69831a4c307","innerbloom":"b3e3bc9f13817bd7878fb69831a4c307","piece of your heart|meduza":"2aa3a5de3aef945681ee002d3dbde756","piece of your heart":"2aa3a5de3aef945681ee002d3dbde756","runaway u i|galantis":"e26d05cc4a80b07bcb4182bb598eae9d","runaway u i":"e26d05cc4a80b07bcb4182bb598eae9d","heroes we could be|alesso":"3a436fc1dfb085581043417e1db3caad","heroes we could be":"3a436fc1dfb085581043417e1db3caad","rather be|clean bandit":"3193132d50c74a62d1cd419fa170139a","rather be":"3193132d50c74a62d1cd419fa170139a","head heart|joel corry":"6c30daf87841ac1c27a67b7ab4ba255d","head heart":"6c30daf87841ac1c27a67b7ab4ba255d","lose control|meduza":"453595cce92efa85b6cade031f59cad6","lose control":"453595cce92efa85b6cade031f59cad6","summer|calvin harris":"a72e5db10e9168cd6f5065fbe750cdbb","summer":"a72e5db10e9168cd6f5065fbe750cdbb","levels|avicii":"30bc3d8c348ddddb00c44f28d3120ac5","levels":"30bc3d8c348ddddb00c44f28d3120ac5","moth to a flame|swedish house mafia":"9bd2f0768b8b53cb3338f546526796ec","moth to a flame":"9bd2f0768b8b53cb3338f546526796ec","losing it|fisher":"ebac3c7a4baff91f789cfdf053a11938","losing it":"ebac3c7a4baff91f789cfdf053a11938","the less i know the better|tame impala":"de5b9b704cd4ec36f8bf49beb3e17ba2","the less i know the better":"de5b9b704cd4ec36f8bf49beb3e17ba2","somebody else|the 1975":"97ab544fb96d693e44adb0cabda14e43","somebody else":"97ab544fb96d693e44adb0cabda14e43","heat waves|glass animals":"04ea51c6eb90a6208f2e47da861cf1a5","heat waves":"04ea51c6eb90a6208f2e47da861cf1a5","sofia|clairo":"ce9daf5b5d41cf2c8e1076b2a1e07787","sofia":"ce9daf5b5d41cf2c8e1076b2a1e07787","sweater weather|the neighbourhood":"521126388e95a1ad2cde7d0a3854cf3d","sweater weather":"521126388e95a1ad2cde7d0a3854cf3d","west coast|lana del rey":"b68adb6788dfa09a314f594aec287850","west coast":"b68adb6788dfa09a314f594aec287850","motion sickness|phoebe bridgers":"effa6216edf21cfefd5332a2899c6ec0","motion sickness":"effa6216edf21cfefd5332a2899c6ec0","my love mine all mine|mitski":"db69f7d3ea280f1155256705735648cd","my love mine all mine":"db69f7d3ea280f1155256705735648cd","show me how|men i trust":"6f4f35fdc77ef818f0e0e29211cac77f","show me how":"6f4f35fdc77ef818f0e0e29211cac77f","chamber of reflection|mac demarco":"fc8f82cf0eba7408386e365e538df8b2","chamber of reflection":"fc8f82cf0eba7408386e365e538df8b2","are you bored yet|wallows":"e8d0adbc15a2bba2350ad40022733418","are you bored yet":"e8d0adbc15a2bba2350ad40022733418","cigarette daydreams|cage the elephant":"fb29ac1b15d07f8c9d70003a9262fd14","cigarette daydreams":"fb29ac1b15d07f8c9d70003a9262fd14","electric feel|mgmt":"751372bcbd63a38e6ec6ef8bd448d687","electric feel":"751372bcbd63a38e6ec6ef8bd448d687","dog days are over|florence the machine":"e4975860d7e182195ec9fb1464676b94","dog days are over":"e4975860d7e182195ec9fb1464676b94","ribs|lorde":"7bb0b356418fbb275c0c3db7259128d7","ribs":"7bb0b356418fbb275c0c3db7259128d7","a punk|vampire weekend":"6fc963e3e5bd489dd82b0e02c3122792","a punk":"6fc963e3e5bd489dd82b0e02c3122792","glue song|beabadoobee":"8e64a61be14286be891afeef6b1aafbe","glue song":"8e64a61be14286be891afeef6b1aafbe","space song|beach house":"ae6cd55de0f78ca8ac38ad6c6cff0c1f","space song":"ae6cd55de0f78ca8ac38ad6c6cff0c1f","walking on a dream|empire of the sun":"63e0641afc551bf313b1e7027799a136","walking on a dream":"63e0641afc551bf313b1e7027799a136","can i call you tonight|dayglow":"bd2f298f15908d7cff95e41ff955fbd0","can i call you tonight":"bd2f298f15908d7cff95e41ff955fbd0","borderline|tame impala":"d8eb61bd4becf79a602a75b69eebde7d","borderline":"d8eb61bd4becf79a602a75b69eebde7d","riptide|vance joy":"d3f67e81d134e4036fd2e68a062210c4","riptide":"d3f67e81d134e4036fd2e68a062210c4","pumped up kicks|foster the people":"fc73624907c40d356ca26152754cef43","pumped up kicks":"fc73624907c40d356ca26152754cef43","holocene|bon iver":"1457f0d27076538d484625fa706541b7","holocene":"1457f0d27076538d484625fa706541b7","die with a smile|lady gaga":"4bd5903f4ce8f2601916bfadb44efe8a","die with a smile":"4bd5903f4ce8f2601916bfadb44efe8a","birds of a feather|billie eilish":"5d284b31cb9ddeb1a0c79aede5a94e1c","birds of a feather":"5d284b31cb9ddeb1a0c79aede5a94e1c","good luck babe|chappell roan":"377470fb0413c43587769a7dea37f691","good luck babe":"377470fb0413c43587769a7dea37f691","beautiful things|benson boone":"71ca8c4c88fdb45381c4291bd4233ff6","beautiful things":"71ca8c4c88fdb45381c4291bd4233ff6","lose control|teddy swims":"a45814bc18561080e3170f7c8ba942aa","too sweet|hozier":"7a7c512b717a4aa7452f3c3e46675322","too sweet":"7a7c512b717a4aa7452f3c3e46675322","a bar song tipsy|shaboozey":"d4f0d9289d6f68204dee8a22fe777c70","a bar song tipsy":"d4f0d9289d6f68204dee8a22fe777c70","taste|sabrina carpenter":"0fd6e3b346b959a8781ccfa89b63607a","taste":"0fd6e3b346b959a8781ccfa89b63607a","i had some help|post malone":"b9c8cc4fd597a9bc516445e6573501cf","i had some help":"b9c8cc4fd597a9bc516445e6573501cf","stick season|noah kahan":"1cf9edd5673e4f9a070054fbd6166134","stick season":"1cf9edd5673e4f9a070054fbd6166134","paint the town red|doja cat":"ad4bfc2a374741218dd6498d04e323cc","paint the town red":"ad4bfc2a374741218dd6498d04e323cc","water|tyla":"b246276eba02e22c9e08605924395480","water":"b246276eba02e22c9e08605924395480","calm down|rema":"3071378af24d789b8fc69e95162041e4","calm down":"3071378af24d789b8fc69e95162041e4","seven|jung kook":"d1ddbc901bf7d7b43187fac1b1e6714e","seven":"d1ddbc901bf7d7b43187fac1b1e6714e","starboy|the weeknd":"134778e4c4f19ea71c82408300925a9a","starboy":"134778e4c4f19ea71c82408300925a9a","dance the night|dua lipa":"67bbf9fc8e49fc8d373c91963061572b","dance the night":"67bbf9fc8e49fc8d373c91963061572b","exes|tate mcrae":"6f05ad1f5ec636827d9db5683188d980","exes":"6f05ad1f5ec636827d9db5683188d980","million dollar baby|tommy richman":"26989b6704a8656f2ceb4e3a148a55cd","million dollar baby":"26989b6704a8656f2ceb4e3a148a55cd","comethru|jeremy zucker":"795daf4244e61b38656efb32f3fe5259","comethru":"795daf4244e61b38656efb32f3fe5259","i like me better|lauv":"3db7eca4ee1a2effa0d353289b4b2bba","i like me better":"3db7eca4ee1a2effa0d353289b4b2bba","limbo|keshi":"5de0eec56dbe0a0670f01826aaf32f1a","limbo":"5de0eec56dbe0a0670f01826aaf32f1a","at my worst|pink sweat":"cab97fdd320e4a821ca92ab3b5dcc37c","at my worst":"cab97fdd320e4a821ca92ab3b5dcc37c","gravity|john mayer":"a49f22668c3f7f26d9de7fcc93537742","texas sun|khruangbin":"ce74bca0d491ab7f24a6a21a752a1745","texas sun":"ce74bca0d491ab7f24a6a21a752a1745","don t know why|norah jones":"d4cb6f8663af84d1db08a41a019065a0","don t know why":"d4cb6f8663af84d1db08a41a019065a0","the night we met|lord huron":"19b14fa5b494e0e74332f7dbf8dab87d","the night we met":"19b14fa5b494e0e74332f7dbf8dab87d","coastline|hollow coves":"694999b0e2c9c832d2ab406f861f9a96","coastline":"694999b0e2c9c832d2ab406f861f9a96","anchor|novo amor":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/54/4b/e1/544be1ff-5505-56dc-2720-96da95313a8e/cover.jpg/500x500bb.jpg","anchor":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/54/4b/e1/544be1ff-5505-56dc-2720-96da95313a8e/cover.jpg/500x500bb.jpg","sunday best|surfaces":"b2eee9b3bc6ad79ef160fd0e732054fa","sunday best":"b2eee9b3bc6ad79ef160fd0e732054fa","glimpse of us|joji":"36aecc47636b326efc3987120dcf4c65","glimpse of us":"36aecc47636b326efc3987120dcf4c65","heather|conan gray":"0a5209aec8e37012eb07eb6ef01fa7e6","heather":"0a5209aec8e37012eb07eb6ef01fa7e6","malibu nights|lany":"f90692153e5d2a47033475d70e1d19dd","malibu nights":"f90692153e5d2a47033475d70e1d19dd","loving is easy|rex orange county":"d805dcdae2effd5781af2eb7662a3c4b","loving is easy":"d805dcdae2effd5781af2eb7662a3c4b","banana pancakes|jack johnson":"6fc75cf6170ae0ed9c6a40810c67ba87","banana pancakes":"6fc75cf6170ae0ed9c6a40810c67ba87","apocalypse|cigarettes after sex":"2db20377876da16feb8ec9652e835a81","apocalypse":"2db20377876da16feb8ec9652e835a81","location|khalid":"7fa1597e86f5b4283ea316f2ddb54008","location":"7fa1597e86f5b4283ea316f2ddb54008","sunset lover|petit biscuit":"e3390ef01b24150b70763cd1d1f7c628","sunset lover":"e3390ef01b24150b70763cd1d1f7c628","sunflower|post malone":"1aa3dfe91b3e5d3bc71eca6b6e9c8d39","sunflower":"1aa3dfe91b3e5d3bc71eca6b6e9c8d39","paris in the rain|lauv":"020c438f93cd3317c1eccb1df1906e15","paris in the rain":"020c438f93cd3317c1eccb1df1906e15","best friend|rex orange county":"9ccaea7ee5c2f1c370aad199ed21935a","best friend":"9ccaea7ee5c2f1c370aad199ed21935a","slow dancing in a burning room|john mayer":"a49f22668c3f7f26d9de7fcc93537742","slow dancing in a burning room":"a49f22668c3f7f26d9de7fcc93537742","till i collapse|eminem":"ec3c8ed67427064c70f67e5815b74cef","till i collapse":"ec3c8ed67427064c70f67e5815b74cef","stronger|kanye west":"15012d974c6263aec95e52e6d86cba23","stronger":"15012d974c6263aec95e52e6d86cba23","believer|imagine dragons":"247b228179aea3b083eef43522b78b45","believer":"247b228179aea3b083eef43522b78b45","can t hold us|macklemore":"238f1c36e8445fd162d1d53b8181ecb5","can t hold us":"238f1c36e8445fd162d1d53b8181ecb5","power|kanye west":"742aba8510ba803bea51d304cf2ca786","power":"742aba8510ba803bea51d304cf2ca786","lose yourself|eminem":"e2b36a9fda865cb2e9ed1476b6291a7d","lose yourself":"e2b36a9fda865cb2e9ed1476b6291a7d","humble|kendrick lamar":"7ce6b8452fae425557067db6e6a1cad5","humble":"7ce6b8452fae425557067db6e6a1cad5","bangarang|skrillex":"3d5ef81b8e6c4b5c35ebe1dfa69a0463","bangarang":"3d5ef81b8e6c4b5c35ebe1dfa69a0463","eye of the tiger|survivor":"e66b5d3a40f69690c1633afb73cc590c","eye of the tiger":"e66b5d3a40f69690c1633afb73cc590c","thunderstruck|ac":"e715766b21a8db6076f6a9a89e25cf82","thunderstruck":"e715766b21a8db6076f6a9a89e25cf82","faint|linkin park":"882448ab63952aa16e502c82db2df160","faint":"882448ab63952aa16e502c82db2df160","centuries|fall out boy":"c0a1d1281570ad3becbb6146c6d54c0c","centuries":"c0a1d1281570ad3becbb6146c6d54c0c","dreams and nightmares|meek mill":"b9e64f0c2ebbf77a34dd58f49fe6a7ae","dreams and nightmares":"b9e64f0c2ebbf77a34dd58f49fe6a7ae","industry baby|lil nas":"a65e86966cfd34b2aa292856136ef9ac","industry baby":"a65e86966cfd34b2aa292856136ef9ac","back in black|ac":"41041b14873956eff0459c8ea2c296a8","back in black":"41041b14873956eff0459c8ea2c296a8","radioactive|imagine dragons":"7e8314f4280cffde363547a495a260bc","radioactive":"7e8314f4280cffde363547a495a260bc","physical|dua lipa":"f8364f090ba04f1b19b381ec0390f3e4","physical":"f8364f090ba04f1b19b381ec0390f3e4","turn down for what|dj snake":"82c139e154a40073542914dfed468474","turn down for what":"82c139e154a40073542914dfed468474","x gon give it to ya|dmx":"2738ddc7f2fa7d869438caf6a3d25a7b","x gon give it to ya":"2738ddc7f2fa7d869438caf6a3d25a7b","remember the name|fort minor":"d4059c5525f643e2843b2f1e18e2d39f","remember the name":"d4059c5525f643e2843b2f1e18e2d39f","killing in the name|rage against the machine":"73a4d0cb2f3ec27583b9e0bc724b50c7","killing in the name":"73a4d0cb2f3ec27583b9e0bc724b50c7","breathe|the prodigy":"566d28d32080a6d82a2d4d145ea5ea7e","breathe":"566d28d32080a6d82a2d4d145ea5ea7e","pump it|black eyed peas":"595ae492a34647054ea30d805096d5b5","pump it":"595ae492a34647054ea30d805096d5b5","dna|kendrick lamar":"7ce6b8452fae425557067db6e6a1cad5","dna":"7ce6b8452fae425557067db6e6a1cad5","yeah|usher":"b89c20012cccb051c8a4e04d98386f95","yeah":"b89c20012cccb051c8a4e04d98386f95","hey ya|outkast":"f81783b6cc6030733cd475f820855562","hey ya":"f81783b6cc6030733cd475f820855562","toxic|britney spears":"8a2b95cda407d004d829831d20e2e20b","toxic":"8a2b95cda407d004d829831d20e2e20b","i want it that way|backstreet boys":"d61eaad8f321ea876a5f5c7219aae892","i want it that way":"d61eaad8f321ea876a5f5c7219aae892","crazy in love|beyonce":"1ea1a631aa5235bbd0063643beb96fa8","crazy in love":"1ea1a631aa5235bbd0063643beb96fa8","say my name|destiny s child":"73da200f9335f752d2f7cb5ed8933cef","say my name":"73da200f9335f752d2f7cb5ed8933cef","no scrubs|tlc":"6dd5f40e7688ba155a5ef557977e95d3","no scrubs":"6dd5f40e7688ba155a5ef557977e95d3","sexyback|justin timberlake":"615bb58abf2e5fd86741ed5311d364b1","sexyback":"615bb58abf2e5fd86741ed5311d364b1","umbrella|rihanna":"91276466fbc876d96be9e6926060af60","umbrella":"91276466fbc876d96be9e6926060af60","hot in herre|nelly":"632fa55096ecab62a0c2556fa9e958c1","hot in herre":"632fa55096ecab62a0c2556fa9e958c1","in da club|50 cent":"8f4dd4d8abf85ceda96b6b4adf217590","in da club":"8f4dd4d8abf85ceda96b6b4adf217590","hips don t lie|shakira":"b570890728621ec68d5c5558164c3945","hips don t lie":"b570890728621ec68d5c5558164c3945","no one|alicia keys":"b9f3ff7c0514902ec94751360154f25b","no one":"b9f3ff7c0514902ec94751360154f25b","so sick|ne yo":"ad97c751643e185a348fb13199c49944","so sick":"ad97c751643e185a348fb13199c49944","wannabe|spice girls":"18c4f2d9608910a2b8eb1835052e895b","wannabe":"18c4f2d9608910a2b8eb1835052e895b","baby one more time|britney spears":"f685d32254a59b6162be0d1082ff8805","baby one more time":"f685d32254a59b6162be0d1082ff8805","bye bye bye|nsync":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/95/e8/65/95e86597-6095-0f6c-f6b8-ba53c7b744a2/828767330723.jpg/500x500bb.jpg","bye bye bye":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/95/e8/65/95e86597-6095-0f6c-f6b8-ba53c7b744a2/828767330723.jpg/500x500bb.jpg","genie in a bottle|christina aguilera":"98276416e4db0e5eb6fbb9c9f1a52bdc","genie in a bottle":"98276416e4db0e5eb6fbb9c9f1a52bdc","complicated|avril lavigne":"1130d6301d5e87976279ea2f706fcc26","complicated":"1130d6301d5e87976279ea2f706fcc26","hollaback girl|gwen stefani":"595ae492a34647054ea30d805096d5b5","hollaback girl":"595ae492a34647054ea30d805096d5b5","where is the love|black eyed peas":"0e4b70f9985801a0acbcef1782bd18eb","where is the love":"0e4b70f9985801a0acbcef1782bd18eb","promiscuous|nelly furtado":"1c0ab3163b031034e5b8155c10aada6d","promiscuous":"1c0ab3163b031034e5b8155c10aada6d","she will be loved|maroon 5":"39fe38574c7af3181d1e56ad7c03fce3","she will be loved":"39fe38574c7af3181d1e56ad7c03fce3","smack that|akon":"bc4d98904d61661cc6d7dd53745340d0","smack that":"bc4d98904d61661cc6d7dd53745340d0"};
+  const VERIFIED_ARTIST_COVERS = {"sachin jigar":"1f8faf6b803911ad2d33ea66cacb3033","karan aujla":"ff6bb1420d9fcd2671cf6f86c2e49658","ram sampath":"407e34575dc610b6592fda6d8210be18","hanumankind":"2d00c5a1488deb77bc1faa958f355b54","diljit dosanjh":"87516b74e8e95b373c57a5b74ff2a769","anuv jain":"bdcf70737dc185ef7ec866fb29591137","mitraz":"8d786df765556de281ac3c502e49f643","vishal mishra":"e8503eb01fce97c7427b794e8cd3c478","seedhe maut":"a9f93d7a3ab2ff3d1e2a6d4d1c47c105","kr na":"0c2035c5f905a7d31e192c2f113e2c6f","divine":"209bb3f2ead009e3ea3c3265400a28cf","king":"https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/90/9d/aa/909daa9a-3a47-9314-2855-39f5a157f1e3/5054197407734.jpg/500x500bb.jpg","aditya rikhari":"8d54f8a03637b9f40ad387b6e46c8985","hasan raheem":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c7/e5/02/c7e50222-40be-521e-b8e0-02df1aac4fde/17535.jpg/500x500bb.jpg","the local train":"8b26bfc0975e7c19dc45b3a0ee9360c9","prateek kuhad":"5703f7b99e90720b01978fbca7923e70","ritviz":"0d6a03d9ec7c93ad31203f09216cfbf1","shubh":"9b315dd75419b5f893cb84a1ff2e8ef0","ap dhillon":"ff7878c3ecade62c69ea2e10d4ec1ce8","arijit singh":"87965798331705639c8965c7fc100ffc","akshath":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/b8/29/f1/b829f155-0534-0808-8a6d-f168f9df3d4a/24UMGIM56452.rgb.jpg/500x500bb.jpg","faheem abdullah":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a3/04/c1/a304c107-6887-c475-8377-d05e86cfe108/cover.jpg/500x500bb.jpg","sai abhyankkar":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/80/df/08/80df0808-17e7-ab41-5972-fec5f83e3819/cover.jpg/500x500bb.jpg","sushin shyam":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/88/4e/29/884e290c-29ed-25d5-7b25-243b89097220/cover.jpg/500x500bb.jpg","badshah":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a9/c7/32/a9c732cc-d880-1ee4-ff22-d01593ac6341/24UMGIM22464.rgb.jpg/500x500bb.jpg","yo yo honey singh":"https://is1-ssl.mzstatic.com/image/thumb/Music128/v4/cf/cd/24/cfcd248a-cbbd-10dd-7d25-894bbf9b9f20/8902633288584.jpg/500x500bb.jpg","sagar bhatia":"53bdfe2ba9539665069498cf4a44da4d","darshan raval":"86a67dbe69bd2769bf1e20f1f4a5ad27","varun jain":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/d3/37/eb/d337eb52-2663-826d-d213-335598b14743/198846005553.jpg/500x500bb.jpg","guru randhawa":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/27/58/c3275887-784f-4ad4-e05d-215c5f9dfbbc/8903431009845_cover.jpg/500x500bb.jpg","saad lamjarred":"d2b0e3341b6cabf610dec963e3d527da","jasleen royal":"6b06bbbf7c2d9c6bcb60763bccc0571d","bhupinder babbal":"e8503eb01fce97c7427b794e8cd3c478","aur":"12d66b492d1e4792fec0c4d0ad754ded","talwiinder":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/da/22/b8/da22b844-b237-c414-2111-79276423c340/196589947482.jpg/500x500bb.jpg","yashraj":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/30/63/c3/3063c36c-8537-ce66-4451-e9de6c2a13dc/23UM1IM04836.rgb.jpg/500x500bb.jpg","chani nattan":"4f6b75ee8d72644714ae5254efb27631","sanju rathod":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/13/2d/eb/132deb17-aee2-6b64-d0cc-6446c213375d/cover.jpg/500x500bb.jpg","jyoti nooran":"6f88346b2818313ccadbde509a411832","rose":"258e6042338ce64bb4157c0c94b232ac","kendrick lamar":"da5256ff8cacfe9ad90521f6e3792259","gigi perez":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/25/d4/96/25d49699-acc0-401f-a7cc-d7697339a474/24UM1IM03751.rgb.jpg/500x500bb.jpg","lola young":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/5a/c6/b1/5ac6b183-8ff1-55e3-fa59-8cce5db3fc87/24UMGIM52751.rgb.jpg/500x500bb.jpg","gracie abrams":"967769c4612d74e8f5c7da8798b28e13","doechii":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/5f/a3/e8/5fa3e8b9-9065-47af-63e1-f213d3074580/24UMGIM88644.rgb.jpg/500x500bb.jpg","tate mcrae":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/51/8a/29/518a29f3-5915-662a-d861-663e6d0fbfe4/196872648911.jpg/500x500bb.jpg","linkin park":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/85/cf/a1/85cfa1ed-d8f6-d021-2a9e-cb541b2bbe87/artwork.jpg/500x500bb.jpg","morgan wallen":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/0e/6d/e1/0e6de152-3ff5-84a3-7ce7-7dfbdcb2c3e1/24UMGIM96374.rgb.jpg/500x500bb.jpg","the weeknd":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/c3/9f/c8/c39fc847-2d00-1b7f-7327-264436bd9957/24UM1IM21421.rgb.jpg/500x500bb.jpg","lady gaga":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/c5/43/8b/c5438b81-75e8-3a0a-05ee-4f29ae0b9bb3/25UMGIM07433.rgb.jpg/500x500bb.jpg","tyler":"https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/6d/31/ab/6d31abaf-7a07-05f1-13ad-72ec520b6bfb/22UMGIM67374.rgb.jpg/500x500bb.jpg","billie eilish":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/92/9f/69/929f69f1-9977-3a44-d674-11f70c852d1b/24UMGIM36186.rgb.jpg/500x500bb.jpg","sabrina carpenter":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f6/15/d0/f615d0ab-e0c4-575d-907e-1cc084642357/24UMGIM61704.rgb.jpg/500x500bb.jpg","chappell roan":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/41/bc/fb/41bcfb43-91d5-931d-5747-fb381803143f/23UMGIM21715.rgb.jpg/500x500bb.jpg","addison rae":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/01/ef/7a/01ef7a06-1b48-0460-efbf-983d6a0a37fa/196872309959.jpg/500x500bb.jpg","alex warren":"f4246416b5e3e71a35adf1e2cbe98bfb","sombr":"37a20b62f754b7ff5a9a29a8f2fe9d27","leon thomas":"1c318762a31c79bd28e9f7951bdab5b4","glorilla":"a65e86966cfd34b2aa292856136ef9ac","charli xcx":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/cf/0b/2b/cf0b2bae-d4c1-49ce-de5c-b7c3fcd9e4cd/075679643087.jpg/500x500bb.jpg","john summit":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/26/86/a9/2686a9dc-0a17-8e7f-82e3-9bb7c53c1494/23UMGIM19042.rgb.jpg/500x500bb.jpg","fred again":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/fc/e8/81/fce8814b-c3c2-3cf1-8294-791326b9801e/cover.jpg/500x500bb.jpg","central cee":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/e1/2d/c5/e12dc546-b50d-5a06-58cf-94227b0c78b9/196872154931.jpg/500x500bb.jpg","ice spice":"8508be30ca355ef44597e9be0f834232","jordan adetunji":"1c318762a31c79bd28e9f7951bdab5b4","kehlani":"1c318762a31c79bd28e9f7951bdab5b4","sza":"992cc838b5f0cf0eebbd83011a979571","zach bryan":"7060ea038f51fdeff23bc40eb5027663","luke combs":"473abf39f40221437fb7c590e36b7282","post malone":"473abf39f40221437fb7c590e36b7282","jelly roll":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/95/b9/ca/95b9ca00-29cb-8edc-1ecb-5bda742f3177/24UMGIM62166.rgb.jpg/500x500bb.jpg","shaboozey":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/23/f2/d9/23f2d96d-b842-5f8b-1a09-bcc9a5cf7032/197342797344_cover.jpg/500x500bb.jpg","dasha":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/85/b5/b0/85b5b00b-ca94-dfa1-a3cf-2da4a1e3dd39/054391277657.jpg/500x500bb.jpg","tucker wetmore":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/a1/54/e2/a154e275-9a98-3491-26cf-a1c6f3fb4ea1/24UMGIM54949.rgb.jpg/500x500bb.jpg","megan moroney":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/de/2a/43/de2a438b-bb7c-16db-64db-954057aca5aa/196872040302.jpg/500x500bb.jpg","clairo":"6dfa4ea965a74b93870a85daa74b7ca3","beabadoobee":"6dfa4ea965a74b93870a85daa74b7ca3","role model":"6dfa4ea965a74b93870a85daa74b7ca3","ravyn lenae":"1c318762a31c79bd28e9f7951bdab5b4","malcolm todd":"37a20b62f754b7ff5a9a29a8f2fe9d27","mk gee":"37a20b62f754b7ff5a9a29a8f2fe9d27","artemas":"ee890cf16d00c684be76b0087c7108c4","fontaines d c":"1e8ffbd401303b5693226c12ee0b84fb","sam fender":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/bd/8c/24/bd8c2468-7978-cace-67b1-e0b3e5a643b8/24UM1IM05583.rgb.jpg/500x500bb.jpg","the last dinner party":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/69/74/ab/6974abd9-0415-aa60-240c-b2fac4c62e1b/23UMGIM23237.rgb.jpg/500x500bb.jpg","sleep token":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/e2/c6/0f/e2c60f68-7cec-fa08-6dd3-891aa72c247e/5401148000849_cover.jpg/500x500bb.jpg","bad omens":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/f0/ce/0d/f0ce0d9c-934d-770d-e62f-74564fc410e1/00810016765424_Cover.jpg/500x500bb.jpg","benson boone":"e8947b2a3e00fde8763011ebee2a02fd","teddy swims":"f4246416b5e3e71a35adf1e2cbe98bfb","laufey":"6dfa4ea965a74b93870a85daa74b7ca3","aespa":"258e6042338ce64bb4157c0c94b232ac","jennie":"258e6042338ce64bb4157c0c94b232ac","stray kids":"258e6042338ce64bb4157c0c94b232ac","illit":"258e6042338ce64bb4157c0c94b232ac","creepy nuts":"74a47f9832735b37a41d8fd49cd23354","mrs green apple":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/4c/3b/b2/4c3bb247-3be8-0c57-aa9a-7f1775a7b7a8/24UMGIM32931.rgb.jpg/500x500bb.jpg","rema":"cb415a59a7bc198ec4aab01f02600691","asake":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/dc/b7/78/dcb7782e-3100-b227-ed40-985954cfc6c8/artwork.jpg/500x500bb.jpg","wizkid":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/82/60/3b/82603b3c-1aad-6e37-3b81-d5451046accf/196872637434.jpg/500x500bb.jpg","tyla":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/2a/cc/48/2acc48c7-e092-6b83-ce65-ff80ac6eb51c/196872520118.jpg/500x500bb.jpg","titom":"e70f7518f5dbe0b0be643cbabc87ca4b","karol g":"2a769f6f0cce0ca9e129ce4b61f83973","bad bunny":"e4b16c1afe136140bba34368357e8f05","bini":"0fd6e3b346b959a8781ccfa89b63607a","maki":"37a20b62f754b7ff5a9a29a8f2fe9d27","tj monterde":"f4246416b5e3e71a35adf1e2cbe98bfb","drake":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/23/7c/a2/237ca270-9926-4b78-be81-410b6fc85f47/50291.jpg/500x500bb.jpg","lisa":"258e6042338ce64bb4157c0c94b232ac","myles smith":"f4246416b5e3e71a35adf1e2cbe98bfb","koe wetzel":"https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a1/5a/2c/a15a2c42-ce9c-8c47-2b68-8cff0ab75708/196872445718.jpg/500x500bb.jpg","lainey wilson":"473abf39f40221437fb7c590e36b7282","zach top":"7060ea038f51fdeff23bc40eb5027663","bakar":"37a20b62f754b7ff5a9a29a8f2fe9d27","bl3ss":"e70f7518f5dbe0b0be643cbabc87ca4b","sonny fodera":"e70f7518f5dbe0b0be643cbabc87ca4b","dua lipa":"f8364f090ba04f1b19b381ec0390f3e4","harry styles":"b0e936124f59e669ddba02ebe5893f95","taylor swift":"6111c5ab9729c8eac47883e4e50e9cf8","ariana grande":"9349b2fcb4bd060060a33f054a619e83","olivia rodrigo":"4bb79214365c0049e031f5e2caae4752","miley cyrus":"98610629a40996b61b3d24bd5ab8c2e1","ed sheeran":"107c2b43f10c249077c1f7618563bb63","charlie puth":"da7eb4c99604b2fda5f123aba3897850","bruno mars":"012b27906b430a37ec1d8f793d5c4fa6","the kid laroi":"dd6fe7fa9267185c4b835bd4f155d1d2","shawn mendes":"35d5f7dd0b398bb37287b3454f0b05b9","troye sivan":"025b8f193e9cb37b15c857956938ae4f","travis scott":"b6fcb2355d00296ca037f17ed3463b40","future":"2d20cf6d65607e406213afbb3b62ce0d","j cole":"f45c8916970597d390313833a9db0c61","21 savage":"d1efd9562706fbc4facf4e86cbe78be4","metro boomin":"862ab860ff69c30deeb5979db6e46b62","a ap rocky":"f3b412a4f69c59dfb46583a93995f565","dave":"d8cd79f825f1a87ec86443c934556df7","jack harlow":"6d4d4cbd4990a644a184b5f64ee01ebf","don toliver":"bd7465c9bc2e952c83c7f168579aefcb","gunna":"35446b14e181f0a3fe415c06fec08d0b","baby keem":"0681d0925e8463d1e7ad2377793cea81","lil uzi vert":"77d464b429890070fecdf853bbe426ff","jid":"52c49df999ccf2844238672acccf2b7b","lil baby":"3d845a35fd7849630324107baf07657b","frank ocean":"f798a866107715dd6dc1049e498ce21f","daniel caesar":"4dff56488d13d0b5e96d93d895c9624b","silk sonic":"https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/c5/33/dc/c533dc8e-2baa-94f9-22be-e6e28945f932/075679754134.jpg/500x500bb.jpg","giveon":"5db10a9a3170871f3f4f9bbd01029b9a","brent faiyaz":"51d0d130671262611c927bd63c192670","summer walker":"4ba5878f51f5aa6f1995b2ba72878f0a","bryson tiller":"adde8485c3484a602f8f8a51d954b4ba","miguel":"23f94611c678b0c16b2a8336fa420e3f","victoria monet":"2c64ab2309b86a1c96896193ac833c40","snoh aalegra":"45579005ac5285cb351e5e7414267f82","jhene aiko":"ad84a421d7190381989ea7a04f897381","h e r":"4dff56488d13d0b5e96d93d895c9624b","partynextdoor":"3046cd9e199255a7c9f64bf0f1cb246e","lucky daye":"e66715b17e490fea982b66506d3a33b8","ella mai":"9747893d144d612424ec129b71648bb0","tems":"53e9db9663c87b34723c17bcf9c2a8e8","khalid":"f350b1fd2563c5f582d10914f8cbbe42","arctic monkeys":"64e54e307bd5e2bdb27ffeb662fd910d","the killers":"64e54e307bd5e2bdb27ffeb662fd910d","foo fighters":"266f01f1c7a04843d11cd08f9c07d11f","nirvana":"f0282817b697279e56df13909962a54a","the white stripes":"ed0929a4c44d77c4dc524a10748fc2f6","green day":"4a2497e819405074b107b3bce1d95cf9","red hot chili peppers":"5e61e8290a4d1d64ca58920656c9602d","muse":"9169b09a2a789322d00b9a616a9f36b5","the strokes":"523ac3e61759f365b9306fc44dd53eea","paramore":"1a48b36fe9dd29b2bef2f5058cbe0c25","kings of leon":"a4d41f829fac22196b44e97824ee9180","franz ferdinand":"f274cdbda80d97a785e001848378dd29","fleetwood mac":"9732751ce91d786dcf30069853697078","radiohead":"1dd56fd8824492e1a5106c99a00a85ec","the black keys":"f1e189eb93b8508d102931bcd9293ce8","twenty one pilots":"dbbde1014cda9b101412a8e27add0ad2","oasis":"c607d5443ca9db2ae550f2081a3904e6","coldplay":"970dce98eeea6729244c0ae71707a83d","calvin harris":"0397baea24f861db7ee63fb1c70391f9","avicii":"ec97306735b46ec334e0ce562290775b","david guetta":"52330286cb5008805253fd77c7111d3f","tiesto":"664cd2e671f05f3f8f1e0bbd710e082d","disclosure":"e44468007c45f2523d056a0b19eed80a","swedish house mafia":"a6e59fada64940a751de6eaa01229e8b","zedd":"6b8a51cd4d5e2a277c8a1c4f88d59489","martin garrix":"8e6e0c8973442986572a2e8a5492fdd9","kygo":"28a8beab24b92bcbbd1e80df83c4bd24","daft punk":"5718f7c81c27e0b2417e2a4c45224f8a","peggy gou":"da81d86b3bc191357af8f86da1ad2751","mk":"4ef99be8f99decc23a9e2bd2b3c891e6","rufus du sol":"b3e3bc9f13817bd7878fb69831a4c307","meduza":"2aa3a5de3aef945681ee002d3dbde756","galantis":"e26d05cc4a80b07bcb4182bb598eae9d","alesso":"3a436fc1dfb085581043417e1db3caad","clean bandit":"3193132d50c74a62d1cd419fa170139a","joel corry":"6c30daf87841ac1c27a67b7ab4ba255d","fisher":"ebac3c7a4baff91f789cfdf053a11938","tame impala":"de5b9b704cd4ec36f8bf49beb3e17ba2","the 1975":"97ab544fb96d693e44adb0cabda14e43","glass animals":"04ea51c6eb90a6208f2e47da861cf1a5","the neighbourhood":"521126388e95a1ad2cde7d0a3854cf3d","lana del rey":"b68adb6788dfa09a314f594aec287850","phoebe bridgers":"effa6216edf21cfefd5332a2899c6ec0","mitski":"db69f7d3ea280f1155256705735648cd","men i trust":"6f4f35fdc77ef818f0e0e29211cac77f","mac demarco":"fc8f82cf0eba7408386e365e538df8b2","wallows":"e8d0adbc15a2bba2350ad40022733418","cage the elephant":"fb29ac1b15d07f8c9d70003a9262fd14","mgmt":"751372bcbd63a38e6ec6ef8bd448d687","florence the machine":"e4975860d7e182195ec9fb1464676b94","lorde":"7bb0b356418fbb275c0c3db7259128d7","vampire weekend":"6fc963e3e5bd489dd82b0e02c3122792","beach house":"ae6cd55de0f78ca8ac38ad6c6cff0c1f","empire of the sun":"63e0641afc551bf313b1e7027799a136","dayglow":"bd2f298f15908d7cff95e41ff955fbd0","vance joy":"d3f67e81d134e4036fd2e68a062210c4","foster the people":"fc73624907c40d356ca26152754cef43","bon iver":"1457f0d27076538d484625fa706541b7","hozier":"7a7c512b717a4aa7452f3c3e46675322","noah kahan":"1cf9edd5673e4f9a070054fbd6166134","doja cat":"ad4bfc2a374741218dd6498d04e323cc","jung kook":"d1ddbc901bf7d7b43187fac1b1e6714e","tommy richman":"26989b6704a8656f2ceb4e3a148a55cd","jeremy zucker":"795daf4244e61b38656efb32f3fe5259","lauv":"3db7eca4ee1a2effa0d353289b4b2bba","keshi":"5de0eec56dbe0a0670f01826aaf32f1a","pink sweat":"cab97fdd320e4a821ca92ab3b5dcc37c","john mayer":"a49f22668c3f7f26d9de7fcc93537742","khruangbin":"ce74bca0d491ab7f24a6a21a752a1745","norah jones":"d4cb6f8663af84d1db08a41a019065a0","lord huron":"19b14fa5b494e0e74332f7dbf8dab87d","hollow coves":"694999b0e2c9c832d2ab406f861f9a96","novo amor":"https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/54/4b/e1/544be1ff-5505-56dc-2720-96da95313a8e/cover.jpg/500x500bb.jpg","surfaces":"b2eee9b3bc6ad79ef160fd0e732054fa","joji":"36aecc47636b326efc3987120dcf4c65","conan gray":"0a5209aec8e37012eb07eb6ef01fa7e6","lany":"f90692153e5d2a47033475d70e1d19dd","rex orange county":"d805dcdae2effd5781af2eb7662a3c4b","jack johnson":"6fc75cf6170ae0ed9c6a40810c67ba87","cigarettes after sex":"2db20377876da16feb8ec9652e835a81","petit biscuit":"e3390ef01b24150b70763cd1d1f7c628","eminem":"ec3c8ed67427064c70f67e5815b74cef","kanye west":"15012d974c6263aec95e52e6d86cba23","imagine dragons":"247b228179aea3b083eef43522b78b45","macklemore":"238f1c36e8445fd162d1d53b8181ecb5","skrillex":"3d5ef81b8e6c4b5c35ebe1dfa69a0463","survivor":"e66b5d3a40f69690c1633afb73cc590c","ac":"e715766b21a8db6076f6a9a89e25cf82","fall out boy":"c0a1d1281570ad3becbb6146c6d54c0c","meek mill":"b9e64f0c2ebbf77a34dd58f49fe6a7ae","lil nas":"a65e86966cfd34b2aa292856136ef9ac","dj snake":"82c139e154a40073542914dfed468474","dmx":"2738ddc7f2fa7d869438caf6a3d25a7b","fort minor":"d4059c5525f643e2843b2f1e18e2d39f","rage against the machine":"73a4d0cb2f3ec27583b9e0bc724b50c7","the prodigy":"566d28d32080a6d82a2d4d145ea5ea7e","black eyed peas":"595ae492a34647054ea30d805096d5b5","usher":"b89c20012cccb051c8a4e04d98386f95","outkast":"f81783b6cc6030733cd475f820855562","britney spears":"8a2b95cda407d004d829831d20e2e20b","backstreet boys":"d61eaad8f321ea876a5f5c7219aae892","beyonce":"1ea1a631aa5235bbd0063643beb96fa8","destiny s child":"73da200f9335f752d2f7cb5ed8933cef","tlc":"6dd5f40e7688ba155a5ef557977e95d3","justin timberlake":"615bb58abf2e5fd86741ed5311d364b1","rihanna":"91276466fbc876d96be9e6926060af60","nelly":"632fa55096ecab62a0c2556fa9e958c1","50 cent":"8f4dd4d8abf85ceda96b6b4adf217590","shakira":"b570890728621ec68d5c5558164c3945","alicia keys":"b9f3ff7c0514902ec94751360154f25b","ne yo":"ad97c751643e185a348fb13199c49944","spice girls":"18c4f2d9608910a2b8eb1835052e895b","nsync":"https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/95/e8/65/95e86597-6095-0f6c-f6b8-ba53c7b744a2/828767330723.jpg/500x500bb.jpg","christina aguilera":"98276416e4db0e5eb6fbb9c9f1a52bdc","avril lavigne":"1130d6301d5e87976279ea2f706fcc26","gwen stefani":"595ae492a34647054ea30d805096d5b5","nelly furtado":"1c0ab3163b031034e5b8155c10aada6d","maroon 5":"39fe38574c7af3181d1e56ad7c03fce3","akon":"bc4d98904d61661cc6d7dd53745340d0"};
+
+  function _coverFold(s) {
+    return String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function _coverPrimArtist(a) {
+    return _coverFold(String(a || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bx\b|\swith\s|\/)\s*/i)[0]);
+  }
+
+  function _expandCoverVal(v) {
+    if (!v) return "";
+    if (/^[a-f0-9]{32}$/i.test(v)) {
+      return `https://cdn-images.dzcdn.net/images/cover/${v}/500x500-000000-80-0-0.jpg`;
+    }
+    return v;
+  }
+
+  function lookupVerifiedSongCoverClient(title, artist) {
+    const tf = _coverFold(title);
+    const af = _coverPrimArtist(artist);
+    if (tf && af && VERIFIED_SONG_COVERS[`${tf}|${af}`]) {
+      return _expandCoverVal(VERIFIED_SONG_COVERS[`${tf}|${af}`]);
+    }
+    if (tf && VERIFIED_SONG_COVERS[tf]) {
+      return _expandCoverVal(VERIFIED_SONG_COVERS[tf]);
+    }
+    if (af && VERIFIED_ARTIST_COVERS[af]) {
+      return _expandCoverVal(VERIFIED_ARTIST_COVERS[af]);
+    }
+    return "";
+  }
+
+  function healTrackCoverClient(t) {
+    if (!t || typeof t !== "object") return t;
+    const tf = _coverFold(t.title || t.trackName || "");
+    const af = _coverPrimArtist(t.artist || t.artistName || "");
+    const exact = (tf && af && VERIFIED_SONG_COVERS[`${tf}|${af}`]) || (tf && VERIFIED_SONG_COVERS[tf]) || "";
+    if (exact) {
+      t.artwork = _expandCoverVal(exact);
+      return t;
+    }
+    const curArt = String(t.artwork || "");
+    if (!curArt || curArt.startsWith("/cover")) {
+      const memHit = _songCoverMemCache.get(`${tf} ${af}`.trim());
+      if (memHit) {
+        t.artwork = memHit;
+        return t;
+      }
+      if (af && VERIFIED_ARTIST_COVERS[af]) {
+        t.artwork = _expandCoverVal(VERIFIED_ARTIST_COVERS[af]);
+      }
+    }
+    return t;
+  }
+
+  function healPlaylistCoversClient(p) {
+    if (!p || typeof p !== "object") return p;
+    if (Array.isArray(p.tracks)) {
+      for (const t of p.tracks) healTrackCoverClient(t);
+    }
+    const firstArt = p.tracks && p.tracks[0] && p.tracks[0].artwork;
+    if (firstArt && !String(firstArt).startsWith("/cover")) {
+      const isCountryPl = String(p.id || "").startsWith("ctrend:");
+      if (!p.artwork || String(p.artwork).startsWith("/cover") || isCountryPl) {
+        p.artwork = firstArt;
+      }
+    }
+    return p;
+  }
+
   window.handleImgErr = function(img) {
     if (!img) return;
     const src = img.getAttribute("src") || "";
+    const holder = img.closest("[data-title]");
+    const title = (holder && holder.getAttribute("data-title")) || "";
+    const artist = (holder && holder.getAttribute("data-artist")) || "";
+    if (title) {
+      const verified = lookupVerifiedSongCoverClient(title, artist);
+      if (verified && verified !== src && !src.includes(encodeURIComponent(verified))) {
+        img.src = verified;
+        return;
+      }
+    }
     if (src && !src.startsWith("data:") && !src.includes("/cover-default.jpg") && !src.includes("/api/img?url=")) {
       img.onerror = function() {
         const el = this;
         el.onerror = null;
-        const holder = el.closest("[data-title]");
-        const title = (holder && holder.getAttribute("data-title")) || "";
-        const artist = (holder && holder.getAttribute("data-artist")) || "";
         el.src = "/cover-default.jpg";
         if (title) {
           resolveRealSongCoverClient(title, artist).then((art) => {
@@ -4233,11 +4600,18 @@
     } else {
       img.onerror = null;
       img.src = "/cover-default.jpg";
+      if (title) {
+        resolveRealSongCoverClient(title, artist).then((art) => {
+          if (art) img.src = art;
+        }).catch(() => {});
+      }
     }
   };
 
   function artUrl(t) {
-    if (!t || !t.artwork) return "/cover-default.jpg";
+    if (!t) return "/cover-default.jpg";
+    healTrackCoverClient(t);
+    if (!t.artwork) return "/cover-default.jpg";
     const a = String(t.artwork);
     if (a.startsWith("/") && API_BASE && !a.includes("/cover-default.jpg")) {
       return `${API_BASE}${a}`;
@@ -4247,19 +4621,20 @@
 
   const _songCoverMemCache = new Map();
   async function resolveRealSongCoverClient(title, artist) {
+    const verified = lookupVerifiedSongCoverClient(title, artist);
+    if (verified) return verified;
     const cleanTitle = String(title || "").trim();
     const cleanArtist = String(artist || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0].trim();
     const q = `${cleanTitle} ${cleanArtist}`.trim();
     if (!q) return "";
-    const key = q.toLowerCase();
+    const key = `${_coverFold(cleanTitle)} ${_coverFold(cleanArtist)}`.trim() || q.toLowerCase();
     if (_songCoverMemCache.has(key)) return _songCoverMemCache.get(key);
     let art = "";
     try {
-      const r = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=2&country=US`, { signal: AbortSignal.timeout(4500) });
-      if (r.ok) {
-        const d = await r.json();
-        const hit = d && d.results && d.results[0];
-        if (hit && hit.artworkUrl100) art = String(hit.artworkUrl100).replace("100x100bb", "400x400bb");
+      const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&entity=song&limit=2`, 4500).catch(() => null);
+      const hit = itRes && itRes.results && itRes.results[0];
+      if (hit && (hit.artwork || hit.artworkUrl100)) {
+        art = String(hit.artwork || hit.artworkUrl100).replace("100x100bb", "500x500bb");
       }
     } catch {}
     if (!art) {
@@ -4281,16 +4656,23 @@
 
   async function hydrateMissingTrackCovers(tracks, onUpdated) {
     if (!Array.isArray(tracks) || !tracks.length) return;
-    const targets = tracks.filter((t) => t && t.title && (!t.artwork || String(t.artwork).startsWith("/cover")));
-    if (!targets.length) return;
     let changed = false;
-    await Promise.all(targets.slice(0, 20).map(async (t) => {
-      const art = await resolveRealSongCoverClient(t.title, artistName(t) || t.artist);
-      if (art) {
-        t.artwork = art;
-        changed = true;
-      }
-    }));
+    for (const t of tracks) {
+      if (!t) continue;
+      const before = t.artwork;
+      healTrackCoverClient(t);
+      if (t.artwork !== before) changed = true;
+    }
+    const targets = tracks.filter((t) => t && t.title && (!t.artwork || String(t.artwork).startsWith("/cover")));
+    if (targets.length) {
+      await Promise.all(targets.slice(0, 20).map(async (t) => {
+        const art = await resolveRealSongCoverClient(t.title, artistName(t) || t.artist);
+        if (art) {
+          t.artwork = art;
+          changed = true;
+        }
+      }));
+    }
     if (changed && typeof onUpdated === "function") onUpdated();
   }
 
@@ -5003,7 +5385,7 @@
     return true;
   }
 
-  // ── Spotify-Style Vibe, Genre, Mood, Tempo & Style Engine (Client) ────────
+  // ── Spotify-Style Vibe, Language/Culture, Genre, Mood, Tempo & Style Engine (Client) ──
   const CLIENT_GENRE_CLUSTERS = {
     pop: ["pop", "dance pop", "synthpop", "electropop", "indie pop", "teen pop", "disco", "funk", "new wave"],
     hiphop: ["hip-hop", "hip hop", "rap", "trap", "drill", "melodic rap", "boom bap", "r&b", "rnb", "contemporary r&b"],
@@ -5014,69 +5396,187 @@
     latin: ["latin", "reggaeton", "urbano", "bachata", "salsa", "corridos", "latin pop", "afrobeats", "dancehall"],
     afro: ["afrobeats", "amapiano", "afropop", "dancehall", "reggae", "r&b"],
     kpop: ["k-pop", "kpop", "j-pop", "jpop", "dance pop", "pop"],
-    desi: ["bollywood", "hindi", "punjabi", "desi", "indian pop", "sufi", "tamil", "telugu"],
+    desi: ["bollywood", "hindi", "punjabi", "desi", "indian pop", "sufi", "tamil", "telugu", "indie_in", "pak_pop", "desi_hiphop", "south_indian"],
     chill: ["lo-fi", "lofi", "ambient", "chill", "chillhop", "downtempo", "acoustic", "jazz", "classical", "instrumental", "indie"],
     country: ["country", "americana", "folk", "bluegrass", "singer-songwriter", "soft rock"],
   };
 
+  const CLIENT_ARTIST_PEERS = {
+    "arijit singh": ["Pritam", "Vishal Mishra", "Atif Aslam", "Shreya Ghoshal", "Jubin Nautiyal", "Sachin-Jigar", "Darshan Raval", "KK", "Amit Trivedi"],
+    "pritam": ["Arijit Singh", "KK", "Vishal-Shekhar", "Amit Trivedi", "Atif Aslam", "Mohit Chauhan", "Shreya Ghoshal", "Sachin-Jigar"],
+    "vishal mishra": ["Arijit Singh", "Sachin-Jigar", "Pritam", "Jubin Nautiyal", "Darshan Raval", "Atif Aslam", "Mithoon", "Shreya Ghoshal"],
+    "sachin jigar": ["Arijit Singh", "Vishal Mishra", "Pritam", "Amit Trivedi", "Shilpa Rao", "Badshah", "Shreya Ghoshal", "Varun Jain"],
+    "shreya ghoshal": ["Arijit Singh", "Pritam", "Sonu Nigam", "A.R. Rahman", "Atif Aslam", "Vishal Mishra", "Shilpa Rao"],
+    "darshan raval": ["Arijit Singh", "Jubin Nautiyal", "Armaan Malik", "Vishal Mishra", "Anuv Jain", "Aditya Rikhari", "Jasleen Royal", "King"],
+    "jubin nautiyal": ["Arijit Singh", "Vishal Mishra", "Atif Aslam", "Darshan Raval", "B Praak", "Mithoon", "Pritam"],
+    "badshah": ["Diljit Dosanjh", "Yo Yo Honey Singh", "Guru Randhawa", "Karan Aujla", "Sachin-Jigar", "King", "Arijit Singh"],
+    "diljit dosanjh": ["Karan Aujla", "AP Dhillon", "Shubh", "Sidhu Moose Wala", "Gurinder Gill", "Badshah", "Guru Randhawa"],
+    "karan aujla": ["Diljit Dosanjh", "AP Dhillon", "Shubh", "Sidhu Moose Wala", "Gurinder Gill", "DIVINE", "Ikky"],
+    "ap dhillon": ["Gurinder Gill", "Shubh", "Karan Aujla", "Diljit Dosanjh", "Talwiinder"],
+    "shubh": ["Karan Aujla", "AP Dhillon", "Diljit Dosanjh", "Sidhu Moose Wala", "Gurinder Gill", "Talwiinder"],
+    "anuv jain": ["Prateek Kuhad", "Aditya Rikhari", "The Local Train", "Mitraz", "Akshath", "Faheem Abdullah", "AUR", "Hasan Raheem"],
+    "prateek kuhad": ["Anuv Jain", "The Local Train", "Aditya Rikhari", "Ritviz", "Zaeden", "When Chai Met Toast"],
+    "aditya rikhari": ["Anuv Jain", "Prateek Kuhad", "Mitraz", "Akshath", "Talwiinder", "Hasan Raheem", "AUR", "Faheem Abdullah"],
+    "the local train": ["Anuv Jain", "Prateek Kuhad", "Aditya Rikhari", "Kaavish", "Bayaan"],
+    "mitraz": ["Aditya Rikhari", "Anuv Jain", "Akshath", "Darshan Raval", "King", "Talwiinder"],
+    "talwiinder": ["Hasan Raheem", "Aditya Rikhari", "AP Dhillon", "Yashraj", "King", "Shubh", "Mitraz"],
+    "hasan raheem": ["Talwiinder", "Abdul Hannan", "AUR", "Aditya Rikhari", "Anuv Jain", "Atif Aslam"],
+    "aur": ["Anuv Jain", "Aditya Rikhari", "Hasan Raheem", "Abdul Hannan", "Faheem Abdullah", "Atif Aslam"],
+    "atif aslam": ["Arijit Singh", "KK", "Pritam", "Rahat Fateh Ali Khan", "Vishal Mishra", "Mohit Chauhan"],
+    "divine": ["KR$NA", "Seedhe Maut", "Karan Aujla", "Raftaar", "Hanumankind", "Badshah"],
+    "kr na": ["Seedhe Maut", "DIVINE", "Raftaar", "Yashraj", "Hanumankind"],
+    "krsna": ["Seedhe Maut", "DIVINE", "Raftaar", "Yashraj", "Hanumankind"],
+    "seedhe maut": ["KR$NA", "DIVINE", "Yashraj", "Prabh Deep", "Raftaar", "Hanumankind"],
+    "hanumankind": ["DIVINE", "Seedhe Maut", "KR$NA", "Sushin Shyam", "Karan Aujla"],
+    "king": ["Darshan Raval", "Mitraz", "Badshah", "Aditya Rikhari", "Talwiinder", "Arijit Singh"],
+    "the weeknd": ["SZA", "Drake", "Post Malone", "Ariana Grande", "Dua Lipa", "Travis Scott", "Frank Ocean"],
+    "taylor swift": ["Sabrina Carpenter", "Olivia Rodrigo", "Gracie Abrams", "Chappell Roan", "Billie Eilish", "Lorde"],
+    "sabrina carpenter": ["Chappell Roan", "Olivia Rodrigo", "Taylor Swift", "Ariana Grande", "Dua Lipa", "Gracie Abrams", "Tate McRae"],
+    "billie eilish": ["Lana Del Rey", "Olivia Rodrigo", "Lorde", "Clairo", "The Neighbourhood", "SZA", "Gracie Abrams"],
+    "sza": ["The Weeknd", "Kendrick Lamar", "Frank Ocean", "Summer Walker", "Daniel Caesar", "Kehlani", "Bryson Tiller"],
+    "kendrick lamar": ["SZA", "Drake", "J. Cole", "Travis Scott", "Future", "Tyler, The Creator", "Doechii"],
+    "drake": ["Kendrick Lamar", "Future", "21 Savage", "Travis Scott", "The Weeknd", "J. Cole"],
+    "post malone": ["Morgan Wallen", "The Weeknd", "Noah Kahan", "Shaboozey", "Luke Combs", "Khalid"],
+    "morgan wallen": ["Luke Combs", "Zach Bryan", "Post Malone", "Shaboozey", "Jelly Roll", "Tucker Wetmore"],
+    "chappell roan": ["Sabrina Carpenter", "Olivia Rodrigo", "Gracie Abrams", "Charli xcx", "Lola Young", "Billie Eilish"],
+    "gracie abrams": ["Sabrina Carpenter", "Olivia Rodrigo", "Taylor Swift", "Chappell Roan", "Clairo", "Role Model"],
+    "clairo": ["beabadoobee", "Men I Trust", "Wallows", "Laufey", "Phoebe Bridgers", "Mitski", "Role Model"],
+    "linkin park": ["Bring Me The Horizon", "Green Day", "Foo Fighters", "Sleep Token", "Bad Omens", "Muse"],
+    "rose": ["Bruno Mars", "JENNIE", "LISA", "aespa", "NewJeans", "BLACKPINK"],
+    "aespa": ["LE SSERAFIM", "NewJeans", "ILLIT", "BLACKPINK", "JENNIE", "LISA", "TWICE"],
+    "bad bunny": ["KAROL G", "Feid", "Rauw Alejandro", "Peso Pluma", "J Balvin", "Maluma"],
+    "rema": ["Burna Boy", "Asake", "Wizkid", "Ayra Starr", "Tems", "Tyla", "Omah Lay"],
+  };
+
   function inferTrackVibeClient(t = {}) {
-    const rawGenre = String(t.genre || "").toLowerCase().trim();
-    const rawTitle = String(t.title || "").toLowerCase().trim();
-    const rawArtist = String(artistName(t) || t.artist || "").toLowerCase().trim();
-    const blob = `${rawTitle} ${rawArtist} ${rawGenre} ${String(t.album || "").toLowerCase()}`;
+    const rawTitleStr = String(t.title || "");
+    const rawArtistStr = String(artistName(t) || t.artist || "");
+    const rawAlbumStr = String(t.album || "");
+    const rawScriptBlob = `${rawTitleStr} ${rawArtistStr} ${rawAlbumStr}`;
+    const rawGenre = String(t.genre || (t._vibeMeta && t._vibeMeta.genre) || "").toLowerCase().trim();
+    const rawTitle = rawTitleStr.toLowerCase().trim();
+    const rawArtist = rawArtistStr.toLowerCase().trim();
+    const blob = `${rawTitle} ${rawArtist} ${rawGenre} ${rawAlbumStr.toLowerCase()}`;
+    const primArt = canonicalPrimaryArtistClient(t);
 
     let cluster = "pop";
     let genre = rawGenre || "pop";
-    if (/\b(bollywood|hindi|punjabi|arijit|pritam|diljit|ap dhillon|karan aujla|shreya|atif|anuv jain|rahman|tamil|telugu|desi)\b/i.test(blob)) {
+    let langCulture = (t._vibeMeta && t._vibeMeta.langCulture) || "western";
+    let subCulture = (t._vibeMeta && t._vibeMeta.subCulture) || "english_pop";
+
+    if (/[\u0A00-\u0A7F]|\b(punjabi|bhangra|diljit|karan aujla|ap dhillon|shubh|sidhu moose|gurinder gill|ikky|mxrci|guru randhawa|honey singh|chani nattan|inderpal moga|harrdy sandhu|amrinder gill|arjan vailly|bhupinder babbal|sultaan|tauba tauba|lalkara|daku|jatt|munde|kudi|sohna|hauli hauli)\b/i.test(rawScriptBlob + " " + blob)) {
       cluster = "desi";
-      genre = /\bpunjabi|diljit|ap dhillon|karan aujla\b/i.test(blob) ? "punjabi" : "bollywood";
-    } else if (/\b(k-pop|kpop|bts|blackpink|newjeans|stray kids|twice|aespa|seventeen|jungkook|le sserafim|ive|illit|ateez|enhypen)\b/i.test(blob)) {
+      genre = "punjabi";
+      langCulture = "south_asian";
+      subCulture = "punjabi";
+    } else if (/\b(desi hip hop|indian rap|desi_hiphop|seedhe maut|kr\$na|krsna|divine|hanumankind|kalmi|raftaar|mc stan|emiway|yashraj|mc altaf|prabh deep|namastute|luka chuppi|prarthana|joota japani|baazigar)\b/i.test(rawScriptBlob + " " + blob)) {
+      cluster = "desi";
+      genre = "desi_hiphop";
+      langCulture = "south_asian";
+      subCulture = "desi_hiphop";
+    } else if (/[\u0B80-\u0BFF\u0C00-\u0C7F\u0D00-\u0D7F\u0C80-\u0CFF]|\b(tamil|telugu|malayalam|kannada|south_indian|anirudh|sai abhyankkar|sushin shyam|dabzee|sid sriram|yuvan shankar|devi sri prasad|thaman|katchi sera|aasa kooda|aavesham|illuminati|sanju rathod|gulabi sadi)\b/i.test(rawScriptBlob + " " + blob)) {
+      cluster = "desi";
+      genre = "south_indian";
+      langCulture = "south_asian";
+      subCulture = "south_indian";
+    } else if (/\b(indie_in|indian indie|anuv jain|prateek kuhad|aditya rikhari|local train|mitraz|ritviz|nucleya|akshath|faheem abdullah|rauhan malik|zaeden|lifafa|when chai met toast|husn|jo tum mere ho|alag aasmaan|baarishein|kasoor|choo lo|aaoge tum kabhi|samjho na|faasle|nadaaniyan|udd gaye|liggi)\b/i.test(blob)) {
+      cluster = "desi";
+      genre = "indie_in";
+      langCulture = "south_asian";
+      subCulture = "indian_indie";
+    } else if (/\b(pak_pop|pakistani|coke studio|atif aslam|abdul hannan|hasan raheem|kaavish|talwiinder|aur\b|young stunners|talha anjum|ali sethi|pasoori|tu hai kahan|shikayat|khayaal|dhundhala)\b/i.test(blob)) {
+      cluster = "desi";
+      genre = "pak_pop";
+      langCulture = "south_asian";
+      subCulture = "pakistani";
+    } else if (/[\u0900-\u097F\u0980-\u09FF]|\b(bollywood|hindi|desi|arijit|pritam|shreya ghoshal|jubin|vishal mishra|sachin[\s-]*jigar|kk\b|mohit chauhan|amit trivedi|a\.?\s*r\.?\s*rahman|darshan raval|badshah|sonu nigam|armaan malik|jasleen royal|shilpa rao|neeti mohan|sagar bhatia|varun jain|madhubanti|divya kumar|pawan singh|king\b|b praak|tanishk|sachet|aaj ki raat|sajni|pehle bhi main|maan meri jaan|tu aake dekhle|sarkaare|chaleya|soulmate|taras|khudaya|soni soni|khoobsurat|tumhare hi rahenge|aayi nai|khel khel mein|heeriye|satranga|apna bana le|kesariya|raataan lambiyan|tum hi ho|channa mereya|kabira|shayad|stree 2|laapataa|bhediya|jawan)\b/i.test(rawScriptBlob + " " + blob)) {
+      cluster = "desi";
+      genre = "bollywood";
+      langCulture = "south_asian";
+      subCulture = "hindi_bollywood";
+    } else if (/[\uAC00-\uD7AF]|\b(k-?pop|korean|bts|blackpink|newjeans|stray kids|twice|aespa|seventeen|jung\s*kook|le sserafim|ive\b|illit|ateez|enhypen|jennie|lisa\b|ros[eé]\b|babymonster|kiss of life|whiplash|chk chk boom)\b/i.test(rawScriptBlob + " " + blob)) {
       cluster = "kpop";
       genre = "k-pop";
-    } else if (/\b(afrobeats|amapiano|burna boy|wizkid|rema|tem|tems|ayra starr|davido|asake|tyla|omah lay)\b/i.test(blob)) {
+      langCulture = "korean";
+      subCulture = "kpop";
+    } else if (/[\u3040-\u30FF]|\b(j-?pop|japanese|yoasobi|fujii kaze|kenshi yonezu|vaundy|ado\b|king gnu|creepy nuts|mrs\.?\s*green apple|official hige|bling[\s-]*bang|otonoke)\b/i.test(rawScriptBlob + " " + blob)) {
+      cluster = "kpop";
+      genre = "j-pop";
+      langCulture = "japanese";
+      subCulture = "jpop";
+    } else if (/\b(afrobeats|amapiano|burna boy|wizkid|rema|tems|ayra starr|davido|asake|tyla|omah lay|titom|yuppe|tshwala bam|ozaka)\b/i.test(blob)) {
       cluster = "afro";
       genre = "afrobeats";
-    } else if (/\b(reggaeton|latin|bad bunny|karol g|feid|peso pluma|rauw alejandro|j balvin|ozuna|maluma|shakira|rosalia|romeo santos)\b/i.test(blob)) {
+      langCulture = "afro";
+      subCulture = "afro";
+    } else if (/\b(reggaeton|latin|urbano|bad bunny|karol g|feid|peso pluma|rauw alejandro|j balvin|ozuna|maluma|shakira|rosalia|romeo santos|dtmf|baile inolvidable)\b/i.test(blob)) {
       cluster = "latin";
       genre = "latin";
-    } else if (/\b(hip[\s-]?hop|rap|trap|drill|drake|kendrick|travis scott|kanye|eminem|future|metro boomin|21 savage|j\.?\s*cole|playboi carti|central cee|nicki minaj|cardi b|lil |gunna|don toliver|asap rocky|tyler, the creator)\b/i.test(blob)) {
+      langCulture = "latin";
+      subCulture = "latin";
+    } else if (/\b(opm|pinoy|hugot|bini\b|maki\b|ben&ben|zack tabudlo|arthur nery|cup of joe|tj monterde|pantropiko|salamin|dilaw|palagi)\b/i.test(blob)) {
+      cluster = "pop";
+      genre = "opm_pop";
+      langCulture = "opm";
+      subCulture = "opm";
+    } else if (/\b(hip[\s-]?hop|rap|trap|drill|drake|kendrick|travis scott|kanye|eminem|future|metro boomin|21 savage|j\.?\s*cole|playboi carti|central cee|nicki minaj|cardi b|lil |gunna|don toliver|asap rocky|tyler, the creator|doechii|glorilla|ice spice)\b/i.test(blob)) {
       cluster = "hiphop";
       genre = /\b(drill)\b/i.test(blob) ? "drill" : /\b(trap)\b/i.test(blob) ? "trap" : "hip-hop";
-    } else if (/\b(r&b|rnb|soul|neo[\s-]?soul|sza|the weeknd|frank ocean|daniel caesar|brent faiyaz|usher|chris brown|alicia keys|kehlani|summer walker|h\.e\.r\.|giveon|bryson tiller|khalid)\b/i.test(blob)) {
+      langCulture = "western";
+      subCulture = "english_hiphop";
+    } else if (/\b(r&b|rnb|soul|neo[\s-]?soul|sza|the weeknd|frank ocean|daniel caesar|brent faiyaz|usher|chris brown|alicia keys|kehlani|summer walker|h\.e\.r\.|giveon|bryson tiller|khalid|leon thomas|jordan adetunji|ravyn lenae|teddy swims)\b/i.test(blob)) {
       cluster = "rnb";
       genre = "r&b";
-    } else if (/\b(edm|electronic|house|techno|trance|dubstep|dnb|drum and bass|phonk|synthwave|calvin harris|david guetta|tiesto|martin garrix|avicii|marshmello|skrillex|fred again|kygo|zedd|alesso|daft punk|odesza|flume|alan walker|chainsmokers|disclosure|peggy gou)\b/i.test(blob)) {
+      langCulture = "western";
+      subCulture = "english_rnb";
+    } else if (/\b(edm|electronic|house|techno|trance|dubstep|dnb|drum and bass|phonk|synthwave|calvin harris|david guetta|tiesto|martin garrix|avicii|marshmello|skrillex|fred again|kygo|zedd|alesso|daft punk|odesza|flume|alan walker|chainsmokers|disclosure|peggy gou|charli xcx|john summit|sonny fodera|bl3ss)\b/i.test(blob)) {
       cluster = "electronic";
       genre = /\b(phonk)\b/i.test(blob) ? "phonk" : /\b(house)\b/i.test(blob) ? "house" : "electronic";
-    } else if (/\b(rock|metal|punk|grunge|alternative|nirvana|linkin park|queen|ac\/dc|metallica|arctic monkeys|green day|foo fighters|red hot chili peppers|oasis|coldplay|imagine dragons|radiohead|the killers|muse|blink-182|paramore|bring me the horizon|slipknot|deftones|strokes|fleetwood mac)\b/i.test(blob)) {
+      langCulture = "western";
+      subCulture = "english_electronic";
+    } else if (/\b(rock|metal|punk|grunge|alternative|nirvana|linkin park|queen|ac\/dc|metallica|arctic monkeys|green day|foo fighters|red hot chili peppers|oasis|coldplay|imagine dragons|radiohead|the killers|muse|blink-182|paramore|bring me the horizon|slipknot|deftones|strokes|fleetwood mac|fontaines|sam fender|last dinner party|sleep token|bad omens)\b/i.test(blob)) {
       cluster = "rock";
-      genre = /\b(metal|slipknot|metallica|deftones)\b/i.test(blob) ? "metal" : /\b(indie|arctic monkeys|strokes)\b/i.test(blob) ? "indie rock" : "rock";
-    } else if (/\b(indie|bedroom pop|dream pop|shoegaze|tame impala|lana del rey|mitski|clairo|beabadoobee|cigars? after sex|phoebe bridgers|hozier|bon iver|mac demarco|wallows|men i trust|laufey|conan gray|girl in red|boygenius|the 1975|glass animals|vampire weekend)\b/i.test(blob)) {
+      genre = /\b(metal|slipknot|metallica|deftones|sleep token|bad omens)\b/i.test(blob) ? "metal" : /\b(indie|arctic monkeys|strokes|fontaines|sam fender)\b/i.test(blob) ? "indie rock" : "rock";
+      langCulture = "western";
+      subCulture = "english_rock";
+    } else if (/\b(indie|bedroom pop|dream pop|shoegaze|tame impala|lana del rey|mitski|clairo|beabadoobee|cigars? after sex|phoebe bridgers|hozier|bon iver|mac demarco|wallows|men i trust|laufey|conan gray|girl in red|boygenius|the 1975|glass animals|vampire weekend|gigi perez|lola young|sombr|role model|malcolm todd|mk\.?gee|artemas|myles smith)\b/i.test(blob)) {
       cluster = "indie";
       genre = "indie pop";
-    } else if (/\b(country|americana|folk|morgan wallen|luke combs|zach bryan|chris stapleton|kacey musgraves|dolly parton|johnny cash|shania twain|taylor swift.*fearless|noah kahan)\b/i.test(blob)) {
+      langCulture = "western";
+      subCulture = "english_indie";
+    } else if (/\b(country|americana|folk|morgan wallen|luke combs|zach bryan|chris stapleton|kacey musgraves|dolly parton|johnny cash|shania twain|noah kahan|shaboozey|jelly roll|dasha|tucker wetmore|megan moroney|lainey wilson|zach top|koe wetzel)\b/i.test(blob)) {
       cluster = "country";
       genre = "country";
+      langCulture = "western";
+      subCulture = "english_country";
     } else if (/\b(lo[\s-]?fi|lofi|chillhop|ambient|study|sleep|meditation|piano|classical|jazz|instrumental|rain)\b/i.test(blob)) {
       cluster = "chill";
       genre = "lo-fi";
+      langCulture = "western";
+      subCulture = "english_chill";
     } else {
       cluster = "pop";
       genre = rawGenre && rawGenre !== "music" ? rawGenre : "pop";
+      langCulture = "western";
+      subCulture = "english_pop";
     }
+
+    const isCrossCulturalBridge = Boolean(
+      /\b(hanumankind|big dawgs|sia\b|hass hass|armani white|stylo g|bruno mars|apt\.|doja cat|raye|dominic fike|doechii|travis scott|anitta)\b/i.test(rawScriptBlob)
+    );
 
     let mood = "upbeat";
     let tempo = "mid";
-    if (/\b(sad|heartbreak|cry|tears|lonely|broken|hurt|miss you|goodbye|alone|melanchol|grief|blue)\b/i.test(blob)) {
+    if (/\b(sad|heartbreak|cry|tears|lonely|broken|hurt|miss you|goodbye|alone|melanchol|grief|blue|channa mereya|alag aasmaan)\b/i.test(blob)) {
       mood = "melancholic";
       tempo = "slow";
-    } else if (/\b(chill|lofi|lo-fi|relax|calm|peace|dream|soft|sunday|coffee|sunset|late night|midnight|sleep|ambient|acoustic)\b/i.test(blob) || cluster === "chill") {
+    } else if (/\b(chill|lofi|lo-fi|relax|calm|peace|dream|soft|sunday|coffee|sunset|late night|midnight|sleep|ambient|acoustic|baarishein|husn|kasoor)\b/i.test(blob) || cluster === "chill") {
       mood = "chill";
       tempo = "slow";
-    } else if (/\b(love|romantic|romance|kiss|heart|baby|darling|forever|yours|valentine|slow dance)\b/i.test(blob)) {
+    } else if (/\b(love|romantic|romance|kiss|heart|baby|darling|forever|yours|valentine|slow dance|sajni|kesariya|tum hi ho|apna bana le|pehle bhi main|satranga|heeriye|ishq)\b/i.test(blob)) {
       mood = "romantic";
       tempo = "slow";
-    } else if (/\b(gym|workout|hype|beast|phonk|rage|hard|pump|power|energy|banger|turnt|club|party|dance|festival|rave|fast)\b/i.test(blob) || genre === "phonk" || genre === "drill") {
+    } else if (/\b(gym|workout|hype|beast|phonk|rage|hard|pump|power|energy|banger|turnt|club|party|dance|festival|rave|fast|aaj ki raat|tauba tauba|illuminati|big dawgs)\b/i.test(blob) || genre === "phonk" || genre === "drill") {
       mood = "hype";
       tempo = "fast";
     } else if (/\b(dark|night|shadow|afterhours|after hours|toxic|sin|devil|villain|obsess)\b/i.test(blob)) {
@@ -5085,16 +5585,16 @@
     } else if (/\b(focus|study|coding|work|instrumental|deep)\b/i.test(blob)) {
       mood = "focus";
       tempo = "slow";
-    } else if (cluster === "electronic" || cluster === "kpop" || cluster === "latin" || cluster === "afro") {
+    } else if (cluster === "electronic" || cluster === "kpop" || cluster === "latin" || cluster === "afro" || subCulture === "punjabi") {
       mood = "upbeat";
       tempo = "fast";
-    } else if (cluster === "indie" || cluster === "rnb") {
+    } else if (cluster === "indie" || cluster === "rnb" || subCulture === "indian_indie" || subCulture === "pakistani") {
       mood = "chill";
       tempo = "mid";
     }
 
     let style = "modern";
-    if (/\b(acoustic|unplugged|stripped|piano|guitar|singer[\s-]?songwriter|folk)\b/i.test(blob)) {
+    if (/\b(acoustic|unplugged|stripped|piano|guitar|singer[\s-]?songwriter|folk)\b/i.test(blob) || subCulture === "indian_indie") {
       style = "acoustic";
       if (tempo === "fast") tempo = "mid";
     } else if (/\b(remix|club|synth|electronic|edm|house|techno|bass|phonk|beat)\b/i.test(blob) || cluster === "electronic") {
@@ -5107,23 +5607,25 @@
       style = "cinematic";
     }
 
-    return { genre, cluster, mood, tempo, style };
+    const peerArtists = (primArt && CLIENT_ARTIST_PEERS[primArt]) ? CLIENT_ARTIST_PEERS[primArt].slice() : [];
+
+    return { genre, cluster, mood, tempo, style, langCulture, subCulture, isCrossCulturalBridge, peerArtists };
   }
 
   function areClustersCompatibleClient(c1, c2) {
     if (!c1 || !c2) return false;
     if (c1 === c2) return true;
     const compat = {
-      pop: ["rnb", "indie", "electronic", "kpop", "latin", "afro"],
-      hiphop: ["rnb", "afro", "latin", "electronic"],
-      rnb: ["hiphop", "pop", "afro", "chill", "indie"],
-      electronic: ["pop", "hiphop", "kpop", "latin"],
+      pop: ["rnb", "indie", "electronic", "country"],
+      hiphop: ["rnb", "electronic"],
+      rnb: ["hiphop", "pop", "chill", "indie"],
+      electronic: ["pop", "hiphop"],
       rock: ["indie", "pop", "country"],
       indie: ["rock", "pop", "chill", "rnb", "country"],
       latin: ["pop", "afro", "hiphop", "electronic"],
       afro: ["rnb", "hiphop", "latin", "pop"],
-      kpop: ["pop", "electronic", "rnb", "hiphop"],
-      desi: ["pop", "chill", "indie"],
+      kpop: ["pop", "electronic", "rnb"],
+      desi: ["desi"],
       chill: ["indie", "rnb", "pop", "country"],
       country: ["indie", "rock", "pop", "chill"],
     };
@@ -5152,21 +5654,21 @@
   }
 
   // Sequences candidate songs like a human-made Spotify playlist:
-  // 1) Phase 1 (first ~35%): close similarity (same vibe, genre, mood, tempo, style, related/seed artists)
-  // 2) Phase 2 (middle ~40%): core vibe & style continuation across varied artists
-  // 3) Phase 3 (final ~25%): gradual exploration into compatible genres/moods
-  // Strictly prevents duplicate songs, recently played repeats, and back-to-back same artist.
+  // 1) Phase 1 (first ~35%): close similarity (same language/subCulture, vibe, genre, mood, tempo, style, related/peer artists)
+  // 2) Phase 2 (middle ~40%): core vibe & style continuation across varied artists in the same language/culture
+  // 3) Phase 3 (final ~25%): gradual exploration into compatible genres/moods within compatible culture
+  // Strictly prevents duplicate songs, recently played repeats, cross-language jarring jumps, and back-to-back same artist.
   function scoreAndSequenceSpotifyStyle(seedTrack, candidates, opts = {}) {
     const max = opts.max || 20;
     const maxPerArtist = opts.maxPerArtist || 2;
-    const seedVibe = seedTrack ? inferTrackVibeClient(seedTrack) : (opts.vibe || { genre: "pop", cluster: "pop", mood: "upbeat", tempo: "mid", style: "modern" });
+    const seedVibe = seedTrack ? inferTrackVibeClient(seedTrack) : (opts.vibe || { genre: "pop", cluster: "pop", mood: "upbeat", tempo: "mid", style: "modern", langCulture: "western", subCulture: "english_pop", peerArtists: [] });
     const seedArtist = seedTrack ? canonicalPrimaryArtistClient(seedTrack) : "";
     const seedKey = seedTrack ? canonicalSongKey(seedTrack) : "";
     const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
     const prefGenres = Array.isArray(state.prefs && state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
     const allowIndian =
       countryCode === "IN" || countryCode === "PK" || countryCode === "BD" ||
-      seedVibe.cluster === "desi" ||
+      seedVibe.cluster === "desi" || seedVibe.langCulture === "south_asian" ||
       prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
 
     const taste = tasteProfile();
@@ -5175,7 +5677,11 @@
       ...((state.following || []).map((f) => canonicalPrimaryArtistClient(f && f.name))),
     ].filter(Boolean));
     const relatedArtistSet = new Set(
-      Array.isArray(opts.relatedArtists) ? opts.relatedArtists.map((a) => canonicalPrimaryArtistClient(a)).filter(Boolean) : []
+      [
+        ...(Array.isArray(opts.relatedArtists) ? opts.relatedArtists : []),
+        ...((seedTrack && Array.isArray(seedTrack._relatedArtists)) ? seedTrack._relatedArtists : []),
+        ...(Array.isArray(seedVibe.peerArtists) ? seedVibe.peerArtists : []),
+      ].map((a) => canonicalPrimaryArtistClient(a)).filter(Boolean)
     );
 
     const excludeKeys = new Set();
@@ -5214,36 +5720,55 @@
       if (idStr) seenIds.add(idStr);
       if (vidStr) seenIds.add(vidStr);
 
+      if (typeof healTrackCoverClient === "function") healTrackCoverClient(t);
+
       const artistNorm = canonicalPrimaryArtistClient(t);
       const tv = inferTrackVibeClient(t);
       let score = 0;
       let tier = 2;
 
       const isSameArtist = Boolean(seedArtist && artistNorm && (artistNorm === seedArtist || artistNorm.includes(seedArtist) || seedArtist.includes(artistNorm)));
-      const isRelArtist = Boolean(artistNorm && relatedArtistSet.has(artistNorm));
+      const isRelArtist = Boolean(!isSameArtist && artistNorm && relatedArtistSet.has(artistNorm));
       const isFavArtist = Boolean(artistNorm && favArtistSet.has(artistNorm));
+      const isSameLang = (tv.langCulture || "western") === (seedVibe.langCulture || "western");
+      const isSameSubCulture = Boolean(seedVibe.subCulture && tv.subCulture === seedVibe.subCulture);
 
-      if (isSameArtist) {
-        score += 32;
-        tier = 1;
-      } else if (isRelArtist) {
-        score += 30;
-        tier = 1;
-      } else if (isFavArtist) {
-        score += 16;
+      // Language & musical culture alignment (critical for avoiding jarring cross-language jumps)
+      if (isSameSubCulture) {
+        score += 38;
+      } else if (isSameLang) {
+        score += 24;
+      } else if ((seedVibe.langCulture || "western") !== "western") {
+        if (seedVibe.isCrossCulturalBridge && (tv.genre === seedVibe.genre || tv.cluster === seedVibe.cluster)) {
+          score -= 8;
+        } else {
+          score -= 85;
+        }
+      } else {
+        score -= 48;
       }
 
-      if (tv.genre === seedVibe.genre) {
+      if (isRelArtist) {
+        score += 36;
+        tier = 1;
+      } else if (isSameArtist) {
+        score += 32;
+        tier = 1;
+      } else if (isFavArtist && isSameLang) {
+        score += 14;
+      }
+
+      if (tv.genre === seedVibe.genre && isSameLang) {
         score += 28;
-        if (tier > 1 && (isRelArtist || tv.mood === seedVibe.mood)) tier = 1;
-      } else if (tv.cluster === seedVibe.cluster) {
+        if (tier > 1 && (isRelArtist || isSameSubCulture || tv.mood === seedVibe.mood)) tier = 1;
+      } else if (tv.cluster === seedVibe.cluster && isSameLang) {
         score += 22;
         if (tier > 2) tier = 2;
-      } else if (areClustersCompatibleClient(seedVibe.cluster, tv.cluster)) {
-        score += 10;
+      } else if (isSameLang && areClustersCompatibleClient(seedVibe.cluster, tv.cluster)) {
+        score += 12;
         tier = 3;
       } else {
-        score -= 14;
+        score -= 16;
         tier = 3;
       }
 
@@ -5261,19 +5786,26 @@
       if (recentPlayKeys.has(key)) score -= 45;
       else if (recentAutoKeys.has(key)) score -= 22;
 
-      score += Math.max(0, 12 - Math.floor(i / 4));
+      score += Math.max(0, 10 - Math.floor(i / 5));
 
       scored.push({
         track: t,
         key,
         artistNorm: artistNorm || `unknown_${i}`,
+        isSameArtist,
+        isRelArtist,
+        isSameLang,
+        isSameSubCulture,
         vibe: tv,
         tier,
         score,
       });
     }
 
-    scored.sort((a, b) => b.score - a.score);
+    // If we have enough same-language/culture tracks (>= 5), filter out jarring cross-language tracks
+    const sameLangList = scored.filter((c) => c.isSameLang || (seedVibe.isCrossCulturalBridge && c.score >= 25));
+    const activePool = sameLangList.length >= 5 ? sameLangList : scored;
+    activePool.sort((a, b) => b.score - a.score);
 
     const sequenced = [];
     const artistCounts = new Map();
@@ -5283,7 +5815,7 @@
       artistLastSlot.set(seedArtist, -1);
     }
 
-    const remaining = scored.slice();
+    const remaining = activePool.slice();
     let prevVibe = seedVibe;
     let prevArtist = seedArtist;
 
@@ -5299,7 +5831,7 @@
         const cand = remaining[i];
         const aCount = artistCounts.get(cand.artistNorm) || 0;
         const capForArtist = (seedArtist && cand.artistNorm === seedArtist) ? Math.min(2, maxPerArtist) : maxPerArtist;
-        if (aCount >= capForArtist) continue;
+        if (aCount >= capForArtist && remaining.length > 4) continue;
         if (cand.artistNorm && cand.artistNorm === prevArtist) continue;
         const lastIdx = artistLastSlot.get(cand.artistNorm);
         if (lastIdx !== undefined && slot - lastIdx < 3) continue;
@@ -5309,6 +5841,15 @@
         if (tierDiff === 0) slotScore += 18;
         else if (tierDiff === 1) slotScore += 6;
         else slotScore -= 8;
+
+        // Immediately after the seed song (slot 0), prefer a similar peer artist in the same subCulture
+        // rather than repeating the seed artist right away; bring the seed artist back around slot 2-4
+        if (cand.isSameArtist) {
+          if (slot === 0) slotScore -= 28;
+          else if (slot >= 2 && slot <= 4 && aCount <= 1) slotScore += 16;
+        } else if (cand.isRelArtist && slot <= 3) {
+          slotScore += 14;
+        }
 
         const tFit = areTemposSmoothClient(prevVibe.tempo, cand.vibe.tempo);
         if (tFit === 2) slotScore += 10;
@@ -5348,6 +5889,7 @@
   }
 
   function localRelatedTracks(t, max = 24) {
+    const seedVibe = t ? inferTrackVibeClient(t) : null;
     const pool = [].concat(
       homeTrackPool(),
       (state.discovery && state.discovery.tracks) || [],
@@ -5356,9 +5898,22 @@
       state.liked || [],
       state.recents || []
     );
-    return pool
-      .filter((cand) => cand && cand.id && cand.title && cand.source !== "radio" && looksLikeSong(cand) && (!t || !isSameSongClient(cand, t)))
-      .slice(0, max * 4);
+    const valid = pool.filter(
+      (cand) => cand && cand.id && cand.title && cand.source !== "radio" && looksLikeSong(cand) && (!t || !isSameSongClient(cand, t))
+    );
+    if (!seedVibe) return valid.slice(0, max * 4);
+    const sameCulture = [];
+    const other = [];
+    for (const cand of valid) {
+      const cv = inferTrackVibeClient(cand);
+      if (cv.langCulture === seedVibe.langCulture) {
+        if (cv.subCulture === seedVibe.subCulture) sameCulture.unshift(cand);
+        else sameCulture.push(cand);
+      } else {
+        other.push(cand);
+      }
+    }
+    return (sameCulture.length >= 6 ? sameCulture : sameCulture.concat(other)).slice(0, max * 4);
   }
 
   async function fetchRelated(seed, extraSkip) {
@@ -5375,6 +5930,11 @@
       ..._sessionAutoQueuedKeys.slice(0, 20),
     ].filter(Boolean);
     const skip = [...new Set(skipParts)].slice(0, 35).join(",");
+    const recentArtists = [
+      artist,
+      ...((state.recents || []).slice(0, 6).map((r) => artistName(r))),
+      ...((state.queue || []).slice(0, 6).map((q) => artistName(q))),
+    ].filter(Boolean).slice(0, 10).join(",");
     const qs = new URLSearchParams({
       title,
       artist,
@@ -5382,18 +5942,33 @@
       mood: vibe.mood || "",
       tempo: vibe.tempo || "",
       style: vibe.style || "",
+      langCulture: vibe.langCulture || "",
+      subCulture: vibe.subCulture || "",
+      duration: String(Number(seed.duration) || 0),
+      recentArtists,
       artists: taste.artists.slice(0, 4).map((x) => x[0]).join(","),
       genres: taste.genres.slice(0, 3).map((x) => x[0]).join(","),
       skip,
     });
     const data = await api(`/api/related?${qs}&${glq()}`, 14000);
+    if (data && data.vibe && Array.isArray(data.vibe.relatedArtists) && data.vibe.relatedArtists.length) {
+      seed._relatedArtists = data.vibe.relatedArtists;
+    }
     return (data && data.tracks) || [];
   }
 
-  // Supplements related candidates with artist catalog + Deezer related artists + iTunes
+  // Supplements related candidates with peer/related artists in the same language & musical culture
   // and sequences them through the Spotify-style similarity -> gradual exploration engine.
   async function gatherSmartRelatedCandidates(seed, excludeTracks = [], max = 18) {
     if (!seed || seed.source === "radio") return [];
+    const vibe = inferTrackVibeClient(seed);
+    const searchGl =
+      vibe.langCulture === "south_asian" ? "IN" :
+      vibe.langCulture === "korean" ? "KR" :
+      vibe.langCulture === "japanese" ? "JP" :
+      vibe.langCulture === "opm" ? "PH" :
+      String((state.prefs && state.prefs.country) || "US").toUpperCase();
+
     const skipKeys = [];
     for (const ex of excludeTracks) {
       if (!ex) continue;
@@ -5402,28 +5977,38 @@
       if (ex.id) skipKeys.push(String(ex.id));
     }
     let raw = await fetchRelated(seed, skipKeys.slice(0, 25).join(",")).catch(() => []);
-    const relatedArtists = [];
+    const relatedArtists = [
+      ...new Set([
+        ...(Array.isArray(seed._relatedArtists) ? seed._relatedArtists : []),
+        ...(Array.isArray(vibe.peerArtists) ? vibe.peerArtists : []),
+      ]),
+    ];
     const art = artistName(seed);
 
     if (raw.length < 10 && art && !/^(various artists|unknown)$/i.test(art)) {
       try {
-        const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&${glq()}`, 8000).catch(() => null);
+        const artData = await api(`/api/artist?q=${encodeURIComponent(art)}&gl=${encodeURIComponent(searchGl)}`, 8000).catch(() => null);
         const artTracks = (artData && (artData.tracks || artData.topTracks || artData.songs)) || [];
-        raw = raw.concat(artTracks.slice(0, 12));
+        raw = raw.concat(artTracks.slice(0, 10));
       } catch {}
     }
 
-    if (raw.length < 10) {
-      const searchQ = art || seed.title || "";
-      if (searchQ && !/^(various artists|unknown)$/i.test(searchQ)) {
+    if (raw.length < 12) {
+      const peerTerms = [
+        relatedArtists[0] || "",
+        relatedArtists[1] || "",
+        art || seed.title || "",
+      ].filter((q) => q && !/^(various artists|unknown)$/i.test(q));
+      const uniqueTerms = [...new Set(peerTerms)].slice(0, 2);
+      for (const searchQ of uniqueTerms) {
         try {
-          const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=25`).catch(() => null);
+          const itRes = await itFetch(`/search?term=${encodeURIComponent(searchQ)}&media=music&entity=song&limit=20&country=${encodeURIComponent(searchGl)}`).catch(() => null);
           const itList = (itRes && itRes.results) || [];
           raw = raw.concat(itList);
         } catch {}
-        if (raw.length < 10) {
+        if (raw.length < 12) {
           try {
-            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=25`).catch(() => null);
+            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(searchQ)}&limit=20`).catch(() => null);
             const dzList = (dzRes && (dzRes.data || dzRes.results)) || [];
             for (const t of dzList) {
               const s = normalizeClientDeezerTrack(t);
@@ -5434,16 +6019,16 @@
       }
     }
 
-    if (raw.length < 10) {
+    if (raw.length < 14) {
+      raw = raw.concat(localRelatedTracks(seed, 30));
+    }
+
+    if (raw.length < 10 && vibe.langCulture === "western") {
       try {
         const disc = await api(`/api/shelf?id=discovery&${glq()}`, 6000).catch(() => null);
         const discTracks = (disc && disc.tracks) || [];
         raw = raw.concat(discTracks);
       } catch {}
-    }
-
-    if (raw.length < 12) {
-      raw = raw.concat(localRelatedTracks(seed, 24));
     }
 
     return scoreAndSequenceSpotifyStyle(seed, raw, {
@@ -5503,12 +6088,18 @@
     if (!targetSeed || targetSeed.source === "radio") return false;
     isRefillingQueue = true;
     try {
-      // 1. If we already have fresh Spotify-style recommendations matching the current vibe,
+      const targetKey = canonicalSongKey(targetSeed);
+      const targetVibe = inferTrackVibeClient(targetSeed);
+      // 1. If we already have fresh Spotify-style recommendations matching the current seed or exact subCulture,
       // filter out any song already in the queue or identical to the current song, and append!
       if (Array.isArray(state.queueRecs) && state.queueRecs.length >= 4) {
-        const validRecs = state.queueRecs.filter(
-          (r) => r && !isSameSongClient(r, targetSeed) && !(state.queue || []).some((q) => isSameSongClient(q, r))
-        );
+        const recsMatchSeed = state._queueRecsSeed === targetKey;
+        const validRecs = state.queueRecs.filter((r) => {
+          if (!r || isSameSongClient(r, targetSeed) || (state.queue || []).some((q) => isSameSongClient(q, r))) return false;
+          if (recsMatchSeed) return true;
+          const rv = inferTrackVibeClient(r);
+          return rv.langCulture === targetVibe.langCulture && rv.subCulture === targetVibe.subCulture;
+        });
         if (validRecs.length >= 4) {
           const toAdd = validRecs.slice(0, 10);
           for (const f of toAdd) recordSessionAutoQueued(f);
@@ -5928,8 +6519,8 @@
     // & desktop browsers and native WebViews don't block autoplay if native
     // on-device stream resolution falls back to the embedded player.
     const useNativeAudioPipe = IS_NATIVE && !!nativePlayer() && state.prefs.ytAudio !== false && !state.showVideo;
-    if (!isNetworkOff && !state.yt && typeof YT !== "undefined" && YT.Player) {
-      try { ensureYT(useNativeAudioPipe ? "" : (t.videoId || "")); } catch {}
+    if (!isNetworkOff && !useNativeAudioPipe && !state.yt && typeof YT !== "undefined" && YT.Player) {
+      try { ensureYT(t.videoId || ""); } catch {}
     }
 
     // Strip any accidental duplicate of the current song sitting right next in the queue
@@ -6091,23 +6682,23 @@
         if (warmHit.data.duration) dur = Number(warmHit.data.duration);
       }
     }
-    // Hand "yt:<videoId>" immediately to the native player (Android MuchiAudioService /
-    // iOS MuchiAudioPlugin) so it resolves the stream directly on the user's residential
-    // phone IP in parallel (~250ms, or 0ms if preloaded) with zero datacenter-IP delay,
-    // and plays with full OS media notification + background playback.
-    if (!url && nativePlayer() && !t._nativeOnDeviceTried) {
-      t._nativeOnDeviceTried = true;
-      url = `yt:${t.videoId}`;
-    }
     if (!url) {
       try {
-        const data = await getWarmStream(t.videoId, t.title || "", t.artist || "", t._ytCandidates || [], 6500, false);
+        const data = await getWarmStream(t.videoId, t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 6500, false);
         if (data && data.url && !data.isPreview) {
           url = data.url;
           if (data.videoId) t.videoId = data.videoId;
           if (data.duration) dur = Number(data.duration);
         }
       } catch {}
+    }
+    // If the Worker couldn't resolve a direct stream on its datacenter IP,
+    // hand "yt:<videoId>" to the native player (Android MuchiAudioService /
+    // iOS MuchiAudioPlugin) so it resolves the stream directly on the user's
+    // residential phone IP and plays with full OS media notification + background playback.
+    if (!url && nativePlayer() && !t._nativeOnDeviceTried) {
+      t._nativeOnDeviceTried = true;
+      url = `yt:${t.videoId}`;
     }
     if (!url) return false;
     const urlDur = parseStreamUrlDuration(url);
@@ -7062,9 +7653,9 @@
     // Audio playback optimization: pre-resolve next track stream and pre-warm for gapless playback
     if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
       const nextT = state.queue[state.index + 1];
-      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving && !nextT._nativePreloaded) {
+      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
         const NP = nativePlayer();
-        if (IS_NATIVE && NP && typeof NP.preload === "function") {
+        if (IS_NATIVE && NP && typeof NP.preload === "function" && !nextT._nativePreloaded) {
           nextT._nativePreloaded = true;
           const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
           NP.preload({
@@ -7073,19 +7664,18 @@
             title: String(nextT.title || ""),
             artist: String(artistName(nextT) || nextT.artist || ""),
           }).catch(() => {});
-        } else {
-          nextT._resolving = true;
-          getWarmStream(nextT.videoId, nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
-            if (res && res.url) {
-              const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
-              nextT.streamUrl = fullUrl;
-              if (!nextT._prefetched) {
-                nextT._prefetched = true;
-                fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
-              }
-            }
-          }).catch(() => {}).finally(() => { nextT._resolving = false; });
         }
+        nextT._resolving = true;
+        getWarmStream(nextT.videoId, nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
+          if (res && res.url) {
+            const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
+            nextT.streamUrl = fullUrl;
+            if (!nextT._prefetched) {
+              nextT._prefetched = true;
+              fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+            }
+          }
+        }).catch(() => {}).finally(() => { nextT._resolving = false; });
       } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
         nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
         if (!nextT._prefetched) {
@@ -7358,12 +7948,14 @@
 
   function keepBackgroundPlay() {
     if (state.prefs.bgPlay === false || !wantPlay) return;
-    unlockSound();
     const t = current();
     if (!t) return;
     if (npActive) {
-      if (!npPlaying) nativeResumePlayback();
-    } else if ((t.videoId || t.source === "youtube") && !t._playingViaAudio) {
+      if (!npPlaying && Date.now() >= npCmdUntil) nativeResumePlayback();
+      return;
+    }
+    if (!document.hidden) unlockSound();
+    if ((t.videoId || t.source === "youtube") && !t._playingViaAudio) {
       if (IS_NATIVE) nativeSyncSession();
       if (!state.yt || !state.yt.getPlayerState) return;
       let s = -1;
@@ -7655,15 +8247,6 @@
       if ((state.playing || wantPlay) && cur) {
         state.playing = true;
         setWantPlay(true);
-        if (!cur._nativeYtFallbackTried && cur.videoId) {
-          cur._nativeYtFallbackTried = true;
-          cur._playingViaAudio = false;
-          playYouTube(cur).catch(() => {
-            if (current() !== cur) return;
-            nativeHandleControls({ message: "error" });
-          });
-          return;
-        }
         if (!cur._nativeRefreshTried && (cur.videoId || cur.title)) {
           cur._nativeRefreshTried = true;
           cur.streamUrl = "";
@@ -7689,13 +8272,34 @@
             });
           return;
         }
+        if (!cur._nativeOnDeviceTried && cur.videoId && nativePlayer()) {
+          cur._nativeOnDeviceTried = true;
+          cur.streamUrl = `yt:${cur.videoId}`;
+          cur._isPreviewStream = false;
+          cur._playingViaAudio = true;
+          playAudio(cur).catch(() => {
+            if (current() !== cur) return;
+            nativeHandleControls({ message: "error" });
+          });
+          return;
+        }
         if (!cur._nativeFallbackTried) {
           cur._nativeFallbackTried = true;
           cur.streamUrl = "";
           playFallbackAudioForTrack(cur, true).then((ok) => {
-            if (!ok && current() === cur) skipFailed("Playback error");
+            if (ok) return;
+            if (current() === cur) nativeHandleControls({ message: "error" });
           }).catch(() => {
-            if (current() === cur) skipFailed("Playback error");
+            if (current() === cur) nativeHandleControls({ message: "error" });
+          });
+          return;
+        }
+        if (!cur._nativeYtFallbackTried && cur.videoId && !document.hidden) {
+          cur._nativeYtFallbackTried = true;
+          cur._playingViaAudio = false;
+          playYouTube(cur).catch(() => {
+            if (current() !== cur) return;
+            skipFailed("Playback error");
           });
           return;
         }
@@ -9044,13 +9648,15 @@
 
   function renderHome() {
     const h = state.home;
-    if (!h) {
+      if (!h) {
       return `
         ${homeBarHTML()}
-        <div class="hero">
-          <div>
+        <div class="hero home-hero">
+          <div class="hero-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
+          ${homeHeroSceneHTML()}
+          <div class="home-hero-copy">
             <span class="hero-brand-kicker">Muchi</span>
-            <h1>${greeting()}</h1>
+            <h1>${heroGreetingHTML()}</h1>
             <p>Loading English hits and genres…</p>
           </div>
         </div>
@@ -9101,7 +9707,7 @@
         ${homeHeroSceneHTML()}
         <div class="home-hero-copy">
           <span class="hero-brand-kicker">Muchi</span>
-          <h1>${greeting()}</h1>
+          <h1>${heroGreetingHTML()}</h1>
           ${liveNote ? `<p>${escapeHTML(liveNote.replace(/^\s*·\s*/, ""))}</p>` : ""}
         </div>
       </div>
@@ -9158,11 +9764,15 @@
   }
 
   function plCardHTML(p, group, i) {
-    const art = p.artwork || (p.tracks && p.tracks[0] && p.tracks[0].artwork) || "/cover-default.jpg";
+    healPlaylistCoversClient(p);
+    const firstTrack = p && Array.isArray(p.tracks) && p.tracks[0] ? p.tracks[0] : null;
+    const art = p.artwork || (firstTrack && firstTrack.artwork) || "/cover-default.jpg";
+    const seedTitle = (firstTrack && firstTrack.title) || p.title || "";
+    const seedArtist = (firstTrack && firstTrack.artist) || p.artist || "";
     return `<div class="card-wrap">
-      <button type="button" class="card card-hit" data-open-home-pl="${escapeAttr(group)}" data-pl-i="${i}">
+      <button type="button" class="card card-hit" data-open-home-pl="${escapeAttr(group)}" data-pl-i="${i}" data-title="${escapeAttr(seedTitle)}" data-artist="${escapeAttr(seedArtist)}">
         <div class="art">
-          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/>
+          <img src="${escapeAttr(art)}" alt="" loading="lazy" onerror="handleImgErr(this)"/>
           <span class="badge yt">Playlist</span>
         </div>
         <h3>${escapeHTML(p.title || "Playlist")}</h3>
@@ -10208,12 +10818,17 @@
     }
     if (pl === "catalog") {
       const p = state.catalogPlaylist || { title: "Playlist", tracks: [], loading: true };
+      healPlaylistCoversClient(p);
       const tracks = p.tracks || [];
+      const firstTrack = tracks[0] || null;
+      const heroArt = (isCountryTrendPlId(p.shelfId) && firstTrack && firstTrack.artwork)
+        ? firstTrack.artwork
+        : (p.artwork || (firstTrack && firstTrack.artwork) || "/cover-default.jpg");
       return `
         <div class="lib-detail">
           <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
-          <div class="lib-hero custom-pl">
-            <img class="lib-cover" src="${escapeAttr(p.artwork || (tracks[0] && tracks[0].artwork) || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
+          <div class="lib-hero custom-pl" data-title="${escapeAttr((firstTrack && firstTrack.title) || p.title || "")}" data-artist="${escapeAttr((firstTrack && firstTrack.artist) || p.artist || "")}">
+            <img class="lib-cover" src="${escapeAttr(heroArt)}" alt="" onerror="handleImgErr(this)"/>
             <div class="lib-hero-copy">
               <p class="lib-kicker">Playlist</p>
               <h1>${escapeHTML(p.title || "Playlist")}</h1>
@@ -10467,10 +11082,12 @@
   function emptyLib() { return `<div class="empty"><h3>Nothing here yet</h3></div>`; }
 
   function githubRepo() {
-    const u = String(state.prefs.github || "").replace(/\/$/, "");
+    const u = String(state.prefs.github || "https://github.com/Kaibshshdheueejw/Muchi").replace(/\/$/, "");
     const m = u.match(/github\.com\/([^/]+)\/([^/#?]+)/i);
-    if (!m) return null;
-    return { url: `https://github.com/${m[1]}/${m[2].replace(/\.git$/i, "")}`, owner: m[1], repo: m[2].replace(/\.git$/i, "") };
+    if (!m) return { url: "https://github.com/Kaibshshdheueejw/Muchi", owner: "Kaibshshdheueejw", repo: "Muchi" };
+    const owner = m[1];
+    const repo = m[2].replace(/\.git$/i, "").replace(/^Muchi-music(?:-New)?$/i, "Muchi");
+    return { url: `https://github.com/${owner}/${repo}`, owner, repo };
   }
   function parseVer(s) {
     const m = String(s || "").replace(/^v/i, "").match(/(\d+)\.(\d+)(?:\.(\d+))?/);
@@ -10503,217 +11120,81 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.7.8",
+      title: "Muchi 1.7.8",
+      notes: [
+        "Reliable background and lock-screen music playback on Android and iOS.",
+        "Full-song offline downloads that save cleanly to your device.",
+        "Updated Terms of Service, Privacy Policy, and smoother Lyrics & Settings layout.",
+      ],
+    },
+    {
       ver: "1.7.7",
       title: "Muchi 1.7.7",
       notes: [
-        "Fixed native Android and iOS tap-to-play reliability by eliminating duplicate service start commands, race conditions during async stream resolution, and slow sequential Piped fallback timeouts.",
-        "Added fast parallelized on-device stream resolution on iOS and immediate foreground service promotion on Android 12+ with preserved phone-speaker DSP.",
-        "Fixed iOS WKWebView inline media configuration and YouTube IFrame postMessage origin matching for instant fallback playback and lock-screen session sync.",
+        "Faster song start times when tapping to play.",
+        "Improved lock-screen controls and playback stability.",
       ],
     },
     {
       ver: "1.7.6",
       title: "Muchi 1.7.6",
       notes: [
-        "Restored exact v1.6.6 Phone Speaker, Bass, Spatial, and Dynamic Sound Stage DSP across WebAudio and Android (LoudnessEnhancer + BassBoost + Equalizer) with 1.55x post-limiter output gain and 0.72 harmonic sub-bass exciter.",
-        "Removed extra post-output brickwall limiting and multiband compression that dulled highs and reduced dynamic punch on phone speakers.",
-        "Removed all 30-second low-bitrate previewUrl overrides and synthetic test-tone playback fallbacks so tracks always stream at full quality.",
+        "Richer phone speaker sound, deeper bass, and clearer vocals.",
+        "Full-length high-quality audio streaming for every track.",
       ],
     },
     {
       ver: "1.7.5",
       title: "Muchi 1.7.5",
       notes: [
-        "New Timestamp Wiggle styles in Settings → Player: replaced Beat Pulse and Electric Zigzag with Harmonic Ribbon and Laser Glow alongside Sine Wave and Double Helix, with smooth endpoint tapering.",
-        "Fixed offline downloaded song seeking across Android, iOS, and Web by shifting MP4 stco/co64/tfhd sample table chunk offsets on metadata tag embedding and fixing Capacitor Android seekTo long coercion.",
-        "Offline lyrics now persist automatically when downloading songs and move/highlight in real time during offline playback.",
-        "Resolved duplicate load() method in MuchiAudioPlugin.java for clean Android release APK compilation.",
+        "New animated progress bar styles in Settings → Player.",
+        "Smooth seeking and synced lyrics for offline downloaded songs.",
       ],
     },
     {
       ver: "1.7.4",
       title: "Muchi 1.7.4",
       notes: [
-        "Fixed the player timer bar (div.seek-row) in the Android & iOS app so elapsed time, total duration, seek thumb, and live dual-layer wave progress stay smoothly synchronized without freezing.",
-        "Upgraded native Android & iOS audio engines to match the exact 1.6.6 / 1.5.5 Sound Stage DSP (6-band Pre-EQ, Multi-Band Compressor, 32-bit float audio path, and Limiter across Phone, Bass, Spatial, and Dynamic modes).",
-        "Fixed stream codec & bitrate prioritization so 160kbps Opus / 256kbps AAC studio masters are always selected over 48kbps low-bitrate streams, and removed 30-second preview fallbacks.",
+        "Smoother song timer bar and live wave progress.",
+        "Enhanced Sound Stage audio presets across all devices.",
       ],
     },
     {
       ver: "1.7.3",
       title: "Muchi 1.7.3",
       notes: [
-        "Fixed offline song downloads across Android, iOS, and Web so full-length audio tracks are always saved (never 30-second previews or incomplete clips).",
-        "Added on-device residential IP stream resolution and 4 MB chunked range downloading in MuchiDownloadPlugin to prevent YouTube throttling or datacenter IP blocks.",
-        "Guaranteed instant offline playback of downloaded songs from local storage and IndexedDB even with no internet connection.",
+        "Improved offline song downloads and instant offline playback.",
       ],
     },
     {
       ver: "1.7.2",
       title: "Muchi 1.7.2",
       notes: [
-        "Faster song start times across YouTube, Apple Music, Deezer, and Audius by racing InnerTube & Piped stream resolvers and search queries in parallel.",
-        "Parallelized on-device Android background audio stream resolution so locked-screen and background playback starts in under a second.",
-        "Added warm stream caching and instant fast-tier handoff between the cloud Worker and native media engine.",
+        "Quicker song loading across YouTube, Apple Music, Deezer, and Audius.",
       ],
     },
     {
       ver: "1.6.9",
       title: "Muchi 1.6.9",
       notes: [
-        "Fixed UI Player Interface across the native app and mobile web: restored full track title/artist visibility, responsive player bar layout, frosted glass blur, and all 4 player styles (Pill, Island, Wave, Solid Bar).",
-        "Synchronized native player progress, seek bar scrubbing, play/pause state, live wave animation, and video player switching without touching background playback or notifications.",
-        "Added full Web-to-App feature parity in Player Options and Now Playing header (Download offline, Follow artist, Watch video, Sleep timer, Playback speed, Player style, Song details, and Share).",
-        "Fixed Deezer song playback when clicking tracks across Search, Artist profiles, Popular lists, and Homepage shelves without affecting Deezer song catalog loading.",
+        "Refined mini-player and Now Playing design with all 4 player styles.",
+        "Quick access to Download, Sleep Timer, Follow Artist, and Share.",
       ],
     },
     {
       ver: "1.6.8",
       title: "Muchi 1.6.8",
       notes: [
-        "New Winter UI, Christmas UI & Autumn UI app-wide themes in Settings → UI alongside Material 3 and Glass UI.",
-        "Custom Alaskan Snowfall & Outdoor Pine Forest animation inside the homepage greeting bar for Winter UI.",
-        "Custom Santa Claus & Reindeer Night-Sky Flight loop animation inside the homepage greeting bar for Christmas UI.",
-        "Custom Golden Maple Forest & Falling Autumn Leaves loop animation inside the homepage greeting bar for Autumn UI, plus mobile GPU optimizations.",
+        "New Winter, Christmas, and Autumn visual themes in Settings → UI.",
       ],
     },
     {
       ver: "1.6.7",
       title: "Muchi 1.6.7",
       notes: [
-        "First-launch Taste Onboarding with dedicated local genres and famous local artists across all 32 countries.",
-        "Combined 'Picked for your taste & artists you follow' playlist shelf under Made for you.",
-        "Restored automatic YouTube Liked Songs & Playlists loading on Google Sign-In and cloud profile restore for returning users.",
-      ],
-    },
-    {
-      ver: "1.6.6",
-      title: "Muchi 1.6.6",
-      notes: [
-        "Restored original v1.5.5 Sound Stage DSP & acoustics across Phone, Bass, Spatial, and Dynamic modes for full warmth, sub-bass punch, and clarity.",
-        "Removed low-bitrate preview and synthetic audio fallbacks from playback so songs always stream at full fidelity.",
-      ],
-    },
-    {
-      ver: "1.6.5",
-      title: "Muchi 1.6.5",
-      notes: [
-        "Unified Artist Search & Profiles: searching any artist (e.g. Justin Bieber) reliably displays their artist profile card at the top of search results with high-resolution artwork.",
-        "Instant Live Search Navigation: typing in the search bar from Home or any view immediately opens live search results.",
-        "Resilient Multi-Provider Artist Fallback: synthesizes and enriches artist profiles across YouTube Music, iTunes, and Deezer even when individual providers rate-limit.",
-      ],
-    },
-    {
-      ver: "1.6.4",
-      title: "Muchi 1.6.4",
-      notes: [
-        "Fixed search input race conditions: cleared queries reset cleanly without resurrecting old search terms or mixing up characters and spaces while typing.",
-        "High-speed iTunes search: optimized parallel queries and instant caching for rapid result delivery.",
-        "Unified Catalog on Homepage: iTunes and Deezer tracks are now integrated directly into homepage playlists, daily mixes, and top charts alongside YouTube music.",
-        "Streamlined multi-provider track playback with persistent source badges across all platforms.",
-      ],
-    },
-    {
-      ver: "1.6.3",
-      title: "Muchi 1.6.3",
-      notes: [
-        "Cloud Library Sync: liked songs, playlists, and followed artists securely sync across desktop, web, and mobile devices when signed in.",
-        "Proactive Queue Autoplay: intelligent queue extension smoothly streams related tracks as playback reaches the queue end.",
-        "2025/2026 Chart Refresh: up-to-date regional hit lists across India, US, UK, Canada, Australia, Japan, South Korea, Germany, and more.",
-        "Optimized caching layers: refreshed home and localized catalog caching for near-instant cold loads.",
-      ],
-    },
-    {
-      ver: "1.6.2",
-      title: "Muchi 1.6.2",
-      notes: [
-        "Full protection of administrative routes with strict server-side RBAC permissions.",
-        "Verified Google Sign-In email authentication (email_verified validation) for security.",
-        "Cryptographic HMAC-SHA256 signature verification for webhooks with anti-replay protection.",
-        "Hardened image proxy against Cross-Site Scripting (XSS) and content type sniffing.",
-        "Isolated sensitive internal debugging output and credentials from production responses.",
-      ],
-    },
-    {
-      ver: "1.6.1",
-      title: "Muchi 1.6.1",
-      notes: [
-        "Fixed cross-platform Deezer and iTunes music search discrepancy across web browser, Android, and iOS app builds.",
-        "Tri-channel search engine: unified Direct CORS fetch, JSONP script bypass, and resilient backend worker proxying (/api/deezer/proxy & /api/itunes/search).",
-        "Universal track normalization: dual compatibility layer for both provider-raw schema and normalized audio models.",
-        "Optimized provider timeouts and cache invalidation so stale or empty results are never frozen.",
-      ],
-    },
-    {
-      ver: "1.5.9",
-      title: "Muchi 1.5.9",
-      notes: [
-        "Fixed iTunes songs search in real app and website: multi-tier resolution with direct queries, JSONP script bypass, and backend country-aware fallback.",
-        "Spotify-style Queue suggestions: instant 'Recommended' tracks based on your active queue vibe with one-tap add (+) and quick play.",
-        "Smarter autoplay mix: enhanced artist and genre diversity capping for seamless continuous radio playback.",
-        "On-demand refresh: easily regenerate fresh song suggestions right from your queue.",
-      ],
-    },
-    {
-      ver: "1.5.8",
-      title: "Muchi 1.5.8",
-      notes: [
-        "Android build stabilization and modern Android 16 (API 36) compatibility.",
-        "Audio engine node stability and background playback reliability.",
-      ],
-    },
-    {
-      ver: "1.5.6",
-      title: "Muchi 1.5.6",
-      notes: [
-        "Fixed Deezer search song results and added direct client-side JSONP catalog fallback.",
-        "Resolved download 403 stream errors with cross-provider playback stream resolution and high-fidelity fallback.",
-        "Stabilized Android build target to stable Android 15 (API 35) across CI/CD workflows and Gradle configs.",
-        "Enhanced equalizer audio engine and media controls synchronization.",
-      ],
-    },
-    {
-      ver: "1.5.5",
-      title: "Muchi 1.5.5",
-      notes: [
-        "In-app updater: Android updates now download seamlessly inside the app with live progress, redirect following, and automatic installer launching.",
-        "iOS & Web updates: instant in-place cache refreshing and in-app iOS package download without external browser redirects.",
-        "Settings About update sheet now keeps you inside the app throughout the entire update flow.",
-        "Capacitor Android build & release pipeline synchronization.",
-      ],
-    },
-    {
-      ver: "1.5.4",
-      title: "Muchi 1.5.4",
-      notes: [
-        "YouTube play + save fixed at the source — the app now resolves streams directly (no flaky third-party proxy), which also brings back reliable background playback.",
-        "Background music survives leaving the app; auto-next works from the notification even with the screen off.",
-        "The media notification now has real Previous / Play-Pause / Next buttons and no longer beeps on every song change.",
-        "Downloads are always the real file type — m4a where available — and a failed download can no longer save a corrupt file.",
-        "Player options: Sleep timer and Download song live in the player's ⋮ sheet (look settings moved to Settings → Appearance where they belong).",
-        "Updates: the app opens the Install screen itself after downloading, with an Install button if you dismissed it — no browser, no re-downloading the version you already have.",
-        "iOS: lock-screen remaining time fixed; radio stations (plain http) now actually play. Android: radio http streams play through the secure proxy too.",
-      ],
-    },
-    {
-      ver: "1.5.3",
-      title: "Muchi 1.5.3",
-      notes: [
-        "Save offline straight from Now Playing — a Download button now sits next to Queue and Lyrics.",
-        "China and Hong Kong are now in the Catalog country list.",
-        "Settings got quieter — many actions no longer pop a toast.",
-        "Updates download inside the app itself, no browser redirect.",
-        "Storage permission is asked when you save a song.",
-        "This What's New popup in Settings instead of a browser tab.",
-      ],
-    },
-    {
-      ver: "1.5.0",
-      title: "Muchi 1.5.0",
-      notes: [
-        "Real tagged downloads on disk — album art and title/artist embedded.",
-        "Sound stage and spatial bass boost.",
-        "Browser-side artist catalogues from iTunes and Deezer.",
+        "Personalized music taste onboarding and regional artist picks.",
+        "Automatic YouTube Liked Songs and Playlists sync on sign-in.",
       ],
     },
   ];
@@ -11377,6 +11858,55 @@
           <i class="leaf-amber"></i>
           <i class="leaf-gold"></i>
         </div>
+      </div>
+      <div class="hero-scene hero-scene-genshin" aria-hidden="true">
+        <div class="genshin-celestia-glow"></div>
+        <div class="genshin-wind-currents"></div>
+        <!-- Teyvat Celestia Floating Island & Mondstadt / Liyue Starlit Horizon -->
+        <svg class="genshin-horizon-svg" viewBox="0 0 800 180" preserveAspectRatio="xMidYMax slice">
+          <defs>
+            <linearGradient id="teyvatPeakBack" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="#0f172a" stop-opacity="0.92"/>
+            </linearGradient>
+            <linearGradient id="teyvatGoldMist" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#fbbf24" stop-opacity="0.05"/>
+              <stop offset="50%" stop-color="#fef08a" stop-opacity="0.28"/>
+              <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.12"/>
+            </linearGradient>
+          </defs>
+          <!-- Celestia Floating Sky Island Silhouette -->
+          <g class="genshin-celestia-island" opacity="0.72">
+            <path d="M590,34 L658,34 L646,44 L628,56 L624,68 L616,54 L602,43 Z" fill="#fef08a" opacity="0.55"/>
+            <path d="M610,34 L616,18 L624,12 L632,18 L638,34 Z" fill="#fde68a" opacity="0.7"/>
+            <ellipse cx="624" cy="34" rx="44" ry="4" fill="#fef9c3" opacity="0.4"/>
+          </g>
+          <!-- Golden Constellation Lines in the Teyvat Sky -->
+          <g stroke="#fde68a" stroke-width="0.9" opacity="0.42" fill="none">
+            <path d="M96,34 L138,22 L176,38 L152,62 Z"/>
+            <path d="M452,26 L496,18 L532,36 L488,52 Z"/>
+          </g>
+          <g fill="#fef9c3" opacity="0.85">
+            <circle cx="96" cy="34" r="2"/><circle cx="138" cy="22" r="2.4"/><circle cx="176" cy="38" r="1.8"/><circle cx="152" cy="62" r="2"/>
+            <circle cx="452" cy="26" r="2.2"/><circle cx="496" cy="18" r="2.5"/><circle cx="532" cy="36" r="1.8"/><circle cx="488" cy="52" r="2"/>
+          </g>
+          <!-- Distant Liyue Karst Peaks & Mondstadt Cliffs -->
+          <path d="M0,180 L0,126 L74,88 L142,128 L238,76 L320,132 L438,84 L548,128 L664,72 L742,118 L800,96 L800,180 Z" fill="url(#teyvatPeakBack)"/>
+          <!-- Anemo & Geo Ley Line Mist -->
+          <path d="M0,158 Q210,138 440,156 T800,146 L800,180 L0,180 Z" fill="url(#teyvatGoldMist)"/>
+          <path d="M0,168 Q260,154 520,168 T800,160 L800,180 L0,180 Z" fill="#090d1e" opacity="0.92"/>
+        </svg>
+        <!-- Drifting Primogem 4-Pointed Stars & Anemo Wind Motes -->
+        <div class="genshin-primogems">
+          <i class="primo-star"></i>
+          <i class="anemo-mote"></i>
+          <i class="primo-star"></i>
+          <i class="geo-mote"></i>
+          <i class="primo-star"></i>
+          <i class="anemo-mote"></i>
+          <i class="primo-star"></i>
+          <i class="geo-mote"></i>
+        </div>
       </div>`;
   }
 
@@ -11390,6 +11920,21 @@
         </span>
         ${ui === id ? `<span class="ui-pick-on">On</span>` : ""}
       </button>`;
+    const animCard = (id, name, blurb, extra) => `
+      <div class="card-wrap ui-anim-card-wrap">
+        <button type="button" class="card card-hit ui-pick ui-anim-card ${ui === id ? "on" : ""}" data-set-ui="${id}">
+          <div class="art ui-pick-preview ${id}">
+            ${extra}
+          </div>
+          <div class="ui-anim-card-meta">
+            <span>
+              <strong>${name}</strong>
+              ${blurb ? `<p>${blurb}</p>` : ""}
+            </span>
+            ${ui === id ? `<span class="ui-pick-on">On</span>` : ""}
+          </div>
+        </button>
+      </div>`;
     return `
       <div class="hero">
         <div>
@@ -11421,9 +11966,15 @@
           <div class="ui-pick-list">
             ${card("material", "Material 3", "", `<i></i><i></i><i></i>`)}
             ${card("glass", "Glass UI", "", `<i></i><i></i><i></i>`)}
-            ${card("winter", "Winter UI", "", `<i></i><i></i><i></i>`)}
-            ${card("christmas", "Christmas UI", "", `<i></i><i></i><i></i>`)}
-            ${card("autumn", "Autumn UI", "", `<i></i><i></i><i></i>`)}
+          </div>
+        </div>
+        <div class="set-card">
+          <h3><span class="material-symbols-outlined">auto_awesome</span>Animated UI</h3>
+          <div class="ui-anim-row">
+            ${animCard("winter", "Winter UI", "Aurora & snowfall", `<i></i><i></i><i></i>`)}
+            ${animCard("christmas", "Christmas UI", "Starry holiday sky", `<i></i><i></i><i></i>`)}
+            ${animCard("autumn", "Autumn UI", "Golden harvest leaves", `<i></i><i></i><i></i>`)}
+            ${animCard("genshin", "Genshin Impact", "Paimon, Aether & Lumine", `<i></i><i></i><i></i>`)}
           </div>
         </div>
       </div>`;
@@ -12098,8 +12649,8 @@
               <div><strong>Help</strong></div>
             </div>
             <div class="set-actions">
-              <button class="chip-btn" id="ghRelease" type="button" ${ghOk ? "" : "disabled"}>What's new</button>
-              <button class="chip-btn" id="ghBug" type="button" ${ghOk ? "" : "disabled"}>Send feedback</button>
+              <button class="chip-btn" id="ghRelease" type="button">What's new</button>
+              <a class="chip-btn" id="ghBug" href="${escapeAttr(`${(gh && gh.url) || "https://github.com/Kaibshshdheueejw/Muchi"}/issues/new?title=${encodeURIComponent("Feedback: ")}&body=${encodeURIComponent(`**Muchi ${APP_VERSION}**\nDevice: ${navigator.userAgent}\n\nFeedback:\n`)}`)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none">Send feedback</a>
             </div>
           </div>
           <div class="set-row">
@@ -12121,10 +12672,10 @@
             <img src="https://github.com/Kaibshshdheueejw.png?size=96" alt="" width="44" height="44"/>
             <span>
               <strong>github.com/Kaibshshdheueejw</strong>
-              <em>Open source · Muchi-music (public)</em>
+              <em>Open source · Muchi (public)</em>
             </span>
           </a>
-          <a class="dev-repo" href="https://github.com/Kaibshshdheueejw/Muchi-music" target="_blank" rel="noopener noreferrer">View the code</a>
+          <a class="dev-repo" href="https://github.com/Kaibshshdheueejw/Muchi" target="_blank" rel="noopener noreferrer">View the code</a>
         </div>
       </div>
     `;
@@ -13256,11 +13807,24 @@
       openWhatsNew();
     });
     const ghBug = viewEl.querySelector("#ghBug");
-    if (ghBug) ghBug.addEventListener("click", () => {
-      const u = String(state.prefs.github || "").replace(/\/$/, "");
-      if (!u) return;
-      const body = encodeURIComponent(`**Muchi ${APP_VERSION}**\nBrowser: ${navigator.userAgent}\nView: ${state.view}\n\nSteps:\n1.\n`);
-      window.open(`${u}/issues/new?title=${encodeURIComponent("Bug: ")}&body=${body}`, "_blank", "noopener");
+    if (ghBug) ghBug.addEventListener("click", (e) => {
+      const gh = githubRepo();
+      const baseUrl = (gh && gh.url) ? gh.url : "https://github.com/Kaibshshdheueejw/Muchi";
+      const body = encodeURIComponent(`**Muchi ${APP_VERSION}**\nDevice: ${navigator.userAgent}\nView: ${state.view}\n\nFeedback:\n`);
+      const targetUrl = `${baseUrl}/issues/new?title=${encodeURIComponent("Feedback: ")}&body=${body}`;
+      if (ghBug.tagName === "A") {
+        ghBug.href = targetUrl;
+        if (IS_NATIVE) {
+          e.preventDefault();
+          try { window.open(targetUrl, "_system"); } catch { window.location.href = targetUrl; }
+        }
+        return;
+      }
+      if (IS_NATIVE) {
+        try { window.open(targetUrl, "_system"); } catch { window.location.href = targetUrl; }
+      } else {
+        window.open(targetUrl, "_blank", "noopener");
+      }
     });
     viewEl.querySelectorAll("[data-unfollow]").forEach((el) => {
       el.addEventListener("click", (e) => {
@@ -13435,6 +13999,8 @@
     try { history.replaceState(navSnap(), ""); } catch {}
   }
   function paintNav(fromBack) {
+    const prevPainted = paintNav._lastView;
+    paintNav._lastView = state.view;
     showEl($("queuePanel"), !!state.showQueue);
     if ($("queuePanel")) $("queuePanel").classList.toggle("open", !!state.showQueue);
     showEl($("ytWrap"), !!state.showVideo);
@@ -13445,6 +14011,19 @@
     showEl($("scrim"), !!state.showQueue || (sideEl && sideEl.classList.contains("open")));
     render();
     syncPlayerVisibility();
+    if (IS_NATIVE || document.documentElement.getAttribute("data-native") === "1") {
+      clearTimeout(paintNav._popT);
+      if (state.view === "settings") {
+        document.body.classList.remove("settings-exit-pop");
+      } else if (prevPainted === "settings") {
+        document.body.classList.remove("settings-exit-pop");
+        void document.body.offsetWidth;
+        document.body.classList.add("settings-exit-pop");
+        paintNav._popT = setTimeout(() => {
+          document.body.classList.remove("settings-exit-pop");
+        }, 460);
+      }
+    }
     restoreScroll(!!fromBack);
     // CSS view fade — no snapshot machinery, so no white-flash risk
     fadeView();
@@ -14355,6 +14934,11 @@
     return good.length >= 3 ? good : a;
   }
 
+  function isCountryTrendPlId(id) {
+    const s = String(id || "");
+    return s.startsWith("ctrend:") || s.startsWith("ctrend-");
+  }
+
   async function openCatalogPlaylist(meta, opts) {
     if (!meta) return;
     // refill=true: re-fetch for a catalog view that is ALREADY current
@@ -14362,10 +14946,11 @@
     // view change, the caller has already painted the loading state.
     const refill = !!(opts && opts.refill);
     if (!refill) rememberScroll();
+    healPlaylistCoversClient(meta);
     const rawPreview = cleanPlaylistTracks(Array.isArray(meta.tracks) ? meta.tracks.slice() : []);
     const playlistId = meta.playlistId || "";
     const fallbackQ = meta.query || meta.title || "";
-    const isCountryTrendPl = String(meta.id || meta.shelfId || "").startsWith("ctrend:");
+    const isCountryTrendPl = isCountryTrendPlId(meta.id || meta.shelfId || "");
     const shelfId = meta.shelfId || (isCountryTrendPl ? meta.id : "") || "";
     const forYouMix = !!meta.forYouMix;
     const fyIndex = meta.fyIndex != null ? Number(meta.fyIndex) : null;
@@ -14375,13 +14960,16 @@
       : (fyIndex != null
           ? personalizeForYouCardTracks({ mood: fyMood, tracks: rawPreview }, null)
           : mixThreeSourcesClient(rawPreview, isCountryTrendPl ? [] : homeCatalogPool(), rawPreview.length));
+    for (const tr of preview) healTrackCoverClient(tr);
     const needFill = (isCountryTrendPl && preview.length >= 15)
       ? false
       : !!(forYouMix || fyIndex != null || shelfId || playlistId || fallbackQ);
     state.catalogPlaylist = {
       title: meta.title || "Playlist",
       artist: meta.subtitle || meta.artist || "",
-      artwork: meta.artwork || (preview[0] && preview[0].artwork) || "",
+      artwork: (isCountryTrendPl && preview[0] && preview[0].artwork)
+        ? preview[0].artwork
+        : (meta.artwork || (preview[0] && preview[0].artwork) || ""),
       playlistId,
       query: fallbackQ,
       shelfId,
@@ -14977,6 +15565,12 @@
           );
           const hasStaleCountryPls = !parsed || !Array.isArray(parsed.countryPlaylists) || parsed.countryPlaylists.length !== 17 || !parsed.countryPlaylists.every((pl) => pl && String(pl.id || "").startsWith("ctrend:"));
           if (!hasStaleFyCovers && !hasStaleCountryPls && parsed && parsed.country === targetCountry && Array.isArray(parsed.shelves) && parsed.shelves.some((s) => s.tracks && s.tracks.length)) {
+            if (Array.isArray(parsed.countryPlaylists)) {
+              parsed.countryPlaylists.forEach((p) => healPlaylistCoversClient(p));
+            }
+            if (Array.isArray(parsed.forYouPlaylists)) {
+              parsed.forYouPlaylists.forEach((p) => healPlaylistCoversClient(p));
+            }
             state.home = parsed;
             if (state.view === "home") render();
           } else if (hasStaleFyCovers || hasStaleCountryPls) {
@@ -15041,10 +15635,15 @@
         const bestCharts = keepBestTracks((state.home.youtubeCharts || []).filter((t) => !isUnwantedIndianTrackClient(t, curCountry)));
         state.home.youtubeCharts = bestCharts.length ? mixThreeSourcesClient(bestCharts, homeCatalogPool(), bestCharts.length) : bestCharts;
         if (Array.isArray(state.home.countryPlaylists)) {
-          state.home.countryPlaylists = state.home.countryPlaylists.slice(0, 17).map((p) => ({
-            ...p,
-            tracks: mixThreeSourcesClient(p.tracks || [], [], 20),
-          }));
+          state.home.countryPlaylists = state.home.countryPlaylists.slice(0, 17).map((p) => {
+            const trs = mixThreeSourcesClient(p.tracks || [], [], 20);
+            const healed = healPlaylistCoversClient({
+              ...p,
+              tracks: trs,
+            });
+            hydrateMissingTrackCovers(healed.tracks, () => paintHomeSoon());
+            return healed;
+          });
         }
         if (Array.isArray(state.home.globalPlaylists)) {
           state.home.globalPlaylists = state.home.globalPlaylists.map((p) => ({
@@ -16309,8 +16908,8 @@
     state.queue = state.recents.slice(0, 24);
     state.index = 0;
   }
-  if (!state.prefs.github) {
-    state.prefs.github = "https://github.com/Kaibshshdheueejw/Muchi-music-New";
+  if (!state.prefs.github || /Muchi-music(?:-New)?\/?$/i.test(state.prefs.github)) {
+    state.prefs.github = "https://github.com/Kaibshshdheueejw/Muchi";
     savePrefs();
   }
   window.__muchiToast = (msg) => toast(msg, true);

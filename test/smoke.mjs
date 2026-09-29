@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.7", APP_VERSION === "1.7.7" && appJs.includes('const APP_VERSION = "1.7.7"'));
+  ok("version: APP_VERSION is 1.7.8", APP_VERSION === "1.7.8" && appJs.includes('const APP_VERSION = "1.7.8"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1118,12 +1118,373 @@ await (async () => {
   ok("offline playback (1.7.3): playCurrent prioritizes saved local file / IndexedDB blob and playAudio uses getOfflineAudioBlob before network", appJs.includes("const hasOfflinePlayback = Boolean(") && appJs.includes("offlineBlob = await getOfflineAudioBlob(t);"));
   ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${candParam}${fastParam}") && appJs.includes("getWarmStream(t.videoId") && appJs.includes("url = `yt:${t.videoId}`"));
   ok("native playback: playYtWithAudio rejects 30s preview streams (!data.isPreview) so full song always plays", appJs.includes("if (data && data.url && !data.isPreview)") && !appJs.includes("resolveFallbackStreamUrl(t, true)"));
+  ok("native playback (1.7.8): playYtWithAudio resolves verified HTTP stream via getWarmStream BEFORE falling back to on-device yt: token",
+    appJs.indexOf("getWarmStream(t.videoId") > 0 &&
+    appJs.indexOf("url = `yt:${t.videoId}`") > appJs.indexOf("getWarmStream(t.videoId")
+  );
+  ok("native playback (1.7.8): nativeHandleControls error handler refreshes HTTP stream & retries native audio BEFORE falling back to WebView YouTube IFrame",
+    (() => {
+      const errBlockStart = appJs.indexOf('} else if (msg === "error") {');
+      const errBlock = appJs.slice(errBlockStart, errBlockStart + 2800);
+      const refreshIdx = errBlock.indexOf("!cur._nativeRefreshTried");
+      const fallbackIdx = errBlock.indexOf("!cur._nativeFallbackTried");
+      const ytFallbackIdx = errBlock.indexOf("!cur._nativeYtFallbackTried");
+      return refreshIdx > 0 && fallbackIdx > refreshIdx && ytFallbackIdx > fallbackIdx;
+    })()
+  );
+  ok("native background (1.7.8): Android MuchiAudioService restores full resolveYoutubeStreamStatic (candidates + official-audio search + ANDROID_TESTSUITE + Piped) and guarantees startInForeground in onStartCommand",
+    androidService.includes("return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, resolveExecutor);") &&
+    androidService.includes("ANDROID_TESTSUITE") &&
+    androidService.includes("public static final String ACTION_RESUME") &&
+    androidPlugin.includes("service.isForegroundStarted()")
+  );
+  ok("native background (1.7.8): iOS MuchiAudioPlugin restores full resolveStreamForDownload on-device resolution, ANDROID_TESTSUITE, and UIBackgroundTask assertions across track transitions",
+    iosPlugin.includes("Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)") &&
+    iosPlugin.includes("beginAudioBackgroundTask()") &&
+    iosPlugin.includes("UIApplication.didEnterBackgroundNotification") &&
+    iosPlugin.includes("ANDROID_TESTSUITE")
+  );
   ok("native background & notification: MuchiAudioService resolves yt: on-device, maintains MediaStyle foreground notification + WakeLock/WifiLock, and supports handleSessionIntent", androidService.includes("resolveYoutubeStreamOnDevice") && androidService.includes("handleSessionIntent") && androidService.includes("C.WAKE_MODE_NETWORK") && androidService.includes("WifiManager.WifiLock") && androidService.includes("stopPlaybackInternal(boolean notifyJs)"));
   ok("native background & notification: MuchiAudioPlugin exposes syncSession and setAudioPrefs and deduplicates loadTrack", androidPlugin.includes("public void syncSession(PluginCall call)") && androidPlugin.includes("public void setAudioPrefs(PluginCall call)") && androidService.includes("currentUrl.equals(url)"));
   ok("native background & notification: MainActivity keeps WebView media and JS timers alive in background (onPause/onStop/onWindowFocusChanged)", androidMainActivity.includes("keepWebViewAwake()") && androidMainActivity.includes("wv.onResume()") && androidMainActivity.includes("wv.resumeTimers()"));
   ok("native background & notification: app.js syncs native session notification on updateMediaSession and checks npActive first in keepBackgroundPlay", appJs.includes("nativeSyncSession();") && appJs.includes("function nativeSyncSession(") && /function keepBackgroundPlay\(\)\s*\{[\s\S]*?if\s*\(npActive\)/.test(appJs));
   ok("sound quality (1.5.5): WebAudio DSP graph (5-band EQ, bass shelf + harmonic warmth shaper, Haas 3D spatial stereo widener, clarity/air loudness compressor) and native hardware DSP effects active by default", appJs.includes("state.prefs.soundV !== 3") && appJs.includes("function hookSound()") && appJs.includes("function spatialMode()") && appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") && appJs.includes("Math.tanh(3.1 * x) * 0.52") && appJs.includes("out.gain.value = 1.55;") && appJs.includes("function nativeSyncAudioPrefs()") && androidService.includes("applyPlayerPrefsAndEffects") && androidService.includes("LoudnessEnhancer") && androidService.includes("BassBoost") && androidService.includes("Equalizer"));
   ok("phone thermal optimization: disables continuous 60-120fps waveRaf/seekRaf loops on phones, pauses background CSS animations via data-hidden, and uses GPU scaleY for eqBars", (appJs.includes("if (cheapPhone() || isBatterySaver()) {\n      drawSeekWave();\n      return;\n    }") || appJs.includes("if (cheapPhone()) {\n      drawSeekWave();\n      return;\n    }")) && appJs.includes("if (document.hidden && npActive) return;") && appJs.includes('document.documentElement.dataset.hidden = document.hidden ? "1" : "0"') && stylesCss.includes('html[data-hidden="1"] *') && stylesCss.includes("transform: scaleY(0.25)"));
+
+  // ── Native Android & iOS Background Playback E2E Simulation ──────────────
+  {
+    const vm = await import("node:vm");
+    // Expose internal test hook inside VM copy of app.js
+    const instrumentedAppJs = appJs.replace(
+      "  loadHome();\n  loadTasteRecommendations();",
+      "  window.__muchiE2E = { state, playCurrent, togglePlay, next, prev, keepBackgroundPlay, unlockSound, getNpState: () => ({ npActive, npPlaying, npDur, npPos, wantPlay }), setNpPos: (p, d) => { npPos = p; if (d) npDur = d; } };\n"
+    );
+
+    async function runNativeBackgroundE2E(platform) {
+      const controlsListeners = [];
+      const progressListeners = [];
+      const calls = [];
+      const docListeners = {};
+      const winListeners = {};
+      let webAudioPlayCalls = 0;
+
+      const MuchiAudioMock = {
+        addListener(event, cb) {
+          if (event === "muchiControls" || event === "controls") controlsListeners.push(cb);
+          if (event === "muchiProgress" || event === "progress") progressListeners.push(cb);
+          return Promise.resolve({ remove: () => {} });
+        },
+        async play(opts) { calls.push({ method: "play", ...opts }); },
+        async preload(opts) { calls.push({ method: "preload", ...opts }); },
+        async syncSession(opts) { calls.push({ method: "syncSession", ...opts }); },
+        async pause() { calls.push({ method: "pause" }); },
+        async resume() { calls.push({ method: "resume" }); },
+        async stop() { calls.push({ method: "stop" }); },
+        async seek(opts) { calls.push({ method: "seek", ...opts }); },
+        async setVolume(opts) { calls.push({ method: "setVolume", ...opts }); },
+        async setRate(opts) { calls.push({ method: "setRate", ...opts }); },
+        async setAudioPrefs(opts) { calls.push({ method: "setAudioPrefs", ...opts }); },
+      };
+
+      const makeEl = (id = "") => ({
+        id,
+        style: { setProperty() {}, removeProperty() {}, getPropertyValue() { return ""; } },
+        dataset: {},
+        classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+        setAttribute() {},
+        getAttribute() { return ""; },
+        removeAttribute() {},
+        appendChild() {},
+        append() {},
+        prepend() {},
+        remove() {},
+        addEventListener() {},
+        removeEventListener() {},
+        querySelector() { return makeEl(); },
+        querySelectorAll() { return []; },
+        getBoundingClientRect() { return { left: 0, top: 0, width: 300, height: 40 }; },
+        getContext() {
+          return {
+            clearRect() {}, fillRect() {}, beginPath() {}, arc() {}, fill() {}, stroke() {},
+            moveTo() {}, lineTo() {}, closePath() {}, createLinearGradient() { return { addColorStop() {} }; },
+            scale() {}, save() {}, restore() {}, translate() {},
+          };
+        },
+        play() { webAudioPlayCalls++; return Promise.resolve(); },
+        pause() {},
+        load() {},
+        innerHTML: "",
+        textContent: "",
+        value: "",
+        paused: true,
+        currentTime: 0,
+        duration: 210,
+        volume: 1,
+        playbackRate: 1,
+        src: "",
+      });
+
+      const elements = new Map();
+      const getEl = (id) => {
+        if (!elements.has(id)) elements.set(id, makeEl(id));
+        return elements.get(id);
+      };
+
+      const storage = new Map([["aura.onboarded", "1"]]);
+      const localStorageMock = {
+        getItem: (k) => (storage.has(k) ? storage.get(k) : null),
+        setItem: (k, v) => storage.set(k, String(v)),
+        removeItem: (k) => storage.delete(k),
+      };
+
+      const docMock = {
+        hidden: false,
+        visibilityState: "visible",
+        body: makeEl("body"),
+        head: makeEl("head"),
+        documentElement: makeEl("html"),
+        getElementById: (id) => getEl(id),
+        createElement: (tag) => makeEl(tag),
+        querySelector: () => makeEl(),
+        querySelectorAll: () => [],
+        addEventListener(ev, fn) { (docListeners[ev] = docListeners[ev] || []).push(fn); },
+        removeEventListener() {},
+        dispatchEvent(ev) { (docListeners[ev.type] || []).forEach((fn) => fn(ev)); },
+      };
+
+      let refreshCounter = 0;
+      const fetchMock = async (urlStr) => {
+        const u = String(urlStr);
+        if (u.includes("/api/yt-stream") || u.includes("/api/yt/stream")) {
+          const m = u.match(/[?&](?:videoId|v)=([^&]+)/);
+          const vid = m ? decodeURIComponent(m[1]) : "vid";
+          const isRefresh = u.includes("refresh=1");
+          if (isRefresh) refreshCounter++;
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              url: `https://rr1---sn-e2e.googlevideo.com/videoplayback?id=${vid}&r=${isRefresh ? refreshCounter : 0}&mime=audio%2Fmp4`,
+              mime: "audio/mp4",
+              duration: 215,
+              isPreview: false,
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true, tracks: [], results: [] }), text: async () => "{}" };
+      };
+
+      const sandbox = {
+        window: null,
+        self: null,
+        globalThis: null,
+        performance: { now: () => Date.now() },
+        document: docMock,
+        localStorage: localStorageMock,
+        sessionStorage: localStorageMock,
+        navigator: {
+          onLine: true,
+          userAgent: platform === "android"
+            ? "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 CapacitorApp"
+            : "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 CapacitorApp",
+          mediaSession: { metadata: null, playbackState: "none", setActionHandler() {}, setPositionState() {} },
+          wakeLock: { request: async () => ({ release: async () => {} }) },
+        },
+        location: { origin: "capacitor://localhost", href: "capacitor://localhost/", protocol: "capacitor:", host: "localhost", pathname: "/", search: "", hash: "" },
+        history: { pushState() {}, replaceState() {} },
+        Capacitor: {
+          isNativePlatform: () => true,
+          getPlatform: () => platform,
+          Plugins: { MuchiAudio: MuchiAudioMock },
+        },
+        MediaMetadata: class { constructor(init) { Object.assign(this, init); } },
+        AudioContext: undefined,
+        webkitAudioContext: undefined,
+        Audio: function() { return makeEl("audio-inst"); },
+        Image: function() { return makeEl("img-inst"); },
+        MutationObserver: class { observe() {} disconnect() {} },
+        ResizeObserver: class { observe() {} disconnect() {} },
+        IntersectionObserver: class { observe() {} disconnect() {} },
+        AbortController,
+        AbortSignal,
+        URL,
+        URLSearchParams,
+        CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } },
+        Event: class { constructor(type) { this.type = type; } },
+        fetch: fetchMock,
+         requestAnimationFrame: () => 1,
+        cancelAnimationFrame: () => {},
+        matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+        setTimeout: (fn, ms) => { const t = setTimeout(fn, Math.min(ms || 0, 20)); t.unref(); return t; },
+        clearTimeout,
+        setInterval: () => 1,
+        clearInterval: () => {},
+        console,
+        Math,
+        Date,
+        JSON,
+        Promise,
+        Set,
+        Map,
+        WeakMap,
+        Array,
+        Object,
+        String,
+        Number,
+        Boolean,
+        RegExp,
+        Error,
+        TypeError,
+        Uint8Array,
+        Int32Array,
+        Float32Array,
+        ArrayBuffer,
+        DataView,
+        encodeURIComponent,
+        decodeURIComponent,
+        parseInt,
+        parseFloat,
+        isNaN,
+        isFinite,
+        btoa: (s) => Buffer.from(String(s), "binary").toString("base64"),
+        atob: (s) => Buffer.from(String(s), "base64").toString("binary"),
+        addEventListener(ev, fn) { (winListeners[ev] = winListeners[ev] || []).push(fn); },
+        removeEventListener() {},
+        dispatchEvent(ev) { (winListeners[ev.type] || []).forEach((fn) => fn(ev)); },
+        scrollTo() {},
+        innerWidth: 390,
+        innerHeight: 844,
+        devicePixelRatio: 2,
+      };
+      sandbox.window = sandbox;
+      sandbox.self = sandbox;
+      sandbox.globalThis = sandbox;
+
+      vm.createContext(sandbox);
+      vm.runInContext(instrumentedAppJs, sandbox);
+
+      const api = sandbox.__muchiE2E;
+      const queue = [
+        { id: "yt:dQw4w9WgXcQ", videoId: "dQw4w9WgXcQ", title: "Never Gonna Give You Up", artist: "Rick Astley", source: "youtube", duration: 213, artwork: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" },
+        { id: "yt:kJQP7kiw5Fk", videoId: "kJQP7kiw5Fk", title: "Despacito", artist: "Luis Fonsi", source: "youtube", duration: 281, artwork: "https://i.ytimg.com/vi/kJQP7kiw5Fk/hqdefault.jpg" },
+        { id: "yt:JGwWNGJdvx8", videoId: "JGwWNGJdvx8", title: "Shape of You", artist: "Ed Sheeran", source: "youtube", duration: 235, artwork: "https://i.ytimg.com/vi/JGwWNGJdvx8/hqdefault.jpg" },
+      ];
+
+      // Step 1: Play Song 1 in foreground + advance past 6s so next-track preload triggers
+      api.state.queue = queue;
+      api.state.index = 0;
+      api.playCurrent(true);
+      await new Promise((r) => setTimeout(r, 40));
+      progressListeners.forEach((cb) => cb({ position: 8, duration: 213, playing: true }));
+      await new Promise((r) => setTimeout(r, 30));
+
+      const firstPlay = calls.find((c) => c.method === "play");
+      const firstPreload = calls.find((c) => c.method === "preload");
+      const step1Ok =
+        Boolean(firstPlay) &&
+        String(firstPlay.url).startsWith("https://") &&
+        firstPlay.videoId === "dQw4w9WgXcQ" &&
+        Boolean(firstPreload) &&
+        firstPreload.videoId === "kJQP7kiw5Fk" &&
+        api.getNpState().npActive === true &&
+        api.state.playing === true;
+
+      // Step 2: Background app + lock screen + wait (progress ticks at 15s, 60s, 120s)
+      const audioPlayBeforeBg = webAudioPlayCalls;
+      docMock.hidden = true;
+      docMock.visibilityState = "hidden";
+      docMock.dispatchEvent({ type: "visibilitychange" });
+      sandbox.dispatchEvent({ type: "pagehide" });
+      sandbox.dispatchEvent({ type: "blur" });
+      docMock.dispatchEvent({ type: "freeze" });
+
+      for (const pos of [15, 60, 120]) {
+        progressListeners.forEach((cb) => cb({ position: pos, duration: 213, playing: true }));
+      }
+      api.keepBackgroundPlay();
+      api.unlockSound();
+      await new Promise((r) => setTimeout(r, 30));
+
+      const stopCallsDuringBg = calls.filter((c) => c.method === "stop");
+      const step2Ok =
+        api.getNpState().npActive === true &&
+        api.state.playing === true &&
+        api.getNpState().npPos === 120 &&
+        stopCallsDuringBg.length === 0 &&
+        webAudioPlayCalls === audioPlayBeforeBg;
+
+      // Step 3: Lock-screen Pause → Resume while backgrounded & screen locked
+      controlsListeners.forEach((cb) => cb({ action: "pause" }));
+      await new Promise((r) => setTimeout(r, 20));
+      const pausedInBg = api.state.playing === false && api.getNpState().npPlaying === false;
+
+      controlsListeners.forEach((cb) => cb({ action: "play" }));
+      await new Promise((r) => setTimeout(r, 20));
+      const resumedInBg = api.state.playing === true && api.getNpState().npPlaying === true;
+
+      // Also test __muchiNative("pause") / __muchiNative("play") bridge commands
+      sandbox.__muchiNative("pause");
+      const bridgePaused = calls.some((c) => c.method === "pause") && api.state.playing === false;
+      sandbox.__muchiNative("play");
+      const bridgeResumed = calls.some((c) => c.method === "resume") && api.state.playing === true;
+      const step3Ok = pausedInBg && resumedInBg && bridgePaused && bridgeResumed && api.getNpState().npActive === true;
+
+      // Step 4: Lock-screen Next Track → Previous Track → Natural Ended transition while backgrounded
+      calls.length = 0;
+      controlsListeners.forEach((cb) => cb({ action: "next" }));
+      await new Promise((r) => setTimeout(r, 40));
+      const nextPlayCall = calls.find((c) => c.method === "play" && c.videoId === "kJQP7kiw5Fk");
+      const nextOk =
+        api.state.index === 1 &&
+        Boolean(nextPlayCall) &&
+        String(nextPlayCall.url).startsWith("https://") &&
+        String(nextPlayCall.url).includes("id=kJQP7kiw5Fk") &&
+        api.getNpState().npActive === true;
+
+      // Set position to 1s so prev() goes back to track 0 instead of seeking to 0
+      api.setNpPos(1, 281);
+      calls.length = 0;
+      controlsListeners.forEach((cb) => cb({ action: "prev" }));
+      await new Promise((r) => setTimeout(r, 40));
+      const prevPlayCall = calls.find((c) => c.method === "play" && c.videoId === "dQw4w9WgXcQ");
+      const prevOk = api.state.index === 0 && Boolean(prevPlayCall) && api.getNpState().npActive === true;
+
+      // Simulate natural track completion ("ended") while screen is still locked
+      calls.length = 0;
+      controlsListeners.forEach((cb) => cb({ action: "ended" }));
+      await new Promise((r) => setTimeout(r, 40));
+      const endedNextCall = calls.find((c) => c.method === "play" && c.videoId === "kJQP7kiw5Fk");
+      const endedOk = api.state.index === 1 && Boolean(endedNextCall) && api.getNpState().npActive === true;
+
+      // Step 5: Native error recovery while backgrounded stays on Native Audio (refreshes HTTP URL first)
+      calls.length = 0;
+      controlsListeners.forEach((cb) => cb({ action: "error" }));
+      await new Promise((r) => setTimeout(r, 40));
+      const errRetryCall = calls.find((c) => c.method === "play" && c.videoId === "kJQP7kiw5Fk");
+      const errRecoveryOk =
+        Boolean(errRetryCall) &&
+        String(errRetryCall.url).includes("&r=1") &&
+        api.getNpState().npActive === true;
+
+      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk };
+    }
+
+    const androidE2E = await runNativeBackgroundE2E("android");
+    ok("Android Native E2E: play song → resolves verified HTTP stream, starts MuchiAudioService & preloads next track", androidE2E.step1Ok);
+    ok("Android Native E2E: background app + lock screen + wait → playback continues with zero WebView audio interference", androidE2E.step2Ok);
+    ok("Android Native E2E: lock-screen MediaStyle pause & resume controls work while backgrounded", androidE2E.step3Ok);
+    ok("Android Native E2E: lock-screen next, previous, natural track-end & error recovery work while backgrounded",
+      androidE2E.nextOk && androidE2E.prevOk && androidE2E.endedOk && androidE2E.errRecoveryOk
+    );
+
+    const iosE2E = await runNativeBackgroundE2E("ios");
+    ok("iOS Native E2E: play song → resolves verified HTTP stream, starts AVPlayer & preloads next track", iosE2E.step1Ok);
+    ok("iOS Native E2E: background app + lock screen + wait → AVAudioSession playback continues uninterrupted", iosE2E.step2Ok);
+    ok("iOS Native E2E: lock-screen MPNowPlayingInfoCenter pause & resume controls work while backgrounded", iosE2E.step3Ok);
+    ok("iOS Native E2E: lock-screen next, previous, natural track-end & error recovery work while backgrounded",
+      iosE2E.nextOk && iosE2E.prevOk && iosE2E.endedOk && iosE2E.errRecoveryOk
+    );
+  }
 
   // ── Country Trending Shelf ("Trending in (Country)") — 17 Unique Curated Playlists ──
   {
@@ -1423,14 +1784,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=107");
+  const appJsRes = await fetch(BASE + "/app.js?v=108");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=107");
+  const stylesRes = await fetch(BASE + "/styles.css?v=108");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=107 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=107 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v107", swText.includes("muchi-shell-v107") && swText.includes("/app.js?v=107") && swText.includes("/styles.css?v=107"));
+  ok("client web: app.js?v=108 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=108 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v108", swText.includes("muchi-shell-v108") && swText.includes("/app.js?v=108") && swText.includes("/styles.css?v=108"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────

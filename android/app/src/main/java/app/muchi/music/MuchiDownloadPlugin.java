@@ -674,7 +674,12 @@ public class MuchiDownloadPlugin extends Plugin {
                     throw new IOException("Refusing non-audio or synthetic stream (" + contentType + ")");
                 }
             }
-            return writeToMediaStore(id, con, total, filename, title, artist, album, genre, contentType != null ? contentType : resolvedMime);
+            try {
+                return writeToMediaStore(id, con, total, filename, title, artist, album, genre, contentType != null ? contentType : resolvedMime);
+            } catch (IOException streamErr) {
+                con.disconnect();
+                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+            }
         } finally {
             con.disconnect();
         }
@@ -705,6 +710,7 @@ public class MuchiDownloadPlugin extends Plugin {
         long done = 0L;
         final long chunkSize = 983040L; // 960 KB range chunks (< 1 MB Googlevideo IOS/ANDROID limit)
         boolean isNativeYtClient = userAgent != null && userAgent.startsWith("com.google.");
+        int chunkRn = 1;
 
         try (OutputStream out = new FileOutputStream(plainFile)) {
             while (true) {
@@ -712,66 +718,92 @@ public class MuchiDownloadPlugin extends Plugin {
                     throw new IOException("Download cancelled");
                 }
                 long end = (clen > 0) ? Math.min(clen - 1, done + chunkSize - 1) : (done + chunkSize - 1);
-                HttpURLConnection con = (HttpURLConnection) new URL(targetUrl).openConnection();
-                con.setConnectTimeout(15000);
-                con.setReadTimeout(25000);
-                con.setInstanceFollowRedirects(true);
-                con.setRequestProperty("User-Agent", userAgent);
-                if (!isNativeYtClient && targetUrl.contains("googlevideo.com")) {
-                    con.setRequestProperty("Origin", "https://www.youtube.com");
-                    con.setRequestProperty("Referer", "https://www.youtube.com/");
-                }
-                con.setRequestProperty("Accept", "*/*");
-                con.setRequestProperty("Range", "bytes=" + done + "-" + end);
                 long chunkRead = 0L;
-                try {
-                    int code = con.getResponseCode();
-                    if (code >= 400) {
-                        throw new IOException("Stream chunk failed (" + code + ")");
+                int lastCode = 0;
+                IOException lastChunkErr = null;
+                boolean fullResponse200 = false;
+
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    boolean useQueryRange = (attempt == 1 && targetUrl.contains("googlevideo.com"));
+                    String reqUrl = useQueryRange
+                            ? (targetUrl + (targetUrl.contains("?") ? "&" : "?") + "range=" + done + "-" + end + "&rn=" + chunkRn)
+                            : targetUrl;
+                    HttpURLConnection con = (HttpURLConnection) new URL(reqUrl).openConnection();
+                    con.setConnectTimeout(15000);
+                    con.setReadTimeout(25000);
+                    con.setInstanceFollowRedirects(true);
+                    con.setRequestProperty("User-Agent", userAgent);
+                    if (!isNativeYtClient && targetUrl.contains("googlevideo.com")) {
+                        con.setRequestProperty("Origin", "https://www.youtube.com");
+                        con.setRequestProperty("Referer", "https://www.youtube.com/");
                     }
-                    String ctype = con.getContentType();
-                    if (ctype != null) {
-                        String ctLow = ctype.toLowerCase();
-                        if (ctLow.contains("application/json") || ctLow.contains("text/html")) {
-                            throw new IOException("Server returned non-audio response (" + ctype + ")");
-                        }
+                    con.setRequestProperty("Accept", "*/*");
+                    if (!useQueryRange) {
+                        con.setRequestProperty("Range", "bytes=" + done + "-" + end);
                     }
-                    if (clen <= 0) {
-                        String cr = con.getHeaderField("Content-Range");
-                        if (cr != null && cr.indexOf('/') >= 0) {
-                            try {
-                                clen = Long.parseLong(cr.substring(cr.indexOf('/') + 1).trim());
-                            } catch (Exception ignored) {}
+                    try {
+                        int code = con.getResponseCode();
+                        lastCode = code;
+                        if (code >= 400) {
+                            lastChunkErr = new IOException("Stream chunk failed (" + code + ")");
+                            continue;
                         }
-                        if (clen <= 0 && code == 200) {
-                            clen = con.getContentLengthLong();
-                        }
-                    }
-                    try (InputStream in = con.getInputStream()) {
-                        byte[] buf = new byte[64 * 1024];
-                        int n;
-                        while ((n = in.read(buf)) > 0) {
-                            if (Thread.currentThread().isInterrupted()) {
-                                throw new IOException("Download cancelled");
-                            }
-                            out.write(buf, 0, n);
-                            done += n;
-                            chunkRead += n;
-                            if (done % (256 * 1024) == 0 || (clen > 0 && done >= clen)) {
-                                JSObject p = new JSObject();
-                                p.put("id", id);
-                                p.put("bytes", done);
-                                p.put("total", clen <= 0 ? done : clen);
-                                p.put("progress", clen <= 0 ? 0f : (float) done / (float) clen);
-                                notifyListeners("progress", p);
+                        String ctype = con.getContentType();
+                        if (ctype != null) {
+                            String ctLow = ctype.toLowerCase();
+                            if (ctLow.contains("application/json") || ctLow.contains("text/html")) {
+                                lastChunkErr = new IOException("Server returned non-audio response (" + ctype + ")");
+                                break;
                             }
                         }
+                        if (clen <= 0) {
+                            String cr = con.getHeaderField("Content-Range");
+                            if (cr != null && cr.indexOf('/') >= 0) {
+                                try {
+                                    clen = Long.parseLong(cr.substring(cr.indexOf('/') + 1).trim());
+                                } catch (Exception ignored) {}
+                            }
+                            if (clen <= 0 && code == 200 && !useQueryRange) {
+                                clen = con.getContentLengthLong();
+                            }
+                        }
+                        try (InputStream in = con.getInputStream()) {
+                            byte[] buf = new byte[64 * 1024];
+                            int n;
+                            while ((n = in.read(buf)) > 0) {
+                                if (Thread.currentThread().isInterrupted()) {
+                                    throw new IOException("Download cancelled");
+                                }
+                                out.write(buf, 0, n);
+                                done += n;
+                                chunkRead += n;
+                                if (done % (256 * 1024) == 0 || (clen > 0 && done >= clen)) {
+                                    JSObject p = new JSObject();
+                                    p.put("id", id);
+                                    p.put("bytes", done);
+                                    p.put("total", clen <= 0 ? done : clen);
+                                    p.put("progress", clen <= 0 ? 0f : (float) done / (float) clen);
+                                    notifyListeners("progress", p);
+                                }
+                            }
+                        }
+                        if (code == 200 && !useQueryRange) {
+                            fullResponse200 = true;
+                        }
+                        lastChunkErr = null;
+                        break;
+                    } catch (IOException attemptErr) {
+                        if ("Download cancelled".equals(attemptErr.getMessage())) throw attemptErr;
+                        lastChunkErr = attemptErr;
+                    } finally {
+                        con.disconnect();
                     }
-                    // If server returned 200 OK (ignored Range and sent full stream), we are done
-                    if (code == 200) break;
-                } finally {
-                    con.disconnect();
                 }
+                if (lastChunkErr != null && chunkRead <= 0) {
+                    throw lastChunkErr;
+                }
+                chunkRn++;
+                if (fullResponse200) break;
                 if (chunkRead <= 0) break;
                 if (clen > 0 && done >= clen) break;
             }
@@ -780,9 +812,10 @@ public class MuchiDownloadPlugin extends Plugin {
             throw (e instanceof IOException) ? (IOException) e : new IOException(e);
         }
 
-        if (!plainFile.exists() || plainFile.length() < 64 * 1024) {
+        if (!plainFile.exists() || plainFile.length() < 64 * 1024 || (clen > 0 && plainFile.length() < clen)) {
+            long got = plainFile.exists() ? plainFile.length() : 0L;
             if (plainFile.exists()) plainFile.delete();
-            throw new IOException("Downloaded audio file is incomplete (<64 KB)");
+            throw new IOException("Downloaded audio file is incomplete (" + got + "/" + clen + " bytes)");
         }
 
         publishFileToMediaStore(plainFile, safeName, realMime, title, artist, album);
@@ -871,9 +904,10 @@ public class MuchiDownloadPlugin extends Plugin {
             try { out.close(); } catch (Exception ignored) {}
         }
 
-        if (!plainFile.exists() || plainFile.length() < 64 * 1024) {
+        if (!plainFile.exists() || plainFile.length() < 64 * 1024 || (total > 0 && plainFile.length() < total)) {
+            long got = plainFile.exists() ? plainFile.length() : 0L;
             if (plainFile.exists()) plainFile.delete();
-            throw new IOException("Downloaded audio file is incomplete (<64 KB)");
+            throw new IOException("Downloaded audio file is incomplete (" + got + "/" + total + " bytes)");
         }
 
         publishFileToMediaStore(plainFile, safeName, mimeType, title, artist, album);

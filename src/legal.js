@@ -8,10 +8,10 @@ export const PRIVACY_HTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="index, follow">
   <title>Muchi Privacy Policy</title>
-  <meta name="description" content="Muchi Privacy Policy describing Google, YouTube, music-service, and Muchi Agent data use.">
+  <meta name="description" content="Muchi Privacy Policy describing Google, YouTube, music-service, and Muchi data use.">
   <link rel="canonical" href="https://muchi.twiarimascord.workers.dev/privacy.html">
   <meta property="og:title" content="Muchi Privacy Policy">
-  <meta property="og:description" content="Muchi Privacy Policy describing Google, YouTube, music-service, and Muchi Agent data use.">
+  <meta property="og:description" content="Muchi Privacy Policy describing Google, YouTube, music-service, and Muchi data use.">
   <meta property="og:url" content="https://muchi.twiarimascord.workers.dev/privacy.html">
   <meta property="og:type" content="website">
   <link rel="icon" type="image/png" href="/logo.png?v=53">
@@ -38,7 +38,7 @@ export const PRIVACY_HTML = `<!doctype html>
 <main>
   <header>
     <h1>Muchi Privacy Policy</h1>
-    <p class="date">Last updated: September 25, 2026</p>
+    <p class="date">Last updated: September 29, 2026</p>
     <p>This Privacy Policy explains how Muchi collects, uses, stores, and shares information when you use the Muchi website, progressive web app, or Muchi mobile application.</p>
   </header>
 
@@ -55,7 +55,6 @@ export const PRIVACY_HTML = `<!doctype html>
       <li><strong>YouTube information, only after you choose Connect YouTube:</strong> liked-video information, playlist information, and identifiers needed to perform a YouTube action that you request. Muchi does not request YouTube access as a requirement for ordinary Muchi sign-in.</li>
       <li><strong>Muchi library and playback information:</strong> local playlists, liked tracks, recent tracks, queue information, preferences, downloads, and playback settings. Much of this information is stored locally on your browser or device.</li>
       <li><strong>Search and music requests:</strong> searches, song identifiers, artist names, lyrics requests, radio requests, and related music requests needed to provide the requested feature.</li>
-      <li><strong>Muchi Agent messages:</strong> if you use Muchi Agent, your messages and limited user-facing context such as the current track, queue, recent tracks, liked tracks, playlist names, and country may be processed to answer your request.</li>
       <li><strong>Technical information:</strong> basic request, browser, device, security, and diagnostic information that hosting and security providers normally process when delivering a web service.</li>
     </ul>
   </section>
@@ -67,7 +66,6 @@ export const PRIVACY_HTML = `<!doctype html>
       <li>To provide playback, search, lyrics, radio, library, playlist, and discovery features.</li>
       <li>To show your YouTube liked videos and playlists after you separately authorize YouTube.</li>
       <li>To perform a YouTube rating or playlist action only after you request that action.</li>
-      <li>To answer Muchi Agent requests, identify songs, recommend music, and prepare user-confirmed playlists.</li>
       <li>To protect the service, prevent abuse, diagnose errors, and maintain reliability.</li>
       <li>To comply with applicable law and respond to valid legal requests.</li>
     </ul>
@@ -86,7 +84,6 @@ export const PRIVACY_HTML = `<!doctype html>
       <li>Google and YouTube APIs for authentication and optional YouTube features.</li>
       <li>Cloudflare Workers, D1, KV, and related infrastructure for hosting, sessions, and app data.</li>
       <li>Music metadata, lyrics, radio, and streaming providers requested by the feature you use.</li>
-      <li>NVIDIA hosted inference when you use Muchi Agent. Agent messages and limited app context may be sent to NVIDIA to generate a response.</li>
     </ul>
     <p>We do not sell personal information. We do not share information with third parties except as needed to provide requested features, operate and secure Muchi, comply with law, or protect users and the service.</p>
   </section>
@@ -114,7 +111,7 @@ export const PRIVACY_HTML = `<!doctype html>
 
   <section>
     <h2>9. Security</h2>
-    <p>We use reasonable technical and organizational safeguards for the information handled by Muchi. No internet service can guarantee absolute security. Never enter passwords, financial information, private keys, or other highly sensitive information into Muchi Agent messages.</p>
+    <p>We use reasonable technical and organizational safeguards for the information handled by Muchi. No internet service can guarantee absolute security.</p>
   </section>
 
   <section>
@@ -170,7 +167,7 @@ export const TERMS_HTML = `<!doctype html>
 <main>
   <header>
     <h1>Muchi Terms of Service</h1>
-    <p class="date">Last updated: September 25, 2026</p>
+    <p class="date">Last updated: September 29, 2026</p>
     <p>These Terms of Service govern your use of the Muchi website, progressive web app, mobile application, and related services.</p>
   </header>
 
@@ -181,7 +178,7 @@ export const TERMS_HTML = `<!doctype html>
 
   <section>
     <h2>2. The service</h2>
-    <p>Muchi is a music discovery and playback application. Features may include search, music metadata, playback, lyrics, radio, local playlists, queue controls, downloads where supported, optional Google sign-in, optional YouTube connection, and Muchi Agent features.</p>
+    <p>Muchi is a music discovery and playback application. Features may include search, music metadata, playback, lyrics, radio, local playlists, queue controls, downloads where supported, optional Google sign-in, and optional YouTube connection.</p>
     <p>Features and provider availability may vary by country, device, account, music provider, copyright restrictions, or provider API availability.</p>
   </section>
 
@@ -204,14 +201,7 @@ export const TERMS_HTML = `<!doctype html>
   </section>
 
   <section>
-    <h2>6. Muchi Agent and automated results</h2>
-    <p>Muchi Agent may use hosted artificial-intelligence services to answer questions, identify songs, search music, recommend tracks, and prepare actions. AI results can be incomplete, inaccurate, or out of date. Verify song identity, lyrics, availability, and recommendations before relying on them.</p>
-    <p>Muchi Agent does not give medical, legal, financial, safety, or other professional advice. Do not submit passwords, payment details, private keys, or sensitive personal information to the Agent.</p>
-    <p>Muchi will ask for confirmation before creating or changing a local playlist through an Agent action. You remain responsible for reviewing and confirming actions.</p>
-  </section>
-
-  <section>
-    <h2>7. Acceptable use</h2>
+    <h2>6. Acceptable use</h2>
     <p>You must not:</p>
     <ul>
       <li>Use Muchi to violate law, copyright, privacy, or the terms of a music provider.</li>
@@ -223,38 +213,38 @@ export const TERMS_HTML = `<!doctype html>
   </section>
 
   <section>
-    <h2>8. Your content and feedback</h2>
-    <p>You retain rights to content you submit to Muchi. You grant Muchi only the limited permission needed to process that content to provide the feature you requested, such as handling a search query or Agent message.</p>
+    <h2>7. Your content and feedback</h2>
+    <p>You retain rights to content you submit to Muchi. You grant Muchi only the limited permission needed to process that content to provide the feature you requested, such as handling a search query or another feature request.</p>
     <p>If you send feedback or suggestions, you allow Muchi to use that feedback to improve the service without owing you compensation.</p>
   </section>
 
   <section>
-    <h2>9. Availability and changes</h2>
+    <h2>8. Availability and changes</h2>
     <p>Muchi is provided on an ongoing-development basis. We may add, remove, suspend, or change features, providers, APIs, or supported devices. We may temporarily suspend access for maintenance, security, legal, or abuse-prevention reasons.</p>
   </section>
 
   <section>
-    <h2>10. Disclaimers</h2>
+    <h2>9. Disclaimers</h2>
     <p>To the maximum extent permitted by law, Muchi is provided “as is” and “as available.” We do not promise uninterrupted operation, perfect search results, accurate lyrics, continuous provider access, compatibility with every device, or availability of any particular song or stream.</p>
   </section>
 
   <section>
-    <h2>11. Limitation of liability</h2>
+    <h2>10. Limitation of liability</h2>
     <p>To the maximum extent permitted by law, <strong>Mochi</strong> and Muchi will not be liable for indirect, incidental, special, consequential, exemplary, or loss-of-data damages arising from or related to your use of Muchi or third-party services.</p>
   </section>
 
   <section>
-    <h2>12. Suspension and termination</h2>
+    <h2>11. Suspension and termination</h2>
     <p>You may stop using Muchi at any time and may disconnect Google or YouTube access. We may suspend or terminate access when reasonably necessary to protect the service, users, providers, or comply with law.</p>
   </section>
 
   <section>
-    <h2>13. Changes to these terms</h2>
+    <h2>12. Changes to these terms</h2>
     <p>We may update these Terms when the service or legal requirements change. The updated version will be posted at this URL with a new revision date. Continued use after an update means you accept the revised Terms.</p>
   </section>
 
   <section>
-    <h2>14. Contact</h2>
+    <h2>13. Contact</h2>
     <p>Questions about these Terms can be sent to <a href="mailto:twiarimascord@gmail.com">twiarimascord@gmail.com</a>.</p>
   </section>
 

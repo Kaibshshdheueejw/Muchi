@@ -5030,6 +5030,73 @@ html[data-theme="light"][data-ui="glass"] .mood {
 .settings .ui-pick-preview { height: 54px; }
 .settings .theme-preview { height: 72px; }
 
+/* Animated UI 2-column stacked boxes (2 boxes per row, stacked down of each other) */
+.settings .ui-anim-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-flow: row;
+  gap: 12px;
+  overflow: visible;
+  padding: 2px 0 4px;
+  margin-top: 2px;
+}
+.settings .ui-anim-card-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+.settings .ui-pick.ui-anim-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  grid-template-columns: none;
+  gap: 10px;
+  min-height: 0;
+  width: 100%;
+  padding: 12px;
+  border-radius: var(--md-shape-lg, 16px);
+  text-align: left;
+  box-sizing: border-box;
+}
+.settings .ui-pick.ui-anim-card .ui-pick-preview {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  border-radius: var(--md-shape-md, 12px);
+  padding: 12px;
+  gap: 6px;
+}
+.settings .ui-anim-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+.settings .ui-anim-card-meta > span:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.settings .ui-pick.ui-anim-card strong {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings .ui-pick.ui-anim-card p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .settings .icon-size-row,
 .settings .eq-presets-grid,
 .settings .set-sub-chips {
@@ -7363,6 +7430,17 @@ html[data-native="1"][data-player="aura"] .cover-btn {
   background: #fed7aa;
   box-shadow: 0 0 8px rgba(249, 115, 22, 0.45);
 }
+.ui-pick-preview.genshin {
+  background:
+    radial-gradient(95% 85% at 78% 18%, rgba(250, 204, 21, 0.55), transparent 56%),
+    radial-gradient(85% 75% at 22% 82%, rgba(56, 189, 248, 0.48), transparent 58%),
+    linear-gradient(165deg, #0b1026 0%, #172554 52%, #1e3a5f 100%);
+  box-shadow: inset 0 1px 0 rgba(254, 240, 138, 0.62);
+}
+.ui-pick-preview.genshin i {
+  background: #fef08a;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+}
 
 /* ── 1. WINTER UI — App-Wide Alaskan Frost & Glacial Glass Overhaul ── */
 html[data-ui="winter"] {
@@ -7703,10 +7781,124 @@ html[data-ui="autumn"] .home-bar {
   border-bottom: 1px solid rgba(251, 146, 60, 0.16);
 }
 
+/* ── 2c. GENSHIN IMPACT UI — Celestia Astral Gold & Teyvat Starry Anemo Glass Overhaul ── */
+html[data-ui="genshin"] {
+  --md-sys-color-primary: #fde047;
+  --md-sys-color-on-primary: #171305;
+  --md-sys-color-primary-container: rgba(250, 204, 21, 0.22);
+  --md-sys-color-on-primary-container: #fef9c3;
+}
+html[data-ui="genshin"] body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Roboto Flex", system-ui, sans-serif;
+  background-color: #090d1e;
+  background-image:
+    radial-gradient(62vw 45vh at 14% -6%, rgba(56, 189, 248, 0.22), transparent 64%),
+    radial-gradient(54vw 42vh at 90% 6%, rgba(250, 204, 21, 0.18), transparent 62%),
+    radial-gradient(50vw 44vh at 68% 106%, rgba(99, 102, 241, 0.18), transparent 64%);
+}
+html[data-theme="light"][data-ui="genshin"] body {
+  background-color: #f4f7fe;
+  background-image:
+    radial-gradient(60vw 42vh at 10% -6%, rgba(56, 189, 248, 0.2), transparent 64%),
+    radial-gradient(50vw 40vh at 92% 4%, rgba(250, 204, 21, 0.2), transparent 62%);
+}
+html[data-ui="genshin"] .card,
+html[data-ui="genshin"] .set-card,
+html[data-ui="genshin"] .panel,
+html[data-ui="genshin"] .lib-row,
+html[data-ui="genshin"] .track-row,
+html[data-ui="genshin"] .queue-panel,
+html[data-ui="genshin"] .modal-card,
+html[data-ui="genshin"] .crop-card,
+html[data-ui="genshin"] .search-wrap,
+html[data-ui="genshin"] .artist-hero,
+html[data-ui="genshin"] .lib-hero,
+html[data-ui="genshin"] .ly-screen,
+html[data-ui="genshin"] .disc-banner {
+  background: linear-gradient(160deg, rgba(19, 27, 58, 0.66), rgba(11, 16, 36, 0.6));
+  border: 1px solid rgba(253, 224, 71, 0.26);
+  box-shadow:
+    0 14px 36px -14px rgba(4, 7, 20, 0.68),
+    inset 0 1px 0 rgba(254, 240, 138, 0.3);
+  backdrop-filter: blur(22px) saturate(165%);
+  -webkit-backdrop-filter: blur(22px) saturate(165%);
+}
+html[data-theme="light"][data-ui="genshin"] .card,
+html[data-theme="light"][data-ui="genshin"] .set-card,
+html[data-theme="light"][data-ui="genshin"] .panel,
+html[data-theme="light"][data-ui="genshin"] .lib-row,
+html[data-theme="light"][data-ui="genshin"] .track-row,
+html[data-theme="light"][data-ui="genshin"] .queue-panel,
+html[data-theme="light"][data-ui="genshin"] .modal-card,
+html[data-theme="light"][data-ui="genshin"] .search-wrap,
+html[data-theme="light"][data-ui="genshin"] .disc-banner {
+  background: linear-gradient(160deg, rgba(255, 253, 245, 0.86), rgba(239, 246, 255, 0.74));
+  border-color: rgba(234, 179, 8, 0.45);
+  box-shadow:
+    0 12px 30px -12px rgba(30, 58, 138, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.94);
+}
+html[data-ui="genshin"] .card { border-radius: 22px; }
+html[data-ui="genshin"] .set-card { border-radius: 24px; }
+html[data-ui="genshin"] .player {
+  background: linear-gradient(165deg, rgba(17, 24, 52, 0.84), rgba(10, 15, 34, 0.86));
+  border: 1px solid rgba(253, 224, 71, 0.36);
+  border-radius: 28px;
+  box-shadow:
+    0 16px 44px rgba(4, 7, 20, 0.62),
+    0 0 24px -6px rgba(56, 189, 248, 0.28),
+    inset 0 1px 0 rgba(254, 240, 138, 0.38);
+  backdrop-filter: blur(36px) saturate(180%);
+  -webkit-backdrop-filter: blur(36px) saturate(180%);
+}
+html[data-theme="light"][data-ui="genshin"] .player {
+  background: rgba(254, 252, 243, 0.88);
+  border-color: rgba(234, 179, 8, 0.55);
+  box-shadow: 0 14px 38px rgba(30, 58, 138, 0.16), inset 0 1px 0 #ffffff;
+}
+html[data-ui="genshin"] .dock-nav {
+  background: linear-gradient(180deg, rgba(16, 23, 48, 0.78), rgba(9, 14, 32, 0.84));
+  border: 1px solid rgba(253, 224, 71, 0.3);
+  border-radius: 28px;
+  padding: 6px 8px;
+  backdrop-filter: blur(34px) saturate(180%);
+  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  box-shadow:
+    0 10px 32px rgba(4, 7, 20, 0.52),
+    inset 0 1px 0 rgba(254, 240, 138, 0.28);
+}
+html[data-theme="light"][data-ui="genshin"] .dock-nav {
+  background: rgba(254, 252, 243, 0.88);
+  border-color: rgba(234, 179, 8, 0.55);
+}
+html[data-ui="genshin"] .dock-nav button.active .nav-ico {
+  background: linear-gradient(135deg, rgba(250, 204, 21, 0.36), rgba(56, 189, 248, 0.24));
+  box-shadow: inset 0 1px 0 rgba(254, 240, 138, 0.5), 0 4px 14px rgba(250, 204, 21, 0.28);
+}
+html[data-ui="genshin"] .chip,
+html[data-ui="genshin"] .chip-btn,
+html[data-ui="genshin"] .tonal-btn {
+  background: rgba(250, 204, 21, 0.1);
+  border: 1px solid rgba(253, 224, 71, 0.26);
+}
+html[data-ui="genshin"] .chip.active,
+html[data-ui="genshin"] .filled-btn,
+html[data-ui="genshin"] .fab {
+  background: linear-gradient(135deg, #fef08a 0%, #eab308 55%, #38bdf8 100%);
+  color: #0f172a;
+  border-color: rgba(254, 249, 195, 0.75);
+  box-shadow: 0 8px 22px -6px rgba(234, 179, 8, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+html[data-ui="genshin"] .home-bar {
+  background: rgba(11, 16, 36, 0.62);
+  border-bottom: 1px solid rgba(253, 224, 71, 0.18);
+}
+
 /* Preserve vibrant per-card `--mood` colors under "For your taste" across all seasonal UIs */
 html[data-ui="winter"] .mood,
 html[data-ui="christmas"] .mood,
-html[data-ui="autumn"] .mood {
+html[data-ui="autumn"] .mood,
+html[data-ui="genshin"] .mood {
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03) 42%, transparent 72%),
     linear-gradient(135deg, var(--mood, #4cc9f0) 0%, rgba(16, 18, 22, 0.66) 92%);
@@ -7719,7 +7911,8 @@ html[data-ui="autumn"] .mood {
 }
 html[data-theme="light"][data-ui="winter"] .mood,
 html[data-theme="light"][data-ui="christmas"] .mood,
-html[data-theme="light"][data-ui="autumn"] .mood {
+html[data-theme="light"][data-ui="autumn"] .mood,
+html[data-theme="light"][data-ui="genshin"] .mood {
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.1) 45%, transparent 75%),
     linear-gradient(135deg, var(--mood, #4cc9f0) 0%, rgba(255, 255, 255, 0.72) 92%);
@@ -7744,10 +7937,11 @@ html[data-theme="light"][data-ui="autumn"] .mood {
   z-index: 3;
 }
 
-/* Activate custom scene inside .home-hero only for Winter, Christmas, or Autumn UI */
+/* Activate custom scene inside .home-hero only for Winter, Christmas, Autumn, or Genshin UI */
 html[data-ui="winter"] .home-hero .hero-orbs,
 html[data-ui="christmas"] .home-hero .hero-orbs,
-html[data-ui="autumn"] .home-hero .hero-orbs {
+html[data-ui="autumn"] .home-hero .hero-orbs,
+html[data-ui="genshin"] .home-hero .hero-orbs {
   display: none;
 }
 html[data-ui="winter"] .home-hero .hero-scene-winter {
@@ -7757,6 +7951,9 @@ html[data-ui="christmas"] .home-hero .hero-scene-christmas {
   display: block;
 }
 html[data-ui="autumn"] .home-hero .hero-scene-autumn {
+  display: block;
+}
+html[data-ui="genshin"] .home-hero .hero-scene-genshin {
   display: block;
 }
 
@@ -7782,6 +7979,15 @@ html[data-ui="autumn"] .home-hero {
     0 24px 64px -20px rgba(14, 5, 2, 0.78),
     inset 0 1px 0 rgba(254, 215, 170, 0.42);
 }
+html[data-ui="genshin"] .home-hero {
+  background: linear-gradient(175deg, #070b1d 0%, #121d42 48%, #1b3358 100%);
+  border-color: rgba(253, 224, 71, 0.4);
+  padding-top: 34px;
+  padding-bottom: 32px;
+  box-shadow:
+    0 24px 64px -20px rgba(4, 7, 22, 0.8),
+    inset 0 1px 0 rgba(254, 240, 138, 0.45);
+}
 html[data-ui="winter"] .home-hero .home-hero-copy .hero-brand-kicker {
   color: #bae6fd;
   text-shadow: 0 2px 10px rgba(3, 10, 24, 0.85);
@@ -7794,17 +8000,25 @@ html[data-ui="autumn"] .home-hero .home-hero-copy .hero-brand-kicker {
   color: #fed7aa;
   text-shadow: 0 2px 10px rgba(18, 6, 2, 0.9);
 }
+html[data-ui="genshin"] .home-hero .home-hero-copy .hero-brand-kicker {
+  color: #fef08a;
+  text-shadow: 0 2px 10px rgba(7, 11, 29, 0.92);
+}
 html[data-ui="winter"] .home-hero .home-hero-copy h1,
 html[data-ui="christmas"] .home-hero .home-hero-copy h1,
-html[data-ui="autumn"] .home-hero .home-hero-copy h1 {
+html[data-ui="autumn"] .home-hero .home-hero-copy h1,
+html[data-ui="genshin"] .home-hero .home-hero-copy h1 {
   color: #ffffff;
   background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
   -webkit-text-fill-color: #ffffff;
   text-shadow: 0 3px 16px rgba(0, 0, 0, 0.78), 0 1px 3px rgba(0, 0, 0, 0.9);
 }
 html[data-ui="winter"] .home-hero .home-hero-copy p,
 html[data-ui="christmas"] .home-hero .home-hero-copy p,
-html[data-ui="autumn"] .home-hero .home-hero-copy p {
+html[data-ui="autumn"] .home-hero .home-hero-copy p,
+html[data-ui="genshin"] .home-hero .home-hero-copy p {
   color: rgba(240, 249, 255, 0.88);
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
 }
@@ -8095,7 +8309,333 @@ html[data-ui="autumn"] .home-hero .home-hero-copy p {
   100% { transform: translate3d(-62px, 168px, 0) rotate(290deg) scale(0.88); opacity: 0; }
 }
 
-/* ── 4. PHONE & MOBILE GPU OPTIMIZATIONS FOR WINTER, CHRISTMAS & AUTUMN UI ── */
+/* ── GENSHIN IMPACT SCENE: Celestia Sky + Paimon, Lumine & Aether Interacting with "Good morning" ── */
+.genshin-celestia-glow {
+  position: absolute;
+  top: -22%;
+  right: 8%;
+  width: 220px;
+  height: 150px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(254, 240, 138, 0.42) 0%, rgba(56, 189, 248, 0.25) 48%, transparent 74%);
+  will-change: transform, opacity;
+  animation: genshinCelestiaPulse 6.5s ease-in-out infinite alternate;
+}
+@keyframes genshinCelestiaPulse {
+  0% { transform: scale(0.94); opacity: 0.8; }
+  100% { transform: scale(1.06); opacity: 1; }
+}
+.genshin-horizon-svg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.genshin-celestia-island {
+  will-change: transform;
+  animation: genshinIslandFloat 5.4s ease-in-out infinite alternate;
+}
+@keyframes genshinIslandFloat {
+  0% { transform: translate3d(0, -2px, 0); }
+  100% { transform: translate3d(0, 3px, 0); }
+}
+.genshin-wind-currents {
+  position: absolute;
+  inset: -120px 0 0 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='120' viewBox='0 0 240 120'%3E%3Cg fill='none' stroke-linecap='round' opacity='0.52'%3E%3Cpath d='M16,34 Q54,22 92,34 T168,30' stroke='%237dd3fc' stroke-width='1.4' stroke-dasharray='6 8'/%3E%3Cpath d='M48,82 Q96,68 144,82 T224,76' stroke='%23fef08a' stroke-width='1.2' stroke-dasharray='4 9'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 240px 120px;
+  will-change: transform;
+  animation: genshinWindLoop 7.2s linear infinite;
+}
+@keyframes genshinWindLoop {
+  0% { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(-80px, 60px, 0); }
+}
+.genshin-primogems {
+  position: absolute;
+  inset: 0;
+}
+.genshin-primogems i {
+  position: absolute;
+  top: -14px;
+  width: 9px;
+  height: 9px;
+  clip-path: polygon(50% 0%, 66% 34%, 100% 50%, 66% 66%, 50% 100%, 34% 66%, 0% 50%, 34% 34%);
+  will-change: transform, opacity;
+  animation: genshinPrimoDrift 5.8s linear infinite;
+}
+.genshin-primogems i.primo-star {
+  background: linear-gradient(135deg, #ffffff, #fef08a 55%, #38bdf8);
+}
+.genshin-primogems i.anemo-mote {
+  background: linear-gradient(135deg, #bae6fd, #2dd4bf);
+}
+.genshin-primogems i.geo-mote {
+  background: linear-gradient(135deg, #fef08a, #f59e0b);
+}
+.genshin-primogems i:nth-child(1) { left: 12%; animation-duration: 5.2s; animation-delay: -0.6s; }
+.genshin-primogems i:nth-child(2) { left: 26%; width: 7px; height: 7px; animation-duration: 6.1s; animation-delay: -2.3s; }
+.genshin-primogems i:nth-child(3) { left: 42%; animation-duration: 5.5s; animation-delay: -3.7s; }
+.genshin-primogems i:nth-child(4) { left: 56%; width: 8px; height: 8px; animation-duration: 4.9s; animation-delay: -1.4s; }
+.genshin-primogems i:nth-child(5) { left: 70%; width: 10px; height: 10px; animation-duration: 6.3s; animation-delay: -4.1s; }
+.genshin-primogems i:nth-child(6) { left: 82%; width: 7px; height: 7px; animation-duration: 5.4s; animation-delay: -2.8s; }
+.genshin-primogems i:nth-child(7) { left: 91%; animation-duration: 5.7s; animation-delay: -1.1s; }
+.genshin-primogems i:nth-child(8) { left: 64%; width: 8px; height: 8px; animation-duration: 5.1s; animation-delay: -3.3s; }
+@keyframes genshinPrimoDrift {
+  0% { transform: translate3d(0, -12px, 0) rotate(0deg) scale(0.85); opacity: 0; }
+  18% { opacity: 0.95; }
+  82% { opacity: 0.9; }
+  100% { transform: translate3d(-44px, 162px, 0) rotate(180deg) scale(1.05); opacity: 0; }
+}
+
+/* Interactive Greeting Stage ("Good morning") with Lumine, Paimon & Aether */
+html[data-ui="genshin"] .home-hero .home-hero-copy h1 {
+  margin-top: 28px;
+  padding-right: 64px;
+  overflow: visible;
+  line-height: 1.22;
+}
+.gi-greeting-stage {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  position: relative;
+  overflow: visible;
+  user-select: none;
+}
+.gi-space {
+  display: inline-block;
+  width: 0.3em;
+}
+.gi-letter {
+  display: inline-block;
+  position: relative;
+  will-change: transform;
+  transform-origin: center bottom;
+}
+.gi-word-anchor {
+  display: inline-flex;
+  align-items: baseline;
+  position: relative;
+  overflow: visible;
+}
+
+/* Letters directly under Lumine ("oo" in "Good") squish down when she bounces on top */
+.gi-letter-seat-lumine {
+  animation: giSeatLumineSquish 2.4s ease-in-out infinite;
+}
+@keyframes giSeatLumineSquish {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1, 1); }
+  50% { transform: translate3d(0, 2.5px, 0) scale(1.05, 0.91); color: #fef08a; }
+}
+
+/* Letter directly under Paimon ("o" in "morning") dips down as Paimon sits & bounces on it */
+.gi-letter-seat-paimon {
+  animation: giSeatPaimonSquish 2.1s ease-in-out infinite;
+}
+@keyframes giSeatPaimonSquish {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1, 1); }
+  45%, 55% { transform: translate3d(0, 3.2px, 0) scale(1.07, 0.89); color: #bae6fd; }
+}
+
+/* Last letter ("g" in "Good morning") physically pulled out of the word by Aether! */
+.gi-letter-pulled {
+  display: inline-block;
+  transform-origin: bottom center;
+  will-change: transform;
+  animation: giLetterPulledOut 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes giLetterPulledOut {
+  0%, 12%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(1);
+    color: #ffffff;
+  }
+  42%, 64% {
+    transform: translate3d(17px, -3px, 0) rotate(19deg) scale(1.08);
+    color: #fde047;
+    text-shadow: 0 0 14px rgba(250, 204, 21, 0.75), -6px 2px 10px rgba(56, 189, 248, 0.55);
+  }
+  78% {
+    transform: translate3d(-2px, 0, 0) rotate(-4deg) scale(0.98);
+  }
+}
+
+/* Character SVG Rigs anchored to the letters */
+.gi-char-rig {
+  position: absolute;
+  pointer-events: none;
+  z-index: 4;
+  will-change: transform;
+}
+.gi-char-svg {
+  display: block;
+  overflow: visible;
+  filter: drop-shadow(0 4px 8px rgba(4, 8, 24, 0.65));
+}
+
+/* 1. Lumine (Female Traveler) sitting on top of the first word ("Good") */
+.gi-lumine-rig {
+  left: -8px;
+  bottom: 62%;
+  width: 52px;
+  height: 56px;
+}
+.gi-lumine-svg {
+  width: 100%;
+  height: 100%;
+}
+.gi-lumine-body-bounce {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  will-change: transform;
+  animation: giLumineSitBounce 2.4s ease-in-out infinite;
+}
+@keyframes giLumineSitBounce {
+  0%, 100% { transform: translate3d(0, -2px, 0); }
+  50% { transform: translate3d(0, 2.5px, 0); }
+}
+.gi-lumine-leg.l {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: giLumineLegSwing 1.2s ease-in-out infinite alternate;
+}
+.gi-lumine-leg.r {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: giLumineLegSwing 1.2s ease-in-out infinite alternate-reverse;
+}
+@keyframes giLumineLegSwing {
+  0% { transform: rotate(-11deg) translateY(-1px); }
+  100% { transform: rotate(12deg) translateY(1.5px); }
+}
+.gi-lumine-wave-arm {
+  transform-box: fill-box;
+  transform-origin: left bottom;
+  animation: giLumineWave 1.6s ease-in-out infinite alternate;
+}
+@keyframes giLumineWave {
+  0% { transform: rotate(-8deg); }
+  100% { transform: rotate(14deg); }
+}
+
+/* 2. Paimon floating & sitting/bouncing on top of the middle letters ("mor") */
+.gi-paimon-rig {
+  left: -14px;
+  bottom: 68%;
+  width: 50px;
+  height: 54px;
+}
+.gi-paimon-svg {
+  width: 100%;
+  height: 100%;
+}
+.gi-paimon-float {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  will-change: transform;
+  animation: giPaimonSitFloat 2.1s ease-in-out infinite;
+}
+@keyframes giPaimonSitFloat {
+  0%, 100% { transform: translate3d(0, -7px, 0) rotate(-3deg); }
+  48%, 54% { transform: translate3d(0, 3px, 0) rotate(2deg); }
+}
+.gi-paimon-crown {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: giPaimonCrownBob 1.4s ease-in-out infinite alternate;
+}
+@keyframes giPaimonCrownBob {
+  0% { transform: translateY(-2px); }
+  100% { transform: translateY(1.5px); }
+}
+.gi-paimon-cape {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: giPaimonCapeFlutter 1.5s ease-in-out infinite alternate;
+}
+@keyframes giPaimonCapeFlutter {
+  0% { transform: scaleX(0.96) rotate(-2deg); }
+  100% { transform: scaleX(1.05) rotate(2deg); }
+}
+.gi-paimon-leg.l {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: giPaimonKick 0.9s ease-in-out infinite alternate;
+}
+.gi-paimon-leg.r {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: giPaimonKick 0.9s ease-in-out infinite alternate-reverse;
+}
+@keyframes giPaimonKick {
+  0% { transform: rotate(-14deg); }
+  100% { transform: rotate(14deg); }
+}
+
+/* 3. Aether (Male Traveler) standing at the right end & pulling out the last letter ("g") */
+.gi-aether-rig {
+  left: calc(100% + 2px);
+  bottom: -6px;
+  width: 66px;
+  height: 54px;
+}
+.gi-aether-svg {
+  width: 100%;
+  height: 100%;
+}
+.gi-aether-tug-body {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  will-change: transform;
+  animation: giAetherTugHeave 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes giAetherTugHeave {
+  0%, 12%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  42%, 64% {
+    transform: translate3d(14px, 1px, 0) rotate(14deg);
+  }
+  78% {
+    transform: translate3d(-2px, 0, 0) rotate(-3deg);
+  }
+}
+.gi-aether-tether {
+  transform-box: fill-box;
+  transform-origin: left center;
+  will-change: transform, opacity;
+  animation: giAetherTetherStretch 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes giAetherTetherStretch {
+  0%, 12%, 100% {
+    transform: translate3d(0, 0, 0) scaleX(0.65);
+    opacity: 0.45;
+  }
+  42%, 64% {
+    transform: translate3d(14px, -2px, 0) scaleX(1.12);
+    opacity: 1;
+  }
+  78% {
+    transform: translate3d(-2px, 0, 0) scaleX(0.55);
+    opacity: 0.6;
+  }
+}
+.gi-aether-braid,
+.gi-aether-scarf {
+  transform-box: fill-box;
+  transform-origin: left center;
+  animation: giAetherBraidWhip 1.6s ease-in-out infinite alternate;
+}
+@keyframes giAetherBraidWhip {
+  0% { transform: rotate(-5deg); }
+  100% { transform: rotate(8deg); }
+}
+
+/* ── 4. PHONE & MOBILE GPU OPTIMIZATIONS FOR WINTER, CHRISTMAS, AUTUMN & GENSHIN UI ── */
 @media (max-width: 980px), (pointer: coarse) {
   html[data-ui="winter"] *,
   html[data-ui="winter"] *::before,
@@ -8105,7 +8645,10 @@ html[data-ui="autumn"] .home-hero .home-hero-copy p {
   html[data-ui="christmas"] *::after,
   html[data-ui="autumn"] *,
   html[data-ui="autumn"] *::before,
-  html[data-ui="autumn"] *::after {
+  html[data-ui="autumn"] *::after,
+  html[data-ui="genshin"] *,
+  html[data-ui="genshin"] *::before,
+  html[data-ui="genshin"] *::after {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
@@ -8133,6 +8676,14 @@ html[data-ui="autumn"] .home-hero .home-hero-copy p {
   html[data-ui="autumn"] .disc-banner {
     background: linear-gradient(160deg, rgba(40, 20, 11, 0.92), rgba(22, 11, 6, 0.94));
   }
+  html[data-ui="genshin"] .card,
+  html[data-ui="genshin"] .set-card,
+  html[data-ui="genshin"] .panel,
+  html[data-ui="genshin"] .lib-row,
+  html[data-ui="genshin"] .track-row,
+  html[data-ui="genshin"] .disc-banner {
+    background: linear-gradient(160deg, rgba(18, 26, 56, 0.93), rgba(10, 15, 34, 0.95));
+  }
   html[data-ui="winter"] .player,
   html[data-ui="winter"] .dock-nav {
     background: rgba(8, 22, 40, 0.95);
@@ -8145,13 +8696,37 @@ html[data-ui="autumn"] .home-hero .home-hero-copy p {
   html[data-ui="autumn"] .dock-nav {
     background: rgba(30, 14, 8, 0.95);
   }
+  html[data-ui="genshin"] .player,
+  html[data-ui="genshin"] .dock-nav {
+    background: rgba(12, 18, 40, 0.95);
+  }
+  .gi-char-svg {
+    filter: none;
+  }
 }
 
 @media (max-width: 640px) {
   .winter-flakes i:nth-child(n+6),
   .autumn-leaves i:nth-child(n+6),
+  .genshin-primogems i:nth-child(n+5),
   .xmas-stars i:nth-child(n+8) {
     display: none;
+  }
+  html[data-ui="genshin"] .home-hero .home-hero-copy h1 {
+    font-size: clamp(1.45rem, 6.2vw, 2.05rem);
+    padding-right: 54px;
+  }
+  .gi-lumine-rig {
+    width: 44px;
+    height: 48px;
+  }
+  .gi-paimon-rig {
+    width: 42px;
+    height: 46px;
+  }
+  .gi-aether-rig {
+    width: 56px;
+    height: 46px;
   }
   .xmas-moon {
     top: 10px;
@@ -8174,7 +8749,12 @@ html[data-ui="autumn"] .home-hero .home-hero-copy p {
   .xmas-snow-layer,
   .autumn-sun-glow,
   .autumn-breeze-layer,
-  .autumn-leaves i {
+  .autumn-leaves i,
+  .genshin-celestia-glow,
+  .genshin-wind-currents,
+  .genshin-celestia-island,
+  .genshin-primogems i,
+  .gi-greeting-stage * {
     animation: none !important;
   }
   .xmas-santa-track {
@@ -8195,6 +8775,7 @@ html[data-hidden="1"] *::after {
 
 /* Pause homepage hero scene animations whenever the user is on another tab */
 body:not([data-view="home"]) .hero-scene *,
+body:not([data-view="home"]) .gi-greeting-stage *,
 body:not([data-view="home"]) .hero-orbs i {
   animation-play-state: paused !important;
 }
@@ -8318,6 +8899,8 @@ html[data-battery-saver="1"] .home-hero .winter-flakes,
 html[data-battery-saver="1"] .home-hero .xmas-snow-layer,
 html[data-battery-saver="1"] .home-hero .autumn-breeze-layer,
 html[data-battery-saver="1"] .home-hero .autumn-leaves,
+html[data-battery-saver="1"] .home-hero .genshin-wind-currents,
+html[data-battery-saver="1"] .home-hero .genshin-primogems,
 html[data-battery-saver="1"] .ly-bg,
 html[data-battery-saver="1"] .player-wash {
   display: none !important;
@@ -8325,12 +8908,14 @@ html[data-battery-saver="1"] .player-wash {
   filter: none !important;
 }
 html[data-battery-saver="1"] .home-hero .hero-scene *,
+html[data-battery-saver="1"] .home-hero .gi-greeting-stage *,
 html[data-battery-saver="1"] .winter-aurora,
 html[data-battery-saver="1"] .xmas-stars i,
 html[data-battery-saver="1"] .xmas-santa-bob,
 html[data-battery-saver="1"] .xmas-sleigh-svg,
 html[data-battery-saver="1"] .xmas-sleigh-svg .reindeer-unit,
 html[data-battery-saver="1"] .autumn-sun-glow,
+html[data-battery-saver="1"] .genshin-celestia-glow,
 html[data-battery-saver="1"] .ly-scroll,
 html[data-battery-saver="1"] .ly-line,
 html[data-battery-saver="1"] .ly-meta strong.is-marquee .marquee-track,
@@ -8359,7 +8944,112 @@ html[data-theme="light"][data-battery-saver="1"] .ly-head {
   background: color-mix(in srgb, var(--song-container, #dfe4df) 92%, #fff) !important;
 }
 
+/* ── 8. NATIVE SETTINGS BAR VISIBILITY & POP-IN + FIXED NATIVE LYRICS LAYOUT ── */
+html[data-native="1"] body[data-view="settings"] {
+  --player: 0px !important;
+  --dock: 0px !important;
+}
+html[data-native="1"] body[data-view="settings"] #app {
+  padding-bottom: calc(24px + var(--safe-b, 0px)) !important;
+}
+html[data-native="1"] body[data-view="settings"] .player,
+html[data-native="1"] body[data-view="settings"] #playerBar,
+html[data-native="1"] body[data-view="settings"] .dock-nav,
+html[data-native="1"] body[data-view="settings"] #dockNav {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
 
+@keyframes nativeBarsPopIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 26px, 0) scale(0.95);
+  }
+  65% {
+    opacity: 1;
+    transform: translate3d(0, -3px, 0) scale(1.012);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
 
+html[data-native="1"] body.settings-exit-pop:not([data-view="settings"]) .player:not(.idle):not([hidden]),
+html[data-native="1"] body.settings-exit-pop:not([data-view="settings"]):not([data-view="now"]) .dock-nav {
+  animation: nativeBarsPopIn 360ms cubic-bezier(0.22, 1, 0.36, 1) both !important;
+}
 
+/* Native Lyrics UI: lock outer containers at a fixed position and height so
+   scrolling/changing lyrics never shifts the container upward, and position
+   the lyrics content slightly lower below the header. */
+html[data-native="1"]:has(body[data-view="now"]),
+html[data-native="1"] body[data-view="now"],
+html[data-native="1"] body[data-view="now"] #app,
+html[data-native="1"] body[data-view="now"] .main {
+  overflow: hidden !important;
+  overflow: clip !important;
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  min-height: 100dvh !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  margin: 0 !important;
+}
+html[data-native="1"] body[data-view="now"] .view,
+html[data-native="1"] body[data-view="now"] #view {
+  position: fixed !important;
+  top: calc(max(env(safe-area-inset-top, 0px), 36px) + 12px) !important;
+  left: 10px !important;
+  right: 10px !important;
+  bottom: calc(var(--player) + 20px + var(--safe-b, 0px)) !important;
+  width: auto !important;
+  height: calc(100dvh - (max(env(safe-area-inset-top, 0px), 36px) + 12px) - var(--player) - 20px - var(--safe-b, 0px)) !important;
+  max-height: calc(100dvh - (max(env(safe-area-inset-top, 0px), 36px) + 12px) - var(--player) - 20px - var(--safe-b, 0px)) !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  overflow: clip !important;
+  transform: none !important;
+  animation: none !important;
+}
+html[data-native="1"] body.player-idle[data-view="now"] .view,
+html[data-native="1"] body.player-idle[data-view="now"] #view {
+  bottom: calc(20px + var(--safe-b, 0px)) !important;
+  height: calc(100dvh - (max(env(safe-area-inset-top, 0px), 36px) + 12px) - 20px - var(--safe-b, 0px)) !important;
+  max-height: calc(100dvh - (max(env(safe-area-inset-top, 0px), 36px) + 12px) - 20px - var(--safe-b, 0px)) !important;
+}
+html[data-native="1"] body[data-view="now"] .ly-screen {
+  position: relative !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 100% !important;
+  max-height: 100% !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  overflow: clip !important;
+  transform: none !important;
+}
+html[data-native="1"] body[data-view="now"] #lyScroll,
+html[data-native="1"] body[data-view="now"] .ly-scroll {
+  margin-top: 0 !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  padding: calc(108px + 8vh) 22px 24vh !important;
+  scroll-padding-top: 96px !important;
+  box-sizing: border-box !important;
+}
+
+.dl-lyr-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--md-sys-color-primary);
+  opacity: 0.92;
+}
 

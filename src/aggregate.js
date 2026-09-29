@@ -344,9 +344,12 @@ export function curateCountryTrendingPlaylists(gl, liveCandidates = [], targetPe
       const mergedRoles = Array.isArray(raw._roles) && raw._roles.length
         ? Array.from(new Set([...roles, ...(existing.roles || [])]))
         : Array.from(new Set([...(existing.roles || []), ...roles]));
+      const preferRawArt = !isLive && raw.artwork && !String(raw.artwork).includes("cover-default");
       bySig.set(sig, {
         ...existing,
-        artwork: (existing.artwork && !existing.artwork.includes("cover-default")) ? existing.artwork : (raw.artwork || existing.artwork),
+        artwork: preferRawArt
+          ? raw.artwork
+          : ((existing.artwork && !existing.artwork.includes("cover-default")) ? existing.artwork : (raw.artwork || existing.artwork)),
         releaseDate: (!isLive && raw.releaseDate) ? raw.releaseDate : (existing.releaseDate || relDate),
         genre: (!isLive && raw.genre) ? raw.genre : (existing.genre || raw.genre || "pop"),
         chartRank: Math.min(existing.chartRank || 999, raw.chartRank || 999) < 999
@@ -906,6 +909,7 @@ export async function handleShelf(env, url) {
       title: matchedDef ? matchedDef.title : (rawQ || "Trending"),
       subtitle: matchedDef ? matchedDef.subtitle : "",
       description: matchedDef ? matchedDef.description : "",
+      artwork: (matchedPl && matchedPl.artwork) || ((matchedPl && matchedPl.tracks && matchedPl.tracks[0] && matchedPl.tracks[0].artwork) || "/cover-default.jpg"),
       tracks: (matchedPl && matchedPl.tracks) || [],
     });
   }
@@ -1641,12 +1645,37 @@ const ARTIST_VIBE_GRAPH = {
   "calvin harris": { genre: "dance", mood: "party", tempo: "fast", energy: 0.88, style: "electronic", peers: ["David Guetta", "Avicii", "Martin Garrix", "Tiësto", "Zedd", "Swedish House Mafia", "Dua Lipa", "Disclosure"] },
   "arijit singh": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.56, style: "vocal", peers: ["Pritam", "Atif Aslam", "Vishal Mishra", "Jubin Nautiyal", "Shreya Ghoshal", "KK", "Mohit Chauhan", "Amit Trivedi", "Darshan Raval", "Armaan Malik"] },
   "pritam": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.64, style: "vocal", peers: ["Arijit Singh", "KK", "Amit Trivedi", "Vishal-Shekhar", "Atif Aslam", "Mohit Chauhan", "Shreya Ghoshal", "A.R. Rahman"] },
+  "vishal mishra": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.58, style: "vocal", peers: ["Arijit Singh", "Sachin-Jigar", "Pritam", "Jubin Nautiyal", "Darshan Raval", "Atif Aslam", "Shreya Ghoshal", "Mithoon"] },
+  "sachin-jigar": { genre: "bollywood", mood: "upbeat", tempo: "upbeat", energy: 0.74, style: "vocal", peers: ["Arijit Singh", "Vishal Mishra", "Pritam", "Amit Trivedi", "Vishal-Shekhar", "Shilpa Rao", "Badshah", "Shreya Ghoshal"] },
+  "shreya ghoshal": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.58, style: "vocal", peers: ["Arijit Singh", "Pritam", "Sonu Nigam", "A.R. Rahman", "Atif Aslam", "Shilpa Rao", "Vishal Mishra", "Sunidhi Chauhan"] },
+  "darshan raval": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.56, style: "vocal", peers: ["Arijit Singh", "Jubin Nautiyal", "Armaan Malik", "Vishal Mishra", "Anuv Jain", "Aditya Rikhari", "Jasleen Royal", "King"] },
+  "jubin nautiyal": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.55, style: "vocal", peers: ["Arijit Singh", "Vishal Mishra", "Atif Aslam", "Darshan Raval", "B Praak", "Mithoon", "Pritam", "Armaan Malik"] },
+  "badshah": { genre: "bollywood", mood: "party", tempo: "upbeat", energy: 0.82, style: "rhythmic", peers: ["Diljit Dosanjh", "Yo Yo Honey Singh", "Guru Randhawa", "Karan Aujla", "Sachin-Jigar", "Arijit Singh", "King", "Raftaar"] },
   "diljit dosanjh": { genre: "punjabi", mood: "upbeat", tempo: "upbeat", energy: 0.82, style: "rhythmic", peers: ["Karan Aujla", "AP Dhillon", "Shubh", "Sidhu Moose Wala", "Gurinder Gill", "Harrdy Sandhu", "Badshah", "Amrinder Gill"] },
   "karan aujla": { genre: "punjabi", mood: "upbeat", tempo: "upbeat", energy: 0.84, style: "rhythmic", peers: ["Diljit Dosanjh", "AP Dhillon", "Shubh", "Sidhu Moose Wala", "Gurinder Gill", "DIVINE", "Ikky"] },
   "ap dhillon": { genre: "punjabi", mood: "latenight", tempo: "mid", energy: 0.74, style: "rhythmic", peers: ["Gurinder Gill", "Shubh", "Karan Aujla", "Diljit Dosanjh", "Talwiinder", "Raf-Saperra"] },
+  "shubh": { genre: "punjabi", mood: "upbeat", tempo: "upbeat", energy: 0.80, style: "rhythmic", peers: ["Karan Aujla", "AP Dhillon", "Diljit Dosanjh", "Sidhu Moose Wala", "Gurinder Gill", "Talwiinder", "Chani Nattan"] },
+  "yo yo honey singh": { genre: "punjabi", mood: "party", tempo: "upbeat", energy: 0.84, style: "rhythmic", peers: ["Badshah", "Diljit Dosanjh", "Guru Randhawa", "Karan Aujla", "Raftaar", "Harrdy Sandhu", "Ikka"] },
+  "guru randhawa": { genre: "punjabi", mood: "party", tempo: "upbeat", energy: 0.78, style: "rhythmic", peers: ["Diljit Dosanjh", "Badshah", "Yo Yo Honey Singh", "Harrdy Sandhu", "Karan Aujla", "Jass Manak"] },
   "anuv jain": { genre: "indie_in", mood: "acoustic", tempo: "slow", energy: 0.42, style: "acoustic", peers: ["Prateek Kuhad", "Aditya Rikhari", "The Local Train", "Mitraz", "Zaeden", "Abdul Hannan", "Hasan Raheem", "When Chai Met Toast"] },
   "prateek kuhad": { genre: "indie_in", mood: "chill", tempo: "slow", energy: 0.44, style: "acoustic", peers: ["Anuv Jain", "The Local Train", "Aditya Rikhari", "Ritviz", "Zaeden", "Lifafa", "Parekh & Singh"] },
   "the local train": { genre: "indie_in", mood: "feelgood", tempo: "mid", energy: 0.68, style: "band", peers: ["Anuv Jain", "Prateek Kuhad", "Naalayak", "Bayaan", "Kaavish", "Strings", "Aditya Rikhari"] },
+  "aditya rikhari": { genre: "indie_in", mood: "chill", tempo: "mid", energy: 0.48, style: "acoustic", peers: ["Anuv Jain", "Prateek Kuhad", "Mitraz", "Akshath", "Talwiinder", "Hasan Raheem", "AUR", "Faheem Abdullah"] },
+  "mitraz": { genre: "indie_in", mood: "romantic", tempo: "mid", energy: 0.58, style: "vocal", peers: ["Aditya Rikhari", "Anuv Jain", "Akshath", "Darshan Raval", "King", "Jasleen Royal", "Talwiinder"] },
+  "akshath": { genre: "indie_in", mood: "romantic", tempo: "mid", energy: 0.52, style: "acoustic", peers: ["Anuv Jain", "Aditya Rikhari", "Mitraz", "Prateek Kuhad", "Faheem Abdullah", "AUR", "Zaeden"] },
+  "faheem abdullah": { genre: "indie_in", mood: "romantic", tempo: "slow", energy: 0.46, style: "acoustic", peers: ["Anuv Jain", "AUR", "Aditya Rikhari", "Abdul Hannan", "Kaavish", "Atif Aslam", "Vishal Mishra"] },
+  "aur": { genre: "pak_pop", mood: "chill", tempo: "slow", energy: 0.48, style: "acoustic", peers: ["Abdul Hannan", "Hasan Raheem", "Anuv Jain", "Talwiinder", "Faheem Abdullah", "Aditya Rikhari", "Atif Aslam"] },
+  "hasan raheem": { genre: "pak_pop", mood: "chill", tempo: "mid", energy: 0.56, style: "vocal", peers: ["Talwiinder", "Abdul Hannan", "AUR", "Aditya Rikhari", "Anuv Jain", "Young Stunners", "Mitraz"] },
+  "talwiinder": { genre: "indie_in", mood: "latenight", tempo: "mid", energy: 0.58, style: "vocal", peers: ["Hasan Raheem", "Aditya Rikhari", "AP Dhillon", "Yashraj", "King", "Shubh", "Mitraz"] },
+  "ritviz": { genre: "indie_in", mood: "upbeat", tempo: "upbeat", energy: 0.76, style: "electronic", peers: ["Nucleya", "Prateek Kuhad", "Seedhe Maut", "King", "Mitraz", "Anuv Jain", "DIVINE"] },
+  "king": { genre: "bollywood", mood: "romantic", tempo: "mid", energy: 0.66, style: "vocal", peers: ["Darshan Raval", "Mitraz", "Badshah", "DIVINE", "Aditya Rikhari", "Talwiinder", "Arijit Singh"] },
+  "divine": { genre: "desi_hiphop", mood: "workout", tempo: "upbeat", energy: 0.84, style: "rhythmic", peers: ["KR$NA", "Seedhe Maut", "Karan Aujla", "Raftaar", "Hanumankind", "MC Stan", "Badshah", "Ikka"] },
+  "kr$na": { genre: "desi_hiphop", mood: "workout", tempo: "upbeat", energy: 0.85, style: "rhythmic", peers: ["Seedhe Maut", "DIVINE", "Raftaar", "Karma", "Yashraj", "Hanumankind", "Young Stunners"] },
+  "seedhe maut": { genre: "desi_hiphop", mood: "upbeat", tempo: "upbeat", energy: 0.84, style: "rhythmic", peers: ["KR$NA", "DIVINE", "Yashraj", "Prabh Deep", "Raftaar", "Ritviz", "Hanumankind"] },
+  "hanumankind": { genre: "desi_hiphop", mood: "workout", tempo: "fast", energy: 0.88, style: "rhythmic", peers: ["DIVINE", "Seedhe Maut", "KR$NA", "Sushin Shyam", "Dabzee", "Karan Aujla", "Raftaar"] },
+  "sai abhyankkar": { genre: "south_indian", mood: "upbeat", tempo: "upbeat", energy: 0.76, style: "vocal", peers: ["Anirudh Ravichander", "Sushin Shyam", "A.R. Rahman", "Sid Sriram", "Yuvan Shankar Raja", "Sanju Rathod"] },
+  "sushin shyam": { genre: "south_indian", mood: "party", tempo: "fast", energy: 0.86, style: "electronic", peers: ["Anirudh Ravichander", "Sai Abhyankkar", "Dabzee", "Hanumankind", "Santhosh Narayanan", "A.R. Rahman"] },
+  "anirudh ravichander": { genre: "south_indian", mood: "upbeat", tempo: "fast", energy: 0.84, style: "electronic", peers: ["Sai Abhyankkar", "Sushin Shyam", "A.R. Rahman", "Yuvan Shankar Raja", "Devi Sri Prasad", "Sid Sriram"] },
   "atif aslam": { genre: "pak_pop", mood: "romantic", tempo: "mid", energy: 0.58, style: "vocal", peers: ["Arijit Singh", "KK", "Rahat Fateh Ali Khan", "Mustafa Zahid", "Ali Zafar", "Pritam", "Mohit Chauhan"] },
   "bts": { genre: "kpop", mood: "upbeat", tempo: "upbeat", energy: 0.82, style: "electronic", peers: ["SEVENTEEN", "Stray Kids", "Jungkook", "TOMORROW X TOGETHER", "ENHYPEN", "BLACKPINK", "NewJeans"] },
   "blackpink": { genre: "kpop", mood: "party", tempo: "upbeat", energy: 0.85, style: "electronic", peers: ["aespa", "LE SSERAFIM", "NewJeans", "TWICE", "(G)I-DLE", "IVE", "BABYMONSTER", "BTS"] },
@@ -1658,70 +1687,83 @@ const ARTIST_VIBE_GRAPH = {
 };
 
 const GENRE_ADJACENCY = {
-  pop: { adj: ["indie", "rnb", "dance"], moods: ["feelgood", "upbeat", "romantic"], tempo: "upbeat", energy: 0.72, style: "vocal", query: "pop hits melodic feel good songs" },
-  rnb: { adj: ["pop", "hiphop", "indie"], moods: ["latenight", "chill", "romantic"], tempo: "mid", energy: 0.58, style: "vocal", query: "rnb soul smooth late night grooves" },
-  hiphop: { adj: ["rnb", "uk_drill", "pop"], moods: ["upbeat", "latenight", "party"], tempo: "upbeat", energy: 0.78, style: "rhythmic", query: "hip hop melodic rap trap hits" },
-  rock: { adj: ["indie", "throwback", "pop"], moods: ["workout", "feelgood", "latenight"], tempo: "upbeat", energy: 0.76, style: "band", query: "modern rock alternative band anthems" },
-  indie: { adj: ["pop", "rock", "lofi"], moods: ["chill", "latenight", "acoustic"], tempo: "mid", energy: 0.52, style: "acoustic", query: "indie pop bedroom pop alternative songs" },
-  dance: { adj: ["pop", "uk_house", "afrobeats"], moods: ["party", "upbeat", "workout"], tempo: "fast", energy: 0.86, style: "electronic", query: "dance house electronic club hits" },
-  lofi: { adj: ["indie", "rnb", "acoustic"], moods: ["chill", "focus", "latenight"], tempo: "slow", energy: 0.35, style: "acoustic", query: "lofi chill beats cozy late night" },
-  country: { adj: ["indie", "pop", "rock"], moods: ["feelgood", "acoustic", "romantic"], tempo: "mid", energy: 0.62, style: "acoustic", query: "country americana modern acoustic hits" },
-  latin: { adj: ["reggaeton", "pop", "dance"], moods: ["party", "upbeat", "romantic"], tempo: "upbeat", energy: 0.80, style: "rhythmic", query: "reggaeton latin urbano top hits" },
-  reggaeton: { adj: ["latin", "dance", "pop"], moods: ["party", "upbeat"], tempo: "upbeat", energy: 0.82, style: "rhythmic", query: "reggaeton urbano latino hits" },
-  afrobeats: { adj: ["amapiano", "rnb", "dance"], moods: ["feelgood", "upbeat", "party"], tempo: "mid", energy: 0.74, style: "rhythmic", query: "afrobeats afro fusion smooth hits" },
-  amapiano: { adj: ["afrobeats", "dance", "rnb"], moods: ["party", "upbeat"], tempo: "mid", energy: 0.78, style: "electronic", query: "amapiano afro house groove hits" },
-  kpop: { adj: ["pop", "dance", "rnb"], moods: ["upbeat", "party", "feelgood"], tempo: "upbeat", energy: 0.80, style: "electronic", query: "kpop krnb top hits" },
-  jpop: { adj: ["indie", "rock", "pop"], moods: ["upbeat", "feelgood"], tempo: "upbeat", energy: 0.78, style: "electronic", query: "jpop city pop japanese hits" },
-  bollywood: { adj: ["indie_in", "pak_pop", "punjabi"], moods: ["romantic", "feelgood", "sad"], tempo: "mid", energy: 0.62, style: "vocal", query: "bollywood hindi romantic melody songs" },
-  punjabi: { adj: ["bollywood", "hiphop", "pak_pop"], moods: ["upbeat", "party", "latenight"], tempo: "upbeat", energy: 0.80, style: "rhythmic", query: "punjabi top hits urban beats" },
-  indie_in: { adj: ["bollywood", "pak_pop", "indie"], moods: ["chill", "romantic", "acoustic"], tempo: "slow", energy: 0.46, style: "acoustic", query: "indian indie acoustic hindi songs" },
-  pak_pop: { adj: ["indie_in", "bollywood", "punjabi"], moods: ["romantic", "chill", "acoustic"], tempo: "mid", energy: 0.55, style: "vocal", query: "pakistani pop coke studio indie songs" },
-  opm_pop: { adj: ["indie", "rnb", "pop"], moods: ["romantic", "feelgood", "acoustic"], tempo: "mid", energy: 0.58, style: "vocal", query: "opm pop hugot filipino hits" },
-  cantopop: { adj: ["mandopop", "pop", "indie"], moods: ["romantic", "sad", "feelgood"], tempo: "mid", energy: 0.58, style: "vocal", query: "hong kong cantopop hits" },
-  mandopop: { adj: ["cantopop", "pop", "indie"], moods: ["romantic", "sad", "feelgood"], tempo: "mid", energy: 0.56, style: "vocal", query: "mandopop ballad chinese pop hits" },
-  throwback: { adj: ["pop", "rock", "rnb"], moods: ["retro", "feelgood"], tempo: "mid", energy: 0.70, style: "vocal", query: "throwback 2000s 90s classic hits" },
+  pop: { adj: ["indie", "rnb", "dance"], moods: ["feelgood", "upbeat", "romantic"], tempo: "upbeat", energy: 0.72, style: "vocal", query: "pop hits melodic feel good songs", langCulture: "western", subCulture: "english_pop" },
+  rnb: { adj: ["pop", "hiphop", "indie"], moods: ["latenight", "chill", "romantic"], tempo: "mid", energy: 0.58, style: "vocal", query: "rnb soul smooth late night grooves", langCulture: "western", subCulture: "english_rnb" },
+  hiphop: { adj: ["rnb", "uk_drill", "pop"], moods: ["upbeat", "latenight", "party"], tempo: "upbeat", energy: 0.78, style: "rhythmic", query: "hip hop melodic rap trap hits", langCulture: "western", subCulture: "english_hiphop" },
+  rock: { adj: ["indie", "throwback", "pop"], moods: ["workout", "feelgood", "latenight"], tempo: "upbeat", energy: 0.76, style: "band", query: "modern rock alternative band anthems", langCulture: "western", subCulture: "english_rock" },
+  indie: { adj: ["pop", "rock", "lofi"], moods: ["chill", "latenight", "acoustic"], tempo: "mid", energy: 0.52, style: "acoustic", query: "indie pop bedroom pop alternative songs", langCulture: "western", subCulture: "english_indie" },
+  dance: { adj: ["pop", "uk_house", "afrobeats"], moods: ["party", "upbeat", "workout"], tempo: "fast", energy: 0.86, style: "electronic", query: "dance house electronic club hits", langCulture: "western", subCulture: "english_electronic" },
+  lofi: { adj: ["indie", "rnb", "acoustic"], moods: ["chill", "focus", "latenight"], tempo: "slow", energy: 0.35, style: "acoustic", query: "lofi chill beats cozy late night", langCulture: "western", subCulture: "english_chill" },
+  country: { adj: ["indie", "pop", "rock"], moods: ["feelgood", "acoustic", "romantic"], tempo: "mid", energy: 0.62, style: "acoustic", query: "country americana modern acoustic hits", langCulture: "western", subCulture: "english_country" },
+  latin: { adj: ["reggaeton", "pop", "dance"], moods: ["party", "upbeat", "romantic"], tempo: "upbeat", energy: 0.80, style: "rhythmic", query: "reggaeton latin urbano top hits", langCulture: "latin", subCulture: "latin" },
+  reggaeton: { adj: ["latin", "dance", "pop"], moods: ["party", "upbeat"], tempo: "upbeat", energy: 0.82, style: "rhythmic", query: "reggaeton urbano latino hits", langCulture: "latin", subCulture: "latin" },
+  afrobeats: { adj: ["amapiano", "rnb", "dance"], moods: ["feelgood", "upbeat", "party"], tempo: "mid", energy: 0.74, style: "rhythmic", query: "afrobeats afro fusion smooth hits", langCulture: "afro", subCulture: "afro" },
+  amapiano: { adj: ["afrobeats", "dance", "rnb"], moods: ["party", "upbeat"], tempo: "mid", energy: 0.78, style: "electronic", query: "amapiano afro house groove hits", langCulture: "afro", subCulture: "afro" },
+  kpop: { adj: ["kpop", "jpop", "dance"], moods: ["upbeat", "party", "feelgood"], tempo: "upbeat", energy: 0.80, style: "electronic", query: "kpop krnb korean top hits", langCulture: "korean", subCulture: "kpop" },
+  jpop: { adj: ["jpop", "kpop", "rock"], moods: ["upbeat", "feelgood"], tempo: "upbeat", energy: 0.78, style: "electronic", query: "jpop city pop japanese hits", langCulture: "japanese", subCulture: "jpop" },
+  bollywood: { adj: ["indie_in", "pak_pop", "punjabi"], moods: ["romantic", "feelgood", "sad"], tempo: "mid", energy: 0.62, style: "vocal", query: "bollywood hindi romantic melody songs", langCulture: "south_asian", subCulture: "hindi_bollywood" },
+  punjabi: { adj: ["desi_hiphop", "bollywood", "pak_pop"], moods: ["upbeat", "party", "latenight"], tempo: "upbeat", energy: 0.80, style: "rhythmic", query: "punjabi top hits urban beats", langCulture: "south_asian", subCulture: "punjabi" },
+  indie_in: { adj: ["bollywood", "pak_pop", "punjabi"], moods: ["chill", "romantic", "acoustic"], tempo: "slow", energy: 0.46, style: "acoustic", query: "indian indie acoustic hindi songs", langCulture: "south_asian", subCulture: "indian_indie" },
+  pak_pop: { adj: ["indie_in", "bollywood", "punjabi"], moods: ["romantic", "chill", "acoustic"], tempo: "mid", energy: 0.55, style: "vocal", query: "pakistani pop coke studio indie songs", langCulture: "south_asian", subCulture: "pakistani" },
+  desi_hiphop: { adj: ["punjabi", "bollywood", "indie_in"], moods: ["workout", "upbeat", "latenight"], tempo: "upbeat", energy: 0.84, style: "rhythmic", query: "desi hip hop indian rap divine krsna seedhe maut", langCulture: "south_asian", subCulture: "desi_hiphop" },
+  south_indian: { adj: ["bollywood", "indie_in", "punjabi"], moods: ["upbeat", "party", "romantic"], tempo: "upbeat", energy: 0.78, style: "vocal", query: "tamil telugu malayalam top hits anirudh", langCulture: "south_asian", subCulture: "south_indian" },
+  opm_pop: { adj: ["opm_pop", "indie", "rnb"], moods: ["romantic", "feelgood", "acoustic"], tempo: "mid", energy: 0.58, style: "vocal", query: "opm pop hugot filipino hits", langCulture: "opm", subCulture: "opm" },
+  cantopop: { adj: ["mandopop", "cantopop", "pop"], moods: ["romantic", "sad", "feelgood"], tempo: "mid", energy: 0.58, style: "vocal", query: "hong kong cantopop hits", langCulture: "chinese", subCulture: "chinese" },
+  mandopop: { adj: ["cantopop", "mandopop", "pop"], moods: ["romantic", "sad", "feelgood"], tempo: "mid", energy: 0.56, style: "vocal", query: "mandopop ballad chinese pop hits", langCulture: "chinese", subCulture: "chinese" },
+  throwback: { adj: ["pop", "rock", "rnb"], moods: ["retro", "feelgood"], tempo: "mid", energy: 0.70, style: "vocal", query: "throwback 2000s 90s classic hits", langCulture: "western", subCulture: "english_pop" },
 };
 
 export function inferServerVibeProfile(meta = {}) {
-  const title = canonFold(meta.title || "");
-  const artist = canonPrimaryArtist(meta.artist || "");
+  const rawTitleStr = String(meta.title || "");
+  const rawArtistStr = String(meta.artist || "");
+  const rawAlbumStr = String(meta.album || "");
+  const rawScriptBlob = `${rawTitleStr} ${rawArtistStr} ${rawAlbumStr}`;
+  const title = canonFold(rawTitleStr);
+  const artist = canonPrimaryArtist(rawArtistStr);
   const rawGenre = canonFold(meta.genre || meta._tag || "");
   const rawMood = canonFold(meta.mood || "");
   const rawTempo = canonFold(meta.tempo || "");
   const rawStyle = canonFold(meta.style || "");
-  const album = canonFold(meta.album || "");
+  const album = canonFold(rawAlbumStr);
   const dur = Number(meta.duration) || 195;
-  const hay = `${title} ${artist} ${rawGenre} ${rawMood} ${album}`;
+  const hay = `${title} ${ canonFold(rawArtistStr) } ${rawGenre} ${rawMood} ${album}`;
 
   const directArtist = ARTIST_VIBE_GRAPH[artist] || null;
 
-  // 1. Genre detection
+  // 1. Genre & Language/Musical Culture detection
   let genre = directArtist ? directArtist.genre : "";
   if (!genre) {
-    if (/punjabi|bhangra|diljit|karan aujla|ap dhillon|shubh|sidhu moose/.test(hay)) genre = "punjabi";
-    else if (/indian indie|anuv jain|prateek kuhad|aditya rikhari|local train|mitraz/.test(hay)) genre = "indie_in";
-    else if (/pakistani|coke studio|atif aslam|abdul hannan|hasan raheem|kaavish/.test(hay)) genre = "pak_pop";
-    else if (/bollywood|hindi|arijit|pritam|shreya ghoshal|jubin|vishal mishra|kk\b|mohit chauhan|amit trivedi|a\.?\s*r\.?\s*rahman/.test(hay)) genre = "bollywood";
-    else if (/k-?pop|korean|bts|blackpink|newjeans|aespa|seventeen|stray kids|twice|le sserafim|illit/.test(hay)) genre = "kpop";
-    else if (/j-?pop|anime|yoasobi|fujii kaze|kenshi yonezu|vaundy|ado|king gnu|city pop/.test(hay)) genre = "jpop";
-    else if (/afrobeats|afro-?fusion|burna boy|wizkid|rema|tems|asake|ayra starr|omah lay/.test(hay)) genre = "afrobeats";
-    else if (/amapiano|kabza|tyla/.test(hay)) genre = "amapiano";
-    else if (/opm|pinoy|hugot|bini|ben&ben|zack tabudlo|arthur nery|cup of joe|tj monterde/.test(hay)) genre = "opm_pop";
-    else if (/cantopop|eason chan|hins cheung|keung to|terence lam/.test(hay)) genre = "cantopop";
-    else if (/mandopop|jay chou|jj lin|stefanie sun|mayday/.test(hay)) genre = "mandopop";
-    else if (/reggaeton|urbano|latino|bad bunny|feid|karol g|peso pluma|rosalia|quevedo/.test(hay)) genre = "reggaeton";
+    if (/[\u0A00-\u0A7F]|\b(punjabi|bhangra|diljit|karan aujla|ap dhillon|shubh|sidhu moose|gurinder gill|ikky|mxrci|guru randhawa|honey singh|chani nattan|inderpal moga|harrdy sandhu|amrinder gill|arjan vailly|bhupinder babbal|sultaan|tauba tauba|lalkara|daku|jatt|munde|kudi|sohna|hauli hauli)\b/.test(rawScriptBlob.toLowerCase() + " " + hay)) genre = "punjabi";
+    else if (/\b(desi hip hop|indian rap|gully|seedhe maut|kr\$na|krsna|divine|hanumankind|kalmi|raftaar|mc stan|emiway|yashraj|mc altaf|prabh deep|karma|namastute|luka chuppi|prarthana|joota japani|baazigar)\b/.test(rawScriptBlob.toLowerCase() + " " + hay)) genre = "desi_hiphop";
+    else if (/[\u0B80-\u0BFF\u0C00-\u0C7F\u0D00-\u0D7F\u0C80-\u0CFF]|\b(tamil|telugu|malayalam|kannada|kollywood|tollywood|mollywood|anirudh|sai abhyankkar|sushin shyam|dabzee|sid sriram|yuvan shankar|devi sri prasad|thaman|katchi sera|aasa kooda|aavesham|illuminati|sanju rathod|gulabi sadi)\b/.test(rawScriptBlob.toLowerCase() + " " + hay)) genre = "south_indian";
+    else if (/\b(indian indie|anuv jain|prateek kuhad|aditya rikhari|local train|mitraz|ritviz|nucleya|akshath|faheem abdullah|rauhan malik|zaeden|lifafa|parekh|when chai met toast|husn|jo tum mere ho|alag aasmaan|baarishein|kasoor|choo lo|aaoge tum kabhi|samjho na|faasle|nadaaniyan|udd gaye|liggi)\b/.test(hay)) genre = "indie_in";
+    else if (/\b(pakistani|coke studio|atif aslam|abdul hannan|hasan raheem|kaavish|talwiinder|aur\b|young stunners|talha anjum|ali sethi|pasoori|tu hai kahan|shikayat|khayaal|dhundhala)\b/.test(hay)) genre = "pak_pop";
+    else if (/[\u0900-\u097F\u0980-\u09FF]|\b(bollywood|hindi|arijit|pritam|shreya ghoshal|jubin|vishal mishra|sachin[\s-]*jigar|kk\b|mohit chauhan|amit trivedi|a\.?\s*r\.?\s*rahman|darshan raval|badshah|sonu nigam|armaan malik|jasleen royal|shilpa rao|neeti mohan|sagar bhatia|varun jain|madhubanti|divya kumar|pawan singh|king\b|b praak|tanishk|sachet|aaj ki raat|sajni|pehle bhi main|maan meri jaan|tu aake dekhle|sarkaare|chaleya|soulmate|taras|khudaya|soni soni|khoobsurat|tumhare hi rahenge|aayi nai|khel khel mein|heeriye|satranga|apna bana le|kesariya|raataan lambiyan|tum hi ho|channa mereya|kabira|shayad|stree 2|laapataa|bhediya|jawan)\b/.test(rawScriptBlob.toLowerCase() + " " + hay)) genre = "bollywood";
+    else if (/[\uAC00-\uD7AF]|\b(k-?pop|korean|bts|blackpink|newjeans|aespa|seventeen|stray kids|twice|le sserafim|illit|ive\b|jungkook|jennie|lisa\b|ros[eé]\b|babymonster|kiss of life|ateez|enhypen|whiplash|chk chk boom)\b/.test(rawScriptBlob.toLowerCase() + " " + hay)) genre = "kpop";
+    else if (/[\u3040-\u30FF]|\b(j-?pop|anime|yoasobi|fujii kaze|kenshi yonezu|vaundy|ado\b|king gnu|city pop|creepy nuts|mrs\.?\s*green apple|official hige|bling[\s-]*bang|otonoke)\b/.test(rawScriptBlob.toLowerCase() + " " + hay)) genre = "jpop";
+    else if (/\b(afrobeats|afro-?fusion|burna boy|wizkid|rema|tems|asake|ayra starr|omah lay|davido|fireboy|ckay|ozaka)\b/.test(hay)) genre = "afrobeats";
+    else if (/\b(amapiano|kabza|tyla|titom|yuppe|tshwala bam)\b/.test(hay)) genre = "amapiano";
+    else if (/\b(opm|pinoy|hugot|bini\b|maki\b|ben&ben|zack tabudlo|arthur nery|cup of joe|tj monterde|pantropiko|salamin|dilaw|palagi)\b/.test(hay)) genre = "opm_pop";
+    else if (/\b(cantopop|eason chan|hins cheung|keung to|terence lam)\b/.test(hay)) genre = "cantopop";
+    else if (/[\u4E00-\u9FFF]|\b(mandopop|jay chou|jj lin|stefanie sun|mayday)\b/.test(rawScriptBlob.toLowerCase() + " " + hay)) genre = "mandopop";
+    else if (/\b(reggaeton|urbano|latino|latin|bad bunny|feid|karol g|peso pluma|rosalia|quevedo|rauw alejandro|j balvin|ozuna|maluma|shakira|anitta|dtmf|baile inolvidable|si antes te hubiera)\b/.test(hay)) genre = "reggaeton";
     else if (/lofi|lo-fi|chillhop|study beats/.test(hay)) genre = "lofi";
-    else if (/r&b|rnb|soul|neo-?soul|sza|frank ocean|daniel caesar|summer walker|brent faiyaz|bryson tiller/.test(hay)) genre = "rnb";
-    else if (/hip-?hop|rap|trap|drill|kendrick|drake|travis scott|future|21 savage|j\.?\s*cole|central cee|eminem|kanye/.test(hay)) genre = "hiphop";
-    else if (/edm|dance|house|techno|trance|club|calvin harris|david guetta|martin garrix|tiesto|avicii|fred again|dom dolla|rufus du sol/.test(hay)) genre = "dance";
-    else if (/rock|metal|punk|grunge|band|linkin park|coldplay|imagine dragons|green day|foo fighters|muse|nirvana|oasis/.test(hay)) genre = "rock";
-    else if (/indie|alternative|bedroom pop|dream pop|shoegaze|tame impala|arctic monkeys|lana del rey|the 1975|clairo|cigarettes after sex|hozier|lorde/.test(hay)) genre = "indie";
-    else if (/country|americana|folk|morgan wallen|zach bryan|luke combs|chris stapleton/.test(hay)) genre = "country";
+    else if (/r&b|rnb|soul|neo-?soul|sza|frank ocean|daniel caesar|summer walker|brent faiyaz|bryson tiller|kehlani|leon thomas|jordan adetunji|ravyn lenae|teddy swims/.test(hay)) genre = "rnb";
+    else if (/hip-?hop|rap|trap|drill|kendrick|drake|travis scott|future|21 savage|j\.?\s*cole|central cee|eminem|kanye|doechii|glorilla|tyler the creator|playboi carti|ice spice|lil baby/.test(hay)) genre = "hiphop";
+    else if (/edm|dance|house|techno|trance|club|calvin harris|david guetta|martin garrix|tiesto|avicii|fred again|dom dolla|rufus du sol|charli xcx|john summit|sonny fodera|bl3ss/.test(hay)) genre = "dance";
+    else if (/rock|metal|punk|grunge|band|linkin park|coldplay|imagine dragons|green day|foo fighters|muse|nirvana|oasis|fontaines|sam fender|last dinner party|sleep token|bad omens/.test(hay)) genre = "rock";
+    else if (/indie|alternative|bedroom pop|dream pop|shoegaze|tame impala|arctic monkeys|lana del rey|the 1975|clairo|beabadoobee|cigarettes after sex|hozier|lorde|gigi perez|lola young|sombr|role model|malcolm todd|mk\.?gee|artemas|laufey|myles smith/.test(hay)) genre = "indie";
+    else if (/country|americana|folk|morgan wallen|zach bryan|luke combs|chris stapleton|jelly roll|shaboozey|dasha|tucker wetmore|megan moroney|lainey wilson|zach top|koe wetzel/.test(hay)) genre = "country";
     else if (/80s|90s|2000s|throwback|retro|classic/.test(hay)) genre = "throwback";
     else genre = "pop";
   }
 
   const gInfo = GENRE_ADJACENCY[genre] || GENRE_ADJACENCY.pop;
+  const langCulture = gInfo.langCulture || "western";
+  const subCulture = gInfo.subCulture || "english_pop";
+  const isCrossCulturalBridge = Boolean(
+    /\b(hanumankind|big dawgs|sia\b|hass hass|armani white|stylo g|bruno mars|apt\.|doja cat|raye|dominic fike|doechii|travis scott|anitta)\b/i.test(rawScriptBlob)
+  );
 
   // 2. Mood detection
   let mood = rawMood || (directArtist ? directArtist.mood : "");
@@ -1790,6 +1832,9 @@ export function inferServerVibeProfile(meta = {}) {
     tempo,
     energy: Number(energy.toFixed(2)),
     style,
+    langCulture,
+    subCulture,
+    isCrossCulturalBridge,
     primaryArtist: artist,
     peerArtists: peerArtists.slice(0, 8),
     adjacentGenres,
@@ -1864,15 +1909,30 @@ export function sequenceSpotifyStyleTracks(candidates, seedMeta = {}, vibe = nul
     const isAdjGenre = !isSameGenre && adjGenreSet.has(candProfile.genre);
     const isSameMood = candProfile.mood === seedProfile.mood;
     const isSameStyle = candProfile.style === seedProfile.style;
+    const seedLang = seedProfile.langCulture || "western";
+    const candLang = candProfile.langCulture || "western";
+    const isSameLangCulture = candLang === seedLang;
+    const isSameSubCulture = Boolean(seedProfile.subCulture && candProfile.subCulture === seedProfile.subCulture);
     const energyDelta = Math.abs(candProfile.energy - seedProfile.energy);
     const dur = Number(raw.duration) || 195;
     const durDelta = Math.abs(dur - seedDur);
 
-    // Similarity score (0 - 100)
+    // Similarity score (0 - 100+)
     let simScore = 25;
     if (isPeerArtist) simScore += 36;
     if (isSeedArtist) simScore += 32;
     if (raw._fromArtistRadio) simScore += 22;
+    if (isSameSubCulture) simScore += 40;
+    else if (isSameLangCulture) simScore += 24;
+    else if (seedLang !== "western") {
+      if (seedProfile.isCrossCulturalBridge && (isSameGenre || isAdjGenre) && energyDelta <= 0.18) {
+        simScore -= 8;
+      } else {
+        simScore -= 85;
+      }
+    } else {
+      simScore -= 45;
+    }
     if (isSameGenre) simScore += 24;
     else if (isAdjGenre) simScore += 12;
     if (isSameMood) simScore += 16;
@@ -1883,11 +1943,16 @@ export function sequenceSpotifyStyleTracks(candidates, seedMeta = {}, vibe = nul
     if (durDelta <= 45) simScore += 6;
     else if (durDelta > 150) simScore -= 8;
 
-    // Exploration score (rewards related/adjacent discovery while staying coherent)
+    // Exploration score (rewards related/adjacent discovery within the same musical culture)
     let exploreScore = 20;
     if (isPeerArtist) exploreScore += 24;
     if (!isSeedArtist) exploreScore += 15;
-    if (isAdjGenre) exploreScore += 26;
+    if (isSameLangCulture) {
+      exploreScore += isSameSubCulture ? 26 : 34;
+    } else if (seedLang !== "western" && !seedProfile.isCrossCulturalBridge) {
+      exploreScore -= 70;
+    }
+    if (isAdjGenre && isSameLangCulture) exploreScore += 26;
     else if (isSameGenre) exploreScore += 18;
     if (isSameMood || energyDelta <= 0.22) exploreScore += 16;
     if (isSameStyle) exploreScore += 8;
@@ -1902,17 +1967,31 @@ export function sequenceSpotifyStyleTracks(candidates, seedMeta = {}, vibe = nul
           tempo: candProfile.tempo,
           energy: candProfile.energy,
           style: candProfile.style,
+          langCulture: candLang,
+          subCulture: candProfile.subCulture,
         },
       },
       artist: cArt,
       sig,
       isSeedArtist,
       isPeerArtist,
+      isSameLangCulture,
+      isSameSubCulture,
       energy: candProfile.energy,
       simScore,
       exploreScore,
       used: false,
     });
+  }
+
+  // Filter out cross-language jarring jumps when enough same-culture tracks are available
+  const sameCultureCount = uniquePool.filter((x) => x.isSameLangCulture).length;
+  if (sameCultureCount >= 6 && (seedProfile.langCulture || "western") !== "western") {
+    for (const item of uniquePool) {
+      if (!item.isSameLangCulture && !(seedProfile.isCrossCulturalBridge && item.simScore >= 45)) {
+        item.used = true;
+      }
+    }
   }
 
   // 2. Slot-by-slot human-playlist sequencing
@@ -2658,22 +2737,41 @@ export async function handleRelated(url) {
   const t = title.replace(/\s*\((official|lyrics|audio|video).*?\)/ig, "").trim();
   if (!t && !a && !genre && !mood) return json(200, { tracks: [] });
 
-  const seedMeta = { title: t, artist: a, genre, mood, tempo, style, duration, gl };
+  const seedMeta = {
+    title: t,
+    artist: a,
+    genre,
+    mood,
+    tempo,
+    style,
+    duration,
+    gl,
+    langCulture: (url.searchParams.get("langCulture") || "").trim(),
+    subCulture: (url.searchParams.get("subCulture") || "").trim(),
+  };
   const vibe = inferServerVibeProfile(seedMeta);
+
+  // Determine optimal catalog region so same-language/same-culture searches return authentic regional songs
+  const searchGl =
+    vibe.langCulture === "south_asian" ? (gl === "PK" || gl === "BD" ? gl : "IN") :
+    vibe.langCulture === "korean" ? "KR" :
+    vibe.langCulture === "japanese" ? "JP" :
+    vibe.langCulture === "opm" ? "PH" :
+    gl;
 
   // Build intelligent multi-tier search queries:
   // Tier 1: Song radio & direct artist mix
-  // Tier 2: Similar peer artists in the same vibe/genre
-  // Tier 3: Gradual exploration query matching genre, mood, tempo & style
+  // Tier 2: Similar peer artists in the same language, musical culture & vibe
+  // Tier 3: Gradual exploration query matching language/culture, genre, mood, tempo & style
   const qs = [];
-  if (t && a) qs.push(`${t} ${a} radio`);
-  if (a && !/^(youtube|various artists|unknown)$/i.test(a)) {
-    qs.push(`${a} radio mix`);
-  }
+  if (t && a) qs.push(`${t} ${a} official audio`);
   if (vibe.peerArtists && vibe.peerArtists.length >= 2) {
     qs.push(`${vibe.peerArtists[0]} ${vibe.peerArtists[1]} official audio`);
+    if (vibe.peerArtists.length >= 4) {
+      qs.push(`${vibe.peerArtists[2]} ${vibe.peerArtists[3]} official audio`);
+    }
   } else if (a && !/^(youtube|various artists|unknown)$/i.test(a)) {
-    qs.push(`songs like ${a} ${vibe.genre} official audio`);
+    qs.push(`${a} ${vibe.genre} official audio`);
   }
   if (vibe.vibeQuery) {
     qs.push(`${vibe.vibeQuery} official audio`);
@@ -2681,7 +2779,7 @@ export async function handleRelated(url) {
 
   const queries = [...new Set(qs.filter(Boolean))].slice(0, 4);
   if (!queries.length) return json(200, { tracks: [] });
-  const cacheKey = `related:v14:${gl}:${a.toLowerCase()}:${t.toLowerCase()}:${vibe.genre}:${vibe.mood}`;
+  const cacheKey = `related:v15:${searchGl}:${a.toLowerCase()}:${t.toLowerCase()}:${vibe.subCulture}:${vibe.genre}:${vibe.mood}`;
   try {
     const cachedBundle = await cached(cacheKey, 180000, async () => {
       const hasValidArtist = Boolean(a && !/^(youtube|various artists|unknown)$/i.test(a));
@@ -2707,10 +2805,12 @@ export async function handleRelated(url) {
         : Promise.resolve({ radioTracks: [], relatedArtists: [] });
 
       const peerSearchTerm = (vibe.peerArtists && vibe.peerArtists[0]) || a || vibe.vibeQuery || t;
-      const [ytSettled, dzGraph, itPeerR, dzVibeR] = await Promise.all([
-        Promise.allSettled(queries.map((q) => searchYouTube(q, gl, true))),
+      const peerSearchTerm2 = (vibe.peerArtists && vibe.peerArtists[1]) || (vibe.bridgeArtists && vibe.bridgeArtists[0]) || vibe.vibeQuery || peerSearchTerm;
+      const [ytSettled, dzGraph, itPeerR, itPeer2R, dzVibeR] = await Promise.all([
+        Promise.allSettled(queries.map((q) => searchYouTube(q, searchGl, true))),
         dzRadioJob,
-        raceTimeout(itunesSearch(peerSearchTerm, { includeExtra: false, country: gl }).catch(() => ({ songs: [] })), 4000, { songs: [] }),
+        raceTimeout(itunesSearch(peerSearchTerm, { includeExtra: false, country: searchGl }).catch(() => ({ songs: [] })), 4000, { songs: [] }),
+        raceTimeout(itunesSearch(peerSearchTerm2, { includeExtra: false, country: searchGl }).catch(() => ({ songs: [] })), 4000, { songs: [] }),
         raceTimeout(deezerSearch(vibe.vibeQuery || peerSearchTerm, { limit: 20, includeExtra: false }).catch(() => ({ songs: [] })), 4000, { songs: [] }),
       ]);
 
@@ -2729,10 +2829,21 @@ export async function handleRelated(url) {
       }
       // 3. Studio catalog tracks (iTunes & Deezer)
       if (itPeerR && Array.isArray(itPeerR.songs)) {
-        rawCandidates.push(...itPeerR.songs.slice(0, 16));
+        rawCandidates.push(...itPeerR.songs.slice(0, 14));
+      }
+      if (itPeer2R && Array.isArray(itPeer2R.songs)) {
+        rawCandidates.push(...itPeer2R.songs.slice(0, 12));
       }
       if (dzVibeR && Array.isArray(dzVibeR.songs)) {
-        rawCandidates.push(...dzVibeR.songs.slice(0, 16));
+        rawCandidates.push(...dzVibeR.songs.slice(0, 14));
+      }
+      // 4. Include curated country seed songs matching the exact language/musical culture
+      const seedPool = getCountrySeedPool(searchGl);
+      for (const st of seedPool) {
+        const sv = inferServerVibeProfile(st);
+        if (sv.langCulture === vibe.langCulture) {
+          rawCandidates.push(st);
+        }
       }
 
       return {
