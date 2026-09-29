@@ -51,6 +51,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var currentTitle: String = ""
     private var currentArtist: String = ""
     private var triedOnDeviceResolve = false
+    private var resolvingOnDevice = false
+    private var pendingSeekMs: Double = 0
+    private var lastKnownPositionMs: Double = 0
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
     private func beginAudioBackgroundTask() {
@@ -198,6 +201,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             durMs = Self.extractDurationMsFromUrl(url)
         }
         fallbackDurationMs = max(0, durMs)
+        let startPosMs = max(0, call.getDouble("position") ?? 0)
+        pendingSeekMs = startPosMs
+        lastKnownPositionMs = startPosMs
 
         let volPct = call.getDouble("volume") ?? 100.0
         let normalize = call.getBool("normalize") ?? false
@@ -217,11 +223,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             title: title,
             artist: artist,
             artwork: artwork,
-            durationMs: fallbackDurationMs
+            durationMs: fallbackDurationMs,
+            elapsedMs: startPosMs
         )
 
-        if url.lowercased().hasPrefix("yt:") {
+        let lowUrl = url.lowercased()
+        let isUnsupportedWebm = lowUrl.contains("mime=audio%2fwebm") || lowUrl.contains("mime=audio/webm") || lowUrl.contains(" codecs=\"opus\"")
+        if lowUrl.hasPrefix("yt:") || (isUnsupportedWebm && !currentVideoId.isEmpty) {
             triedOnDeviceResolve = true
+            resolvingOnDevice = true
             stopTicker()
             player?.pause()
             let vid = currentVideoId
@@ -232,6 +242,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
                 DispatchQueue.main.async {
                     guard let self = self, seq == self.loadSeq else { return }
+                    self.resolvingOnDevice = false
                     if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
                         if rs.durationMs > 0 && self.fallbackDurationMs <= 0 {
                             self.fallbackDurationMs = rs.durationMs
@@ -239,7 +250,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                         self.startPlayer(with: streamUrl, rawUrl: rs.url, userAgent: rs.userAgent)
                     } else {
                         self.errorSent = true
-                        self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
+                        self.notifyListeners("muchiControls", data: ["message": "error", "position": Int(self.lastKnownPositionMs)])
                     }
                 }
             }
@@ -251,6 +262,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("MuchiAudio: invalid url")
             return
         }
+        resolvingOnDevice = false
         triedOnDeviceResolve = false
         startPlayer(with: streamUrl, rawUrl: url, userAgent: Self.userAgentForStreamUrl(url))
         call.resolve()
@@ -288,6 +300,16 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
 
         p.replaceCurrentItem(with: item)
+        let startAtMs = max(0, pendingSeekMs)
+        if startAtMs > 0 {
+            lastKnownPositionMs = startAtMs
+            let targetTime = CMTime(seconds: startAtMs / 1000.0, preferredTimescale: 600)
+            item.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+                if finished {
+                    self?.pendingSeekMs = 0
+                }
+            }
+        }
         p.play()
         if prefSpeed != 1.0 {
             p.rate = prefSpeed
@@ -358,8 +380,20 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc public func seekTo(_ call: CAPPluginCall) {
-        let ms = call.getDouble("position") ?? 0
-        player?.seek(to: CMTime(seconds: ms / 1000.0, preferredTimescale: 600))
+        let ms = max(0, call.getDouble("position") ?? 0)
+        lastKnownPositionMs = ms
+        pendingSeekMs = ms
+        if !resolvingOnDevice, let p = player {
+            let target = CMTime(seconds: ms / 1000.0, preferredTimescale: 600)
+            p.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+                if finished {
+                    self?.pendingSeekMs = 0
+                }
+            }
+        }
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = ms / 1000.0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         call.resolve()
     }
 
@@ -463,11 +497,19 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self = self, let p = self.player, let item = self.currentItem else { return }
             if item.status == .failed && !self.errorSent {
+                var errPosMs = max(self.pendingSeekMs, self.lastKnownPositionMs)
+                let cur = p.currentTime()
+                if cur.isNumeric && cur.seconds.isFinite && cur.seconds > 0 {
+                    errPosMs = max(errPosMs, cur.seconds * 1000.0)
+                }
                 if !self.currentVideoId.isEmpty {
                     Self.invalidateResolvedCache(self.currentVideoId)
                 }
                 if !self.triedOnDeviceResolve && (!self.currentVideoId.isEmpty || !self.currentTitle.isEmpty) {
                     self.triedOnDeviceResolve = true
+                    self.resolvingOnDevice = true
+                    self.pendingSeekMs = errPosMs
+                    self.lastKnownPositionMs = errPosMs
                     self.stopTicker()
                     self.beginAudioBackgroundTask()
                     let seq = self.loadSeq
@@ -475,32 +517,45 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     let cands = self.currentCandidates
                     let tTitle = self.currentTitle
                     let tArtist = self.currentArtist
+                    let resumeMs = errPosMs
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                         let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
                         DispatchQueue.main.async {
                             guard let self = self, seq == self.loadSeq else { return }
+                            self.resolvingOnDevice = false
                             if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
                                 if rs.durationMs > 0 && self.fallbackDurationMs <= 0 {
                                     self.fallbackDurationMs = rs.durationMs
                                 }
+                                if self.pendingSeekMs <= 0 && resumeMs > 0 {
+                                    self.pendingSeekMs = resumeMs
+                                }
                                 self.startPlayer(with: streamUrl, rawUrl: rs.url, userAgent: rs.userAgent)
                             } else {
                                 self.errorSent = true
-                                self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
+                                self.notifyListeners("muchiControls", data: ["message": "error", "position": Int(resumeMs)])
                             }
                         }
                     }
                     return
                 }
                 self.errorSent = true
-                self.notifyListeners("muchiControls", data: ["message": "error", "position": 0])
+                self.notifyListeners("muchiControls", data: ["message": "error", "position": Int(errPosMs)])
                 return
             }
             if p.rate > 0 && item.status == .readyToPlay {
                 self.endAudioBackgroundTask()
             }
             let pos = p.currentTime()
-            let posSec = pos.isNumeric && pos.seconds.isFinite && pos.seconds >= 0 ? pos.seconds : 0
+            var posSec = pos.isNumeric && pos.seconds.isFinite && pos.seconds >= 0 ? pos.seconds : 0
+            if self.pendingSeekMs > 0 && (item.status != .readyToPlay || abs(posSec * 1000.0 - self.pendingSeekMs) > 1500) {
+                posSec = self.pendingSeekMs / 1000.0
+            } else if posSec > 0 {
+                self.lastKnownPositionMs = posSec * 1000.0
+                if self.pendingSeekMs > 0 && abs(posSec * 1000.0 - self.pendingSeekMs) <= 1500 {
+                    self.pendingSeekMs = 0
+                }
+            }
             let rawDurMs = (item.duration.isNumeric && item.duration.seconds.isFinite && item.duration.seconds > 0)
                 ? (item.duration.seconds * 1000.0)
                 : self.fallbackDurationMs
@@ -531,12 +586,12 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
-    private func updateNowPlaying(title: String, artist: String, artwork: String, durationMs: Double) {
+    private func updateNowPlaying(title: String, artist: String, artwork: String, durationMs: Double, elapsedMs: Double = 0) {
         var info: [String: Any] = [:]
         info[MPMediaItemPropertyTitle] = title
         if !artist.isEmpty { info[MPMediaItemPropertyArtist] = artist }
         if durationMs > 0 { info[MPMediaItemPropertyPlaybackDuration] = durationMs / 1000.0 }
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = max(0, elapsedMs) / 1000.0
         info[MPNowPlayingInfoPropertyPlaybackRate] = 1
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
 
@@ -608,7 +663,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
             if let posEvent = event as? MPChangePlaybackPositionCommandEvent {
-                self?.player?.seek(to: CMTime(seconds: posEvent.positionTime, preferredTimescale: 600))
+                let ms = max(0, posEvent.positionTime * 1000.0)
+                self?.lastKnownPositionMs = ms
+                self?.pendingSeekMs = ms
+                let target = CMTime(seconds: posEvent.positionTime, preferredTimescale: 600)
+                self?.player?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
+                    if finished {
+                        self?.pendingSeekMs = 0
+                    }
+                }
                 return .success
             }
             return .commandFailed
@@ -721,6 +784,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 if !primary.isEmpty { putCachedStream(primary, rs) }
                 return rs
             }
+        }
+        if !cleanTitle.isEmpty, let aud = probeAudiusForTitle(title: cleanTitle, artist: artist) {
+            if !primary.isEmpty { putCachedStream(primary, aud) }
+            return aud
         }
         return nil
     }
@@ -914,6 +981,94 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 if !bestUrl.isEmpty {
                     let durSec = (root["duration"] as? Double) ?? 0
                     found = ResolvedStream(url: bestUrl, userAgent: defaultUA, durationMs: durSec * 1000.0, mimeType: "audio/mp4")
+                }
+            }.resume()
+            _ = sem.wait(timeout: .now() + 4.2)
+            if let f = found { return f }
+        }
+        return nil
+    }
+
+    private static func probeAudiusForTitle(title: String, artist: String) -> ResolvedStream? {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { return nil }
+        var coreTitle = cleanTitle.replacingOccurrences(
+            of: "\\s*[\\[(]\\s*(?:feat\\.?|ft\\.?|featuring|with)\\s+[^)\\]]+[)\\]]",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        coreTitle = coreTitle.replacingOccurrences(
+            of: "\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        if coreTitle.isEmpty { coreTitle = cleanTitle }
+        var coreArtist = cleanArtist.replacingOccurrences(
+            of: "\\s*[\\[(]?\\s*(?:feat\\.?|ft\\.?|featuring)\\s+.*$",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        if let firstPart = coreArtist.components(separatedBy: CharacterSet(charactersIn: ",&/")).first {
+            coreArtist = firstPart.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if coreArtist.isEmpty { coreArtist = cleanArtist }
+        var queries: [String] = []
+        if !coreArtist.isEmpty { queries.append("\(coreTitle) \(coreArtist)") }
+        if !cleanArtist.isEmpty {
+            let fullQ = "\(cleanTitle) \(cleanArtist)"
+            if !queries.contains(fullQ) { queries.append(fullQ) }
+        }
+        if !queries.contains(coreTitle) { queries.append(coreTitle) }
+        let wantTitle = cleanTitle.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        let wantCore = coreTitle.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        let wantArtist = coreArtist.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        for q in queries {
+            guard let encodedQ = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let url = URL(string: "https://discoveryprovider.audius.co/v1/tracks/search?query=\(encodedQ)&app_name=MUCHI") else {
+                continue
+            }
+            var req = URLRequest(url: url, timeoutInterval: 4.0)
+            req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
+            var found: ResolvedStream?
+            let sem = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { data, response, _ in
+                defer { sem.signal() }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let data = data,
+                      let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      let items = root["data"] as? [[String: Any]] else { return }
+                for item in items {
+                    if (item["is_delete"] as? Bool) == true || (item["is_streamable"] as? Bool) == false { continue }
+                    if let access = item["access"] as? [String: Any], (access["stream"] as? Bool) == false { continue }
+                    guard let id = item["id"] as? String, !id.isEmpty else { continue }
+                    let durSec = (item["duration"] as? Double) ?? Double((item["duration"] as? Int) ?? 0)
+                    if durSec < 45 { continue }
+                    let rawItemTitle = (item["title"] as? String) ?? ""
+                    let gotTitle = rawItemTitle.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let gotCoreRaw = rawItemTitle.replacingOccurrences(
+                        of: "\\s*[\\[(]\\s*(?:feat\\.?|ft\\.?|featuring|with)\\s+[^)\\]]+[)\\]]",
+                        with: "",
+                        options: [.regularExpression, .caseInsensitive]
+                    ).replacingOccurrences(
+                        of: "\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$",
+                        with: "",
+                        options: [.regularExpression, .caseInsensitive]
+                    )
+                    let gotCore = gotCoreRaw.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let userDict = item["user"] as? [String: Any]
+                    let rawArtist = "\((userDict?["name"] as? String) ?? "") \((userDict?["handle"] as? String) ?? "")"
+                    let gotArtist = rawArtist.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let titleMatch = (!wantTitle.isEmpty && !gotTitle.isEmpty && (gotTitle.contains(wantTitle) || wantTitle.contains(gotTitle)))
+                        || (!wantCore.isEmpty && !gotTitle.isEmpty && (gotTitle.contains(wantCore) || wantCore.contains(gotTitle) || (!gotCore.isEmpty && (gotCore.contains(wantCore) || wantCore.contains(gotCore)))))
+                    let artistMatch = wantArtist.isEmpty || gotArtist.contains(wantArtist) || wantArtist.contains(gotArtist) || gotTitle.contains(wantArtist)
+                    if titleMatch && artistMatch {
+                        if let encId = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
+                            let streamUrl = "https://discoveryprovider.audius.co/v1/tracks/\(encId)/stream?app_name=MUCHI"
+                            found = ResolvedStream(url: streamUrl, userAgent: defaultUA, durationMs: durSec * 1000.0, mimeType: "audio/mpeg")
+                            break
+                        }
+                    }
                 }
             }.resume()
             _ = sem.wait(timeout: .now() + 4.2)

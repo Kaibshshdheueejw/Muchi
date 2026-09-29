@@ -394,14 +394,6 @@ const INNERTUBE_PROFILES = [
     ua: "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
     client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 34, osName: "Android", osVersion: "14", hl: "en", gl: "US" },
   },
-  {
-    tag: "TV_EMBED-2.0",
-    tier: 2,
-    clientId: "85",
-    ua: "Mozilla/5.0 (PlayStation; PlayStation 4/11.50) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
-    client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" },
-    thirdParty: { embedUrl: "https://www.youtube.com/" },
-  },
 ];
 
 // One profile probe: direct audio stream or a REJECT carrying "TAG=reason"
@@ -478,6 +470,26 @@ export async function youtubeAudioStream(videoId) {
     return await Promise.any([tier1B, tier2]);
   } catch {
     throw new Error(`no audio stream (innertube: ${gates.length ? [...new Set(gates)].join(", ") : "not attempted"}; all piped stream instances failed)`);
+  }
+}
+
+/**
+ * Direct InnerTube-only stream resolver for Worker downloads.
+ * Avoids fanning out to the 6 public Piped instances per candidate videoId
+ * so /api/download stays well within Cloudflare Workers' 50-subrequest limit.
+ */
+export async function youtubeAudioStreamDirect(videoId) {
+  const id = String(videoId || "").trim();
+  if (!id) return null;
+  const specs = [
+    INNERTUBE_PROFILES[0], // ANDROID_VR-1.61
+    INNERTUBE_PROFILES[2], // IOS-19.09
+    INNERTUBE_PROFILES[3], // ANDROID-19.09
+  ].filter(Boolean);
+  try {
+    return await Promise.any(specs.map((spec) => innertubeProbe(spec, id)));
+  } catch {
+    return null;
   }
 }
 

@@ -11,12 +11,39 @@
 // /api/img: buffered like server.js (10 s abort, 8 MB cap → 413, public
 // cache 86400) with an early Content-Length guard added.
 
-import { json, corsHeaders, cached, invalidateCached } from "./util.js";
+import { json, corsHeaders, cached, hasCached, invalidateCached, tidyTitle, tidyArtist } from "./util.js";
 import { assertPublicUrl } from "./ssrf.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
-import { audiusStreamUrl, youtubeAudioStream, searchYouTube, audiusSearch } from "./providers.js";
+import { audiusStreamUrl, youtubeAudioStream, youtubeAudioStreamDirect, searchYouTube, audiusSearch } from "./providers.js";
 
 const PROXY_ACCEPT = "audio/*,*/*";
+
+const dlResolvedCache = new Map();
+const DL_RESOLVED_TTL = 20 * 60 * 1000;
+
+function getDlResolved(key) {
+  if (!key) return null;
+  const hit = dlResolvedCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at >= DL_RESOLVED_TTL) {
+    dlResolvedCache.delete(key);
+    return null;
+  }
+  return hit;
+}
+
+function putDlResolved(key, src, mime) {
+  if (!key || !src) return;
+  if (dlResolvedCache.size > 300) {
+    const oldest = dlResolvedCache.keys().next().value;
+    if (oldest !== undefined) dlResolvedCache.delete(oldest);
+  }
+  dlResolvedCache.set(key, { src, mime: mime || "audio/mp4", at: Date.now() });
+}
+
+function invalidateDlResolved(key) {
+  if (key) dlResolvedCache.delete(key);
+}
 
 function sanitizeForFilename(name) {
   const clean = String(name || "").replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim();
@@ -626,38 +653,35 @@ export async function handleDownload(request, url) {
     return json(400, { error: "Missing videoId or trackId" });
   }
 
+  const dlKey =
+    videoId ||
+    trackId ||
+    (title ? `${tidyTitle(title).toLowerCase()}::${tidyArtist(artist).toLowerCase()}` : query.toLowerCase());
+
   let src = "";
   let mime = url.searchParams.get("mime") || (trackId ? "audio/mpeg" : "audio/mp4");
 
   const collectYtCandidateIds = async (seedId) => {
     const ids = [];
     if (seedId && !ids.includes(seedId)) ids.push(seedId);
-    for (const c of rawCands.slice(0, 8)) {
+    for (const c of rawCands.slice(0, 6)) {
       if (c && !ids.includes(c)) ids.push(c);
     }
-    if (query && ids.length < 8) {
+    const cleanT = tidyTitle(title);
+    const cleanA = tidyArtist(artist);
+    const searchBase = `${cleanT} ${cleanA}`.trim() || query;
+    if (searchBase && ids.length < 6) {
       try {
-        const res = await searchYouTube(`${query} official audio`.trim());
+        const res = await searchYouTube(`${searchBase} official audio`.trim());
         for (const h of res || []) {
           if (h && h.videoId && !ids.includes(h.videoId) && (!h.duration || h.duration >= 45)) {
             ids.push(h.videoId);
-            if (ids.length >= 8) break;
+            if (ids.length >= 6) break;
           }
         }
       } catch {}
     }
-    if (title && ids.length < 8) {
-      try {
-        const res2 = await searchYouTube(title);
-        for (const h of res2 || []) {
-          if (h && h.videoId && !ids.includes(h.videoId) && (!h.duration || h.duration >= 45)) {
-            ids.push(h.videoId);
-            if (ids.length >= 8) break;
-          }
-        }
-      } catch {}
-    }
-    return ids;
+    return ids.slice(0, 6);
   };
 
   if (streamUrl) {
@@ -670,6 +694,13 @@ export async function handleDownload(request, url) {
       }
     } catch {}
   }
+  if (!src && dlKey) {
+    const cachedDl = getDlResolved(dlKey);
+    if (cachedDl && cachedDl.src) {
+      src = cachedDl.src;
+      mime = cachedDl.mime || mime;
+    }
+  }
   if (!src && trackId) {
     try {
       src = await audiusStreamUrl(trackId);
@@ -681,6 +712,11 @@ export async function handleDownload(request, url) {
 
   const cleanName = sanitizeForFilename(name) || "track";
   let orig = src ? await fetchForDownload(request, src, PROXY_ACCEPT, mime) : { status: 502 };
+  if (src && orig.status < 400 && dlKey) {
+    putDlResolved(dlKey, src, mime);
+  } else if (src && orig.status >= 400 && dlKey) {
+    invalidateDlResolved(dlKey);
+  }
 
   // If the upstream returned an explicit 404 (not found), do not attempt resolution or
   // fallback — pass the error through directly without Content-Disposition.
@@ -689,7 +725,7 @@ export async function handleDownload(request, url) {
   }
 
   // If no direct streamUrl succeeded (or it failed with 403/410/5xx), iterate through
-  // all candidate videoIds, invalidating any stale cached URL that 403s on fetchForDownload!
+  // candidate videoIds using direct InnerTube resolution (no duplicate resolution or dead Piped fanout).
   if (orig.status === 403 || orig.status === 410 || orig.status >= 500 || !src) {
     try {
       let vId = videoId;
@@ -705,6 +741,9 @@ export async function handleDownload(request, url) {
         src = await audiusStreamUrl(audCleanId);
         mime = "audio/mpeg";
         orig = await fetchForDownload(request, src, PROXY_ACCEPT, mime);
+        if (orig.status < 400 && dlKey) {
+          putDlResolved(dlKey, src, mime);
+        }
       } else if (vId || rawCands.length || query) {
         if (vId && streamUrl) {
           invalidateCached(`ytstream:${vId}`);
@@ -712,7 +751,9 @@ export async function handleDownload(request, url) {
         const ids = await collectYtCandidateIds(vId);
         for (const vid of ids) {
           try {
-            let s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid)).catch(() => null);
+            const cacheKey = `ytstream:${vid}`;
+            const wasCached = hasCached(cacheKey);
+            let s = await cached(cacheKey, 15 * 60 * 1000, () => youtubeAudioStreamDirect(vid)).catch(() => null);
             if (s && s.url) {
               const testMime = s.mimeType || mime;
               const testOrig = await fetchForDownload(request, s.url, PROXY_ACCEPT, testMime);
@@ -720,21 +761,28 @@ export async function handleDownload(request, url) {
                 src = s.url;
                 mime = testMime;
                 orig = testOrig;
+                if (dlKey) putDlResolved(dlKey, src, mime);
                 break;
               }
             }
-            // Cached URL failed with 403/5xx or was empty — invalidate and resolve fresh!
-            invalidateCached(`ytstream:${vid}`);
-            const fresh = await youtubeAudioStream(vid).catch(() => null);
-            if (fresh && fresh.url) {
-              const freshMime = fresh.mimeType || mime;
-              const freshOrig = await fetchForDownload(request, fresh.url, PROXY_ACCEPT, freshMime);
-              if (freshOrig.status < 400) {
-                src = fresh.url;
-                mime = freshMime;
-                orig = freshOrig;
-                break;
+            // Only re-resolve if we tested a previously cached URL that expired/403'd.
+            // Never re-resolve when wasCached is false (avoids duplicate resolution).
+            if (wasCached) {
+              invalidateCached(cacheKey);
+              const fresh = await youtubeAudioStreamDirect(vid).catch(() => null);
+              if (fresh && fresh.url) {
+                const freshMime = fresh.mimeType || mime;
+                const freshOrig = await fetchForDownload(request, fresh.url, PROXY_ACCEPT, freshMime);
+                if (freshOrig.status < 400) {
+                  src = fresh.url;
+                  mime = freshMime;
+                  orig = freshOrig;
+                  if (dlKey) putDlResolved(dlKey, src, mime);
+                  break;
+                }
               }
+            } else {
+              invalidateCached(cacheKey);
             }
           } catch {}
         }
@@ -742,30 +790,60 @@ export async function handleDownload(request, url) {
     } catch {}
   }
 
-  // Strict full-song Audius fallback ONLY if both title and artist genuinely match (Unicode/CJK aware)
+  // Strict full-song Audius fallback ONLY if both title and artist genuinely match (Unicode/CJK & feat. aware)
   if ((!src || orig.status >= 400) && (title || query)) {
     try {
       const normText = (str) => String(str || "").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
-      const searchQ = `${title} ${artist}`.trim() || query;
-      const audHits = await audiusSearch(searchQ);
-      if (Array.isArray(audHits) && audHits.length) {
-        const cleanT = normText(title || query);
-        const cleanA = normText(artist);
-        const matchedAud = audHits.find((a) => {
+      const strippedT = tidyTitle(title || query);
+      const strippedA = tidyArtist(artist);
+      const cleanT = normText(title || query);
+      const coreT = normText(strippedT) || cleanT;
+      const cleanA = normText(strippedA || artist);
+      const primaryA = normText(String(strippedA || artist || "").split(/[,&/]|(?:\b(?:feat|ft|with|x)\b)/i)[0]);
+
+      const searchQueries = [];
+      for (const qCand of [
+        `${strippedT} ${strippedA}`.trim(),
+        `${title} ${artist}`.trim(),
+        strippedT,
+        query,
+      ]) {
+        if (qCand && !searchQueries.includes(qCand)) searchQueries.push(qCand);
+      }
+
+      let matchedAud = null;
+      for (const sq of searchQueries.slice(0, 2)) {
+        const audHits = await audiusSearch(sq).catch(() => []);
+        if (!Array.isArray(audHits) || !audHits.length) continue;
+        matchedAud = audHits.find((a) => {
           const ht = normText(a.title);
+          const htCore = normText(tidyTitle(a.title)) || ht;
           const ha = normText(a.artist);
           if (!ht || (a.duration || 0) < 60) return false;
-          const titleMatch = cleanT && (ht.includes(cleanT) || cleanT.includes(ht));
-          const artistMatch = !cleanA || (ha && (ha.includes(cleanA) || cleanA.includes(ha))) || (cleanT && cleanT.includes(ha));
+          const titleMatch =
+            (cleanT && (ht.includes(cleanT) || cleanT.includes(ht))) ||
+            (coreT && (ht.includes(coreT) || coreT.includes(ht) || htCore.includes(coreT) || coreT.includes(htCore)));
+          const artistMatch =
+            !cleanA ||
+            (ha && (ha.includes(cleanA) || cleanA.includes(ha))) ||
+            (primaryA && ha && (ha.includes(primaryA) || primaryA.includes(ha))) ||
+            (cleanA && ht.includes(cleanA)) ||
+            (primaryA && ht.includes(primaryA)) ||
+            (cleanT && ha && cleanT.includes(ha));
           return titleMatch && artistMatch;
         });
-        const audId = matchedAud ? String(matchedAud.trackId || matchedAud.id || "").replace(/^audius:/, "") : "";
-        if (audId) {
-          const audUrl = await audiusStreamUrl(audId);
-          if (audUrl) {
-            src = audUrl;
-            mime = "audio/mpeg";
-            orig = await fetchForDownload(request, src, PROXY_ACCEPT, mime);
+        if (matchedAud) break;
+      }
+
+      const audId = matchedAud ? String(matchedAud.trackId || matchedAud.id || "").replace(/^audius:/, "") : "";
+      if (audId) {
+        const audUrl = await audiusStreamUrl(audId);
+        if (audUrl) {
+          src = audUrl;
+          mime = "audio/mpeg";
+          orig = await fetchForDownload(request, src, PROXY_ACCEPT, mime);
+          if (orig.status < 400 && dlKey) {
+            putDlResolved(dlKey, src, mime);
           }
         }
       }

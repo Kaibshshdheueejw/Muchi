@@ -109,6 +109,7 @@
     sleep: { mode: "off", until: 0, timer: null },
     playerReady: false,
     detailTrack: null,
+    detailFrom: null,
     settingsPage: null,
     catalogPlaylist: null,
     queueRecs: [],
@@ -134,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.9";
+  const APP_VERSION = "1.8.0";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1891,6 +1892,9 @@
     const liked = isLiked(track);
     const inLiked = where === "liked";
     const inPl = where === "playlist" && typeof state.activePlaylist === "number";
+    const inYtLiked = where === "yt-liked";
+    const inYtPl = where === "yt-playlist" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0;
+    const ytAlreadyLiked = inYtLiked || isYtLiked(track);
     const inDl = where === "downloads" || isSaved(track);
     const canDl = !!(track && (track.trackId || track.videoId || track.source === "apple" || track.source === "itunes" || track.source === "deezer"));
     const hasOfflineLyr = hasOfflineSyncedLyrics(track);
@@ -1907,11 +1911,17 @@
               ? sheetItem("unlike", "heart_minus", "Remove from Liked Songs")
               : sheetItem("like", "favorite", "Add to Liked Songs")}
           ${inPl ? sheetItem("rempl", "playlist_remove", "Remove from this playlist") : ""}
+          ${inYtLiked ? sheetItem("ytunlike", "thumb_down", "Remove from YouTube Liked") : ""}
+          ${inYtPl ? sheetItem("remytpl", "playlist_remove", "Remove from YouTube playlist") : ""}
           ${track.source !== "radio" ? sheetItem("follow", isFollowing(track) ? "person_remove" : "person_add", isFollowing(track) ? "Unfollow artist" : "Follow artist") : ""}
           ${inDl ? sheetItem("deldl", "delete", "Delete download") : (canDl ? sheetItem("dl", "download", "Save offline") : "")}
           ${track.source !== "radio" ? sheetItem("savelyrics", "subtitles", hasOfflineLyr ? "Update offline synced lyrics" : "Save synced lyrics offline") : ""}
           ${hasOfflineLyr ? sheetItem("exportlrc", "description", "Export synced lyrics (.lrc)") : ""}
-          ${ytConnected() && track.videoId ? sheetItem("ytlike", "thumb_up", "Add to YouTube Liked") : ""}
+          ${ytConnected() && track.videoId && !inYtLiked
+            ? (ytAlreadyLiked
+              ? sheetItem("ytunlike", "thumb_down", "Remove from YouTube Liked")
+              : sheetItem("ytlike", "thumb_up", "Add to YouTube Liked"))
+            : ""}
           ${ytConnected() && track.videoId ? sheetItem("ytpl", "playlist_add", "Add to YouTube playlist") : ""}
           ${IS_NATIVE ? sheetItem("share", "share", "Share") : ""}
           ${sheetItem("now", "lyrics", "Song details & lyrics")}
@@ -1928,6 +1938,8 @@
         else if (act === "addpl") addToPlaylist(track);
         else if (act === "like" || act === "unlike") toggleLike(track);
         else if (act === "rempl") removeFromPlaylist(track, state.activePlaylist);
+        else if (act === "ytunlike") ytUnlikeTrack(track);
+        else if (act === "remytpl") ytRemoveFromPlaylist(track, state.activePlaylist);
         else if (act === "follow") toggleFollow(track);
         else if (act === "dl") downloadTrack(track);
         else if (act === "deldl") removeDownload(track.id);
@@ -1939,8 +1951,10 @@
         else if (act === "now") {
           const list = inLiked ? state.liked
             : inPl ? state.playlists[state.activePlaylist].tracks
+            : inYtLiked ? ((state.ytLiked && state.ytLiked.tracks) || [])
+            : inYtPl ? ((state.ytOpen && state.ytOpen.tracks) || [])
             : state.queue;
-          const i = list.findIndex((x) => x.id === track.id);
+          const i = list.findIndex((x) => x && x.id === track.id);
           if (i >= 0) playFromList(list, i);
           setView("now");
         }
@@ -3293,8 +3307,9 @@
     }
     // Already resolved to a full, real stream (played / audius / radio): keep it.
     if (out.streamUrl && !isPreviewOrPlaceholderStream(out.streamUrl, out)) return out;
-    // YouTube: resolve via the same /api/yt/stream endpoint playback uses with allowPreview=0.
-    if (out.videoId) {
+    // YouTube: on Web, resolve via /api/yt/stream with allowPreview=0.
+    // On Native (Android/iOS), MuchiDownloadPlugin resolves directly on-device via residential IP.
+    if (out.videoId && !IS_NATIVE) {
       try {
         const cands = Array.isArray(out._ytCandidates) && out._ytCandidates.length
           ? `&candidates=${encodeURIComponent(out._ytCandidates.slice(0, 5).join(","))}`
@@ -4849,6 +4864,8 @@
       const pools = [
         state.queue,
         state.liked,
+        (state.ytLiked && state.ytLiked.tracks) || [],
+        (state.ytOpen && state.ytOpen.tracks) || [],
         state.recents,
         state.radio,
         ...(state.playlists.map((p) => p.tracks)),
@@ -6754,38 +6771,15 @@
     if (!IS_NATIVE || !nativePlayer()) return false;
     if (state.prefs.ytAudio === false) return false;
     if (state.showVideo) return false;
-    let url = (!t._isPreviewStream && !t._nativeRefreshTried && t.streamUrl) ? t.streamUrl : "";
     let dur = t.duration || 0;
-    if (!url) {
-      const warmHit = warmStreamMap.get(String(t.videoId || "").trim());
-      if (warmHit && warmHit.data && warmHit.data.url && warmHit.exp > Date.now()) {
-        url = warmHit.data.url;
-        if (warmHit.data.videoId) t.videoId = warmHit.data.videoId;
-        if (warmHit.data.duration) dur = Number(warmHit.data.duration);
-      }
-    }
-    if (!url) {
-      try {
-        const data = await getWarmStream(t.videoId, t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 6500, false);
-        if (data && data.url && !data.isPreview) {
-          url = data.url;
-          if (data.videoId) t.videoId = data.videoId;
-          if (data.duration) dur = Number(data.duration);
-        }
-      } catch {}
-    }
-    // If the Worker couldn't resolve a direct stream on its datacenter IP,
-    // hand "yt:<videoId>" to the native player (Android MuchiAudioService /
-    // iOS MuchiAudioPlugin) so it resolves the stream directly on the user's
-    // residential phone IP and plays with full OS media notification + background playback.
-    if (!url && nativePlayer() && !t._nativeOnDeviceTried) {
-      t._nativeOnDeviceTried = true;
-      url = `yt:${t.videoId}`;
-    }
-    if (!url) return false;
-    const urlDur = parseStreamUrlDuration(url);
+    const urlDur = parseStreamUrlDuration(t.streamUrl || "");
     if (!dur && urlDur > 0) dur = urlDur;
-    t.streamUrl = url;
+    // Always resolve YouTube streams directly on the device's residential IP via
+    // MuchiAudioService (Android) / MuchiAudioPlugin (iOS, M4A-only) instead of
+    // routing through the Cloudflare Worker /api/stream datacenter proxy (which
+    // triggers Googlevideo 403 IP-binding rejections after the initial buffer).
+    t._nativeOnDeviceTried = true;
+    t.streamUrl = `yt:${t.videoId}`;
     t._isPreviewStream = false;
     if (dur > 0) t.duration = dur;
     t._playingViaAudio = true;
@@ -6842,7 +6836,8 @@
 
     if (saved && saved.uri && nativePlayer() && !saved.uri.startsWith("fsp:") && !saved.uri.startsWith("blob:")) {
       url = saved.uri;
-      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0)) {
+      const startAt = _pendingSeek > 0 ? _pendingSeek : 0;
+      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", "", startAt)) {
         setWantPlay(true); state.playing = true; showEl($("eqBars"), true);
         applyNativePendingSeek();
         updateMediaSession(); updateWakeLock(); startTimer(); return;
@@ -6862,6 +6857,10 @@
       url = activeOfflineBlobUrl;
     } else if (!isNetworkOff) {
       url = t.streamUrl || t.url || "";
+      if (IS_NATIVE && nativePlayer() && t.videoId && (!url || url.includes("/api/stream") || url.includes("/api/yt/stream"))) {
+        url = `yt:${t.videoId}`;
+        t._nativeOnDeviceTried = true;
+      }
     }
 
     if (!url && t.source === "audius" && t.trackId) {
@@ -6898,7 +6897,10 @@
       }
     }
     if (!url && !isNetworkOff) {
-      if (t.videoId) {
+      if (t.videoId && IS_NATIVE && nativePlayer()) {
+        url = `yt:${t.videoId}`;
+        t._nativeOnDeviceTried = true;
+      } else if (t.videoId) {
         try {
           const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId)}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(artistName(t) || t.artist || "")}`, 6000);
           if (sData && sData.url) {
@@ -6925,7 +6927,8 @@
     if (url.startsWith("/")) url = API_BASE + url;
     if (nativePlayer() && (/^https?:\/\//i.test(url) || /^yt:/i.test(url))) {
       const cands = Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "";
-      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", cands)) {
+      const startAt = _pendingSeek > 0 ? _pendingSeek : 0;
+      if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", cands, startAt)) {
         if (/^yt:/i.test(url)) t.streamUrl = "";
         setWantPlay(true);
         state.playing = true;
@@ -7737,27 +7740,30 @@
       const nextT = state.queue[state.index + 1];
       if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
         const NP = nativePlayer();
-        if (IS_NATIVE && NP && typeof NP.preload === "function" && !nextT._nativePreloaded) {
-          nextT._nativePreloaded = true;
-          const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
-          NP.preload({
-            videoId: String(nextT.videoId),
-            candidates: cands,
-            title: String(nextT.title || ""),
-            artist: String(artistName(nextT) || nextT.artist || ""),
-          }).catch(() => {});
-        }
-        nextT._resolving = true;
-        getWarmStream(nextT.videoId, nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
-          if (res && res.url) {
-            const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
-            nextT.streamUrl = fullUrl;
-            if (!nextT._prefetched) {
-              nextT._prefetched = true;
-              fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
-            }
+        if (IS_NATIVE && NP && typeof NP.preload === "function") {
+          if (!nextT._nativePreloaded) {
+            nextT._nativePreloaded = true;
+            const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
+            NP.preload({
+              videoId: String(nextT.videoId),
+              candidates: cands,
+              title: String(nextT.title || ""),
+              artist: String(artistName(nextT) || nextT.artist || ""),
+            }).catch(() => {});
           }
-        }).catch(() => {}).finally(() => { nextT._resolving = false; });
+        } else {
+          nextT._resolving = true;
+          getWarmStream(nextT.videoId, nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
+            if (res && res.url) {
+              const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
+              nextT.streamUrl = fullUrl;
+              if (!nextT._prefetched) {
+                nextT._prefetched = true;
+                fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+              }
+            }
+          }).catch(() => {}).finally(() => { nextT._resolving = false; });
+        }
       } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
         nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
         if (!nextT._prefetched) {
@@ -8178,19 +8184,24 @@
       }).catch(() => {});
     } catch {}
   }
-  function nativePlayTrack(url, title, artist, artwork, durationSec, videoId = "", candidates = "") {
+  function nativePlayTrack(url, title, artist, artwork, durationSec, videoId = "", candidates = "", startPosSec = 0) {
     const NP = nativePlayer();
     if (!NP) return false;
     nativeEnsureNotifyPermission();
     const resolvedDur = Number(durationSec) || parseStreamUrlDuration(url) || 0;
+    const initPos = Math.max(0, Number(startPosSec) || (Number(_pendingSeek) > 0 ? Number(_pendingSeek) : 0));
+    if (initPos > 0) {
+      _pendingSeek = 0;
+      _pendingSeekApplied = true;
+    }
     npActive = true;
     npPlaying = true;
     npSeenPlaying = false;
-    npPos = 0;
+    npPos = initPos;
     npPosAt = performance.now();
     npDur = resolvedDur;
     npCmdUntil = Date.now() + 4500;
-    npSeekGuardUntil = 0;
+    npSeekGuardUntil = initPos > 0 ? Date.now() + 2500 : 0;
     NP.play({
       url: String(url),
       videoId: String(videoId || ""),
@@ -8199,6 +8210,7 @@
       artist: String(artist || ""),
       artwork: String(artwork || ""),
       duration: Math.round(resolvedDur * 1000),
+      position: Math.round(initPos * 1000),
       volume: Number(state.volume ?? 100),
       normalize: Boolean(state.prefs.normalize),
       speed: Number(state.prefs.speed || 1),
@@ -8246,7 +8258,7 @@
     if (!NP || !npActive) return false;
     npPos = Math.max(0, Number(sec) || 0);
     npPosAt = performance.now();
-    npSeekGuardUntil = Date.now() + 1400;
+    npSeekGuardUntil = Date.now() + 2500;
     NP.seekTo({ position: Math.round(npPos * 1000) }).catch(() => {});
     return true;
   }
@@ -8324,12 +8336,30 @@
     } else if (msg === "ended") {
       next(true);
     } else if (msg === "error") {
+      const rawErrPos = Number(action.position != null ? action.position : 0);
+      const errPosSec = rawErrPos > 1000 ? rawErrPos / 1000 : rawErrPos;
+      const savedPos = Math.max(errPosSec || 0, npPos || 0, _pendingSeek || 0);
+      if (savedPos > 0) {
+        _pendingSeek = savedPos;
+        _pendingSeekApplied = false;
+      }
       if (npActive) { npActive = false; npPlaying = false; npSeenPlaying = false; }
       const cur = current();
       if ((state.playing || wantPlay) && cur) {
         state.playing = true;
         setWantPlay(true);
-        if (!cur._nativeRefreshTried && (cur.videoId || cur.title)) {
+        if (!cur._nativeOnDeviceTried && cur.videoId && nativePlayer()) {
+          cur._nativeOnDeviceTried = true;
+          cur.streamUrl = `yt:${cur.videoId}`;
+          cur._isPreviewStream = false;
+          cur._playingViaAudio = true;
+          playAudio(cur).catch(() => {
+            if (current() !== cur) return;
+            nativeHandleControls({ message: "error", position: Math.round(savedPos * 1000) });
+          });
+          return;
+        }
+        if (!IS_NATIVE && !cur._nativeRefreshTried && (cur.videoId || cur.title)) {
           cur._nativeRefreshTried = true;
           cur.streamUrl = "";
           const candParam = Array.isArray(cur._ytCandidates) && cur._ytCandidates.length
@@ -8350,19 +8380,8 @@
             })
             .catch(() => {
               if (current() !== cur) return;
-              nativeHandleControls({ message: "error" });
+              nativeHandleControls({ message: "error", position: Math.round(savedPos * 1000) });
             });
-          return;
-        }
-        if (!cur._nativeOnDeviceTried && cur.videoId && nativePlayer()) {
-          cur._nativeOnDeviceTried = true;
-          cur.streamUrl = `yt:${cur.videoId}`;
-          cur._isPreviewStream = false;
-          cur._playingViaAudio = true;
-          playAudio(cur).catch(() => {
-            if (current() !== cur) return;
-            nativeHandleControls({ message: "error" });
-          });
           return;
         }
         if (!cur._nativeFallbackTried) {
@@ -8370,15 +8389,16 @@
           cur.streamUrl = "";
           playFallbackAudioForTrack(cur, true).then((ok) => {
             if (ok) return;
-            if (current() === cur) nativeHandleControls({ message: "error" });
+            if (current() === cur) nativeHandleControls({ message: "error", position: Math.round(savedPos * 1000) });
           }).catch(() => {
-            if (current() === cur) nativeHandleControls({ message: "error" });
+            if (current() === cur) nativeHandleControls({ message: "error", position: Math.round(savedPos * 1000) });
           });
           return;
         }
         if (!cur._nativeYtFallbackTried && cur.videoId && !document.hidden) {
           cur._nativeYtFallbackTried = true;
           cur._playingViaAudio = false;
+          if (savedPos > 1) ytSeekReset = Math.floor(savedPos);
           playYouTube(cur).catch(() => {
             if (current() !== cur) return;
             skipFailed("Playback error");
@@ -8645,6 +8665,11 @@
   function ytConnected() {
     return !!(state.auth && state.auth.signedIn && state.auth.youtube && state.auth.youtube.connected);
   }
+  function isYtLiked(track) {
+    if (!track || !state.ytLiked || !Array.isArray(state.ytLiked.tracks)) return false;
+    const vid = String(track.videoId || "").trim();
+    return state.ytLiked.tracks.some((t) => t && (t.id === track.id || (vid && t.videoId === vid)));
+  }
   // Add the track to the connected user's YouTube Liked Videos. Only for
   // tracks that carry a real YouTube videoId (Audius/radio can't be liked on
   // YouTube). Re-authorization note: connectYouTube now grants a write scope.
@@ -8661,6 +8686,69 @@
     } catch (e) {
       if (String((e && e.message) || "").indexOf("youtube") >= 0) { state.ytReconnect = true; toast("YouTube access expired — reconnect in Settings", true, "error"); }
       else toast("Couldn't add to YouTube Liked", true, "error");
+    }
+  }
+  // Remove/unlike a song from the connected user's YouTube Liked Videos.
+  async function ytUnlikeTrack(track) {
+    if (!ytConnected()) { toast("Connect your YouTube account in Settings", true, "error"); return; }
+    const videoId = String((track && track.videoId) || (track && track.id && String(track.id).replace(/^ytlike:/, "")) || "").trim();
+    if (!videoId) { toast("This song isn't a YouTube track", true, "error"); return; }
+    try {
+      await api("/api/youtube/unlike", 12000, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoId }),
+      });
+      if (state.ytLiked && Array.isArray(state.ytLiked.tracks)) {
+        state.ytLiked.tracks = state.ytLiked.tracks.filter(
+          (t) => t && t.id !== track.id && t.videoId !== videoId
+        );
+      }
+      toast("Removed from YouTube Liked Videos", true, "success");
+      if (state.view === "library") render();
+      loadYtLiked(true);
+    } catch (e) {
+      if (String((e && e.message) || "").indexOf("youtube") >= 0) { state.ytReconnect = true; toast("YouTube access expired — reconnect in Settings", true, "error"); }
+      else toast("Couldn't remove from YouTube Liked", true, "error");
+    }
+  }
+  // Remove a song from one of the connected user's YouTube playlists.
+  async function ytRemoveFromPlaylist(track, activePl) {
+    if (!ytConnected()) { toast("Connect your YouTube account in Settings", true, "error"); return; }
+    const plStr = String(activePl || state.activePlaylist || "");
+    const playlistId = plStr.indexOf("yt-pl:") === 0
+      ? plStr.slice("yt-pl:".length)
+      : String((state.ytOpen && state.ytOpen.id) || "").trim();
+    const videoId = String((track && track.videoId) || "").trim();
+    const playlistItemId = String((track && track.playlistItemId) || "").trim();
+    if (!playlistId || (!videoId && !playlistItemId)) {
+      toast("Couldn't remove from YouTube playlist", true, "error");
+      return;
+    }
+    try {
+      await api("/api/youtube/playlist/remove", 12000, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playlistId, videoId, playlistItemId }),
+      });
+      if (state.ytOpen && String(state.ytOpen.id) === String(playlistId) && Array.isArray(state.ytOpen.tracks)) {
+        state.ytOpen.tracks = state.ytOpen.tracks.filter(
+          (t) => t && (playlistItemId ? t.playlistItemId !== playlistItemId : (t.id !== track.id && t.videoId !== videoId))
+        );
+      }
+      if (Array.isArray(state.ytPlaylists)) {
+        const plMeta = state.ytPlaylists.find((p) => p && String(p.id) === String(playlistId));
+        if (plMeta && typeof plMeta.count === "number" && plMeta.count > 0) {
+          plMeta.count = Math.max(0, plMeta.count - 1);
+        }
+      }
+      const plTitle = (state.ytOpen && state.ytOpen.title) || "YouTube playlist";
+      toast(`Removed from ${plTitle}`, true, "success");
+      if (state.view === "library") render();
+      loadYtPlaylists(true);
+    } catch (e) {
+      if (String((e && e.message) || "").indexOf("youtube") >= 0) { state.ytReconnect = true; toast("YouTube access expired — reconnect in Settings", true, "error"); }
+      else toast("Couldn't remove from YouTube playlist", true, "error");
     }
   }
   // Pick one of the user's YouTube playlists and add the track to it.
@@ -11479,6 +11567,14 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.8.0",
+      title: "Muchi 1.8.0",
+      notes: [
+        "3-dot track options menu added to songs inside YouTube Likes and imported YouTube playlists.",
+        "Unlike/remove songs directly from YouTube Likes and YouTube playlists inside Muchi.",
+      ],
+    },
+    {
       ver: "1.7.9",
       title: "Muchi 1.7.9",
       notes: [
@@ -13081,7 +13177,7 @@
   }
 
   function renderDetail() {
-    const t = state.detailTrack;
+    const t = state.detailTrack || current();
     if (!t) {
       return `<button class="chip-btn page-back" id="detailBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
         <div class="empty"><h3>No song selected</h3></div>`;
@@ -13228,9 +13324,18 @@
           track = (state.liked[idx] && state.liked[idx].id === id) ? state.liked[idx] : state.liked.find((t) => t.id === id);
         } else if (state.view === "library" && (state.activePlaylist === "downloads" || state.libFilter === "downloaded")) {
           track = (state.downloads[idx] && state.downloads[idx].id === id) ? state.downloads[idx] : state.downloads.find((t) => t.id === id);
+        } else if (state.view === "library" && state.activePlaylist === "yt-liked") {
+          const rows = (state.ytLiked && state.ytLiked.tracks) || [];
+          track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t && t.id === id);
+        } else if (state.view === "library" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0) {
+          const rows = (state.ytOpen && state.ytOpen.tracks) || [];
+          track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t && t.id === id);
         } else if (state.view === "library" && state.activePlaylist === "catalog") {
           const rows = (state.catalogPlaylist && state.catalogPlaylist.tracks) || [];
           track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t.id === id);
+        } else if (state.view === "library" && state.activePlaylist === "discovery") {
+          const rows = (state.discovery && state.discovery.tracks) || [];
+          track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t && t.id === id);
         } else if (state.view === "library" && typeof state.activePlaylist === "number") {
           const rows = state.playlists[state.activePlaylist] && state.playlists[state.activePlaylist].tracks || [];
           track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t.id === id);
@@ -13241,9 +13346,13 @@
           ? "liked"
           : state.view === "library" && (state.activePlaylist === "downloads" || state.libFilter === "downloaded")
             ? "downloads"
-            : state.view === "library" && typeof state.activePlaylist === "number"
-              ? "playlist"
-              : "generic";
+            : state.view === "library" && state.activePlaylist === "yt-liked"
+              ? "yt-liked"
+              : state.view === "library" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0
+                ? "yt-playlist"
+                : state.view === "library" && typeof state.activePlaylist === "number"
+                  ? "playlist"
+                  : "generic";
         openTrackMenu(track, where);
       });
     });
@@ -13261,7 +13370,7 @@
     if (detailPlay) {
       detailPlay.addEventListener("pointerdown", (e) => triggerFabRipple(detailPlay, e));
       detailPlay.addEventListener("click", () => {
-      const tr = state.detailTrack;
+      const tr = state.detailTrack || current();
       if (!tr) return;
       if (current() && current().id === tr.id) {
         togglePlay();
@@ -13276,10 +13385,11 @@
     });
     }
     const detailArtist = viewEl.querySelector("#detailArtist");
-    if (detailArtist) detailArtist.addEventListener("click", () => openArtistFromTrack(state.detailTrack));
+    if (detailArtist) detailArtist.addEventListener("click", () => openArtistFromTrack(state.detailTrack || current()));
     const detailLike = viewEl.querySelector("#detailLike");
     if (detailLike) detailLike.addEventListener("click", () => {
-      if (state.detailTrack) { toggleLike(state.detailTrack); render(); }
+      const tr = state.detailTrack || current();
+      if (tr) { toggleLike(tr); render(); }
     });
     viewEl.querySelectorAll("[data-set-icons]").forEach((el) => {
       el.addEventListener("click", () => {
@@ -13393,7 +13503,11 @@
     }
     const openDisc = () => {
       rememberScroll();
-      state.prevView = "home";
+      const originView = (state.view === "library" && state.activePlaylist != null)
+        ? (state.playlistFrom || state.prevView || "home")
+        : (state.view || "home");
+      state.playlistFrom = originView;
+      state.prevView = originView;
       state.view = "library";
       state.activePlaylist = "discovery";
       navPush();
@@ -13548,20 +13662,35 @@
       el.addEventListener("click", () => loadRadio(el.dataset.radioQ));
     });
     viewEl.querySelectorAll("[data-open-pl]").forEach((el) => {
-      el.addEventListener("click", () => { rememberScroll(); state.activePlaylist = Number(el.dataset.openPl); navPush(); paintNav(false); });
+      el.addEventListener("click", () => {
+        rememberScroll();
+        state.playlistFrom = (state.view === "library" && state.activePlaylist != null) ? (state.playlistFrom || "library") : (state.view || "library");
+        state.activePlaylist = Number(el.dataset.openPl);
+        navPush();
+        paintNav(false);
+      });
     });
     const np = viewEl.querySelector("#newPl2");
     if (np) np.addEventListener("click", newPlaylist);
     viewEl.querySelectorAll("[data-open-yt-liked]").forEach((el) => {
-      el.addEventListener("click", () => { state.activePlaylist = "yt-liked"; render(); });
+      el.addEventListener("click", () => {
+        rememberScroll();
+        state.playlistFrom = (state.view === "library" && state.activePlaylist != null) ? (state.playlistFrom || "library") : (state.view || "library");
+        state.activePlaylist = "yt-liked";
+        navPush();
+        paintNav(false);
+      });
     });
     viewEl.querySelectorAll("[data-open-yt-pl]").forEach((el) => {
       el.addEventListener("click", () => {
+        rememberScroll();
         const id = el.dataset.openYtPl || "";
         const pl = Array.isArray(state.ytPlaylists) ? state.ytPlaylists.find((p) => String(p.id) === id) : null;
         state.ytOpen = { id, title: (pl && pl.title) || "Playlist", artwork: (pl && pl.artwork) || "", tracks: null, loading: true };
+        state.playlistFrom = (state.view === "library" && state.activePlaylist != null) ? (state.playlistFrom || "library") : (state.view || "library");
         state.activePlaylist = "yt-pl:" + id;
-        render();
+        navPush();
+        paintNav(false);
         openYtPlaylist(id, (pl && pl.title) || "Playlist");
       });
     });
@@ -13608,10 +13737,22 @@
       toast("Refreshing YouTube…");
     });
     viewEl.querySelectorAll("[data-open-liked]").forEach((el) => {
-      el.addEventListener("click", () => { rememberScroll(); state.activePlaylist = "liked"; navPush(); paintNav(false); });
+      el.addEventListener("click", () => {
+        rememberScroll();
+        state.playlistFrom = (state.view === "library" && state.activePlaylist != null) ? (state.playlistFrom || "library") : (state.view || "library");
+        state.activePlaylist = "liked";
+        navPush();
+        paintNav(false);
+      });
     });
     viewEl.querySelectorAll("[data-open-downloads]").forEach((el) => {
-      el.addEventListener("click", () => { rememberScroll(); state.activePlaylist = "downloads"; navPush(); paintNav(false); });
+      el.addEventListener("click", () => {
+        rememberScroll();
+        state.playlistFrom = (state.view === "library" && state.activePlaylist != null) ? (state.playlistFrom || "library") : (state.view || "library");
+        state.activePlaylist = "downloads";
+        navPush();
+        paintNav(false);
+      });
     });
     viewEl.querySelectorAll("[data-lib-filter]").forEach((el) => {
       el.addEventListener("click", () => { state.libFilter = el.dataset.libFilter; render(); });
@@ -14383,6 +14524,10 @@
     return {
       muchi: 1,
       view: state.view,
+      prevView: state.prevView || null,
+      detailFrom: state.detailFrom || null,
+      detailTrack: state.detailTrack || null,
+      playlistFrom: state.playlistFrom || null,
       settingsPage: state.settingsPage || null,
       activePlaylist: state.activePlaylist,
       hasArtist: !!state.artistPage,
@@ -14448,13 +14593,28 @@
     if (!s || !s.muchi) return false;
     navSilent = true;
     state.view = s.view || "home";
+    if (s.prevView !== undefined && s.prevView !== "detail" && s.prevView !== "now") {
+      state.prevView = s.prevView;
+    }
+    state.detailFrom = s.detailFrom || null;
+    state.playlistFrom = s.playlistFrom || null;
     state.settingsPage = s.settingsPage || null;
     state.activePlaylist = s.activePlaylist == null ? null : s.activePlaylist;
     if (!s.hasArtist) {
       state.artistPage = null;
       state.artistFrom = null;
     }
-    if (!s.hasDetail) state.detailTrack = null;
+    if (!s.hasDetail) {
+      state.detailTrack = null;
+      state.detailFrom = null;
+    } else if (s.detailTrack) {
+      state.detailTrack = s.detailTrack;
+    }
+    if (state.view === "detail" && !state.detailTrack && !current()) {
+      state.view = (state.detailFrom && state.detailFrom !== "detail")
+        ? state.detailFrom
+        : ((state.prevView && state.prevView !== "detail" && state.prevView !== "now") ? state.prevView : "home");
+    }
     if (!s.hasCatalog && state.activePlaylist === "catalog") {
       state.catalogPlaylist = null;
       state.catalogMeta = null;
@@ -14505,12 +14665,19 @@
       return true;
     }
     if (state.view === "now") {
-      setView(state.prevView || "home", true);
+      const target = (state.prevView && state.prevView !== "now" && state.prevView !== "detail")
+        ? state.prevView
+        : "home";
+      setView(target, true);
       return true;
     }
     if (state.view === "detail") {
+      const returnTo = (state.detailFrom && state.detailFrom !== "detail")
+        ? state.detailFrom
+        : ((state.prevView && state.prevView !== "detail") ? state.prevView : "home");
       state.detailTrack = null;
-      setView(state.prevView || "home", true);
+      state.detailFrom = null;
+      setView(returnTo, true);
       return true;
     }
     if (state.view === "settings" && state.settingsPage) {
@@ -14523,16 +14690,22 @@
       const from = state.artistFrom;
       state.artistPage = null;
       state.artistFrom = null;
-      if (from && from !== state.view) setView(from, true);
+      if (from && from !== state.view) {
+        const target = (from === "detail" && !state.detailTrack)
+          ? ((state.detailFrom && state.detailFrom !== "detail") ? state.detailFrom : (state.prevView || "home"))
+          : from;
+        setView(target, true);
+      }
       else { softRender(); navReplace(); }
       return true;
     }
     if (state.view === "library" && state.activePlaylist != null) {
-      const fromCatalog = state.activePlaylist === "catalog";
+      const returnTo = state.playlistFrom || ((state.activePlaylist === "catalog" || state.activePlaylist === "discovery") ? state.prevView : "library") || "library";
       state.activePlaylist = null;
       state.catalogPlaylist = null;
-      if (fromCatalog && state.prevView && state.prevView !== "library") {
-        setView(state.prevView, true);
+      state.playlistFrom = null;
+      if (returnTo && returnTo !== "library") {
+        setView(returnTo, true);
         return true;
       }
       softRender();
@@ -14551,12 +14724,6 @@
   }
 
   function requestBack() {
-    try {
-      if (history.state && history.state.muchi && window.history.length > 1) {
-        history.back();
-        return;
-      }
-    } catch {}
     logicalBack();
   }
 
@@ -14566,16 +14733,28 @@
       if (name === "home") { state.showProfile = false; render(); }
       return;
     }
-    if ((name === "now" || name === "settings" || name === "detail") && state.view !== name) state.prevView = state.view;
+    if (!fromBack && (name === "now" || name === "settings" || name === "detail") && state.view !== name) {
+      if (state.view !== "now" && state.view !== "settings" && state.view !== "detail") {
+        state.prevView = state.view;
+      }
+    }
     if (name !== "home") state.showProfile = false;
     if (name !== "search" && name !== "now" && name !== "settings" && name !== "detail") state.artistPage = null;
-    if (name !== "detail") state.detailTrack = null;
+    if (name !== "detail") {
+      state.detailTrack = null;
+      state.detailFrom = null;
+    }
+    if (name === "library" && !fromBack && state.activePlaylist != null) {
+      state.activePlaylist = null;
+      state.playlistFrom = null;
+    }
     state.view = name;
     // "now" (lyrics) and "detail" (track page) are transient overlays on
     // top of the current view — going back must land the user exactly
     // where they were, playlist included.
     if (name !== "library" && name !== "now" && name !== "detail") {
       state.activePlaylist = null;
+      state.playlistFrom = null;
       // Keep state.catalogPlaylist as an in-memory cache: nav history may
       // still point at it (e.g. home → playlist → lyrics → back). Nulling
       // it here used to strand the playlist in a permanent "Loading songs…".
@@ -14591,7 +14770,12 @@
   function openTrackDetail(track) {
     if (!track) return;
     state.detailTrack = track;
-    if (state.view !== "detail") state.prevView = state.view;
+    if (state.view !== "detail") {
+      state.detailFrom = state.view;
+      if (state.view !== "now" && state.view !== "settings") {
+        state.prevView = state.view;
+      }
+    }
     setView("detail");
   }
 
@@ -15407,7 +15591,11 @@
       fyIndex,
     };
     if (!refill) {
-      state.prevView = state.view === "library" ? (state.prevView || "home") : state.view;
+      const originView = (state.view === "library" && state.activePlaylist != null)
+        ? (state.playlistFrom || state.prevView || "home")
+        : (state.view || "home");
+      state.playlistFrom = originView;
+      state.prevView = originView;
       state.view = "library";
       state.activePlaylist = "catalog";
       navPush();
@@ -16873,10 +17061,16 @@
     if ($("playlistNav")) $("playlistNav").addEventListener("click", (e) => {
       const b = e.target.closest("button");
       if (!b) return;
+      rememberScroll();
       closeOverlays();
-      if (b.hasAttribute("data-open-liked")) { state.view = "library"; state.activePlaylist = "liked"; render(); }
-      if (b.hasAttribute("data-open-downloads")) { state.view = "library"; state.activePlaylist = "downloads"; render(); }
-      if (b.dataset.pl) { state.view = "library"; state.activePlaylist = Number(b.dataset.pl); render(); }
+      const originView = (state.view === "library" && state.activePlaylist != null)
+        ? (state.playlistFrom || state.prevView || "home")
+        : (state.view || "home");
+      state.playlistFrom = originView;
+      state.prevView = originView;
+      if (b.hasAttribute("data-open-liked")) { state.view = "library"; state.activePlaylist = "liked"; navPush(); paintNav(false); }
+      if (b.hasAttribute("data-open-downloads")) { state.view = "library"; state.activePlaylist = "downloads"; navPush(); paintNav(false); }
+      if (b.dataset.pl) { state.view = "library"; state.activePlaylist = Number(b.dataset.pl); navPush(); paintNav(false); }
     });
     $("queueList").addEventListener("click", (e) => {
       const del = e.target.closest("[data-q-del]");

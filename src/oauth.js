@@ -156,6 +156,28 @@ async function ytApiPost(session, env, pathAndQuery, body) {
   try { return JSON.parse(text); } catch { return {}; }
 }
 
+// DELETE variant for removing an item from a YouTube playlist (playlistItems.delete).
+// Returns 204 No Content on success.
+async function ytApiDelete(session, env, pathAndQuery) {
+  const base = "https://www.googleapis.com/youtube/v3/";
+  const headers = {
+    Authorization: "Bearer " + session.yt.access,
+  };
+  const doFetch = async () => {
+    return fetch(base + pathAndQuery, { method: "DELETE", headers });
+  };
+  let r = await doFetch();
+  if (r.status === 401 && (await googleRefresh(session, env))) r = await doFetch();
+  if (!r.ok) {
+    try {
+      const t = await r.text().catch(() => "");
+      console.error(`YouTube API DELETE ${pathAndQuery.split("?")[0]} ${r.status}: ${String(t).slice(0, 180)}`);
+    } catch {}
+    return null;
+  }
+  return {};
+}
+
 function revokeGoogle(token) {
   if (!token) return;
   fetch("https://oauth2.googleapis.com/revoke?token=" + encodeURIComponent(token), { method: "POST" }).catch(() => {});
@@ -412,10 +434,55 @@ export async function handleYoutubeData(request, env, url, path) {
       });
       if (!j) return json(401, { error: "youtube" });
       cache.detail.delete(playlistId); // invalidate the cached track list
+      cache.playlists = null;
       return json(200, { ok: true });
     }
+    // Remove/unlike a song from the user's YouTube Liked Videos.
+    if (path === "/api/youtube/unlike" && (request.method === "POST" || request.method === "DELETE")) {
+      const body = await request.json().catch(() => ({}));
+      const videoId = String(body.videoId || url.searchParams.get("videoId") || "").trim();
+      if (!videoId) return json(400, { error: "Missing videoId" });
+      const q = new URLSearchParams({ id: videoId, rating: "none" });
+      const j = await ytApiPost(s, env, "videos/rate?" + q.toString());
+      if (!j) return json(401, { error: "youtube" });
+      cache.liked = null; // refetch the liked list next time
+      return json(200, { ok: true });
+    }
+    // Remove a song from one of the user's YouTube playlists.
+    if (path === "/api/youtube/playlist/remove" && (request.method === "POST" || request.method === "DELETE")) {
+      const body = await request.json().catch(() => ({}));
+      const playlistId = String(body.playlistId || url.searchParams.get("playlistId") || "").trim();
+      const videoId = String(body.videoId || url.searchParams.get("videoId") || "").trim();
+      let playlistItemId = String(body.playlistItemId || url.searchParams.get("playlistItemId") || "").trim();
+      if (!playlistItemId && playlistId && videoId) {
+        const cachedDet = cache.detail.get(playlistId);
+        const cachedHit = cachedDet && Array.isArray(cachedDet.tracks)
+          ? cachedDet.tracks.find((t) => t && (t.videoId === videoId || t.id === `ytpl:${playlistId}:${videoId}`) && t.playlistItemId)
+          : null;
+        if (cachedHit && cachedHit.playlistItemId) {
+          playlistItemId = String(cachedHit.playlistItemId);
+        } else {
+          const qLookup = new URLSearchParams({ part: "id,snippet,contentDetails", playlistId, videoId, maxResults: "50" });
+          const found = await ytApi(s, env, "playlistItems?" + qLookup.toString());
+          const match = (found && Array.isArray(found.items) && found.items.find((it) => {
+            const vid = (it.contentDetails && it.contentDetails.videoId) || (it.snippet && it.snippet.resourceId && it.snippet.resourceId.videoId) || "";
+            return !vid || vid === videoId;
+          })) || (found && Array.isArray(found.items) && found.items[0]);
+          if (match && match.id) playlistItemId = String(match.id);
+        }
+      }
+      if (!playlistItemId) return json(400, { error: "Missing playlistItemId or videoId" });
+      const q = new URLSearchParams({ id: playlistItemId });
+      const j = await ytApiDelete(s, env, "playlistItems?" + q.toString());
+      if (!j) return json(401, { error: "youtube" });
+      if (playlistId) cache.detail.delete(playlistId);
+      else cache.detail.clear();
+      cache.playlists = null;
+      return json(200, { ok: true });
+    }
+    const forceRefresh = url.searchParams.get("refresh") === "1";
     if (path === "/api/youtube/liked") {
-      if (!ytFresh(cache.liked)) {
+      if (forceRefresh || !ytFresh(cache.liked)) {
         const pages = [];
         let pageToken = "";
         for (let i = 0; i < 4; i++) {
@@ -433,7 +500,7 @@ export async function handleYoutubeData(request, env, url, path) {
       return json(200, { tracks: cache.liked.tracks, truncated: cache.liked.truncated });
     }
     if (path === "/api/youtube/playlists") {
-      if (!ytFresh(cache.playlists)) {
+      if (forceRefresh || !ytFresh(cache.playlists)) {
         const out = [];
         let pageToken = "";
         for (let i = 0; i < 4; i++) {
@@ -462,7 +529,7 @@ export async function handleYoutubeData(request, env, url, path) {
     const plId = url.searchParams.get("id") || "";
     if (!plId) return json(400, { error: "Missing playlist id" });
     let det = cache.detail.get(plId);
-    if (!ytFresh(det)) {
+    if (forceRefresh || !ytFresh(det)) {
       const pages = [];
       let pageToken = "";
       for (let i = 0; i < 4; i++) {

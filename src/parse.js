@@ -23,7 +23,7 @@ export function ytTrack(item, prefix) {
   // contentDetails.videoId, so fall back to item.id.
   const videoId = cd.videoId || rid || (item && item.id) || "";
   if (!videoId || !sn.title || /^private video$/i.test(sn.title)) return null;
-  return {
+  const out = {
     id: `${prefix}${videoId}`,
     videoId,
     source: "youtube",
@@ -33,6 +33,10 @@ export function ytTrack(item, prefix) {
     duration: cd.duration ? ytDurationToSec(cd.duration) : 0,
     streamUrl: "",
   };
+  if ((cd.videoId || rid) && item && item.id && String(item.id) !== String(videoId)) {
+    out.playlistItemId = String(item.id);
+  }
+  return out;
 }
 
 export function decodeIdToken(idToken) {

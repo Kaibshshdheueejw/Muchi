@@ -179,7 +179,8 @@ async function handleApi(request, env, url) {
   if (p === "/api/auth/signout") return handleSignout(request, env);
   if (p === "/api/auth/youtube/disconnect") return handleYoutubeDisconnect(request, env);
   if (p === "/api/youtube/liked" || p === "/api/youtube/playlists" || p === "/api/youtube/playlist"
-      || p === "/api/youtube/like" || p === "/api/youtube/playlist/add") {
+      || p === "/api/youtube/like" || p === "/api/youtube/unlike"
+      || p === "/api/youtube/playlist/add" || p === "/api/youtube/playlist/remove") {
     return handleYoutubeData(request, env, url, p);
   }
   if (p === "/api/moods") return handleMoods(url);

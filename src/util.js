@@ -65,6 +65,11 @@ export function invalidateCached(key) {
   inflight.delete(key);
 }
 
+export function hasCached(key, ttlMs) {
+  const hit = cache.get(key);
+  return Boolean(hit && (!ttlMs || Date.now() - hit.at < ttlMs));
+}
+
 export function cached(key, ttlMs, fn) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < ttlMs) return Promise.resolve(hit.value);

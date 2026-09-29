@@ -142,11 +142,21 @@ public class MuchiAudioService extends Service {
         }
         public void seekToPlayback(long positionMs) {
             ticker.post(() -> {
+                long targetMs = Math.max(0L, positionMs);
+                lastKnownPositionMs = targetMs;
                 if (mirrorMode) {
-                    mirrorPositionMs = Math.max(0L, positionMs);
+                    mirrorPositionMs = targetMs;
                     updatePlaybackState(mirrorPlaying, mirrorPositionMs);
-                } else if (player != null) {
-                    player.seekTo(positionMs);
+                } else if (resolvingOnDevice || player == null || player.getPlaybackState() == Player.STATE_IDLE) {
+                    pendingSeekMs = targetMs;
+                    updatePlaybackState(true, targetMs);
+                } else {
+                    pendingSeekMs = targetMs;
+                    player.seekTo(targetMs);
+                    if (player.getPlayWhenReady() && !player.isPlaying()) {
+                        player.play();
+                    }
+                    updatePlaybackState(isCurrentlyPlaying(), targetMs);
                 }
             });
         }
@@ -204,6 +214,8 @@ public class MuchiAudioService extends Service {
     private boolean triedOnDeviceResolve = false;
     private volatile boolean resolvingOnDevice = false;
     private volatile boolean isForegroundStarted = false;
+    private volatile long pendingSeekMs = 0L;
+    private volatile long lastKnownPositionMs = 0L;
 
     // Mirror mode: active when WebView (YouTube IFrame or WebAudio <audio>) is
     // playing so the Foreground Service notification + WakeLock still run.
@@ -235,11 +247,22 @@ public class MuchiAudioService extends Service {
             }
             if (session == null) return;
             if (player == null) {
-                if (l != null) l.onProgress(0L, currentDurationMs, true);
+                long fallbackPos = pendingSeekMs > 0 ? pendingSeekMs : lastKnownPositionMs;
+                if (l != null) l.onProgress(fallbackPos, currentDurationMs, true);
                 ticker.postDelayed(tick, 250L);
                 return;
             }
             long positionMs = Math.max(0L, player.getCurrentPosition());
+            if (resolvingOnDevice && pendingSeekMs > 0) {
+                positionMs = pendingSeekMs;
+            } else if (positionMs > 0) {
+                lastKnownPositionMs = positionMs;
+                if (pendingSeekMs > 0 && Math.abs(positionMs - pendingSeekMs) < 1500) {
+                    pendingSeekMs = 0L;
+                }
+            } else if (pendingSeekMs > 0 && player.getPlaybackState() != Player.STATE_READY) {
+                positionMs = pendingSeekMs;
+            }
             long rawDur = player.getDuration();
             long durationMs = (rawDur != C.TIME_UNSET && rawDur > 0) ? rawDur : 0L;
             if (durationMs <= 0 && currentDurationMs > 0) durationMs = currentDurationMs;
@@ -403,6 +426,7 @@ public class MuchiAudioService extends Service {
         String artwork = intent.getStringExtra(EXTRA_ARTWORK);
         String candidates = intent.getStringExtra(EXTRA_CANDIDATES);
         long durationMs = intent.getLongExtra(EXTRA_DURATION_MS, 0L);
+        long startPosMs = Math.max(0L, intent.getLongExtra(EXTRA_POSITION_MS, 0L));
 
         trackTitle = title != null && !title.isEmpty() ? title : "Muchi";
         trackArtist = artist != null ? artist : "";
@@ -415,12 +439,12 @@ public class MuchiAudioService extends Service {
         // notification right away.
         ensureSession();
         session.setMetadata(buildMetadata(currentDurationMs));
-        updatePlaybackState(true, 0L);
+        updatePlaybackState(true, startPosMs);
         startInForeground();
         showNotification();
         updateLocks(true);
 
-        loadTrack(url, videoId, candidates != null ? candidates : "", trackTitle, trackArtist, artwork, currentDurationMs);
+        loadTrack(url, videoId, candidates != null ? candidates : "", trackTitle, trackArtist, artwork, currentDurationMs, startPosMs);
     }
 
     /** Mirror mode: keeps the Foreground Media Notification & WakeLock active
@@ -578,6 +602,10 @@ public class MuchiAudioService extends Service {
 
             @Override
             public void onPlayerError(@NonNull PlaybackException error) {
+                long errPos = Math.max(pendingSeekMs, lastKnownPositionMs);
+                if (player != null) {
+                    errPos = Math.max(errPos, Math.max(0L, player.getCurrentPosition()));
+                }
                 if (!currentVideoId.isEmpty()) {
                     invalidateResolvedCache(currentVideoId);
                 }
@@ -585,29 +613,37 @@ public class MuchiAudioService extends Service {
                 // and we have a videoId/title, resolve a fresh stream directly on the phone's IP first!
                 if (!triedOnDeviceResolve && (!currentVideoId.isEmpty() || !trackTitle.isEmpty())) {
                     triedOnDeviceResolve = true;
+                    resolvingOnDevice = true;
+                    pendingSeekMs = errPos;
+                    lastKnownPositionMs = errPos;
                     final int seq = loadSeq;
                     final String vid = currentVideoId;
                     final String cands = currentCandidates;
                     final String tTitle = trackTitle;
                     final String tArtist = trackArtist;
+                    final long resumePos = errPos;
                     resolveExecutor.execute(() -> {
                         ResolvedStream rs = resolveYoutubeStreamOnDevice(vid, cands, tTitle, tArtist);
                         ticker.post(() -> {
                             if (seq != loadSeq) return;
+                            resolvingOnDevice = false;
                             if (rs != null && rs.url != null && !rs.url.isEmpty()) {
                                 currentUrl = rs.url;
                                 if (rs.durationMs > 0 && currentDurationMs <= 0) {
                                     currentDurationMs = rs.durationMs;
                                 }
+                                if (pendingSeekMs <= 0 && resumePos > 0) {
+                                    pendingSeekMs = resumePos;
+                                }
                                 startExoPlayerWithUrl(rs.url, rs.userAgent, currentDurationMs);
                             } else {
-                                emitControls("error", 0L);
+                                emitControls("error", resumePos);
                             }
                         });
                     });
                     return;
                 }
-                emitControls("error", 0L);
+                emitControls("error", errPos);
             }
 
             @Override
@@ -664,12 +700,18 @@ public class MuchiAudioService extends Service {
 
             @Override
             public void onSeekTo(long position) {
+                long targetMs = Math.max(0L, position);
+                lastKnownPositionMs = targetMs;
                 if (mirrorMode) {
-                    mirrorPositionMs = Math.max(0L, position);
+                    mirrorPositionMs = targetMs;
                     updatePlaybackState(mirrorPlaying, mirrorPositionMs);
                     emitControls("seek", mirrorPositionMs);
-                } else if (player != null) {
-                    player.seekTo(position);
+                } else if (resolvingOnDevice || player == null || player.getPlaybackState() == Player.STATE_IDLE) {
+                    pendingSeekMs = targetMs;
+                    updatePlaybackState(true, targetMs);
+                } else {
+                    pendingSeekMs = targetMs;
+                    player.seekTo(targetMs);
                 }
             }
 
@@ -698,7 +740,7 @@ public class MuchiAudioService extends Service {
     }
 
     private synchronized void loadTrack(String url, String videoId, String candidates,
-                                        String title, String artist, String artwork, long durationMs) {
+                                        String title, String artist, String artwork, long durationMs, long startPosMs) {
         trackTitle = title != null && !title.isEmpty() ? title : "Muchi";
         trackArtist = artist != null ? artist : "";
         if (videoId != null && !videoId.isEmpty()) {
@@ -719,6 +761,13 @@ public class MuchiAudioService extends Service {
         // Deduplicate rapid double-invocation (e.g. startForegroundService + binder.playIntent)
         if (player != null && currentUrl != null && (currentUrl.equals(url) || (currentRequestedUrl != null && currentRequestedUrl.equals(url)))
                 && (resolvingOnDevice || player.isPlaying() || player.getPlayWhenReady() || player.getPlaybackState() == Player.STATE_BUFFERING)) {
+            if (startPosMs > 0) {
+                pendingSeekMs = startPosMs;
+                lastKnownPositionMs = startPosMs;
+                if (!resolvingOnDevice && Math.abs(player.getCurrentPosition() - startPosMs) > 1500) {
+                    player.seekTo(startPosMs);
+                }
+            }
             ensureSession();
             session.setMetadata(buildMetadata(currentDurationMs));
             showNotification();
@@ -734,6 +783,8 @@ public class MuchiAudioService extends Service {
         currentRequestedUrl = url;
         currentUrl = url;
         endedNotified = false;
+        pendingSeekMs = Math.max(0L, startPosMs);
+        lastKnownPositionMs = pendingSeekMs;
         final int seq = ++loadSeq;
 
         ensurePlayer();
@@ -810,13 +861,20 @@ public class MuchiAudioService extends Service {
             httpFactory.setDefaultRequestProperties(headers);
         }
         endedNotified = false;
-        player.setMediaItem(MediaItem.fromUri(streamUrl));
+        long startAtMs = Math.max(0L, pendingSeekMs);
+        pendingSeekMs = 0L;
+        if (startAtMs > 0) {
+            lastKnownPositionMs = startAtMs;
+            player.setMediaItem(MediaItem.fromUri(streamUrl), startAtMs);
+        } else {
+            player.setMediaItem(MediaItem.fromUri(streamUrl));
+        }
         applyPlayerPrefsAndEffects();
         player.prepare();
         player.play();
 
         session.setMetadata(buildMetadata(durationMs));
-        updatePlaybackState(true, 0L);
+        updatePlaybackState(true, startAtMs);
         startInForeground();
         showNotification();
         updateLocks(true);
@@ -1121,6 +1179,14 @@ public class MuchiAudioService extends Service {
                 return rs;
             }
         }
+        // Tier 3 fallback: Direct Audius full-length MP3 stream when on a VPN/datacenter IP where YouTube gates InnerTube
+        if (title != null && !title.trim().isEmpty()) {
+            ResolvedStream aud = probeAudiusForTitleStatic(title, artist);
+            if (aud != null) {
+                if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, aud);
+                return aud;
+            }
+        }
         return null;
     }
 
@@ -1227,9 +1293,9 @@ public class MuchiAudioService extends Service {
                             }
                         }
 
-                        // 1.5.5 / 1.6.6 stream quality rule: prefer high-bitrate AAC/m4a (>=120kbps) or
-                        // high-bitrate Opus (160kbps itag=251); never let 48kbps itag=139 beat 160kbps Opus.
-                        boolean useM4a = !bestM4aUrl.isEmpty() && (bestOpusUrl.isEmpty() || (bestM4aBitrate >= 115000 && bestM4aBitrate >= bestOpusBitrate * 0.75));
+                        // Prefer AAC/M4A (itag 140, ~128kbps) when available (>=96kbps) so ExoPlayer gets an MP4
+                        // sidx index for instant range-request seeking and never hits WebM Cues seek stalls.
+                        boolean useM4a = !bestM4aUrl.isEmpty() && (bestOpusUrl.isEmpty() || bestM4aBitrate >= 96000);
                         String chosen = useM4a ? bestM4aUrl : (!bestOpusUrl.isEmpty() ? bestOpusUrl : bestM4aUrl);
                         String chosenMime = useM4a || bestOpusUrl.isEmpty() ? "audio/mp4" : "audio/webm";
                         if (!chosen.isEmpty()) {
@@ -1326,21 +1392,114 @@ public class MuchiAudioService extends Service {
                     String bestUrl = "";
                     String bestMime = "audio/mp4";
                     int bestBr = -1;
+                    String bestM4aUrl = "";
+                    int bestM4aBr = -1;
                     for (int i = 0; i < streams.length(); i++) {
                         JSONObject s = streams.optJSONObject(i);
                         if (s == null) continue;
                         String u = s.optString("url", "");
                         String m = s.optString("mimeType", "audio/mp4");
                         int br = s.optInt("bitrate", 0);
-                        if (!u.isEmpty() && br > bestBr) {
+                        if (u.isEmpty()) continue;
+                        String lowM = m.toLowerCase();
+                        if (lowM.contains("mp4") || lowM.contains("m4a") || lowM.contains("aac")) {
+                            if (br > bestM4aBr) {
+                                bestM4aBr = br;
+                                bestM4aUrl = u;
+                            }
+                        }
+                        if (br > bestBr) {
                             bestBr = br;
                             bestUrl = u;
                             bestMime = m;
                         }
                     }
+                    if (!bestM4aUrl.isEmpty() && bestM4aBr >= 96000) {
+                        bestUrl = bestM4aUrl;
+                        bestMime = "audio/mp4";
+                    }
                     if (!bestUrl.isEmpty()) {
                         long dur = root.optLong("duration", 0L) * 1000L;
                         return new ResolvedStream(bestUrl, DEFAULT_UA, dur, bestMime);
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (con != null) con.disconnect();
+            }
+        }
+        return null;
+    }
+
+    private static ResolvedStream probeAudiusForTitleStatic(String title, String artist) {
+        if (title == null || title.trim().isEmpty()) return null;
+        String cleanTitle = title.trim();
+        String coreTitle = cleanTitle
+                .replaceAll("(?i)\\s*[\\[(]\\s*(?:feat\\.?|ft\\.?|featuring|with)\\s+[^)\\]]+[)\\]]", "")
+                .replaceAll("(?i)\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$", "")
+                .trim();
+        if (coreTitle.isEmpty()) coreTitle = cleanTitle;
+        String cleanArtist = artist != null ? artist.trim() : "";
+        String coreArtist = cleanArtist
+                .replaceAll("(?i)\\s*[\\[(]?\\s*(?:feat\\.?|ft\\.?|featuring)\\s+.*$", "")
+                .split("[,&/]")[0]
+                .trim();
+        if (coreArtist.isEmpty()) coreArtist = cleanArtist;
+        List<String> queryList = new ArrayList<>();
+        if (!coreArtist.isEmpty()) queryList.add((coreTitle + " " + coreArtist).trim());
+        if (!cleanArtist.isEmpty()) {
+            String qFull = (cleanTitle + " " + cleanArtist).trim();
+            if (!queryList.contains(qFull)) queryList.add(qFull);
+        }
+        if (!queryList.contains(coreTitle)) queryList.add(coreTitle);
+        String wantTitle = cleanTitle.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+        String wantCore = coreTitle.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+        String wantArtist = coreArtist.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+        for (String q : queryList) {
+            HttpURLConnection con = null;
+            try {
+                String url = "https://discoveryprovider.audius.co/v1/tracks/search?query="
+                        + java.net.URLEncoder.encode(q, "UTF-8") + "&app_name=MUCHI";
+                con = (HttpURLConnection) new URL(url).openConnection();
+                con.setConnectTimeout(3500);
+                con.setReadTimeout(4500);
+                con.setRequestProperty("User-Agent", DEFAULT_UA);
+                if (con.getResponseCode() == 200) {
+                    JSONObject root = new JSONObject(readStreamString(con.getInputStream()));
+                    JSONArray data = root.optJSONArray("data");
+                    if (data == null || data.length() == 0) continue;
+                    for (int i = 0; i < data.length(); i++) {
+                        JSONObject item = data.optJSONObject(i);
+                        if (item == null) continue;
+                        if (item.optBoolean("is_delete", false) || !item.optBoolean("is_streamable", true)) continue;
+                        JSONObject access = item.optJSONObject("access");
+                        if (access != null && !access.optBoolean("stream", true)) continue;
+                        String id = item.optString("id", "").trim();
+                        long durSec = item.optLong("duration", 0L);
+                        if (id.isEmpty() || durSec < 45L) continue;
+                        String rawItemTitle = item.optString("title", "");
+                        String gotTitle = rawItemTitle.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+                        String gotCore = rawItemTitle
+                                .replaceAll("(?i)\\s*[\\[(]\\s*(?:feat\\.?|ft\\.?|featuring|with)\\s+[^)\\]]+[)\\]]", "")
+                                .replaceAll("(?i)\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$", "")
+                                .toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+                        JSONObject user = item.optJSONObject("user");
+                        String gotArtist = (user != null ? user.optString("name", "") + " " + user.optString("handle", "") : "")
+                                .toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+                        boolean titleMatch = (!wantTitle.isEmpty() && !gotTitle.isEmpty()
+                                && (gotTitle.contains(wantTitle) || wantTitle.contains(gotTitle)))
+                                || (!wantCore.isEmpty() && !gotTitle.isEmpty()
+                                && (gotTitle.contains(wantCore) || wantCore.contains(gotTitle)
+                                || (!gotCore.isEmpty() && (gotCore.contains(wantCore) || wantCore.contains(gotCore)))));
+                        boolean artistMatch = wantArtist.isEmpty()
+                                || gotArtist.contains(wantArtist)
+                                || wantArtist.contains(gotArtist)
+                                || gotTitle.contains(wantArtist);
+                        if (titleMatch && artistMatch) {
+                            String streamUrl = "https://discoveryprovider.audius.co/v1/tracks/"
+                                    + java.net.URLEncoder.encode(id, "UTF-8") + "/stream?app_name=MUCHI";
+                            return new ResolvedStream(streamUrl, DEFAULT_UA, durSec * 1000L, "audio/mpeg");
+                        }
                     }
                 }
             } catch (Exception ignored) {

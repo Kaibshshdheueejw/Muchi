@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.7.9", APP_VERSION === "1.7.9" && appJs.includes('const APP_VERSION = "1.7.9"'));
+  ok("version: APP_VERSION is 1.8.0", APP_VERSION === "1.8.0" && appJs.includes('const APP_VERSION = "1.8.0"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1583,6 +1583,16 @@ await (async () => {
   ok("taste: tastePlaylistList always tops up to 10 playlists (never stops at 4 when only artists are followed)", appJs.includes("taste-country-genre-") && appJs.includes("taste-country-artist-") && appJs.includes("cards.length >= 10") && appJs.includes("return cards.slice(0, 10);"));
   ok("library: artistRows in Library has no inline Unfollow button and opens Artist page where #followArtist unfollows", !appJs.includes('data-unfollow="${escapeAttr(a.key)}"') && appJs.includes('id="followArtist"') && appJs.includes("origName: a.origName"));
   ok("onboarding: returning Google user auto-skips onboarding and restores library", appJs.includes("res.isReturningUser") && appJs.includes('localStorage.setItem("aura.onboarded", "1")'));
+  ok("youtube library (1.8.0): 3-dot track options menu and remove/unlike actions work for YouTube Likes and YouTube playlists",
+    appJs.includes('state.view === "library" && state.activePlaylist === "yt-liked"') &&
+    appJs.includes('state.activePlaylist.indexOf("yt-pl:") === 0') &&
+    appJs.includes('sheetItem("ytunlike", "thumb_down", "Remove from YouTube Liked")') &&
+    appJs.includes('sheetItem("remytpl", "playlist_remove", "Remove from YouTube playlist")') &&
+    appJs.includes("async function ytUnlikeTrack(track)") &&
+    appJs.includes("async function ytRemoveFromPlaylist(track, activePl)") &&
+    readFileSync("src/oauth.js", "utf8").includes('path === "/api/youtube/unlike"') &&
+    readFileSync("src/oauth.js", "utf8").includes('path === "/api/youtube/playlist/remove"')
+  );
 })();
 
 // ── 6. Live worker checks (only when WRANGLER_DEV_URL is set) ───────────────
