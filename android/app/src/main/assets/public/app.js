@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.0";
+  const APP_VERSION = "1.8.1";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -8359,7 +8359,7 @@
           });
           return;
         }
-        if (!IS_NATIVE && !cur._nativeRefreshTried && (cur.videoId || cur.title)) {
+        if (!cur._nativeRefreshTried && (cur.videoId || cur.title)) {
           cur._nativeRefreshTried = true;
           cur.streamUrl = "";
           const candParam = Array.isArray(cur._ytCandidates) && cur._ytCandidates.length
@@ -11566,6 +11566,14 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.8.1",
+      title: "Muchi 1.8.1",
+      notes: [
+        "Faster, deterministic offline song downloads across Web, Android, and iOS.",
+        "Fixed back navigation when opening Song Details from Lyrics Player options.",
+      ],
+    },
     {
       ver: "1.8.0",
       title: "Muchi 1.8.0",

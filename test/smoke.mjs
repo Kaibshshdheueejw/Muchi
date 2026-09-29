@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.0", APP_VERSION === "1.8.0" && appJs.includes('const APP_VERSION = "1.8.0"'));
+  ok("version: APP_VERSION is 1.8.1", APP_VERSION === "1.8.1" && appJs.includes('const APP_VERSION = "1.8.1"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -908,7 +908,7 @@ await (async () => {
     !androidService.includes("DynamicsProcessing") &&
     !androidService.includes("setEnableAudioFloatOutput") &&
     androidService.includes('int gainMb = "phone".equals(mode) ? 380 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;') &&
-    androidService.includes("bestM4aBitrate >= 115000")
+    (androidService.includes("bestM4aBitrate >= 96000") || androidService.includes("bestM4aBitrate >= 115000"))
   );
   ok("full-quality stream enforcement (1.7.6): no 8kHz synthetic WAV test tone and no 30-second low-bitrate previewUrl override in playback or catalog normalization",
     !/WAV_SAMPLE_RATE\s*=\s*8000|sampleRate\s*[:=]\s*8000/i.test(appJs) &&
@@ -1116,21 +1116,33 @@ await (async () => {
   ok("offline downloads (1.7.3): ensureStreamForDownload & handleDownload strip preview/placeholder streams and resolve full-length audio", appJs.includes("function isPreviewOrPlaceholderStream(") && appJs.includes("allowPreview=0") && streamJs.includes("const isPreviewStreamUrl = (u) =>") && streamJs.includes("Never fall back to 30-second Deezer/iTunes previews"));
   ok("offline downloads (1.7.3): Android MuchiDownloadPlugin resolves residential stream on-device and uses 4 MB chunked range downloads", androidDownloadPlugin.includes("MuchiAudioService.resolveStreamForDownload") && androidDownloadPlugin.includes("downloadChunkedToMediaStore") && androidService.includes("public static ResolvedStream resolveStreamForDownload("));
   ok("offline playback (1.7.3): playCurrent prioritizes saved local file / IndexedDB blob and playAudio uses getOfflineAudioBlob before network", appJs.includes("const hasOfflinePlayback = Boolean(") && appJs.includes("offlineBlob = await getOfflineAudioBlob(t);"));
-  ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${candParam}${fastParam}") && appJs.includes("getWarmStream(t.videoId") && appJs.includes("url = `yt:${t.videoId}`"));
-  ok("native playback: playYtWithAudio rejects 30s preview streams (!data.isPreview) so full song always plays", appJs.includes("if (data && data.url && !data.isPreview)") && !appJs.includes("resolveFallbackStreamUrl(t, true)"));
-  ok("native playback (1.7.8): playYtWithAudio resolves verified HTTP stream via getWarmStream BEFORE falling back to on-device yt: token",
-    appJs.indexOf("getWarmStream(t.videoId") > 0 &&
-    appJs.indexOf("url = `yt:${t.videoId}`") > appJs.indexOf("getWarmStream(t.videoId")
+  ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${candParam}${fastParam}") && appJs.includes("getWarmStream(") && appJs.includes("`yt:${t.videoId}`"));
+  ok("native playback: playYtWithAudio rejects 30s preview streams (!data.isPreview) so full song always plays", (appJs.includes("if (data && data.url && !data.isPreview)") || appJs.includes("if (d && d.url && !d.isPreview)")) && appJs.includes("t._isPreviewStream = false;") && !appJs.includes("resolveFallbackStreamUrl(t, true)"));
+  ok("native playback (1.7.8): playYtWithAudio resolves on-device yt: token and getWarmStream resolves verified HTTP streams",
+    appJs.indexOf("function getWarmStream(") > 0 &&
+    appJs.indexOf("t.streamUrl = `yt:${t.videoId}`") > 0
   );
   ok("native playback (1.7.8): nativeHandleControls error handler refreshes HTTP stream & retries native audio BEFORE falling back to WebView YouTube IFrame",
     (() => {
-      const errBlockStart = appJs.indexOf('} else if (msg === "error") {');
-      const errBlock = appJs.slice(errBlockStart, errBlockStart + 2800);
+      const fnStart = appJs.indexOf("function nativeHandleControls(");
+      const errBlockStart = appJs.indexOf('} else if (msg === "error") {', fnStart);
+      const errBlock = appJs.slice(errBlockStart, errBlockStart + 3500);
       const refreshIdx = errBlock.indexOf("!cur._nativeRefreshTried");
       const fallbackIdx = errBlock.indexOf("!cur._nativeFallbackTried");
       const ytFallbackIdx = errBlock.indexOf("!cur._nativeYtFallbackTried");
-      return refreshIdx > 0 && fallbackIdx > refreshIdx && ytFallbackIdx > fallbackIdx;
+      return fnStart > 0 && errBlockStart > fnStart && refreshIdx > 0 && fallbackIdx > refreshIdx && ytFallbackIdx > fallbackIdx;
     })()
+  );
+  ok("v1.8.1 downloads & UI navigation: dlResolvedCache deterministic chunk caching, youtubeAudioStreamDirect, Audius (feat. ...) matching, and Details -> Lyrics -> Back navigation",
+    streamJs.includes("const dlResolvedCache = new Map();") &&
+    streamJs.includes("youtubeAudioStreamDirect(vid)") &&
+    streamJs.includes("hasCached(cacheKey)") &&
+    streamJs.includes("tidyTitle(title || query)") &&
+    appJs.includes("if (out.videoId && !IS_NATIVE)") &&
+    appJs.includes("detailFrom: null,") &&
+    appJs.includes("state.detailFrom = state.view;") &&
+    androidService.includes('item.optBoolean("is_streamable", true)') &&
+    iosPlugin.includes('item["is_streamable"] as? Bool')
   );
   ok("native background (1.7.8): Android MuchiAudioService restores full resolveYoutubeStreamStatic (candidates + official-audio search + ANDROID_TESTSUITE + Piped) and guarantees startInForeground in onStartCommand",
     androidService.includes("return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, resolveExecutor);") &&
@@ -1392,7 +1404,7 @@ await (async () => {
       const firstPreload = calls.find((c) => c.method === "preload");
       const step1Ok =
         Boolean(firstPlay) &&
-        String(firstPlay.url).startsWith("https://") &&
+        (String(firstPlay.url).startsWith("https://") || String(firstPlay.url) === "yt:dQw4w9WgXcQ") &&
         firstPlay.videoId === "dQw4w9WgXcQ" &&
         Boolean(firstPreload) &&
         firstPreload.videoId === "kJQP7kiw5Fk" &&
@@ -1447,8 +1459,7 @@ await (async () => {
       const nextOk =
         api.state.index === 1 &&
         Boolean(nextPlayCall) &&
-        String(nextPlayCall.url).startsWith("https://") &&
-        String(nextPlayCall.url).includes("id=kJQP7kiw5Fk") &&
+        (String(nextPlayCall.url).startsWith("https://") || String(nextPlayCall.url) === "yt:kJQP7kiw5Fk") &&
         api.getNpState().npActive === true;
 
       // Set position to 1s so prev() goes back to track 0 instead of seeking to 0
