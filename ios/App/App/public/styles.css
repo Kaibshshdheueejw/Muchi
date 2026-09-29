@@ -1243,12 +1243,16 @@ img { max-width: 100%; display: block; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: 16px 20px 8px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
-.top-left { display: flex; align-items: center; gap: 8px; flex: 1; }
+.top-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .search-wrap {
   flex: 1;
+  min-width: 0;
   max-width: 720px;
   height: 56px;
   display: flex;
@@ -1258,6 +1262,7 @@ img { max-width: 100%; display: block; }
   background: var(--md-sys-color-surface-container-high);
   border-radius: var(--md-shape-full);
   box-shadow: var(--md-elevation-1);
+  box-sizing: border-box;
 }
 .search-wrap:focus-within {
   background: var(--md-sys-color-surface-container-highest);
@@ -1276,13 +1281,21 @@ img { max-width: 100%; display: block; }
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: 6px;
   padding: 2px 7px;
+  flex-shrink: 0;
 }
 /* The "/" is a physical-keyboard shortcut hint — it looks out of place on a
-   phone where there is no key to press, so hide it on touch devices. */
-@media (pointer: coarse) {
+   phone where there is no key to press, so hide it on touch devices and native/mobile screens. */
+@media (pointer: coarse), (max-width: 680px) {
   .search-wrap kbd { display: none; }
 }
-.top-right { display: flex; align-items: center; gap: 8px; }
+html[data-native="1"] .search-wrap kbd { display: none; }
+.top-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+#pasteBtn { flex-shrink: 0; white-space: nowrap; }
+@media (max-width: 680px) {
+  .topbar { padding: 10px 12px 8px; gap: 8px; }
+  .search-wrap { height: 48px; padding: 0 14px; gap: 8px; }
+  #pasteBtn { min-height: 42px; height: 42px; padding: 0 12px; font-size: 13px; gap: 5px; }
+}
 
 .icon-btn {
   width: 40px;
@@ -5051,11 +5064,33 @@ html[data-theme="light"][data-ui="glass"] .mood {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.settings .set-follow-search .search-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 50px;
+  padding: 0 6px 0 14px;
+  gap: 8px;
+  box-sizing: border-box;
+}
+div#app:nth-of-type(2) > main:nth-of-type(1) > section#view:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > span:nth-of-type(1),
+.settings .set-follow-search .set-follow-ico {
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
 }
 .settings .set-follow-search #newFollowArtistBtn {
-  min-height: 44px;
-  padding: 0 18px;
+  min-height: 36px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
   flex-shrink: 0;
+  margin-left: auto;
 }
 .settings .set-sub-kicker {
   display: block;
@@ -5614,13 +5649,37 @@ html[data-native="1"] .track-row .t-art {
 html[data-native="1"] .card { border-radius: 18px; }
 
 /* ── Topbar search: taller field, comfortable hit area ── */
-html[data-native="1"] .topbar { padding: 12px 14px 8px; gap: 10px; }
-html[data-native="1"] .search-wrap {
-  height: 50px;
-  padding: 0 16px;
-  gap: 10px;
+html[data-native="1"] .topbar {
+  padding: 10px 12px 8px;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
-html[data-native="1"] .search-wrap input { font-size: 16px; }
+html[data-native="1"] .search-wrap {
+  height: 48px;
+  padding: 0 14px;
+  gap: 8px;
+  min-width: 0;
+}
+html[data-native="1"] .search-wrap input { font-size: 16px; min-width: 0; }
+html[data-native="1"] #pasteBtn {
+  min-height: 42px;
+  height: 42px;
+  padding: 0 12px;
+  font-size: 13px;
+  gap: 5px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+html[data-native="1"] .settings .set-follow-search .search-wrap {
+  padding: 0 6px 0 14px;
+}
+html[data-native="1"] .settings .set-follow-search #newFollowArtistBtn {
+  min-height: 36px;
+  height: 36px;
+  padding: 0 14px;
+}
 
 /* ── Settings rows: comfortable touch height ── */
 html[data-native="1"] .set-row {

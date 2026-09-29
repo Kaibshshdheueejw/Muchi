@@ -182,13 +182,12 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
         if url.lowercased().hasPrefix("yt:") {
             triedOnDeviceResolve = true
+            stopTicker()
             player?.pause()
             let vid = currentVideoId
             let cands = currentCandidates
-            let tTitle = currentTitle
-            let tArtist = currentArtist
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
+                let rs = Self.resolveStreamFast(videoId: vid, candidates: cands)
                 DispatchQueue.main.async {
                     guard let self = self, seq == self.loadSeq else { return }
                     if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
@@ -429,10 +428,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     let seq = self.loadSeq
                     let vid = self.currentVideoId
                     let cands = self.currentCandidates
-                    let tTitle = self.currentTitle
-                    let tArtist = self.currentArtist
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                        let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)
+                        let rs = Self.resolveStreamFast(videoId: vid, candidates: cands)
                         DispatchQueue.main.async {
                             guard let self = self, seq == self.loadSeq else { return }
                             if let rs = rs, !rs.url.isEmpty, let streamUrl = URL(string: rs.url) {
@@ -623,6 +620,36 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    public static func resolveStreamFast(videoId: String, candidates: String) -> ResolvedStream? {
+        let primary = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !primary.isEmpty, let hit = getCachedStream(primary) {
+            return hit
+        }
+        var vids: [String] = []
+        if !primary.isEmpty { vids.append(primary) }
+        if vids.isEmpty {
+            for part in candidates.components(separatedBy: ",") {
+                let c = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !c.isEmpty {
+                    vids.append(c)
+                    break
+                }
+            }
+        }
+        for vid in vids {
+            if let hit = getCachedStream(vid) {
+                if !primary.isEmpty { putCachedStream(primary, hit) }
+                return hit
+            }
+            if let rs = probeInnertubeForVideo(vid) {
+                putCachedStream(vid, rs)
+                if !primary.isEmpty { putCachedStream(primary, rs) }
+                return rs
+            }
+        }
+        return nil
+    }
+
     public static func resolveStreamForDownload(videoId: String, candidates: String, title: String, artist: String) -> ResolvedStream? {
         let primary = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         if !primary.isEmpty, let hit = getCachedStream(primary) {
@@ -668,24 +695,12 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static func probeInnertubeForVideo(_ videoId: String) -> ResolvedStream? {
         guard !videoId.isEmpty, let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false") else { return nil }
-        let profiles: [(id: String, ver: String, ua: String, body: String)] = [
-            (
-                "5",
-                "20.10.4",
-                "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
-                "{\"context\":{\"client\":{\"clientName\":\"IOS\",\"clientVersion\":\"20.10.4\",\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.2.22D82\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
-            ),
+        let tier1VrProfiles: [(id: String, ver: String, ua: String, body: String)] = [
             (
                 "28",
                 "1.61.48",
                 "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.61.48\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
-            ),
-            (
-                "3",
-                "20.10.38",
-                "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
-                "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             ),
             (
                 "28",
@@ -694,7 +709,28 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.60.19\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             )
         ]
+        let tier2FallbackProfiles: [(id: String, ver: String, ua: String, body: String)] = [
+            (
+                "5",
+                "20.10.4",
+                "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
+                "{\"context\":{\"client\":{\"clientName\":\"IOS\",\"clientVersion\":\"20.10.4\",\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.2.22D82\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            ),
+            (
+                "3",
+                "20.10.38",
+                "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            )
+        ]
 
+        if let vrStream = probeInnertubeBatch(tier1VrProfiles, endpoint: endpoint) {
+            return vrStream
+        }
+        return probeInnertubeBatch(tier2FallbackProfiles, endpoint: endpoint)
+    }
+
+    private static func probeInnertubeBatch(_ profiles: [(id: String, ver: String, ua: String, body: String)], endpoint: URL) -> ResolvedStream? {
         let lock = NSLock()
         var winner: ResolvedStream?
         let doneSem = DispatchSemaphore(value: 0)

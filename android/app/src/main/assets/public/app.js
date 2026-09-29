@@ -134,7 +134,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.7.6";
+  const APP_VERSION = "1.7.7";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -3081,11 +3081,7 @@
       if (resolvedSid.startsWith("/")) {
         resolvedSid = API_BASE ? `${API_BASE}${resolvedSid}` : resolvedSid;
       }
-      if (IS_NATIVE) {
-        if (!/^https?:\/\//i.test(resolvedSid) && API_BASE) resolvedSid = API_BASE.replace(/\/$/, "") + "/" + resolvedSid;
-        return resolvedSid;
-      }
-      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}${titleParam}${artistParam}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
+      return `${API_BASE}/api/download?streamUrl=${encodeURIComponent(resolvedSid)}&name=${nm}${titleParam}${artistParam}${candParam}&mime=${encodeURIComponent(t.streamMime || "audio/mp4")}`;
     }
     if (t && (t.title || t.artist)) {
       return `${API_BASE}/api/download?query=${encodeURIComponent(`${t.title || ""} ${t.artist || ""}`.trim())}&name=${nm}${titleParam}${artistParam}${candParam}`;
@@ -3169,43 +3165,112 @@
       return (res && typeof res === "object" && res.uri) ? res.uri : String(res || "");
     }
     // Web / PWA — File System Access API, then blob+<a download> fallback.
-    let res = await fetch(meta.url, { credentials: "same-origin" }).catch(() => null);
-    if (!res || !res.ok) {
-      const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
-      const artistParam = t && t.artist ? `&artist=${encodeURIComponent(t.artist)}` : "";
-      const candParam = t && Array.isArray(t._ytCandidates) && t._ytCandidates.length
-        ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
-        : "";
-      // Fallback 1: If direct streamUrl failed (e.g. expired or 403), retry through /api/download?videoId=...
-      const fallbackUrl = (t && t.videoId)
-        ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
-        : ((t && t.source === "audius" && t.trackId)
-          ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}`
-          : ((t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer"))
-            ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
-            : ""));
-      if (fallbackUrl && meta.url !== fallbackUrl) {
-        const retryRes = await fetch(fallbackUrl, { credentials: "same-origin" }).catch(() => null);
-        if (retryRes && retryRes.ok) res = retryRes;
-      }
-      // Fallback 2: Query-based server full-song download resolution (never fall back to 30s previewUrl)
-      if (!res || !res.ok) {
-        try {
-          const qName = `${t && t.title || ""} ${t && t.artist || ""}`.trim();
-          if (qName) {
-            const qUrl = `${API_BASE}/api/download?query=${encodeURIComponent(qName)}&name=${encodeURIComponent(t && t.title || "track")}${titleParam}${artistParam}${candParam}`;
-            const qRes = await fetch(qUrl, { credentials: "same-origin" }).catch(() => null);
-            if (qRes && qRes.ok) res = qRes;
+    const isValidAudioRes = (r) => {
+      if (!r || !r.ok) return false;
+      const ct = String(r.headers.get("content-type") || "").toLowerCase();
+      if (ct.includes("application/json") || ct.includes("text/html") || ct.includes("text/plain")) return false;
+      return true;
+    };
+    const isLikelyAudioBytes = (bytes) => {
+      if (!bytes || bytes.byteLength < 1024) return false;
+      // Reject JSON ("{") or HTML ("<") error bodies masquerading as audio
+      if (bytes[0] === 0x7b || bytes[0] === 0x3c) return false;
+      return true;
+    };
+    const fetchChunkedAudio = async (dlUrl) => {
+      const CHUNK = 983040; // 960 KB (< 1 MB Googlevideo IOS/ANDROID chunk ceiling)
+      const parts = [];
+      let offset = 0;
+      let totalBytes = 0;
+      let detectedMime = "";
+      let detectedDisp = "";
+      try {
+        const uObj = new URL(dlUrl, window.location.origin);
+        const sParam = uObj.searchParams.get("streamUrl") || uObj.searchParams.get("url") || "";
+        const mClen = sParam.match(/[?&]clen=(\d+)/);
+        if (mClen && Number(mClen[1]) > 0) totalBytes = Number(mClen[1]);
+      } catch {}
+      while (true) {
+        if (job.status === "cancelled") throw new Error("cancelled");
+        const end = totalBytes > 0 ? Math.min(offset + CHUNK - 1, totalBytes - 1) : (offset + CHUNK - 1);
+        let chunkRes = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const r = await fetch(dlUrl, {
+            credentials: "same-origin",
+            headers: { Range: `bytes=${offset}-${end}` },
+          }).catch(() => null);
+          if (isValidAudioRes(r)) {
+            chunkRes = r;
+            break;
           }
-        } catch {}
+        }
+        if (!chunkRes) return null;
+        if (!detectedMime) detectedMime = chunkRes.headers.get("content-type") || "";
+        if (!detectedDisp) detectedDisp = chunkRes.headers.get("content-disposition") || "";
+        if (!totalBytes) {
+          const cr = chunkRes.headers.get("content-range") || "";
+          const mTot = cr.match(/\/(\d+)/);
+          if (mTot && Number(mTot[1]) > 0) totalBytes = Number(mTot[1]);
+          else if (chunkRes.status === 200) totalBytes = Number(chunkRes.headers.get("content-length") || 0);
+        }
+        const ab = await chunkRes.arrayBuffer();
+        const chunkBytes = new Uint8Array(ab);
+        if (!chunkBytes.byteLength) break;
+        parts.push(chunkBytes);
+        offset += chunkBytes.byteLength;
+        onProgress({
+          bytes: offset,
+          total: totalBytes || offset,
+          progress: totalBytes ? Math.min(1, offset / totalBytes) : 0,
+        });
+        if (chunkRes.status === 200) break;
+        if (totalBytes > 0 && offset >= totalBytes) break;
+        if (chunkBytes.byteLength < (end - (offset - chunkBytes.byteLength) + 1)) break;
+      }
+      const combined = concatBytes(parts);
+      if (!isLikelyAudioBytes(combined)) return null;
+      return { bytes: combined, mime: detectedMime, disp: detectedDisp, total: combined.byteLength };
+    };
+
+    const titleParam = t && t.title ? `&title=${encodeURIComponent(t.title)}` : "";
+    const artistParam = t && t.artist ? `&artist=${encodeURIComponent(t.artist)}` : "";
+    const candParam = t && Array.isArray(t._ytCandidates) && t._ytCandidates.length
+      ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
+      : "";
+    const fallbackUrl = (t && t.videoId)
+      ? `${API_BASE}/api/download?videoId=${encodeURIComponent(t.videoId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
+      : ((t && t.source === "audius" && t.trackId)
+        ? `${API_BASE}/api/download?trackId=${encodeURIComponent(t.trackId)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}`
+        : ((t && (t.source === "apple" || t.source === "itunes" || t.source === "deezer"))
+          ? `${API_BASE}/api/download?query=${encodeURIComponent(t.playQuery || `${t.title} ${t.artist}`)}&name=${encodeURIComponent(t.title || "track")}${titleParam}${artistParam}${candParam}`
+          : ""));
+    const qName = `${t && t.title || ""} ${t && t.artist || ""}`.trim();
+    const qUrl = qName
+      ? `${API_BASE}/api/download?query=${encodeURIComponent(qName)}&name=${encodeURIComponent(t && t.title || "track")}${titleParam}${artistParam}${candParam}`
+      : "";
+
+    const candidateUrls = [meta.url, fallbackUrl, qUrl].filter((u, idx, arr) => u && arr.indexOf(u) === idx);
+    let res = null;
+    let preloadedChunked = null;
+    for (const tryUrl of candidateUrls) {
+      const r = await fetch(tryUrl, { credentials: "same-origin" }).catch(() => null);
+      if (isValidAudioRes(r)) {
+        res = r;
+        break;
+      }
+      // If un-ranged fetch returned 403/5xx on a Googlevideo-backed endpoint, try 960KB bounded Range chunks
+      const chunked = await fetchChunkedAudio(tryUrl).catch(() => null);
+      if (chunked && isLikelyAudioBytes(chunked.bytes)) {
+        preloadedChunked = chunked;
+        break;
       }
     }
-    if (!res || !res.ok) throw new Error(`download failed with status ${res ? res.status : "network"}`);
-    const total = Number(res.headers.get("content-length") || 0);
-    const cd = res.headers.get("content-disposition") || "";
+    if (!res && !preloadedChunked) throw new Error("download failed: could not retrieve valid audio stream");
+    const total = preloadedChunked ? preloadedChunked.total : Number(res.headers.get("content-length") || 0);
+    const cd = preloadedChunked ? (preloadedChunked.disp || "") : (res.headers.get("content-disposition") || "");
     const m = cd.match(/filename="?([^";]+)"?/i);
     let fname = (m && m[1]) ? m[1] : meta.filename;
-    const ctype = (res.headers.get("content-type") || meta.mime || "audio/webm").split(";")[0].trim();
+    const ctype = ((preloadedChunked ? preloadedChunked.mime : res.headers.get("content-type")) || meta.mime || "audio/mp4").split(";")[0].trim();
     // The pre-generated filename/extension can disagree with the actual bytes
     // (e.g. an unresolved stream guessed ".webm" while the server served
     // audio/mp4). Derive the extension from the REAL content type and reconcile
@@ -3221,26 +3286,34 @@
     // downloaded file shows title/artist/album/cover in any music app. The
     // native shells mirror the same frames (see public/meta.js).
     const MM = w.MuchiMeta;
-    const collect = [];
-    if (res.body && typeof res.body.getReader === "function") {
-      const reader = res.body.getReader();
-      let buf = 0;
-      let cancelled = false;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (job.status === "cancelled") { cancelled = true; break; }
-        collect.push(value);
-        buf += value.byteLength;
-        onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
-      }
-      if (cancelled) throw new Error("cancelled");
+    let rawAudioBytes;
+    if (preloadedChunked) {
+      rawAudioBytes = preloadedChunked.bytes;
     } else {
-      const ab = await res.arrayBuffer();
-      collect.push(new Uint8Array(ab));
-      onProgress({ bytes: ab.byteLength, total: total || ab.byteLength, progress: 1 });
+      const collect = [];
+      if (res.body && typeof res.body.getReader === "function") {
+        const reader = res.body.getReader();
+        let buf = 0;
+        let cancelled = false;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (job.status === "cancelled") { cancelled = true; break; }
+          collect.push(value);
+          buf += value.byteLength;
+          onProgress({ bytes: buf, total: total || buf, progress: total ? buf / total : 0 });
+        }
+        if (cancelled) throw new Error("cancelled");
+      } else {
+        const ab = await res.arrayBuffer();
+        collect.push(new Uint8Array(ab));
+        onProgress({ bytes: ab.byteLength, total: total || ab.byteLength, progress: 1 });
+      }
+      rawAudioBytes = concatBytes(collect);
     }
-    const rawAudioBytes = concatBytes(collect);
+    if (!isLikelyAudioBytes(rawAudioBytes)) {
+      throw new Error("download failed: invalid or non-audio payload received");
+    }
     let taggedBytes = rawAudioBytes;
     if (MM) {
       try {
@@ -5852,12 +5925,11 @@
 
     // Pre-warm the YouTube IFrame player synchronously on the user click
     // gesture BEFORE awaiting network resolution (resolveYouTubePlay) so mobile
-    // & desktop browsers don't block autoplay after the async resolve finishes.
-    // On native Android/iOS shells using MuchiAudio background playback, skip
-    // pre-warming the iframe so it doesn't compete with native audio.
+    // & desktop browsers and native WebViews don't block autoplay if native
+    // on-device stream resolution falls back to the embedded player.
     const useNativeAudioPipe = IS_NATIVE && !!nativePlayer() && state.prefs.ytAudio !== false && !state.showVideo;
-    if (!isNetworkOff && !useNativeAudioPipe && !state.yt && typeof YT !== "undefined" && YT.Player) {
-      try { ensureYT(t.videoId || ""); } catch {}
+    if (!isNetworkOff && !state.yt && typeof YT !== "undefined" && YT.Player) {
+      try { ensureYT(useNativeAudioPipe ? "" : (t.videoId || "")); } catch {}
     }
 
     // Strip any accidental duplicate of the current song sitting right next in the queue
@@ -6289,13 +6361,13 @@
     return {
       onReady: (e) => {
         try {
-          if (ytWanted) {
+          e.target.setVolume(state.volume);
+          if (ytWanted && !npActive) {
             const startSec = ytSeekReset > 0 ? ytSeekReset : 0;
             e.target.loadVideoById(ytWanted, startSec);
             if (startSec > 0) ytSeekReset = 0;
+            e.target.playVideo();
           }
-          e.target.playVideo();
-          e.target.setVolume(state.volume);
         } catch {}
         if (typeof ytReadyResolve === "function") {
           const done = ytReadyResolve;
@@ -6361,22 +6433,24 @@
     if (typeof YT === "undefined" || !YT.Player) return null;
     const host = $("ytPlayer");
     if (!host) return null;
-    const isCapacitorOrLocal = IS_NATIVE || !location.origin || location.origin === "null" || /^(file:|capacitor:|https?:\/\/localhost)/i.test(location.origin);
-    const ytOrigin = isCapacitorOrLocal ? "https://www.youtube.com" : location.origin;
+    const hasHttpOrigin = Boolean(location.origin && /^https?:\/\//i.test(location.origin));
+    const playerVars = {
+      autoplay: 1,
+      controls: 1,
+      rel: 0,
+      modestbranding: 1,
+      playsinline: 1,
+      enablejsapi: 1,
+      fs: 1,
+      vq: ytQualityVq(),
+    };
+    if (hasHttpOrigin) {
+      playerVars.origin = location.origin;
+    }
     const opts = {
       width: "360",
       height: "202",
-      playerVars: {
-        autoplay: 1,
-        controls: 1,
-        rel: 0,
-        modestbranding: 1,
-        playsinline: 1,
-        enablejsapi: 1,
-        origin: ytOrigin,
-        fs: 1,
-        vq: ytQualityVq(),
-      },
+      playerVars,
       events: ytEvents(),
     };
     if (initialId) opts.videoId = String(initialId);
@@ -6388,10 +6462,26 @@
     if (state.yt) return Promise.resolve(state.yt);
     if (ytWait) return ytWait;
     let rejectP;
+    let readyTimer = null;
     ytWait = new Promise((resolve, reject) => {
-      ytReadyResolve = resolve;
-      rejectP = reject;
+      ytReadyResolve = (player) => {
+        if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
+        resolve(player);
+      };
+      rejectP = (err) => {
+        if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
+        reject(err);
+      };
     });
+    readyTimer = setTimeout(() => {
+      if (!state.yt || ytReadyResolve) {
+        const rej = rejectP;
+        ytWait = null;
+        ytReadyResolve = null;
+        rejectP = null;
+        if (rej) rej(new Error("YouTube player ready timeout"));
+      }
+    }, 6500);
     const start = () => {
       if (state.yt) {
         if (typeof ytReadyResolve === "function") ytReadyResolve(state.yt);
@@ -7562,7 +7652,18 @@
     } else if (msg === "error") {
       if (npActive) { npActive = false; npPlaying = false; npSeenPlaying = false; }
       const cur = current();
-      if (state.playing && cur) {
+      if ((state.playing || wantPlay) && cur) {
+        state.playing = true;
+        setWantPlay(true);
+        if (!cur._nativeYtFallbackTried && cur.videoId) {
+          cur._nativeYtFallbackTried = true;
+          cur._playingViaAudio = false;
+          playYouTube(cur).catch(() => {
+            if (current() !== cur) return;
+            nativeHandleControls({ message: "error" });
+          });
+          return;
+        }
         if (!cur._nativeRefreshTried && (cur.videoId || cur.title)) {
           cur._nativeRefreshTried = true;
           cur.streamUrl = "";
@@ -7586,15 +7687,6 @@
               if (current() !== cur) return;
               nativeHandleControls({ message: "error" });
             });
-          return;
-        }
-        if (!cur._nativeYtFallbackTried && cur.videoId) {
-          cur._nativeYtFallbackTried = true;
-          cur._playingViaAudio = false;
-          playYouTube(cur).catch(() => {
-            if (current() !== cur) return;
-            nativeHandleControls({ message: "error" });
-          });
           return;
         }
         if (!cur._nativeFallbackTried) {
@@ -10411,6 +10503,15 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.7.7",
+      title: "Muchi 1.7.7",
+      notes: [
+        "Fixed native Android and iOS tap-to-play reliability by eliminating duplicate service start commands, race conditions during async stream resolution, and slow sequential Piped fallback timeouts.",
+        "Added fast parallelized on-device stream resolution on iOS and immediate foreground service promotion on Android 12+ with preserved phone-speaker DSP.",
+        "Fixed iOS WKWebView inline media configuration and YouTube IFrame postMessage origin matching for instant fallback playback and lock-screen session sync.",
+      ],
+    },
+    {
       ver: "1.7.6",
       title: "Muchi 1.7.6",
       notes: [
@@ -11671,13 +11772,13 @@
           <h3><span class="material-symbols-outlined">person_add</span>Follow an Artist</h3>
           <div class="set-sub-body">
             <div class="set-follow-search">
-              <div class="search-wrap" style="flex:1">
-                <span class="material-symbols-outlined">person_add</span>
+              <div class="search-wrap set-follow-input-wrap" style="flex:1;min-width:0">
+                <span class="material-symbols-outlined set-follow-ico" role="button" tabindex="0" title="Follow artist">person_add</span>
                 <input id="newFollowArtistInput" type="text" placeholder="Type artist name (e.g. Taylor Swift, Coldplay)…" autocomplete="off" />
+                <button class="chip-btn set-follow-inline-btn" id="newFollowArtistBtn" type="button">
+                  Follow
+                </button>
               </div>
-              <button class="chip-btn" id="newFollowArtistBtn" type="button">
-                Follow
-              </button>
             </div>
             ${popularSuggestions.length ? `
               <div class="set-Quick-suggest">
@@ -12837,7 +12938,17 @@
         }
       }
     };
+    const newFollowIco = viewEl.querySelector(".set-follow-ico");
     if (newFollowBtn) newFollowBtn.addEventListener("click", handleNewFollow);
+    if (newFollowIco) {
+      newFollowIco.addEventListener("click", handleNewFollow);
+      newFollowIco.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleNewFollow();
+        }
+      });
+    }
     if (newFollowInput) newFollowInput.addEventListener("keydown", (e) => { if (e.key === "Enter") handleNewFollow(); });
 
     viewEl.querySelectorAll("[data-quick-follow]").forEach((el) => {

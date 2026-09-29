@@ -137,6 +137,88 @@ async function pipeUrl(request, src, accept, overrideMime) {
     } catch {}
   }
 
+  // Googlevideo IOS/ANDROID streams reject open-ended "Range: bytes=0-" with HTTP 403
+  // but accept bounded <= 960 KB Range chunks ("Range: bytes=0-983039"). When a full-file
+  // download (!range) hits 403 on open-ended Range, stream the file in 960 KB chunks.
+  if (isYt && !range && (!r || r.status === 403)) {
+    try {
+      const CHUNK_SIZE = 983040; // 960 KB (< 1 MB Googlevideo IOS/ANDROID chunk ceiling)
+      let clen = 0;
+      try {
+        clen = Number(new URL(src).searchParams.get("clen")) || 0;
+      } catch {}
+      const firstEnd = clen > 0 ? Math.min(CHUNK_SIZE - 1, clen - 1) : CHUNK_SIZE - 1;
+      const chunkHeaders = {
+        "User-Agent": headers["User-Agent"],
+        Accept: accept || "*/*",
+        Range: `bytes=0-${firstEnd}`,
+      };
+      const rFirst = await fetch(src, { headers: chunkHeaders, redirect: "follow" });
+      if ((rFirst.status === 206 || rFirst.status === 200) && rFirst.body) {
+        let totalBytes = clen;
+        const cr = rFirst.headers.get("content-range") || "";
+        const mTotal = cr.match(/\/(\d+)/);
+        if (mTotal && Number(mTotal[1]) > 0) totalBytes = Number(mTotal[1]);
+        if (rFirst.status === 200 || (totalBytes > 0 && firstEnd >= totalBytes - 1)) {
+          r = rFirst;
+        } else if (totalBytes > 0) {
+          let ctChunk = overrideMime || rFirst.headers.get("content-type") || "audio/mp4";
+          if (ctChunk === "application/octet-stream") ctChunk = "audio/mp4";
+          const uaForChunks = headers["User-Agent"];
+          const acceptForChunks = accept || "*/*";
+          const streamBody = new ReadableStream({
+            async start(controller) {
+              try {
+                const reader0 = rFirst.body.getReader();
+                while (true) {
+                  const { done, value } = await reader0.read();
+                  if (done) break;
+                  controller.enqueue(value);
+                }
+                let offset = firstEnd + 1;
+                while (offset < totalBytes) {
+                  const end = Math.min(offset + CHUNK_SIZE - 1, totalBytes - 1);
+                  const rNext = await fetch(src, {
+                    headers: {
+                      "User-Agent": uaForChunks,
+                      Accept: acceptForChunks,
+                      Range: `bytes=${offset}-${end}`,
+                    },
+                    redirect: "follow",
+                  });
+                  if (!rNext.ok || !rNext.body) {
+                    throw new Error(`chunk ${offset}-${end} failed with ${rNext.status}`);
+                  }
+                  const reader = rNext.body.getReader();
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    controller.enqueue(value);
+                  }
+                  offset = end + 1;
+                }
+                controller.close();
+              } catch (err) {
+                controller.error(err);
+              }
+            },
+          });
+          return new Response(streamBody, {
+            status: 200,
+            headers: {
+              "Content-Type": ctChunk.split(";")[0],
+              "Content-Length": String(totalBytes),
+              "Accept-Ranges": "bytes",
+              "Cache-Control": "no-store",
+              "Access-Control-Expose-Headers": "Content-Disposition, Content-Length, Content-Range, Accept-Ranges",
+              ...corsHeaders(),
+            },
+          });
+        }
+      }
+    } catch {}
+  }
+
   if (!r.ok || !r.body) return json(r.status || 502, { error: "stream failed" });
 
   let ct = overrideMime || r.headers.get("content-type") || "application/octet-stream";
@@ -297,35 +379,24 @@ export async function handleDownload(request, url) {
   let src = "";
   let mime = url.searchParams.get("mime") || (trackId ? "audio/mpeg" : "audio/mp4");
 
-  const resolveYtCandidates = async (seedId) => {
+  const collectYtCandidateIds = async (seedId) => {
     const ids = [];
-    if (seedId) ids.push(seedId);
-    for (const c of rawCands.slice(0, 4)) {
-      if (!ids.includes(c)) ids.push(c);
+    if (seedId && !ids.includes(seedId)) ids.push(seedId);
+    for (const c of rawCands.slice(0, 5)) {
+      if (c && !ids.includes(c)) ids.push(c);
     }
-    if (query && ids.length < 4) {
+    if (query && ids.length < 5) {
       try {
         const res = await searchYouTube(`${query} official audio`.trim());
         for (const h of res || []) {
-          if (h && h.videoId && !ids.includes(h.videoId)) {
+          if (h && h.videoId && !ids.includes(h.videoId) && (!h.duration || h.duration >= 45)) {
             ids.push(h.videoId);
-            if (ids.length >= 4) break;
+            if (ids.length >= 5) break;
           }
         }
       } catch {}
     }
-    for (const vid of ids) {
-      try {
-        const s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid));
-        if (s && s.url) return s;
-      } catch {
-        try {
-          const s = await youtubeAudioStream(vid);
-          if (s && s.url) return s;
-        } catch {}
-      }
-    }
-    return null;
+    return ids;
   };
 
   if (streamUrl) {
@@ -345,17 +416,9 @@ export async function handleDownload(request, url) {
     } catch (e) {
       return json(502, { error: String((e && e.message) || e) });
     }
-  } else if (!src && (videoId || rawCands.length || query)) {
-    const s = await resolveYtCandidates(videoId);
-    if (s && s.url) {
-      src = s.url;
-      if (s.mimeType) mime = s.mimeType;
-    }
   }
 
   const cleanName = sanitizeForFilename(name) || "track";
-  const searchQuery = query || name || "";
-
   let orig = src ? await pipeUrl(request, src, PROXY_ACCEPT, mime) : { status: 502 };
 
   // If the upstream returned an explicit 404 (not found), do not attempt resolution or
@@ -364,8 +427,8 @@ export async function handleDownload(request, url) {
     return orig instanceof Response ? orig : json(404, { error: "not found" });
   }
 
-  // If the stream failed (e.g. 403 on expired/IP-mismatched Googlevideo URL, 410, or 502)
-  // resolve a fresh stream URL directly across candidate videoIds and retry!
+  // If no direct streamUrl succeeded (or it failed with 403/410/5xx), iterate through
+  // all candidate videoIds, invalidating any stale cached URL that 403s on pipeUrl!
   if (orig.status === 403 || orig.status === 410 || orig.status >= 500 || !src) {
     try {
       let vId = videoId;
@@ -381,13 +444,38 @@ export async function handleDownload(request, url) {
         src = await audiusStreamUrl(audCleanId);
         mime = "audio/mpeg";
         orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
-      } else {
-        if (vId) invalidateCached(`ytstream:${vId}`);
-        const fresh = await resolveYtCandidates(vId);
-        if (fresh && fresh.url) {
-          src = fresh.url;
-          if (fresh.mimeType) mime = fresh.mimeType;
-          orig = await pipeUrl(request, src, PROXY_ACCEPT, mime);
+      } else if (vId || rawCands.length || query) {
+        if (vId && streamUrl) {
+          invalidateCached(`ytstream:${vId}`);
+        }
+        const ids = await collectYtCandidateIds(vId);
+        for (const vid of ids) {
+          try {
+            let s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid)).catch(() => null);
+            if (s && s.url) {
+              const testMime = s.mimeType || mime;
+              const testOrig = await pipeUrl(request, s.url, PROXY_ACCEPT, testMime);
+              if (testOrig.status < 400) {
+                src = s.url;
+                mime = testMime;
+                orig = testOrig;
+                break;
+              }
+            }
+            // Cached URL failed with 403/5xx or was empty — invalidate and resolve fresh!
+            invalidateCached(`ytstream:${vid}`);
+            const fresh = await youtubeAudioStream(vid).catch(() => null);
+            if (fresh && fresh.url) {
+              const freshMime = fresh.mimeType || mime;
+              const freshOrig = await pipeUrl(request, fresh.url, PROXY_ACCEPT, freshMime);
+              if (freshOrig.status < 400) {
+                src = fresh.url;
+                mime = freshMime;
+                orig = freshOrig;
+                break;
+              }
+            }
+          } catch {}
         }
       }
     } catch {}

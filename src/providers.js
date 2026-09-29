@@ -181,6 +181,13 @@ export async function searchYouTube(query, gl, fast) {
   if (!out.length) throw new Error(errors.join(" | ") || "YouTube search failed");
   const qn = String(query || "").toLowerCase().trim();
   const words = qn.split(/\s+/).filter((w) => w.length > 1);
+  const cjkRuns = qn.match(/[\u3040-\u30ff\u3400-\u9fff]{2,}/g) || [];
+  const cjkBigrams = [];
+  for (const run of cjkRuns) {
+    for (let i = 0; i < run.length - 1; i++) {
+      cjkBigrams.push(run.slice(i, i + 2));
+    }
+  }
   const score = (t) => {
     const title = String(t.title || "").toLowerCase();
     const artist = String(t.artist || "").toLowerCase();
@@ -192,6 +199,9 @@ export async function searchYouTube(query, gl, fast) {
     for (const w of words) {
       if (title.includes(w)) s += 18;
       if (artist.includes(w)) s += 10;
+    }
+    for (const bg of cjkBigrams) {
+      if (title.includes(bg)) s += 14;
     }
     return s;
   };
@@ -296,7 +306,7 @@ const PIPED_STREAM_INSTANCES = [
   "https://pipedapi.reallyaweso.me",
   "https://pipedapi.ducks.party",
 ];
-const PIPED_API_TIMEOUT = 1700;
+const PIPED_API_TIMEOUT = 3500;
 
 export function pickPipedStream(data) {
   const streams = (data && data.audioStreams) || [];
@@ -350,41 +360,43 @@ function streamQualityScore(s) {
 // If Google ever gates this endpoint too, this tier simply returns null and
 // the existing Piped fan-out (Tier 2) + the client's iframe fallback keep
 // working exactly as before — nothing regresses.
-const INNERTUBE_PLAYER_TIMEOUT = 1900;
+const INNERTUBE_PLAYER_TIMEOUT = 4500;
 const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
-// Multiple client profiles, raced in parallel. A single client version/IP can
-// be gated (LOGIN_REQUIRED / cipher-only) by Google while others still return
-// direct URLs — the first profile to hand back a usable stream wins, so the
-// median latency stays one request. If Google ever gates them ALL, each gate
-// reason is included in the final error so production logs/curls tell us WHY
-// (this is what /api/yt/stream's error field used to hide).
+// Multiple client profiles, raced in parallel with ANDROID_VR prioritized in Tier 1A.
+// ANDROID_VR returns full-file streamable googlevideo URLs without PO-token / range-chunk
+// 403 blocks, whereas IOS/ANDROID are staggered by 250ms as Tier 1B fallbacks.
 const INNERTUBE_PROFILES = [
   {
     tag: "ANDROID_VR-1.61",
+    tier: 1,
     clientId: "28",
     ua: "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
     client: { clientName: "ANDROID_VR", clientVersion: "1.61.48", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
   },
   {
+    tag: "ANDROID_VR-1.60",
+    tier: 1,
+    clientId: "28",
+    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
+  },
+  {
     tag: "IOS-19.09",
+    tier: 2,
     clientId: "5",
     ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
     client: { clientName: "IOS", clientVersion: "20.10.4", deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "18.3.2.22D82", hl: "en", gl: "US" },
   },
   {
     tag: "ANDROID-19.09",
+    tier: 2,
     clientId: "3",
     ua: "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
     client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 34, osName: "Android", osVersion: "14", hl: "en", gl: "US" },
   },
   {
-    tag: "ANDROID_VR-1.60",
-    clientId: "28",
-    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-    client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
-  },
-  {
     tag: "TV_EMBED-2.0",
+    tier: 2,
     clientId: "85",
     ua: "Mozilla/5.0 (PlayStation; PlayStation 4/11.50) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
     client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" },
@@ -429,8 +441,20 @@ export async function youtubeAudioStream(videoId) {
   const id = String(videoId || "").trim();
   if (!id) return null;
   const gates = [];
-  const tier1 = Promise.any(
-    INNERTUBE_PROFILES.map((spec) =>
+  const primarySpecs = INNERTUBE_PROFILES.filter((s) => s.tier === 1);
+  const secondarySpecs = INNERTUBE_PROFILES.filter((s) => s.tier !== 1);
+  try {
+    return await Promise.any(
+      primarySpecs.map((spec) =>
+        innertubeProbe(spec, id).catch((e) => {
+          gates.push(String(e.message || e));
+          throw e;
+        })
+      )
+    );
+  } catch {}
+  const tier1B = Promise.any(
+    secondarySpecs.map((spec) =>
       innertubeProbe(spec, id).catch((e) => {
         gates.push(String(e.message || e));
         throw e;
@@ -448,10 +472,10 @@ export async function youtubeAudioStream(videoId) {
           })
         )
       ).then(resolve, reject);
-    }, 250);
+    }, 150);
   });
   try {
-    return await Promise.any([tier1, tier2]);
+    return await Promise.any([tier1B, tier2]);
   } catch {
     throw new Error(`no audio stream (innertube: ${gates.length ? [...new Set(gates)].join(", ") : "not attempted"}; all piped stream instances failed)`);
   }

@@ -597,7 +597,7 @@ public class MuchiDownloadPlugin extends Plugin {
         }
 
         String targetUrl = url != null ? url : "";
-        String userAgent = "Muchi/1.7.3";
+        String userAgent = "Muchi/1.7.7";
         String resolvedMime = mime != null && !mime.isEmpty() ? mime : "audio/mp4";
 
         // Resolve YouTube/catalog tracks directly on the user's residential phone IP
@@ -626,10 +626,19 @@ public class MuchiDownloadPlugin extends Plugin {
             throw new IOException("Could not resolve full audio stream for download");
         }
 
-        // For googlevideo.com adaptive streams, download in 4 MB byte-range chunks
-        // so YouTube never throttles or truncates the download mid-song.
+        // For googlevideo.com adaptive streams, download in 960 KB byte-range chunks
+        // (< 1 MB ceiling for IOS/ANDROID googlevideo streams) with fallback to proxy URL.
         if (targetUrl.contains("googlevideo.com")) {
-            return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+            try {
+                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+            } catch (IOException directErr) {
+                if (url != null && !url.isEmpty() && !url.startsWith("yt:") && !url.equals(targetUrl)) {
+                    targetUrl = url;
+                    userAgent = "Muchi/1.7.7";
+                } else {
+                    throw directErr;
+                }
+            }
         }
 
         HttpURLConnection con = (HttpURLConnection) new URL(targetUrl).openConnection();
@@ -641,6 +650,10 @@ public class MuchiDownloadPlugin extends Plugin {
         con.setRequestProperty("Range", "bytes=0-");
         try {
             int code = con.getResponseCode();
+            if (code == 403 || code >= 500) {
+                con.disconnect();
+                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+            }
             if (code >= 400) throw new IOException("download failed (" + code + ")");
             String muchiSrc = con.getHeaderField("X-Muchi-Source");
             if (muchiSrc != null && (muchiSrc.contains("preview") || muchiSrc.contains("seed"))) {
@@ -655,8 +668,11 @@ public class MuchiDownloadPlugin extends Plugin {
                 }
             }
             String contentType = con.getContentType();
-            if (contentType != null && contentType.toLowerCase().contains("audio/wav")) {
-                throw new IOException("Refusing synthetic WAV stream for song download");
+            if (contentType != null) {
+                String ctLow = contentType.toLowerCase();
+                if (ctLow.contains("audio/wav") || ctLow.contains("application/json") || ctLow.contains("text/html")) {
+                    throw new IOException("Refusing non-audio or synthetic stream (" + contentType + ")");
+                }
             }
             return writeToMediaStore(id, con, total, filename, title, artist, album, genre, contentType != null ? contentType : resolvedMime);
         } finally {
@@ -687,7 +703,8 @@ public class MuchiDownloadPlugin extends Plugin {
         }
         File plainFile = new File(dir, safeName);
         long done = 0L;
-        final long chunkSize = 4L * 1024L * 1024L; // 4 MB range chunks
+        final long chunkSize = 983040L; // 960 KB range chunks (< 1 MB Googlevideo IOS/ANDROID limit)
+        boolean isNativeYtClient = userAgent != null && userAgent.startsWith("com.google.");
 
         try (OutputStream out = new FileOutputStream(plainFile)) {
             while (true) {
@@ -700,8 +717,10 @@ public class MuchiDownloadPlugin extends Plugin {
                 con.setReadTimeout(25000);
                 con.setInstanceFollowRedirects(true);
                 con.setRequestProperty("User-Agent", userAgent);
-                con.setRequestProperty("Origin", "https://www.youtube.com");
-                con.setRequestProperty("Referer", "https://www.youtube.com/");
+                if (!isNativeYtClient && targetUrl.contains("googlevideo.com")) {
+                    con.setRequestProperty("Origin", "https://www.youtube.com");
+                    con.setRequestProperty("Referer", "https://www.youtube.com/");
+                }
                 con.setRequestProperty("Accept", "*/*");
                 con.setRequestProperty("Range", "bytes=" + done + "-" + end);
                 long chunkRead = 0L;
@@ -709,6 +728,13 @@ public class MuchiDownloadPlugin extends Plugin {
                     int code = con.getResponseCode();
                     if (code >= 400) {
                         throw new IOException("Stream chunk failed (" + code + ")");
+                    }
+                    String ctype = con.getContentType();
+                    if (ctype != null) {
+                        String ctLow = ctype.toLowerCase();
+                        if (ctLow.contains("application/json") || ctLow.contains("text/html")) {
+                            throw new IOException("Server returned non-audio response (" + ctype + ")");
+                        }
                     }
                     if (clen <= 0) {
                         String cr = con.getHeaderField("Content-Range");

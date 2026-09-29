@@ -100,7 +100,7 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             var targetUrlStr = urlStr
-            var userAgent = "Muchi/1.7.6"
+            var userAgent = "Muchi/1.7.7"
             let isYtOrProxy = !vid.isEmpty
                 || targetUrlStr.isEmpty
                 || targetUrlStr.hasPrefix("yt:")
@@ -114,7 +114,7 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
                     if !rs.userAgent.isEmpty { userAgent = rs.userAgent }
                 }
             }
-            guard !targetUrlStr.isEmpty, !targetUrlStr.hasPrefix("yt:"), let u = URL(string: targetUrlStr) else {
+            guard !targetUrlStr.isEmpty, !targetUrlStr.hasPrefix("yt:") else {
                 DispatchQueue.main.async {
                     let msg = "Could not resolve full audio stream for download"
                     self.emitError(id, message: msg)
@@ -123,84 +123,165 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
                 return
             }
 
-            var req = URLRequest(url: u, timeoutInterval: 30.0)
-            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-            req.setValue("audio/*,*/*", forHTTPHeaderField: "Accept")
-            req.setValue("bytes=0-", forHTTPHeaderField: "Range")
+            DispatchQueue.global(qos: .utility).async {
+                var finalURI = dest0.absoluteString
+                var doneError: String?
+                let tempFile = self.documentsDir().appendingPathComponent(".tmp_\(UUID().uuidString)")
+                defer { try? FileManager.default.removeItem(at: tempFile) }
 
-            let session = URLSession(configuration: .default)
-            let task = session.downloadTask(with: req) { tempURL, response, error in
-                self.tasks[id] = nil
-                self.stopProgress(id)
-                // Download + metadata tagging happen off the main thread so the
-                // UI never blocks (AVAssetExportSession + file I/O are heavy).
-                DispatchQueue.global(qos: .utility).async {
-                    var finalURI = dest0.absoluteString
-                    var doneError: String?
-                    // (v1.5.4) URLSession's downloadTask does NOT surface HTTP
-                    // errors as `error` — a 404/502 body (e.g. the "No stream
-                    // available" JSON from /api/download when resolution fails)
-                    // was previously moved into place and saved as a "song".
-                    // Reject non-2xx before touching the file system, mirroring
-                    // the Android plugin's `code >= 400` guard.
-                    let http = response as? HTTPURLResponse
-                    if let error = error {
+                var dlResult = self.downloadChunkedOrDirect(id: id, urlStr: targetUrlStr, userAgent: userAgent, tempFile: tempFile)
+                if !dlResult.ok, !urlStr.isEmpty, !urlStr.hasPrefix("yt:"), urlStr != targetUrlStr {
+                    try? FileManager.default.removeItem(at: tempFile)
+                    dlResult = self.downloadChunkedOrDirect(id: id, urlStr: urlStr, userAgent: "Muchi/1.7.7", tempFile: tempFile)
+                }
+
+                if !dlResult.ok {
+                    doneError = dlResult.error ?? "download failed"
+                } else {
+                    do {
+                        var dest = dest0
+                        if let mime = dlResult.mime,
+                           let realExt = Self.extensionFor(mime),
+                           dest.pathExtension.lowercased() != realExt {
+                            dest = dest.deletingPathExtension().appendingPathExtension(realExt)
+                        }
+                        let ext = dest.pathExtension.lowercased()
+                        try? FileManager.default.removeItem(at: dest)
+                        try FileManager.default.moveItem(at: tempFile, to: dest)
+                        self.embedMetadata(at: dest, ext: ext, title: title, artist: artist,
+                                           album: album, genre: genre, artwork: artworkData, artworkURL: artworkURL)
+                        self.savedURIs[id] = dest.absoluteString
+                        finalURI = dest.absoluteString
+                    } catch {
                         doneError = error.localizedDescription
-                    } else if let status = http?.statusCode, !(200..<300).contains(status) {
-                        doneError = "server responded \(status)"
-                    } else if let tempURL = tempURL {
-                        do {
-                            // Trust the response's Content-Type over the
-                            // JS-guessed extension (mirrors Android's
-                            // extensionFor(realMime)): the m4a streams the resolver
-                            // prefers were landing as .webm because JS guessed.
-                            var dest = dest0
-                            if let mime = http?.value(forHTTPHeaderField: "Content-Type"),
-                               let realExt = Self.extensionFor(mime),
-                               dest.pathExtension.lowercased() != realExt {
-                                dest = dest.deletingPathExtension().appendingPathExtension(realExt)
-                            }
-                            let ext = dest.pathExtension.lowercased()
-                            try? FileManager.default.removeItem(at: dest)
-                            try FileManager.default.moveItem(at: tempURL, to: dest)
-                            self.embedMetadata(at: dest, ext: ext, title: title, artist: artist,
-                                               album: album, genre: genre, artwork: artworkData, artworkURL: artworkURL)
-                            self.savedURIs[id] = dest.absoluteString
-                            finalURI = dest.absoluteString
-                        } catch {
-                            doneError = error.localizedDescription
-                        }
-                    } else {
-                        doneError = "download failed"
-                    }
-                    DispatchQueue.main.async {
-                        if let e = doneError {
-                            self.emitError(id, message: e)
-                            call.reject(e)
-                            return
-                        }
-                        let done: [String: Any] = ["id": id, "uri": finalURI]
-                        self.notifyListeners("done", data: done)
-                        call.resolve(done)
                     }
                 }
-            }
-            DispatchQueue.main.async {
-                self.tasks[id] = task
-                task.resume()
-                let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-                    guard let self = self, let task = self.tasks[id] else { return }
-                    let bytes = task.countOfBytesReceived
-                    let expected = task.countOfBytesExpectedToReceive
-                    let progress = expected > 0 ? Float(bytes) / Float(expected) : 0
-                    self.notifyListeners("progress", data: [
-                        "id": id, "bytes": bytes, "total": expected, "progress": progress
-                    ])
+
+                DispatchQueue.main.async {
+                    self.stopProgress(id)
+                    if let e = doneError {
+                        self.emitError(id, message: e)
+                        call.reject(e)
+                        return
+                    }
+                    let done: [String: Any] = ["id": id, "uri": finalURI]
+                    self.notifyListeners("done", data: done)
+                    call.resolve(done)
                 }
-                RunLoop.main.add(timer, forMode: .common)
-                self.progressTimers[id] = timer
             }
         }
+    }
+
+    private func downloadChunkedOrDirect(id: String, urlStr: String, userAgent: String, tempFile: URL) -> (ok: Bool, mime: String?, error: String?) {
+        guard let u = URL(string: urlStr) else {
+            return (false, nil, "invalid download URL")
+        }
+        let chunkSize: Int64 = 983040 // 960 KB (< 1 MB Googlevideo IOS/ANDROID chunk ceiling)
+        var clen: Int64 = -1
+        let clenStr = Self.extractQueryParam(urlStr, "clen")
+        if !clenStr.isEmpty, let parsed = Int64(clenStr), parsed > 0 {
+            clen = parsed
+        }
+        FileManager.default.createFile(atPath: tempFile.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: tempFile) else {
+            return (false, nil, "could not open temporary file")
+        }
+        defer { try? handle.close() }
+
+        var offset: Int64 = 0
+        var detectedMime: String?
+        let session = URLSession(configuration: .ephemeral)
+
+        while true {
+            let end = clen > 0 ? min(clen - 1, offset + chunkSize - 1) : (offset + chunkSize - 1)
+            var chunkData: Data?
+            var httpResp: HTTPURLResponse?
+            var lastErr: String?
+
+            for _ in 0..<3 {
+                var req = URLRequest(url: u, timeoutInterval: 25.0)
+                req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                req.setValue("audio/*,*/*", forHTTPHeaderField: "Accept")
+                req.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+
+                let sem = DispatchSemaphore(value: 0)
+                var gotData: Data?
+                var gotResp: HTTPURLResponse?
+                var gotErr: Error?
+                let task = session.dataTask(with: req) { d, r, e in
+                    gotData = d
+                    gotResp = r as? HTTPURLResponse
+                    gotErr = e
+                    sem.signal()
+                }
+                task.resume()
+                sem.wait()
+
+                if let e = gotErr {
+                    lastErr = e.localizedDescription
+                    continue
+                }
+                guard let resp = gotResp else {
+                    lastErr = "no response"
+                    continue
+                }
+                if !(200..<300).contains(resp.statusCode) {
+                    lastErr = "server responded \(resp.statusCode)"
+                    continue
+                }
+                let ct = (resp.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+                if ct.contains("application/json") || ct.contains("text/html") || ct.contains("audio/wav") {
+                    lastErr = "refusing non-audio payload (\(ct))"
+                    break
+                }
+                if let d = gotData, !d.isEmpty {
+                    chunkData = d
+                    httpResp = resp
+                    break
+                }
+            }
+
+            guard let data = chunkData, let resp = httpResp else {
+                return (false, nil, lastErr ?? "chunk download failed")
+            }
+            if offset == 0 {
+                // Reject JSON ("{") or HTML ("<") error bodies
+                let firstByte = data.first ?? 0
+                if firstByte == 0x7b || firstByte == 0x3c {
+                    return (false, nil, "server returned error payload instead of audio")
+                }
+                detectedMime = resp.value(forHTTPHeaderField: "Content-Type")
+            }
+            if clen <= 0 {
+                if let cr = resp.value(forHTTPHeaderField: "Content-Range"),
+                   let slash = cr.firstIndex(of: "/") {
+                    let totStr = cr[cr.index(after: slash)...].trimmingCharacters(in: .whitespaces)
+                    if let parsed = Int64(totStr), parsed > 0 { clen = parsed }
+                }
+                if clen <= 0, resp.statusCode == 200, resp.expectedContentLength > 0 {
+                    clen = resp.expectedContentLength
+                }
+            }
+            handle.write(data)
+            offset += Int64(data.count)
+            let progress = clen > 0 ? Float(offset) / Float(clen) : 0
+            DispatchQueue.main.async { [weak self] in
+                self?.notifyListeners("progress", data: [
+                    "id": id,
+                    "bytes": offset,
+                    "total": clen > 0 ? clen : offset,
+                    "progress": progress
+                ])
+            }
+            if resp.statusCode == 200 { break }
+            if clen > 0 && offset >= clen { break }
+            if Int64(data.count) < (end - (offset - Int64(data.count)) + 1) { break }
+        }
+
+        if offset < 16384 {
+            return (false, nil, "downloaded file is incomplete (\(offset) bytes)")
+        }
+        return (true, detectedMime, nil)
     }
 
     @objc public func cancelDownload(_ call: CAPPluginCall) {

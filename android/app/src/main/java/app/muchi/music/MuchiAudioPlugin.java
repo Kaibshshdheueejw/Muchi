@@ -211,11 +211,10 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             i.putExtra(MuchiAudioService.EXTRA_SPATIAL, call.getString("spatial", "phone"));
         }
 
-        // Always ensure the Foreground Service is started so its lifecycle is not
-        // tied solely to activity binding. Background playback continues when swiped away.
-        startService(i);
-
         if (service != null) {
+            // Promote the bound service to a started service without re-sending ACTION_PLAY
+            // so onStartCommand does not execute handlePlayIntent a second time.
+            startService(new Intent(getContext(), MuchiAudioService.class));
             try {
                 service.playIntent(i);
                 call.resolve();
@@ -224,6 +223,9 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
                 service = null; // binder dead — fall through to the cold path
             }
         }
+
+        // Cold path: service not yet bound; start with full ACTION_PLAY intent.
+        startService(i);
 
         // Resolve once the service connects; reject on timeout so web falls back.
         pendingPlay = call;

@@ -199,6 +199,7 @@ public class MuchiAudioService extends Service {
     private String currentCandidates = "";
     private long currentDurationMs = 0L;
     private boolean triedOnDeviceResolve = false;
+    private volatile boolean resolvingOnDevice = false;
 
     // Mirror mode: active when WebView (YouTube IFrame or WebAudio <audio>) is
     // playing so the Foreground Service notification + WakeLock still run.
@@ -245,7 +246,7 @@ public class MuchiAudioService extends Service {
                     durationMs = urlDur;
                 }
             }
-            boolean playing = player.isPlaying() || (player.getPlayWhenReady() && player.getPlaybackState() == Player.STATE_BUFFERING);
+            boolean playing = resolvingOnDevice || player.isPlaying() || (player.getPlayWhenReady() && player.getPlaybackState() == Player.STATE_BUFFERING);
             if (l != null) l.onProgress(positionMs, durationMs, playing);
             updatePlaybackState(playing, positionMs);
             ticker.postDelayed(tick, 250L);
@@ -389,7 +390,7 @@ public class MuchiAudioService extends Service {
         if (intent == null) return;
         // If native ExoPlayer is actively playing or preparing a track, native
         // ExoPlayer owns the notification directly — ignore mirror updates.
-        if (!mirrorMode && player != null && (player.isPlaying() || player.getPlayWhenReady())) {
+        if (!mirrorMode && (resolvingOnDevice || (player != null && (player.isPlaying() || (player.getPlayWhenReady() && player.getPlaybackState() == Player.STATE_BUFFERING))))) {
             return;
         }
         String title = intent.getStringExtra(EXTRA_TITLE);
@@ -678,7 +679,7 @@ public class MuchiAudioService extends Service {
 
         // Deduplicate rapid double-invocation (e.g. startForegroundService + binder.playIntent)
         if (player != null && currentUrl != null && currentUrl.equals(url)
-                && (player.isPlaying() || player.getPlayWhenReady() || player.getPlaybackState() == Player.STATE_BUFFERING)) {
+                && (resolvingOnDevice || player.isPlaying() || player.getPlayWhenReady() || player.getPlaybackState() == Player.STATE_BUFFERING)) {
             ensureSession();
             session.setMetadata(buildMetadata(currentDurationMs));
             showNotification();
@@ -715,6 +716,7 @@ public class MuchiAudioService extends Service {
         // resolve the direct high-bitrate stream on the user's phone IP!
         if (url.startsWith("yt:")) {
             triedOnDeviceResolve = true;
+            resolvingOnDevice = true;
             if (player != null) player.stop();
             final String vid = currentVideoId;
             final String cands = currentCandidates;
@@ -724,6 +726,7 @@ public class MuchiAudioService extends Service {
                 ResolvedStream rs = resolveYoutubeStreamOnDevice(vid, cands, tTitle, tArtist);
                 ticker.post(() -> {
                     if (seq != loadSeq) return;
+                    resolvingOnDevice = false;
                     if (rs != null && rs.url != null && !rs.url.isEmpty()) {
                         currentUrl = rs.url;
                         if (rs.durationMs > 0 && currentDurationMs <= 0) {
@@ -738,6 +741,7 @@ public class MuchiAudioService extends Service {
             return;
         }
 
+        resolvingOnDevice = false;
         triedOnDeviceResolve = false;
         String ua = userAgentForStreamUrl(url);
         startExoPlayerWithUrl(url, ua, currentDurationMs);
@@ -1022,7 +1026,37 @@ public class MuchiAudioService extends Service {
     }
 
     private ResolvedStream resolveYoutubeStreamOnDevice(String primaryVid, String candidatesCsv, String title, String artist) {
-        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, resolveExecutor);
+        if (primaryVid != null && !primaryVid.trim().isEmpty()) {
+            ResolvedStream cachedHit = getCachedStream(primaryVid);
+            if (cachedHit != null) return cachedHit;
+        }
+        List<String> vids = new ArrayList<>();
+        if (primaryVid != null && !primaryVid.trim().isEmpty()) {
+            vids.add(primaryVid.trim());
+        }
+        if (candidatesCsv != null && !candidatesCsv.isEmpty() && vids.isEmpty()) {
+            for (String part : candidatesCsv.split(",")) {
+                String c = part.trim();
+                if (!c.isEmpty()) {
+                    vids.add(c);
+                    break;
+                }
+            }
+        }
+        for (String vid : vids) {
+            ResolvedStream cachedCand = getCachedStream(vid);
+            if (cachedCand != null) {
+                if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, cachedCand);
+                return cachedCand;
+            }
+            ResolvedStream rs = probeInnertubeForVideoStatic(vid, resolveExecutor);
+            if (rs != null) {
+                putCachedStream(vid, rs);
+                if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, rs);
+                return rs;
+            }
+        }
+        return null;
     }
 
     private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist, ExecutorService pool) {
@@ -1082,13 +1116,21 @@ public class MuchiAudioService extends Service {
 
     private static ResolvedStream probeInnertubeForVideoStatic(String videoId, ExecutorService pool) {
         if (videoId == null || videoId.isEmpty()) return null;
-        String[][] profiles = new String[][] {
+        String[][] tier1VrProfiles = new String[][] {
             {
                 "28",
                 "1.61.48",
                 "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.61.48\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             },
+            {
+                "28",
+                "1.60.19",
+                "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.60.19\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            }
+        };
+        String[][] tier2FallbackProfiles = new String[][] {
             {
                 "5",
                 "20.10.4",
@@ -1100,15 +1142,15 @@ public class MuchiAudioService extends Service {
                 "20.10.38",
                 "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
-            },
-            {
-                "28",
-                "1.60.19",
-                "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.60.19\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             }
         };
 
+        ResolvedStream vrStream = probeInnertubeBatchStatic(tier1VrProfiles, pool);
+        if (vrStream != null) return vrStream;
+        return probeInnertubeBatchStatic(tier2FallbackProfiles, pool);
+    }
+
+    private static ResolvedStream probeInnertubeBatchStatic(String[][] profiles, ExecutorService pool) {
         java.util.concurrent.CompletionService<ResolvedStream> ecs =
                 new java.util.concurrent.ExecutorCompletionService<>(pool != null ? pool : sharedResolvePool);
         List<java.util.concurrent.Future<ResolvedStream>> futures = new ArrayList<>();
@@ -1321,6 +1363,7 @@ public class MuchiAudioService extends Service {
             session.release();
             session = null;
         }
+        resolvingOnDevice = false;
         artworkBitmap = null;
         trackArtworkUrl = "";
         currentUrl = null;
@@ -1376,6 +1419,7 @@ public class MuchiAudioService extends Service {
 
     private boolean isCurrentlyPlaying() {
         if (mirrorMode) return mirrorPlaying;
+        if (resolvingOnDevice) return true;
         if (player != null) {
             return player.isPlaying() || (player.getPlayWhenReady() && player.getPlaybackState() == Player.STATE_BUFFERING);
         }
