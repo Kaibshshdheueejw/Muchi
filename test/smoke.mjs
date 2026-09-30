@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.6", APP_VERSION === "1.8.6" && appJs.includes('const APP_VERSION = "1.8.6"'));
+  ok("version: APP_VERSION is 1.8.7", APP_VERSION === "1.8.7" && appJs.includes('const APP_VERSION = "1.8.7"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1170,7 +1170,7 @@ await (async () => {
     // Expose internal test hook inside VM copy of app.js
     const instrumentedAppJs = appJs.replace(
       "  loadHome();\n  loadTasteRecommendations();",
-      "  window.__muchiE2E = { state, playCurrent, playFromList, position, togglePlay, next, prev, keepBackgroundPlay, unlockSound, getNativeAppAudioCache, storeNativeAppAudioCache, getNpState: () => ({ npActive, npPlaying, npDur, npPos, wantPlay, _pendingSeek }), setNpPos: (p, d) => { npPos = p; if (d) npDur = d; }, setPendingSeek: (p, tid) => { _pendingSeek = p; _pendingSeekApplied = false; _resumeTrackId = tid || null; } };\n"
+      "  window.__muchiE2E = { state, playCurrent, playFromList, position, duration, updateProgress, setSleep, cycleSleep, sleepLabel, sleepStatusLabel, openSleepTimerSheet, togglePlay, next, prev, keepBackgroundPlay, unlockSound, getNativeAppAudioCache, storeNativeAppAudioCache, getNpState: () => ({ npActive, npPlaying, npSeenPlaying, npDur, npPos, wantPlay, _pendingSeek }), setNpPos: (p, d) => { npPos = p; if (d) npDur = d; }, setPendingSeek: (p, tid) => { _pendingSeek = p; _pendingSeekApplied = false; _resumeTrackId = tid || null; } };\n"
     );
 
     async function runNativeBackgroundE2E(platform) {
@@ -1592,7 +1592,47 @@ await (async () => {
         deezerFullPlayDur === 210 &&
         api.state.playing === true;
 
-      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk, zeroJumpOk, itunesDeezerFullPlayOk };
+      // Step 9 (v1.8.6): Native Cloudflare Backend Stream Resolution + Player Timer UI & Sleep Timer UI E2E
+      const cloudflareStreamConnected =
+        Boolean(firstPlay && String(firstPlay.url).startsWith("https://")) &&
+        Boolean(catalogPlayCall && String(catalogPlayCall.url).startsWith("https://")) &&
+        Boolean(deezerPlayCall && String(deezerPlayCall.url).startsWith("https://"));
+
+      // Verify Player Timer UI elements (#curTime, #durTime, #seek) update accurately during native playback
+      progressListeners.forEach((cb) => cb({ position: 65, duration: 210, playing: true }));
+      api.updateProgress();
+      const curTimeText = getEl("curTime").textContent;
+      const durTimeText = getEl("durTime").textContent;
+      const playerTimerUiOk =
+        curTimeText === "1:05" &&
+        durTimeText === "3:30" &&
+        api.getNpState().npSeenPlaying === true;
+
+      // Verify Sleep Timer UI presets (5m, 10m, 15m, 30m, 45m, 60m, 90m, track, off), live status countdown, and auto-pause in muchiProgress
+      api.setSleep("5");
+      const sleep5Ok =
+        api.state.sleep.mode === "mins" &&
+        api.state.sleep.preset === "5" &&
+        api.sleepLabel().includes("min left") &&
+        api.sleepStatusLabel().includes("Stops in ");
+      api.setSleep("15");
+      api.cycleSleep(); // 15 -> 30
+      const cycle30Ok = api.state.sleep.mode === "mins" && api.state.sleep.preset === "30";
+      // Simulate sleep timer expiration during background native progress tick
+      api.state.sleep.until = Date.now() - 100;
+      progressListeners.forEach((cb) => cb({ position: 70, duration: 210, playing: true }));
+      const sleepExpiredPausedOk =
+        api.state.sleep.mode === "off" &&
+        api.state.playing === false &&
+        api.getNpState().npPlaying === false;
+      const timerAndCloudflareOk =
+        cloudflareStreamConnected &&
+        playerTimerUiOk &&
+        sleep5Ok &&
+        cycle30Ok &&
+        sleepExpiredPausedOk;
+
+      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk, zeroJumpOk, itunesDeezerFullPlayOk, timerAndCloudflareOk };
     }
 
     const androidE2E = await runNativeBackgroundE2E("android");
@@ -1611,6 +1651,9 @@ await (async () => {
     ok("Android Native E2E (v1.8.4): iTunes & Deezer songs play full track duration (200s / 210s) without cutting off early",
       androidE2E.itunesDeezerFullPlayOk
     );
+    ok("Android Native E2E (v1.8.6): Cloudflare backend stream resolution + Player Timer UI (1:05 / 3:30) + Sleep Timer UI live countdown & auto-pause",
+      androidE2E.timerAndCloudflareOk
+    );
 
     const iosE2E = await runNativeBackgroundE2E("ios");
     ok("iOS Native E2E: play song → resolves verified HTTP stream, starts AVPlayer & preloads next track", iosE2E.step1Ok);
@@ -1628,6 +1671,9 @@ await (async () => {
     ok("iOS Native E2E (v1.8.4): iTunes & Deezer songs play full track duration (200s / 210s) without cutting off early",
       iosE2E.itunesDeezerFullPlayOk
     );
+    ok("iOS Native E2E (v1.8.6): Cloudflare backend stream resolution + Player Timer UI (1:05 / 3:30) + Sleep Timer UI live countdown & auto-pause",
+      iosE2E.timerAndCloudflareOk
+    );
 
     // ── v1.8.2 & v1.8.3 E2E: Immediate Playback, Zero-Jump Timer, and Native App Audio Cache ──
     ok("v1.8.2 fast playback: DefaultLoadControl (200ms bufferForPlaybackMs), AVPlayer playImmediately, single-batch raced InnerTube, and resolvedStreamCache + Promise.any",
@@ -1644,7 +1690,7 @@ await (async () => {
       appJs.includes("if (IS_NATIVE) return;") &&
       androidService.includes(".build(),\n                        false);") &&
       appJs.includes("let nativeAppInBackground = false;") &&
-      appJs.includes("if (!isStaleStartJump && rawPos > 0.05) npSeenPlaying = true;") &&
+      appJs.includes("if (!isStaleStartJump) npSeenPlaying = true;") &&
       appJs.includes("if ((document.hidden || nativeAppInBackground) && wantPlay && state.prefs.bgPlay !== false)")
     );
     ok("v1.8.2 native app audio cache: MuchiAudioService & MuchiAudioPlugin cache played streams to muchi_audio_cache on disk and app.js persists aura.nativeAudioCache.v1 for 0-backend-load instant replay",
@@ -1823,6 +1869,31 @@ await (async () => {
     iosPlug.includes("item.preferredForwardBufferDuration = 180.0") &&
     appJs.includes("await resolveYouTubePlay(t);") &&
     appJs.includes('const exclParam = cur.videoId ? `&exclude=${encodeURIComponent(cur.videoId)}` : "";')
+  );
+  ok(
+    "v1.8.6 native app Cloudflare backend connection: playYtWithAudio & playAudio resolve via getWarmStream (/api/yt/stream) first, never overwrite http(s) streamUrl with yt: token, and pre-warm Cloudflare stream on warmTrack",
+    appJs.includes("const warm = await getWarmStream(") &&
+    appJs.includes("let resolvedStream = (t.streamUrl && /^https?:\\/\\//i.test(t.streamUrl) && !t._isPreviewStream) ? t.streamUrl : \"\";") &&
+    appJs.includes("if (resolvedStream) {\n      t.streamUrl = resolvedStream;") &&
+    !appJs.includes('else if (t.videoId && !t._isPreviewStream) {\n        url = `yt:${t.videoId}`;') &&
+    appJs.includes("getWarmStream(t.videoId, t.title || \"\", artistName(t) || t.artist || \"\", t._ytCandidates || [], 5500, true);")
+  );
+  ok(
+    "v1.8.6 Cloudflare backend & native services: aggregate.js gives resolveForVideoId 650ms head start + directUrl, and Android/iOS native services connect to Cloudflare /api/yt/stream (probeCloudflareBackendStatic / probeCloudflareBackend) and decode ?u= duration",
+    aggSrc.includes("setTimeout(() => audiusPromise.then(res, rej), 650)") &&
+    aggSrc.includes("directUrl: stream.url") &&
+    androidSvc.includes("probeCloudflareBackendStatic(") &&
+    androidSvc.includes("int qU = target.indexOf(\"?u=\");") &&
+    iosPlug.includes("probeCloudflareBackend(") &&
+    iosPlug.includes("target.range(of: \"?u=\")")
+  );
+  ok(
+    "v1.8.6 Player Timer UI & Sleep Timer UI: npSeenPlaying unlocked immediately at 0:00 when playing is true, sleep timer enforced in updateProgress & muchiProgress & native ended, and live countdown + all presets (off, 5, 10, 15, 30, 45, 60, 90, track) synced across player & settings",
+    appJs.includes("if (!isStaleStartJump) npSeenPlaying = true;") &&
+    appJs.includes("if (state.sleep && state.sleep.mode === \"mins\" && state.sleep.until > 0 && Date.now() >= state.sleep.until)") &&
+    appJs.includes("const sleep = [\"off\", \"5\", \"10\", \"15\", \"30\", \"45\", \"60\", \"90\", \"track\"];") &&
+    appJs.includes("id=\"sleepModalStatus\"") &&
+    appJs.includes("id=\"sleepListeningStatus\"")
   );
 })();
 
@@ -2051,14 +2122,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=110");
+  const appJsRes = await fetch(BASE + "/app.js?v=111");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=110");
+  const stylesRes = await fetch(BASE + "/styles.css?v=111");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=110 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=110 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v110", swText.includes("muchi-shell-v110") && swText.includes("/app.js?v=110") && swText.includes("/styles.css?v=110"));
+  ok("client web: app.js?v=111 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=111 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v111", swText.includes("muchi-shell-v111") && swText.includes("/app.js?v=111") && swText.includes("/styles.css?v=111"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────

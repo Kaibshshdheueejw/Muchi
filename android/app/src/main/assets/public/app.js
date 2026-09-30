@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.6";
+  const APP_VERSION = "1.8.7";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -4439,15 +4439,17 @@
   function sleepLabel() {
     if (state.sleep.mode === "track") return "After this track";
     if (state.sleep.mode === "mins" && state.sleep.until) {
-      const m = Math.max(0, Math.ceil((state.sleep.until - Date.now()) / 60000));
-      return m ? `${m} min left` : "Off";
+      const remSec = Math.max(0, Math.ceil((state.sleep.until - Date.now()) / 1000));
+      if (!remSec) return "Off";
+      const m = Math.ceil(remSec / 60);
+      return `${m} min left`;
     }
     return "Off";
   }
 
   function pauseForSleep() {
     if (state.sleep.timer) clearTimeout(state.sleep.timer);
-    state.sleep = { mode: "off", until: 0, timer: null };
+    state.sleep = { mode: "off", until: 0, timer: null, preset: "off" };
     setWantPlay(false);
     state.playing = false;
     showEl($("eqBars"), false);
@@ -4459,21 +4461,23 @@
     updateMediaSession();
     updateWakeLock();
     renderChrome();
+    if (state.view === "settings") render();
     toast("Sleep timer — paused");
   }
 
   function setSleep(kind) {
     if (state.sleep.timer) clearTimeout(state.sleep.timer);
     if (kind === "off") {
-      state.sleep = { mode: "off", until: 0, timer: null };
+      state.sleep = { mode: "off", until: 0, timer: null, preset: "off" };
       toast("Sleep timer off");
     } else if (kind === "track") {
-      state.sleep = { mode: "track", until: 0, timer: null };
+      state.sleep = { mode: "track", until: 0, timer: null, preset: "track" };
       toast("Stops after this track");
     } else {
       const mins = Number(kind);
       state.sleep = {
         mode: "mins",
+        preset: String(mins),
         until: Date.now() + mins * 60000,
         timer: setTimeout(pauseForSleep, mins * 60000),
       };
@@ -4488,9 +4492,13 @@
     let cur = "off";
     if (state.sleep.mode === "track") cur = "track";
     else if (state.sleep.mode === "mins") {
-      const left = Math.round((state.sleep.until - Date.now()) / 60000);
-      cur = [15, 30, 45, 60].reduce((best, n) => (Math.abs(n - left) < Math.abs(best - left) ? n : best), 15);
-      cur = String(cur);
+      if (state.sleep.preset && order.includes(String(state.sleep.preset))) {
+        cur = String(state.sleep.preset);
+      } else {
+        const left = Math.round((state.sleep.until - Date.now()) / 60000);
+        cur = [15, 30, 45, 60].reduce((best, n) => (Math.abs(n - left) < Math.abs(best - left) ? n : best), 15);
+        cur = String(cur);
+      }
     }
     const nextKind = order[(order.indexOf(String(cur)) + 1) % order.length];
     setSleep(nextKind);
@@ -4506,19 +4514,26 @@
     const s = state.sleep || { mode: "off", until: 0 };
     if (s.mode === "track") return "End of this track";
     if (s.mode === "mins") {
-      const left = Math.max(1, Math.round((s.until - Date.now()) / 60000));
-      return `Stops in about ${left} min`;
+      const remSec = Math.max(0, Math.ceil((s.until - Date.now()) / 1000));
+      if (!remSec) return "Off";
+      const mins = Math.floor(remSec / 60);
+      const secs = remSec % 60;
+      return `Stops in ${mins}:${secs < 10 ? "0" : ""}${secs} (${Math.max(1, Math.ceil(remSec / 60))} min left)`;
     }
     return "Off";
   }
   function openSleepTimerSheet() {
     const sleep = ["off", "5", "10", "15", "30", "45", "60", "90", "track"];
-    const curSleep = state.sleep.mode === "track" ? "track" : state.sleep.mode === "mins" ? String(Math.round((state.sleep.until - Date.now()) / 60000)) || "off" : "off";
+    const curSleep = state.sleep.mode === "track"
+      ? "track"
+      : state.sleep.mode === "mins"
+        ? (state.sleep.preset || String(Math.round((state.sleep.until - Date.now()) / 60000)) || "off")
+        : "off";
     showModal({
       title: "Sleep timer",
       body: `
         <div class="set-card">
-          <p style="margin:0 0 10px">Pause playback automatically — currently: <strong>${escapeHTML(sleepStatusLabel())}</strong>.</p>
+          <p style="margin:0 0 10px">Pause playback automatically — currently: <strong id="sleepModalStatus">${escapeHTML(sleepStatusLabel())}</strong>.</p>
           <div class="po-chips">
             ${sleep.map((n) => {
               const label = n === "off" ? "Off" : n === "track" ? "End of track" : `${n} min`;
@@ -6483,8 +6498,16 @@
             artist: String(artistName(tr) || tr.artist || ""),
           }).catch(() => {});
         }
-      } else if (tr.videoId && !tr.streamUrl) {
-        getWarmStream(tr.videoId, tr.title || "", artistName(tr) || tr.artist || "", tr._ytCandidates || [], 5000, true).catch(() => {});
+      }
+      if ((tr.videoId || tr.title) && !tr.streamUrl) {
+        getWarmStream(tr.videoId || "", tr.title || "", artistName(tr) || tr.artist || "", tr._ytCandidates || [], 5000, true).then((res) => {
+          if (res && res.url && !res.isPreview) {
+            tr.streamUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
+            tr._isPreviewStream = false;
+            if (res.videoId && !tr.videoId) tr.videoId = res.videoId;
+            if (res.duration && !tr.duration) tr.duration = Number(res.duration);
+          }
+        }).catch(() => {});
       }
     };
     if (!t.videoId && !t.streamUrl && !t.url && t.source !== "audius") {
@@ -6494,13 +6517,16 @@
     }
   }
 
-  // In-flight & warm stream cache: videoId -> { promise, data, exp }
+  // In-flight & warm stream cache: key (videoId or query) -> { promise, data, exp }
   const warmStreamMap = new Map();
   function getWarmStream(videoId, title = "", artist = "", candidates = [], timeoutMs = 4000, fast = false) {
     const vid = String(videoId || "").trim();
-    if (!vid) return Promise.resolve(null);
+    const cleanT = String(title || "").trim().toLowerCase();
+    const cleanA = String(artist || "").trim().toLowerCase();
+    const key = vid || (cleanT ? `q:${cleanT}|${cleanA}` : "");
+    if (!key) return Promise.resolve(null);
     const now = Date.now();
-    const hit = warmStreamMap.get(vid);
+    const hit = warmStreamMap.get(key) || (vid && cleanT ? warmStreamMap.get(`q:${cleanT}|${cleanA}`) : null);
     if (hit && hit.exp > now) {
       if (hit.data) return Promise.resolve(hit.data);
       if (hit.promise) {
@@ -6515,25 +6541,28 @@
       : "";
     const fastParam = fast ? "&fast=1" : "";
     const p = api(
-      `/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || "")}&artist=${encodeURIComponent(artist || "")}${candParam}${fastParam}`,
+      `/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || "")}&artist=${encodeURIComponent(artist || "")}${candParam}${fastParam}&allowPreview=0`,
       timeoutMs
     ).then((d) => {
       if (d && d.url && !d.isPreview) {
         if (d.url.startsWith("/")) d.url = API_BASE + d.url;
-        warmStreamMap.set(vid, { data: d, promise: null, exp: Date.now() + 12 * 60 * 1000 });
+        const entry = { data: d, promise: null, exp: Date.now() + 12 * 60 * 1000 };
+        warmStreamMap.set(key, entry);
+        if (d.videoId) warmStreamMap.set(String(d.videoId), entry);
+        if (cleanT) warmStreamMap.set(`q:${cleanT}|${cleanA}`, entry);
         return d;
       }
-      warmStreamMap.delete(vid);
+      warmStreamMap.delete(key);
       return null;
     }).catch(() => {
-      warmStreamMap.delete(vid);
+      warmStreamMap.delete(key);
       return null;
     });
     if (warmStreamMap.size > 200) {
       const oldest = warmStreamMap.keys().next().value;
       if (oldest) warmStreamMap.delete(oldest);
     }
-    warmStreamMap.set(vid, { data: null, promise: p, exp: now + 30000 });
+    warmStreamMap.set(key, { data: null, promise: p, exp: now + 30000 });
     return p;
   }
 
@@ -6995,7 +7024,7 @@
     if (state.view === "now" && gen === playGen) render();
   }
 
-  // Try to play a YouTube track through the native audio pipeline
+  // Try to play a YouTube track through the native audio pipeline connected to Cloudflare backend
   async function playYtWithAudio(t, reset) {
     if (!t || (!t.videoId && !t.title)) return false;
     if (!IS_NATIVE || !nativePlayer()) return false;
@@ -7004,19 +7033,53 @@
     let dur = t.duration || 0;
     const urlDur = parseStreamUrlDuration(t.streamUrl || "");
     if (!dur && urlDur > 0) dur = urlDur;
-    // Always resolve YouTube streams directly on the device's residential IP via
-    // MuchiAudioService (Android) / MuchiAudioPlugin (iOS, M4A-only) instead of
-    // routing through the Cloudflare Worker /api/stream datacenter proxy (which
-    // triggers Googlevideo 403 IP-binding rejections after the initial buffer).
-    t._nativeOnDeviceTried = true;
-    t._nativeOnDeviceVid = String(t.videoId || "");
-    if (t.videoId) {
-      t.streamUrl = `yt:${t.videoId}`;
+
+    // 1. Connect Native App to the Cloudflare Backend (/api/yt/stream) just like Web:
+    //    If we don't already have a resolved http(s) streamUrl on the track, resolve via
+    //    getWarmStream (which hits https://muchi.twiarimascord.workers.dev/api/yt/stream
+    //    and returns a verified M4A/MP3 stream proxied through /api/stream with zero IP mismatch).
+    let resolvedStream = (t.streamUrl && /^https?:\/\//i.test(t.streamUrl) && !t._isPreviewStream) ? t.streamUrl : "";
+    if (!resolvedStream && t.streamUrl && t.streamUrl.startsWith("/") && !t._isPreviewStream) {
+      resolvedStream = API_BASE + t.streamUrl;
+    }
+    if (!resolvedStream) {
+      try {
+        const warm = await getWarmStream(
+          t.videoId || "",
+          t.title || "",
+          artistName(t) || t.artist || "",
+          t._ytCandidates || [],
+          3400,
+          false
+        );
+        if (warm && warm.url && !warm.isPreview) {
+          resolvedStream = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
+          if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
+          if (warm.duration && !dur) dur = Number(warm.duration);
+        }
+      } catch {}
+    }
+
+    if (resolvedStream) {
+      t.streamUrl = resolvedStream;
+      t._nativeOnDeviceTried = false;
     } else {
-      t.streamUrl = "yt:";
+      // Fallback to native service resolution (which also queries Cloudflare backend + on-device InnerTube/JioSaavn)
+      t._nativeOnDeviceTried = true;
+      t._nativeOnDeviceVid = String(t.videoId || "");
+      if (t.videoId) {
+        t.streamUrl = `yt:${t.videoId}`;
+      } else {
+        t.streamUrl = "yt:";
+      }
     }
     t._isPreviewStream = false;
-    if (dur > 0) t.duration = dur;
+    if (dur > 0) {
+      t.duration = dur;
+      if ($("durTime") && current() === t && t.source !== "radio") {
+        $("durTime").textContent = fmt(dur);
+      }
+    }
     t._playingViaAudio = true;
     await playAudio(t);
     return (!!nativePlayer() && npActive) || !audio.paused;
@@ -7092,7 +7155,7 @@
       url = activeOfflineBlobUrl;
     } else if (!isNetworkOff) {
       url = t.streamUrl || t.url || "";
-      if (IS_NATIVE && nativePlayer() && t.videoId && !t._nativeOnDeviceTried && (!url || url.includes("/api/stream") || url.includes("/api/yt/stream"))) {
+      if (IS_NATIVE && nativePlayer() && t.videoId && !t._nativeOnDeviceTried && !url) {
         url = `yt:${t.videoId}`;
         t._nativeOnDeviceTried = true;
       }
@@ -7980,6 +8043,10 @@
   }
 
   function updateProgress() {
+    if (state.sleep && state.sleep.mode === "mins" && state.sleep.until > 0 && Date.now() >= state.sleep.until) {
+      pauseForSleep();
+      return;
+    }
     // When screen is off and native service owns playback, skip redundant JS polling
     if (document.hidden && npActive) return;
     const d = duration();
@@ -7989,6 +8056,13 @@
       updateMediaPosition();
       msPosTick = (msPosTick || 0) + 1;
       if (msPosTick % 5 === 0) updateMediaSession();
+      if (state.sleep && state.sleep.mode === "mins" && state.sleep.until > 0) {
+        const sm = $("sleepModalStatus");
+        if (sm) sm.textContent = sleepStatusLabel();
+        const sl = $("sleepListeningStatus");
+        if (sl) sl.textContent = sleepStatusLabel();
+        if ($("sleepBtn")) $("sleepBtn").title = `Sleep · ${sleepLabel()}`;
+      }
     }
 
     // Adaptive buffering health check
@@ -8002,35 +8076,35 @@
         ensureQueueRefill();
       }
     }
-    // Audio playback optimization: pre-resolve next track stream and pre-warm for gapless playback
+    // Audio playback optimization: pre-resolve next track stream via Cloudflare backend & native preload for gapless playback
     if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
       const nextT = state.queue[state.index + 1];
-      if (nextT && nextT.videoId && !nextT.streamUrl && !nextT._resolving) {
+      if (nextT && (nextT.videoId || nextT.title) && !nextT.streamUrl && !nextT._resolving && nextT.source !== "audius" && nextT.source !== "radio") {
         const NP = nativePlayer();
-        if (IS_NATIVE && NP && typeof NP.preload === "function") {
-          if (!nextT._nativePreloaded) {
-            nextT._nativePreloaded = true;
-            const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
-            NP.preload({
-              videoId: String(nextT.videoId),
-              candidates: cands,
-              title: String(nextT.title || ""),
-              artist: String(artistName(nextT) || nextT.artist || ""),
-            }).catch(() => {});
-          }
-        } else {
-          nextT._resolving = true;
-          getWarmStream(nextT.videoId, nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
-            if (res && res.url) {
-              const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
-              nextT.streamUrl = fullUrl;
-              if (!nextT._prefetched) {
-                nextT._prefetched = true;
-                fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
-              }
-            }
-          }).catch(() => {}).finally(() => { nextT._resolving = false; });
+        if (IS_NATIVE && NP && typeof NP.preload === "function" && !nextT._nativePreloaded) {
+          nextT._nativePreloaded = true;
+          const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
+          NP.preload({
+            videoId: String(nextT.videoId || ""),
+            candidates: cands,
+            title: String(nextT.title || ""),
+            artist: String(artistName(nextT) || nextT.artist || ""),
+          }).catch(() => {});
         }
+        nextT._resolving = true;
+        getWarmStream(nextT.videoId || "", nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
+          if (res && res.url && !res.isPreview) {
+            const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
+            nextT.streamUrl = fullUrl;
+            nextT._isPreviewStream = false;
+            if (res.videoId && !nextT.videoId) nextT.videoId = res.videoId;
+            if (res.duration && !nextT.duration) nextT.duration = Number(res.duration);
+            if (!IS_NATIVE && !nextT._prefetched) {
+              nextT._prefetched = true;
+              fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+            }
+          }
+        }).catch(() => {}).finally(() => { nextT._resolving = false; });
       } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
         nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
         if (!nextT._prefetched) {
@@ -8621,7 +8695,7 @@
         seekTo(sec);
       }
     } else if (msg === "ended") {
-      next(true);
+      next(false);
     } else if (msg === "error") {
       const rawErrPos = Number(action.position != null ? action.position : 0);
       const errPosSec = rawErrPos > 1000 ? rawErrPos / 1000 : rawErrPos;
@@ -8636,18 +8710,6 @@
       if ((state.playing || wantPlay) && cur) {
         state.playing = true;
         setWantPlay(true);
-        if ((!cur._nativeOnDeviceTried || (cur.videoId && cur._nativeOnDeviceVid !== String(cur.videoId))) && cur.videoId && nativePlayer()) {
-          cur._nativeOnDeviceTried = true;
-          cur._nativeOnDeviceVid = String(cur.videoId);
-          cur.streamUrl = `yt:${cur.videoId}`;
-          cur._isPreviewStream = false;
-          cur._playingViaAudio = true;
-          playAudio(cur).catch(() => {
-            if (current() !== cur) return;
-            nativeHandleControls({ message: "error", position: Math.round(savedPos * 1000) });
-          });
-          return;
-        }
         if (!cur._nativeRefreshTried && (cur.videoId || cur.title)) {
           cur._nativeRefreshTried = true;
           cur.streamUrl = "";
@@ -8672,6 +8734,18 @@
               if (current() !== cur) return;
               nativeHandleControls({ message: "error", position: Math.round(savedPos * 1000) });
             });
+          return;
+        }
+        if ((!cur._nativeOnDeviceTried || (cur.videoId && cur._nativeOnDeviceVid !== String(cur.videoId))) && cur.videoId && nativePlayer()) {
+          cur._nativeOnDeviceTried = true;
+          cur._nativeOnDeviceVid = String(cur.videoId);
+          cur.streamUrl = `yt:${cur.videoId}`;
+          cur._isPreviewStream = false;
+          cur._playingViaAudio = true;
+          playAudio(cur).catch(() => {
+            if (current() !== cur) return;
+            nativeHandleControls({ message: "error", position: Math.round(savedPos * 1000) });
+          });
           return;
         }
         if (!cur._nativeFallbackTried) {
@@ -8783,6 +8857,10 @@
         // Notification.requestPermission duplicate that fired alongside it.
         NP.addListener("muchiControls", (e) => nativeHandleControls(e || {}));
         NP.addListener("muchiProgress", (e) => {
+          if (state.sleep && state.sleep.mode === "mins" && state.sleep.until > 0 && Date.now() >= state.sleep.until) {
+            pauseForSleep();
+            return;
+          }
           if (!npActive) return;
           const v = e || {};
           const now = Date.now();
@@ -8806,11 +8884,13 @@
           if (rawDur > 0 && !isStaleStartJump) {
             npDur = rawDur;
             const cur = current();
-            if (cur && !cur.duration) cur.duration = Math.round(rawDur);
+            if (cur && (!cur.duration || Math.abs(cur.duration - rawDur) > 2)) {
+              cur.duration = Math.round(rawDur);
+            }
           }
           const isPl = !!v.playing;
           if (isPl) {
-            if (!isStaleStartJump && rawPos > 0.05) npSeenPlaying = true;
+            if (!isStaleStartJump) npSeenPlaying = true;
             npPlaying = true;
             renderBufferState(false);
             if (!state.playing && now >= npCmdUntil) {
@@ -12993,19 +13073,30 @@
 
   function renderListeningPage() {
     const p = state.prefs;
+    const curSleep = state.sleep.mode === "track"
+      ? "track"
+      : state.sleep.mode === "mins"
+        ? String(state.sleep.preset || [5, 10, 15, 30, 45, 60, 90].reduce((best, n) => {
+            const left = Math.max(1, Math.round((state.sleep.until - Date.now()) / 60000));
+            return Math.abs(n - left) < Math.abs(best - left) ? n : best;
+          }, 15))
+        : "off";
     return `
       ${settingsSubChrome("Listening")}
       <div class="settings">
         <div class="set-card">
           <label class="set-row">
-            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="indigo">bedtime</span><div><strong>Sleep timer</strong></div></div>
+            <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="indigo">bedtime</span><div><strong>Sleep timer</strong><p id="sleepListeningStatus" style="margin:2px 0 0;font-size:12px;opacity:0.75">${escapeHTML(sleepStatusLabel())}</p></div></div>
             <select id="setSleep">
-              <option value="off" ${state.sleep.mode === "off" ? "selected" : ""}>Off</option>
-              <option value="15">15 min</option>
-              <option value="30">30 min</option>
-              <option value="45">45 min</option>
-              <option value="60">60 min</option>
-              <option value="track" ${state.sleep.mode === "track" ? "selected" : ""}>End of track</option>
+              <option value="off" ${curSleep === "off" ? "selected" : ""}>Off</option>
+              <option value="5" ${curSleep === "5" ? "selected" : ""}>5 min</option>
+              <option value="10" ${curSleep === "10" ? "selected" : ""}>10 min</option>
+              <option value="15" ${curSleep === "15" ? "selected" : ""}>15 min</option>
+              <option value="30" ${curSleep === "30" ? "selected" : ""}>30 min</option>
+              <option value="45" ${curSleep === "45" ? "selected" : ""}>45 min</option>
+              <option value="60" ${curSleep === "60" ? "selected" : ""}>60 min</option>
+              <option value="90" ${curSleep === "90" ? "selected" : ""}>90 min</option>
+              <option value="track" ${curSleep === "track" ? "selected" : ""}>End of track</option>
             </select>
           </label>
           <div class="set-row">

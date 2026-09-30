@@ -1407,17 +1407,18 @@ export async function handleYtStream(url) {
         fastRaces.push(new Promise((res, rej) => setTimeout(() => resolveForVideoId(candId).then(res, rej), 120)));
       }
       if (!fast && title) {
-        fastRaces.push(audiusPromise);
+        fastRaces.push(new Promise((res, rej) => setTimeout(() => audiusPromise.then(res, rej), 650)));
       }
       const stream = await Promise.any(fastRaces);
       if (stream && stream.url) {
-        if (stream.source === "audius" || stream.source === "soundcloud") {
+        if (stream.source === "audius" || stream.source === "soundcloud" || stream.source === "jiosaavn") {
           return rememberAndReturn(stream);
         }
         const useVid = stream.videoId || id;
         const proxied = `/api/stream?url=${encodeURIComponent(stream.url)}${buildMetaExtra(useVid)}`;
         return rememberAndReturn({
           url: proxied,
+          directUrl: stream.url,
           videoId: useVid,
           format: stream.format || "",
           mimeType: stream.mimeType || "",

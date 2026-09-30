@@ -411,7 +411,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static func extractDurationMsFromUrl(_ rawUrl: String) -> Double {
         var target = rawUrl
-        if let uRange = target.range(of: "url=") {
+        if let uRange = target.range(of: "url=") ?? target.range(of: "?u=") ?? target.range(of: "&u=") {
             let sub = String(target[uRange.upperBound...])
             let part = sub.components(separatedBy: "&").first ?? sub
             if let decoded = part.removingPercentEncoding {
@@ -1172,6 +1172,13 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 return rs
             }
         }
+        let cfVid = vids.first ?? primary
+        if let cfHit = probeCloudflareBackend(videoId: cfVid, candidates: candidates, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs) {
+            if !cfVid.isEmpty { putCachedStream(cfVid, cfHit) }
+            if !primary.isEmpty { putCachedStream(primary, cfHit) }
+            if !qKey.isEmpty { putCachedStream(qKey, cfHit) }
+            return cfHit
+        }
         for vid in vids.prefix(3) {
             if let rs = probePipedForVideo(vid, expectedDurationMs: expectedDurationMs) {
                 putCachedStream(vid, rs)
@@ -1455,6 +1462,48 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }.resume()
         _ = sem.wait(timeout: .now() + 3.2)
         return out
+    }
+
+    private static let cloudflareBackendBase = "https://muchi.twiarimascord.workers.dev"
+
+    private static func probeCloudflareBackend(videoId: String, candidates: String, title: String, artist: String, expectedDurationMs: Double = 0) -> ResolvedStream? {
+        let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        if vid.isEmpty && cleanTitle.isEmpty { return nil }
+        var comps = URLComponents(string: "\(cloudflareBackendBase)/api/yt/stream")
+        var items: [URLQueryItem] = [URLQueryItem(name: "allowPreview", value: "0")]
+        if !vid.isEmpty { items.append(URLQueryItem(name: "v", value: vid)) }
+        if !cleanTitle.isEmpty { items.append(URLQueryItem(name: "title", value: cleanTitle)) }
+        if !cleanArtist.isEmpty { items.append(URLQueryItem(name: "artist", value: cleanArtist)) }
+        let cands = candidates.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cands.isEmpty { items.append(URLQueryItem(name: "candidates", value: cands)) }
+        comps?.queryItems = items
+        guard let url = comps?.url else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 5.0)
+        req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
+        var found: ResolvedStream?
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            defer { sem.signal() }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let data = data,
+                  let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+            if (root["isPreview"] as? Bool) == true { return }
+            guard let rawUrl = (root["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !rawUrl.isEmpty else { return }
+            let fullUrl = rawUrl.hasPrefix("/") ? "\(cloudflareBackendBase)\(rawUrl)" : rawUrl
+            let durSec = (root["duration"] as? Double) ?? Double((root["duration"] as? Int) ?? 0)
+            var durMs = durSec > 0 ? durSec * 1000.0 : 0
+            if durMs <= 0 {
+                durMs = extractDurationMsFromUrl(fullUrl)
+            }
+            guard isDurationAcceptable(gotDurationMs: durMs, expectedDurationMs: expectedDurationMs) else { return }
+            let mime = (root["mimeType"] as? String) ?? "audio/mp4"
+            let resolvedVid = (root["videoId"] as? String) ?? vid
+            found = ResolvedStream(url: fullUrl, userAgent: userAgentForStreamUrl(fullUrl), durationMs: durMs, mimeType: mime, videoId: resolvedVid)
+        }.resume()
+        _ = sem.wait(timeout: .now() + 5.2)
+        return found
     }
 
     private static func probePipedForVideo(_ videoId: String, expectedDurationMs: Double = 0) -> ResolvedStream? {

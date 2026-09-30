@@ -1014,8 +1014,22 @@ public class MuchiAudioService extends Service {
         try {
             String target = url;
             int uIdx = target.indexOf("url=");
+            int offset = 4;
+            if (uIdx < 0) {
+                int qU = target.indexOf("?u=");
+                if (qU >= 0) {
+                    uIdx = qU + 1;
+                    offset = 2;
+                } else {
+                    int aU = target.indexOf("&u=");
+                    if (aU >= 0) {
+                        uIdx = aU + 1;
+                        offset = 2;
+                    }
+                }
+            }
             if (uIdx >= 0) {
-                String sub = target.substring(uIdx + 4);
+                String sub = target.substring(uIdx + offset);
                 int amp = sub.indexOf('&');
                 target = java.net.URLDecoder.decode(amp >= 0 ? sub.substring(0, amp) : sub, "UTF-8");
             }
@@ -1600,10 +1614,12 @@ public class MuchiAudioService extends Service {
             }
         }
 
-        // Fast parallel fallback: race Piped instances concurrently
+        // Fast parallel fallback: race Cloudflare backend (/api/yt/stream) and Piped instances concurrently
         java.util.concurrent.CompletionService<ResolvedStream> fallbackRace =
                 new java.util.concurrent.ExecutorCompletionService<>(exec);
         List<java.util.concurrent.Future<ResolvedStream>> fbFutures = new ArrayList<>();
+        final String cfVid = !vids.isEmpty() ? vids.get(0) : (primaryVid != null ? primaryVid.trim() : "");
+        fbFutures.add(fallbackRace.submit(() -> probeCloudflareBackendStatic(cfVid, candidatesCsv, cleanTitle, cleanArtist, expectedDurationMs)));
         for (int i = 0; i < Math.min(3, vids.size()); i++) {
             final String pVid = vids.get(i);
             fbFutures.add(fallbackRace.submit(() -> probePipedForVideoStatic(pVid, expectedDurationMs)));
@@ -1611,7 +1627,7 @@ public class MuchiAudioService extends Service {
         try {
             for (int i = 0; i < fbFutures.size(); i++) {
                 java.util.concurrent.Future<ResolvedStream> done =
-                        fallbackRace.poll(3500, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        fallbackRace.poll(4200, java.util.concurrent.TimeUnit.MILLISECONDS);
                 if (done == null) break;
                 try {
                     ResolvedStream rs = done.get();
@@ -1934,6 +1950,54 @@ public class MuchiAudioService extends Service {
             if (con2 != null) con2.disconnect();
         }
         return out;
+    }
+
+    private static final String CLOUDFLARE_BACKEND_BASE = "https://muchi.twiarimascord.workers.dev";
+
+    private static ResolvedStream probeCloudflareBackendStatic(String primaryVid, String candidatesCsv, String title, String artist, long expectedDurationMs) {
+        String vid = primaryVid != null ? primaryVid.trim() : "";
+        String cleanTitle = title != null ? title.trim() : "";
+        String cleanArtist = artist != null ? artist.trim() : "";
+        if (vid.isEmpty() && cleanTitle.isEmpty()) return null;
+        HttpURLConnection con = null;
+        try {
+            StringBuilder sb = new StringBuilder(CLOUDFLARE_BACKEND_BASE + "/api/yt/stream?allowPreview=0");
+            if (!vid.isEmpty()) {
+                sb.append("&v=").append(java.net.URLEncoder.encode(vid, "UTF-8"));
+            }
+            if (!cleanTitle.isEmpty()) {
+                sb.append("&title=").append(java.net.URLEncoder.encode(cleanTitle, "UTF-8"));
+            }
+            if (!cleanArtist.isEmpty()) {
+                sb.append("&artist=").append(java.net.URLEncoder.encode(cleanArtist, "UTF-8"));
+            }
+            if (candidatesCsv != null && !candidatesCsv.trim().isEmpty()) {
+                sb.append("&candidates=").append(java.net.URLEncoder.encode(candidatesCsv.trim(), "UTF-8"));
+            }
+            con = (HttpURLConnection) new URL(sb.toString()).openConnection();
+            con.setConnectTimeout(4000);
+            con.setReadTimeout(5500);
+            con.setRequestProperty("User-Agent", DEFAULT_UA);
+            if (con.getResponseCode() == 200) {
+                JSONObject root = new JSONObject(readStreamString(con.getInputStream()));
+                if (root.optBoolean("isPreview", false)) return null;
+                String rawUrl = root.optString("url", "").trim();
+                if (rawUrl.isEmpty()) return null;
+                String fullUrl = rawUrl.startsWith("/") ? (CLOUDFLARE_BACKEND_BASE + rawUrl) : rawUrl;
+                long durMs = root.optLong("duration", 0L) * 1000L;
+                if (durMs <= 0L) {
+                    durMs = extractDurationMsFromUrl(fullUrl);
+                }
+                if (!isDurationAcceptableStatic(durMs, expectedDurationMs)) return null;
+                String mime = root.optString("mimeType", "audio/mp4");
+                String resolvedVid = root.optString("videoId", vid);
+                return new ResolvedStream(fullUrl, userAgentForStreamUrl(fullUrl), durMs, mime, resolvedVid);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (con != null) con.disconnect();
+        }
+        return null;
     }
 
     private static ResolvedStream probePipedForVideoStatic(String videoId, long expectedDurationMs) {
