@@ -9053,3 +9053,170 @@ html[data-native="1"] body[data-view="now"] .ly-scroll {
   opacity: 0.92;
 }
 
+/* ── 9. NATIVE TACTILE PRESS & CLICK INTERACTION REFINEMENT (v1.9.0) ── */
+*,
+*::before,
+*::after,
+button,
+a,
+input,
+select,
+label,
+[role="button"],
+[data-play],
+[data-view],
+[data-tab] {
+  -webkit-tap-highlight-color: transparent !important;
+}
+
+button,
+a[href],
+[role="button"],
+.icon-btn,
+.chip-btn,
+.tonal-btn,
+.pill-btn,
+.btn,
+.fab,
+.dock-btn,
+.nav-btn,
+.ly-icon,
+.ly-pill,
+.ly-line,
+.tab,
+.mood-pill,
+.taste-pill,
+.seg-btn,
+.set-ui-card,
+.set-theme-chip,
+.app-icon-opt,
+.sheet-item,
+.track-row,
+.q-item,
+.card,
+.playlist-card,
+.artist-card,
+.radio-card {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  transition:
+    transform 135ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 135ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+/* Crisp removal of blurry overlay feel on press */
+.fab-ripple {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* 1. Primary FABs & Play Buttons: tactile spring compression + depth */
+.fab:active,
+.fab.is-pressed,
+#playBtn:active,
+#playBtn.is-pressed,
+.card-play:active,
+.card-play.is-pressed,
+.btn.primary:active,
+.btn.primary.is-pressed {
+  transform: scale(0.92) translateZ(0) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28) !important;
+}
+
+/* 2. Icon & Circle Controls: instant crisp scale response */
+.icon-btn:active,
+.icon-btn.is-pressed,
+.ly-icon:active,
+.ly-icon.is-pressed,
+.q-act:active,
+.q-act.is-pressed,
+.q-rm:active,
+.q-rm.is-pressed,
+.avatar-btn:active,
+.avatar-btn.is-pressed,
+#topBackBtn:active,
+#topBackBtn.is-pressed,
+#clearSearch:active,
+#clearSearch.is-pressed,
+#closeQueue:active,
+#closeQueue.is-pressed,
+#closeVideo:active,
+#closeVideo.is-pressed,
+#closeBrowser:active,
+#closeBrowser.is-pressed,
+#lyMinimizeBtn:active,
+#lyMinimizeBtn.is-pressed {
+  transform: scale(0.89) translateZ(0) !important;
+}
+
+/* 3. Pill, Chip, Tonal, Tab & Settings Controls: subtle press depth */
+.chip-btn:active,
+.chip-btn.is-pressed,
+.tonal-btn:active,
+.tonal-btn.is-pressed,
+.pill-btn:active,
+.pill-btn.is-pressed,
+.btn:not(.primary):active,
+.btn:not(.primary).is-pressed,
+.ly-pill:active,
+.ly-pill.is-pressed,
+.tab:active,
+.tab.is-pressed,
+.mood-pill:active,
+.mood-pill.is-pressed,
+.taste-pill:active,
+.taste-pill.is-pressed,
+.seg-btn:active,
+.seg-btn.is-pressed,
+.set-ui-card:active,
+.set-ui-card.is-pressed,
+.set-theme-chip:active,
+.set-theme-chip.is-pressed,
+.app-icon-opt:active,
+.app-icon-opt.is-pressed {
+  transform: scale(0.95) translateZ(0) !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+/* 4. Bottom Dock & Sidebar Navigation Controls */
+.dock-btn:active,
+.dock-btn.is-pressed,
+.nav-btn:active,
+.nav-btn.is-pressed,
+#brandHome:active,
+#brandHome.is-pressed {
+  transform: scale(0.92) translateZ(0) !important;
+}
+
+/* 5. Track Rows, Queue Items, Sheet Rows, Lyrics Lines & Media Cards */
+.track-row:active,
+.track-row.is-pressed,
+.q-item:active,
+.q-item.is-pressed,
+.sheet-item:active,
+.sheet-item.is-pressed,
+.ly-line:active,
+.ly-line.is-pressed {
+  transform: scale(0.986) translateZ(0);
+}
+
+.card:active,
+.card.is-pressed,
+.playlist-card:active,
+.playlist-card.is-pressed,
+.artist-card:active,
+.artist-card.is-pressed,
+.radio-card:active,
+.radio-card.is-pressed {
+  transform: scale(0.975) translateZ(0);
+}
+
+

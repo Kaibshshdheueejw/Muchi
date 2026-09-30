@@ -591,22 +591,88 @@ const itunesCache = new Map();
 const ITUNES_CACHE_TTL = 10 * 60 * 1000;
 let itunesRateLimitedUntil = 0;
 
-export async function itunesSearch(query, { includeExtra = true, country = "" } = {}) {
+function parseItunesSearchIntent(rawQuery) {
+  const q = String(rawQuery || "").trim();
+  const foldStr = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9\u0900-\u0D7F\u0E00-\u0E7F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0600-\u06FF\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  let songHint = "";
+  let artistHint = "";
+  let hasExplicitSplit = false;
+
+  // 1. Explicit "<song> by <artist>"
+  const byMatch = q.match(/^(.+?)\s+\bby\b\s+(.+)$/i);
+  if (byMatch) {
+    songHint = byMatch[1].replace(/^["'\s]+|["'\s]+$/g, "").trim();
+    artistHint = byMatch[2].replace(/^["'\s]+|["'\s]+$/g, "").trim();
+    hasExplicitSplit = true;
+  } else {
+    // 2. Explicit "<artist> - <song>" or "<song> - <artist>"
+    const dashMatch = q.match(/^(.+?)\s+[-–—|]\s+(.+)$/);
+    if (dashMatch) {
+      songHint = dashMatch[1].trim();
+      artistHint = dashMatch[2].trim();
+      hasExplicitSplit = true;
+    }
+  }
+
+  const cleanQuery = hasExplicitSplit
+    ? `${songHint} ${artistHint}`.replace(/\s+/g, " ").trim()
+    : q.replace(/\s+\bby\b\s+/gi, " ").replace(/\s+/g, " ").trim();
+
+  const stopWords = new Set(["by", "the", "a", "an", "of", "in", "on", "to", "for", "with", "feat", "ft", "featuring", "song", "songs", "music", "official", "audio", "video", "lyrics"]);
+  const allTokens = foldStr(cleanQuery).split(" ").filter((w) => w.length >= 2 && !stopWords.has(w));
+  const songFold = foldStr(songHint);
+  const artistFold = foldStr(artistHint);
+  const songTokens = songFold ? songFold.split(" ").filter((w) => w.length >= 2 && !stopWords.has(w)) : [];
+  const artistTokens = artistFold ? artistFold.split(" ").filter((w) => w.length >= 2 && !stopWords.has(w)) : [];
+  const wantsInstrumental = /\b(instrumental|karaoke|backing\s*track|piano\s*version|lofi|ambient|classical|score|soundtrack)\b/i.test(q);
+
+  return {
+    raw: q,
+    cleanQuery,
+    foldQuery: foldStr(cleanQuery),
+    songHint,
+    artistHint,
+    songFold,
+    artistFold,
+    hasExplicitSplit,
+    allTokens,
+    songTokens,
+    artistTokens,
+    wantsInstrumental,
+    foldStr,
+  };
+}
+
+const ITUNES_UNRELATED_INSTRUMENTAL_RE = /\b(instrumental|karaoke|backing\s+track|originally\s+performed\s+by|in\s+the\s+style\s+of|made\s+famous\s+by|tribute\s+to|ringtone|8-bit|lullaby\s+rendition|music\s+box|piano\s+rendition|piano\s+version|guitar\s+version|lower\s+key|higher\s+key|shortened|arr\.\s*by|arranged\s+by|string\s+quartet|orchestral\s+rendition|music\s+for\s+babies|sleep\s+music|white\s+noise|sound\s+effects?|remix\s+of|cover\s+of|version\s+of)\b/i;
+const ITUNES_JUNK_PERFORMER_RE = /\b(sing2piano|don't\s+stop\s+piano|piano\s+nest|karaoke|tribute|hit\s+crew|party\s+tyme|ameritz|prosource|starlite|8-bit|lullaby|baby\s+einstein|vitamin\s+string|music\s+box|piano\s+guys|soundtrack\s+orchestra|various\s+artists|unknown\s+artist|former\s+fat\s+boys|soundalike|sing-along|done\s+again|cast\s+of|cast\s+recording|famous\s+by|\d{4}\s+.*hitz|iron\s+hitz)\b/i;
+
+export async function itunesSearch(query, { includeExtra = true, country = "", limit = 75 } = {}) {
   const cleanQ = String(query || "").trim().slice(0, 80);
   const q = encodeURIComponent(cleanQ);
   if (!q) return { songs: [], artists: [], playlists: [] };
 
-  const cacheKey = `${cleanQ.toLowerCase()}:${country.toLowerCase()}:${includeExtra ? 1 : 0}`;
+  const maxSongs = Math.max(25, Math.min(Number(limit) || 75, 100));
+  const cacheKey = `v2:${cleanQ.toLowerCase()}:${country.toLowerCase()}:${includeExtra ? 1 : 0}:${maxSongs}`;
   const cached = itunesCache.get(cacheKey);
   if (cached && cached.exp > Date.now()) {
     return cached.val;
   }
 
+  const intent = parseItunesSearchIntent(cleanQ);
+  const qClean = encodeURIComponent(intent.cleanQuery || cleanQ);
   const countryParam = country ? `&country=${encodeURIComponent(country)}` : "";
-  const fetchItunes = async (url) => {
+  const fetchItunes = async (url, timeoutMs = 2800) => {
     if (Date.now() < itunesRateLimitedUntil) return null;
     const ctrl = new AbortController();
-    const tm = setTimeout(() => ctrl.abort(), 2500);
+    const tm = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const r = await fetch(url, {
         signal: ctrl.signal,
@@ -628,24 +694,200 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
     }
   };
 
+  const fetchSongsTerm = (encTerm, lim = 80) =>
+    fetchItunes(`https://itunes.apple.com/search?term=${encTerm}&media=music&entity=song&limit=${lim}${countryParam}`)
+      .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${encTerm}&media=music&entity=song&limit=${lim}`) : res);
+
   const calls = [
-    fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50${countryParam}`)
-      .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=50`) : res),
+    fetchSongsTerm(qClean, 90),
   ];
   if (includeExtra) {
     calls.push(
-      fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=25${countryParam}`)
-        .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=musicArtist&limit=25`) : res)
+      fetchItunes(`https://itunes.apple.com/search?term=${encodeURIComponent(intent.artistHint || intent.cleanQuery || cleanQ)}&media=music&entity=musicArtist&limit=25${countryParam}`)
+        .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${encodeURIComponent(intent.artistHint || intent.cleanQuery || cleanQ)}&media=music&entity=musicArtist&limit=25`) : res)
     );
     calls.push(
-      fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25${countryParam}`)
-        .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&entity=album&limit=25`) : res)
+      fetchItunes(`https://itunes.apple.com/search?term=${qClean}&media=music&entity=album&limit=25${countryParam}`)
+        .then((res) => (!res || !res.results || !res.results.length) && countryParam ? fetchItunes(`https://itunes.apple.com/search?term=${qClean}&media=music&entity=album&limit=25`) : res)
     );
   }
+  if (intent.hasExplicitSplit && intent.songHint && intent.artistHint) {
+    calls.push(fetchSongsTerm(encodeURIComponent(intent.artistHint), 65));
+    calls.push(fetchSongsTerm(encodeURIComponent(intent.songHint), 50));
+    if (q !== qClean) calls.push(fetchSongsTerm(q, 45));
+  } else if (q !== qClean) {
+    calls.push(fetchSongsTerm(q, 60));
+  }
+
   const settled = await Promise.allSettled(calls);
   const songsR = settled[0];
   const artistsR = includeExtra ? settled[1] : null;
   const albumsR = includeExtra ? settled[2] : null;
+
+  const rawSongRows = [];
+  if (songsR && songsR.status === "fulfilled" && songsR.value && Array.isArray(songsR.value.results)) {
+    rawSongRows.push(...songsR.value.results);
+  }
+  const extraStartIdx = includeExtra ? 3 : 1;
+  for (let i = extraStartIdx; i < settled.length; i++) {
+    const st = settled[i];
+    if (st && st.status === "fulfilled" && st.value && Array.isArray(st.value.results)) {
+      rawSongRows.push(...st.value.results);
+    }
+  }
+
+  const foldArtist = intent.foldStr;
+  const wantQ = intent.foldQuery || foldArtist(query);
+
+  const artistMatchesHint = (candName, hintFold) => {
+    const cf = foldArtist(candName);
+    if (!cf || !hintFold) return false;
+    if (cf === hintFold || cf.startsWith(hintFold + " ") || cf.endsWith(" " + hintFold) || cf.includes(" " + hintFold + " ")) return true;
+    const hToks = hintFold.split(" ").filter((t) => t.length >= 3);
+    return hToks.length > 0 && hToks.every((t) => cf.includes(t));
+  };
+
+  const extractFeaturedArtist = (titleStr) => {
+    const s = String(titleStr || "");
+    if (/originally\s+performed\s+by|in\s+the\s+style\s+of|tribute\s+to/i.test(s)) return "";
+    const m = s.match(/(?:feat\.?|ft\.?|featuring|with)\s+([^)\]-]+)/i);
+    return m ? m[1].trim() : "";
+  };
+
+  const stripDecorations = (title) =>
+    String(title || "")
+      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|official|audio|video|lyric|remaster|version|edit|mix|live|explicit|clean|from\s)[^)\]]*[)\]]/gi, "")
+      .replace(/\s*[-–—]\s*(?:remaster(?:ed)?|single|radio\s*edit|version|live|from\s.*).*$/i, "")
+      .trim();
+
+  // Detect target artist: first check songs that match the searched song title + artist hint!
+  let detectedArtistName = "";
+  let detectedArtistId = "";
+  let detectedGenre = "";
+
+  if (intent.artistFold && intent.songFold) {
+    for (const r of rawSongRows) {
+      if (!r || !r.trackId) continue;
+      const tName = String(r.trackName || "");
+      const aName = String(r.artistName || "");
+      if (ITUNES_UNRELATED_INSTRUMENTAL_RE.test(tName) || ITUNES_JUNK_PERFORMER_RE.test(aName)) continue;
+      const coreT = foldArtist(stripDecorations(tName) || tName);
+      if (coreT === intent.songFold || coreT.startsWith(intent.songFold + " ")) {
+        const primCredit = aName.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+        if (artistMatchesHint(primCredit, intent.artistFold)) {
+          detectedArtistName = primCredit;
+          if (r.artistId) detectedArtistId = String(r.artistId);
+          if (r.primaryGenreName) detectedGenre = String(r.primaryGenreName);
+          break;
+        }
+        const featCred = extractFeaturedArtist(tName);
+        if (featCred && artistMatchesHint(featCred, intent.artistFold)) {
+          detectedArtistName = featCred.split(/\s*(?:,|&)\s*/)[0].trim();
+          if (r.primaryGenreName) detectedGenre = String(r.primaryGenreName);
+          break;
+        }
+      }
+    }
+  }
+
+  if (artistsR && artistsR.status === "fulfilled" && artistsR.value && Array.isArray(artistsR.value.results)) {
+    for (const a of artistsR.value.results) {
+      if (!a || !a.artistName || ITUNES_JUNK_PERFORMER_RE.test(a.artistName)) continue;
+      const targetCheck = foldArtist(detectedArtistName || intent.artistHint || "");
+      if (targetCheck && artistMatchesHint(a.artistName, targetCheck)) {
+        detectedArtistName = a.artistName;
+        if (a.artistId) detectedArtistId = String(a.artistId);
+        if (a.primaryGenreName && !detectedGenre) detectedGenre = String(a.primaryGenreName);
+        break;
+      }
+      if (!intent.hasExplicitSplit && !detectedArtistName) {
+        const af = foldArtist(a.artistName);
+        if (af && (wantQ === af || wantQ.includes(af) || af.includes(wantQ))) {
+          detectedArtistName = a.artistName;
+          if (a.artistId) detectedArtistId = String(a.artistId);
+          if (a.primaryGenreName && !detectedGenre) detectedGenre = String(a.primaryGenreName);
+        }
+      }
+    }
+  }
+
+  if (!detectedArtistName && intent.artistFold) {
+    for (const r of rawSongRows) {
+      if (!r || !r.trackId) continue;
+      const aName = String(r.artistName || "");
+      const tName = String(r.trackName || "");
+      if (ITUNES_UNRELATED_INSTRUMENTAL_RE.test(tName) || ITUNES_JUNK_PERFORMER_RE.test(aName)) continue;
+      const primCredit = aName.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+      if (artistMatchesHint(primCredit, intent.artistFold)) {
+        detectedArtistName = primCredit;
+        if (r.artistId) detectedArtistId = String(r.artistId);
+        if (r.primaryGenreName && !detectedGenre) detectedGenre = String(r.primaryGenreName);
+        break;
+      }
+      const featCred = extractFeaturedArtist(tName);
+      if (featCred && artistMatchesHint(featCred, intent.artistFold)) {
+        detectedArtistName = featCred.split(/\s*(?:,|&)\s*/)[0].trim();
+        if (r.primaryGenreName && !detectedGenre) detectedGenre = String(r.primaryGenreName);
+      }
+    }
+  }
+
+  if (!detectedArtistName && rawSongRows.length > 0) {
+    for (const r of rawSongRows.slice(0, 12)) {
+      if (!r || !r.artistName) continue;
+      if (ITUNES_UNRELATED_INSTRUMENTAL_RE.test(r.trackName || "") || ITUNES_JUNK_PERFORMER_RE.test(r.artistName)) continue;
+      const primCredit = String(r.artistName).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+      const pf = foldArtist(primCredit);
+      if (pf && pf.length >= 3 && wantQ.includes(pf)) {
+        detectedArtistName = primCredit;
+        if (r.artistId) detectedArtistId = String(r.artistId);
+        if (r.primaryGenreName && !detectedGenre) detectedGenre = String(r.primaryGenreName);
+        break;
+      }
+      const featCred = extractFeaturedArtist(r.trackName || "");
+      if (featCred) {
+        const fc = featCred.split(/\s*(?:,|&)\s*/)[0].trim();
+        const ff = foldArtist(fc);
+        const ffToks = ff.split(" ").filter((w) => w.length >= 4);
+        if (ff && (wantQ.includes(ff) || (ffToks.length > 0 && ffToks.some((tk) => wantQ.includes(tk))))) {
+          detectedArtistName = fc;
+          if (r.primaryGenreName && !detectedGenre) detectedGenre = String(r.primaryGenreName);
+          break;
+        }
+      }
+    }
+    if (!detectedArtistName && rawSongRows[0] && rawSongRows[0].artistName) {
+      detectedArtistName = String(rawSongRows[0].artistName).split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0].trim();
+      if (rawSongRows[0].artistId) detectedArtistId = String(rawSongRows[0].artistId);
+      if (rawSongRows[0].primaryGenreName && !detectedGenre) detectedGenre = String(rawSongRows[0].primaryGenreName);
+    }
+  }
+
+  // Stage 2: Expand with a broad selection of songs by the target artist + genuinely related vocal songs
+  if (includeExtra && Date.now() >= itunesRateLimitedUntil) {
+    const stage2Jobs = [];
+    const targetFoldCheck = foldArtist(detectedArtistName || intent.artistHint || "");
+    const haveArtistSongs = targetFoldCheck
+      ? rawSongRows.filter((r) => r && (artistMatchesHint(r.artistName, targetFoldCheck) || artistMatchesHint(extractFeaturedArtist(r.trackName), targetFoldCheck))).length
+      : 0;
+    if (detectedArtistId && haveArtistSongs < 30) {
+      stage2Jobs.push(fetchItunes(`https://itunes.apple.com/lookup?id=${encodeURIComponent(detectedArtistId)}&entity=song&limit=65${countryParam}`, 2400));
+    }
+    if (detectedArtistName && haveArtistSongs < 32) {
+      stage2Jobs.push(fetchSongsTerm(encodeURIComponent(detectedArtistName), 65));
+    }
+    if (detectedGenre && detectedArtistName && !/^(music|general)$/i.test(detectedGenre) && rawSongRows.length < 70) {
+      stage2Jobs.push(fetchSongsTerm(encodeURIComponent(`${detectedGenre} ${detectedArtistName}`), 40));
+    }
+    if (stage2Jobs.length > 0) {
+      const st2 = await Promise.allSettled(stage2Jobs);
+      for (const s of st2) {
+        if (s && s.status === "fulfilled" && s.value && Array.isArray(s.value.results)) {
+          rawSongRows.push(...s.value.results);
+        }
+      }
+    }
+  }
 
   const songs = [];
   const artists = [];
@@ -653,11 +895,9 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   const seenArt = new Set();
   const seenAlb = new Set();
 
-  const foldArtist = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-  const wantQ = foldArtist(query);
-
   const upsertArtist = (name, id, artwork) => {
     const cleanName = String(name || "").trim();
+    if (!cleanName || (!intent.wantsInstrumental && ITUNES_JUNK_PERFORMER_RE.test(cleanName))) return;
     const k = foldArtist(cleanName);
     if (!k) return;
     if (!seenArt.has(k)) {
@@ -685,51 +925,198 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
       upsertArtist(a.artistName, a.artistId || a.artistName, art);
     }
   }
-  if (songsR && songsR.status === "fulfilled") {
-    for (const t of (songsR.value && songsR.value.results) || []) {
-      if (!t.trackId) continue;
-      const art400 = String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
-      songs.push({
-        id: `apple:${t.trackId}`,
-        source: "apple",
-        title: t.trackName || "Song",
-        artist: t.artistName || "Artist",
-        album: t.collectionName || "",
-        duration: Math.round((t.trackTimeMillis || 0) / 1000),
-        artwork: art400,
-        genre: t.primaryGenreName || "",
-        year: t.releaseDate ? String(t.releaseDate).slice(0, 4) : "",
-        releaseDate: t.releaseDate || "",
-        previewUrl: "",
-        playQuery: `${t.trackName || ""} ${t.artistName || ""} official audio`.trim(),
-        trackId: t.trackId,
-        trackName: t.trackName || "Song",
-        artistName: t.artistName || "Artist",
-        collectionName: t.collectionName || "",
-        trackTimeMillis: t.trackTimeMillis || 0,
-        artworkUrl100: t.artworkUrl100 || "",
-      });
-      if (t.artistName) {
-        upsertArtist(t.artistName, t.artistId || t.artistName, art400);
-      }
-      if (t.collectionId && t.collectionName && !seenAlb.has(String(t.collectionId))) {
-        seenAlb.add(String(t.collectionId));
-        playlists.push({
-          id: `album:${t.collectionId}`,
-          kind: "playlist",
-          title: t.collectionName,
-          artist: t.artistName || "Apple Music",
-          artwork: art400,
-          source: "apple",
-          query: `${t.collectionName} ${t.artistName || ""}`.trim(),
-        });
+
+  const targetArtistFold = foldArtist(detectedArtistName || intent.artistHint || "");
+  const targetSongFold = intent.songFold || (() => {
+    if (!targetArtistFold) return wantQ;
+    const artToks = new Set(targetArtistFold.split(" ").filter(Boolean));
+    const rem = wantQ.split(" ").filter((w) => !artToks.has(w) && w !== "by").join(" ").trim();
+    return rem || wantQ;
+  })();
+
+  const seenTrackIds = new Set();
+  const seenCanonKey = new Set();
+  const scoredCandidates = [];
+
+  for (const t of rawSongRows) {
+    if (!t || !t.trackId || t.wrapperType === "artist" || t.wrapperType === "collection") continue;
+    if (seenTrackIds.has(t.trackId)) continue;
+    seenTrackIds.add(t.trackId);
+
+    const rawTitle = String(t.trackName || "Song").trim();
+    const rawArtist = String(t.artistName || "Artist").trim();
+    const rawAlbum = String(t.collectionName || "").trim();
+    const genreName = String(t.primaryGenreName || "").trim();
+    const durSec = Math.round((t.trackTimeMillis || 0) / 1000);
+    if (durSec > 0 && (durSec < 45 || durSec > 720)) continue;
+
+    // Prefer real vocal/singing songs and avoid unrelated instrumental/karaoke/tribute tracks
+    if (!intent.wantsInstrumental) {
+      if (ITUNES_UNRELATED_INSTRUMENTAL_RE.test(rawTitle) || ITUNES_UNRELATED_INSTRUMENTAL_RE.test(rawAlbum)) continue;
+      if (ITUNES_JUNK_PERFORMER_RE.test(rawArtist) || ITUNES_JUNK_PERFORMER_RE.test(rawAlbum)) continue;
+      if (/^(instrumental|classical|new age|spoken word|comedy|children's music|holiday)$/i.test(genreName) && (!targetArtistFold || !artistMatchesHint(rawArtist, targetArtistFold))) {
+        continue;
       }
     }
+
+    const art400 = String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+    if (t.artistName) {
+      upsertArtist(t.artistName, t.artistId || t.artistName, art400);
+    }
+    if (t.collectionId && t.collectionName && !seenAlb.has(String(t.collectionId))) {
+      seenAlb.add(String(t.collectionId));
+      playlists.push({
+        id: `album:${t.collectionId}`,
+        kind: "playlist",
+        title: t.collectionName,
+        artist: t.artistName || "Apple Music",
+        artwork: art400,
+        source: "apple",
+        query: `${t.collectionName} ${t.artistName || ""}`.trim(),
+      });
+    }
+
+    const coreTitle = stripDecorations(rawTitle) || rawTitle;
+    const titleFold = foldArtist(rawTitle);
+    const coreTitleFold = foldArtist(coreTitle);
+    const artistFoldVal = foldArtist(rawArtist);
+    const featCredit = extractFeaturedArtist(rawTitle);
+    const primCredit = rawArtist.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+    const combinedText = `${artistFoldVal} ${foldArtist(featCredit)} ${coreTitleFold}`;
+    const isRemixOrLive = /\b(remix|live|acoustic|sped\s*up|slowed|reverb|karaoke|instrumental|vip|dub|club\s*mix|extended)\b/i.test(rawTitle);
+    const canonKey = `${coreTitleFold}|${foldArtist(primCredit)}${isRemixOrLive ? `|${titleFold}` : ""}`;
+
+    let score = 0;
+    let bucket = "related";
+
+    const matchesTargetArtist = Boolean(
+      targetArtistFold &&
+      (artistMatchesHint(rawArtist, targetArtistFold) ||
+       artistMatchesHint(featCredit, targetArtistFold) ||
+       (intent.artistFold && (artistMatchesHint(rawArtist, intent.artistFold) || artistMatchesHint(featCredit, intent.artistFold))))
+    );
+    const matchesTargetTitleExact = Boolean(
+      targetSongFold &&
+      (coreTitleFold === targetSongFold || titleFold === targetSongFold)
+    );
+    const matchesTargetTitlePrefix = Boolean(
+      targetSongFold &&
+      targetSongFold.length >= 3 &&
+      (coreTitleFold.startsWith(targetSongFold + " ") ||
+       titleFold.startsWith(targetSongFold + " ") ||
+       (coreTitleFold.includes(targetSongFold) && Math.abs(coreTitleFold.length - targetSongFold.length) <= 12))
+    );
+
+    if (matchesTargetTitleExact && matchesTargetArtist) {
+      bucket = "exact_song";
+      score += 1000;
+      if (!isRemixOrLive) score += 250;
+      if (coreTitleFold === targetSongFold) score += 80;
+    } else if (matchesTargetTitlePrefix && matchesTargetArtist) {
+      bucket = "exact_song";
+      score += 820;
+      if (!isRemixOrLive) score += 160;
+    } else if (matchesTargetTitleExact && !intent.hasExplicitSplit) {
+      bucket = "exact_title";
+      score += 620;
+      if (!isRemixOrLive) score += 120;
+    } else if (matchesTargetArtist) {
+      bucket = "target_artist";
+      score += 480;
+      if (artistMatchesHint(primCredit, targetArtistFold || intent.artistFold)) score += 95;
+      if (!isRemixOrLive) score += 85;
+    } else if (matchesTargetTitleExact || matchesTargetTitlePrefix) {
+      bucket = "exact_title";
+      score += 410;
+      if (!isRemixOrLive) score += 70;
+    } else {
+      bucket = "related";
+      score += 200;
+      if (!isRemixOrLive) score += 45;
+    }
+
+    for (const tok of intent.allTokens) {
+      if (coreTitleFold.includes(tok)) score += 28;
+      if (combinedText.includes(tok)) score += 24;
+    }
+    if (detectedGenre && genreName && foldArtist(genreName) === foldArtist(detectedGenre)) {
+      score += 35;
+    }
+    const queryWantsRemix = /\b(remix|live|acoustic|slowed|sped\s*up)\b/i.test(cleanQ);
+    if (isRemixOrLive && !queryWantsRemix) {
+      score -= 180;
+    }
+
+    const songObj = {
+      id: `apple:${t.trackId}`,
+      source: "apple",
+      title: rawTitle,
+      artist: rawArtist,
+      album: rawAlbum,
+      duration: durSec,
+      artwork: art400,
+      genre: genreName,
+      year: t.releaseDate ? String(t.releaseDate).slice(0, 4) : "",
+      releaseDate: t.releaseDate || "",
+      previewUrl: "",
+      playQuery: `${rawTitle} ${rawArtist} official audio`.trim(),
+      trackId: t.trackId,
+      trackName: rawTitle,
+      artistName: rawArtist,
+      collectionName: rawAlbum,
+      trackTimeMillis: t.trackTimeMillis || 0,
+      artworkUrl100: t.artworkUrl100 || "",
+    };
+
+    scoredCandidates.push({ track: songObj, canonKey, bucket, score, isRemixOrLive });
+  }
+
+  scoredCandidates.sort((a, b) => b.score - a.score);
+  const uniqueCandidates = [];
+  for (const c of scoredCandidates) {
+    if (seenCanonKey.has(c.canonKey)) continue;
+    seenCanonKey.add(c.canonKey);
+    uniqueCandidates.push(c);
+  }
+
+  const exactSongs = uniqueCandidates.filter((c) => c.bucket === "exact_song");
+  const targetArtistSongs = uniqueCandidates.filter((c) => c.bucket === "target_artist");
+  const exactTitleSongs = uniqueCandidates.filter((c) => c.bucket === "exact_title");
+  const relatedSongs = uniqueCandidates.filter((c) => c.bucket === "related");
+
+  const pushOrdered = (item) => {
+    if (!item || songs.length >= maxSongs) return;
+    if (!songs.some((x) => x.id === item.track.id)) {
+      songs.push(item.track);
+    }
+  };
+
+  if (exactSongs.length > 0) {
+    pushOrdered(exactSongs[0]);
+    if (exactSongs[1] && !exactSongs[1].isRemixOrLive) {
+      pushOrdered(exactSongs[1]);
+    }
+  } else if (exactTitleSongs.length > 0) {
+    for (const et of exactTitleSongs.slice(0, 2)) pushOrdered(et);
+  }
+
+  let ai = 0;
+  let ti = exactSongs.length === 0 ? 2 : 0;
+  let ri = 0;
+  let exRest = exactSongs.length > 1 && !exactSongs[1].isRemixOrLive ? 2 : 1;
+  while (songs.length < maxSongs && (ai < targetArtistSongs.length || ti < exactTitleSongs.length || ri < relatedSongs.length || exRest < exactSongs.length)) {
+    if (ai < targetArtistSongs.length) pushOrdered(targetArtistSongs[ai++]);
+    if (ai < targetArtistSongs.length) pushOrdered(targetArtistSongs[ai++]);
+    if (intent.hasExplicitSplit && ai < targetArtistSongs.length) pushOrdered(targetArtistSongs[ai++]);
+    if (ti < exactTitleSongs.length) pushOrdered(exactTitleSongs[ti++]);
+    else if (exRest < exactSongs.length) pushOrdered(exactSongs[exRest++]);
+    if (ri < relatedSongs.length) pushOrdered(relatedSongs[ri++]);
+    if (!intent.hasExplicitSplit && ri < relatedSongs.length) pushOrdered(relatedSongs[ri++]);
   }
   // Secondary fallback if specific entity search returned empty
   if (!songs.length && Date.now() >= itunesRateLimitedUntil) {
     try {
-      const fb = await fetchItunes(`https://itunes.apple.com/search?term=${q}&media=music&limit=30`);
+      const fb = await fetchItunes(`https://itunes.apple.com/search?term=${qClean}&media=music&limit=50`);
       for (const t of (fb && fb.results) || []) {
         if (!t.trackId || !t.trackName) continue;
         const art400 = String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
@@ -762,7 +1149,7 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   // Tertiary studio catalog fallback when itunes.apple.com rate-limits the server IP
   if (!songs.length) {
     try {
-      const dzFb = await fetchJSON(`https://api.deezer.com/search?q=${q}&limit=30`, {}, 5000);
+      const dzFb = await fetchJSON(`https://api.deezer.com/search?q=${qClean}&limit=50`, {}, 5000);
       for (const d of (dzFb && dzFb.data) || []) {
         if (!d || !d.id || !d.title) continue;
         const aName = (d.artist && d.artist.name) || "Artist";
@@ -807,7 +1194,7 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
   // Quaternary YouTube Music catalog fallback when both iTunes and Deezer rate-limit datacenter IPs
   if (!songs.length) {
     try {
-      const ytFb = await searchYouTube(`${cleanQ} official audio`, country || "US", true);
+      const ytFb = await searchYouTube(`${intent.cleanQuery || cleanQ} official audio`, country || "US", true);
       if (Array.isArray(ytFb)) {
         for (const yt of ytFb) {
           if (!yt || !yt.title) continue;
@@ -838,17 +1225,17 @@ export async function itunesSearch(query, { includeExtra = true, country = "" } 
           if (aName && !/^(youtube|unknown|various artists)$/i.test(aName)) {
             upsertArtist(aName, aName, artUrl);
           }
-          if (songs.length >= 30) break;
+          if (songs.length >= 50) break;
         }
       }
     } catch {}
   }
-  if (artists.length > 1 && wantQ) {
+  if (artists.length > 1 && (wantQ || targetArtistFold)) {
     artists.sort((a, b) => {
       const na = foldArtist(a.name);
       const nb = foldArtist(b.name);
-      const exactA = na === wantQ ? 1 : 0;
-      const exactB = nb === wantQ ? 1 : 0;
+      const exactA = (targetArtistFold && na === targetArtistFold) ? 2 : na === wantQ ? 1 : 0;
+      const exactB = (targetArtistFold && nb === targetArtistFold) ? 2 : nb === wantQ ? 1 : 0;
       if (exactA !== exactB) return exactB - exactA;
       const prefA = na.startsWith(wantQ) ? 1 : 0;
       const prefB = nb.startsWith(wantQ) ? 1 : 0;
@@ -1191,17 +1578,33 @@ export async function audiusUserTracks(userId) {
 }
 
 export function parseLyricsHit(hit) {
-  if (!hit) return null;
+  if (!hit || hit.instrumental) return null;
   const synced = [];
   if (hit.syncedLyrics) {
-    for (const line of String(hit.syncedLyrics).split("\n")) {
-      const m = line.match(/\[(\d+):(\d+(?:\.\d+)?)\](.*)/);
-      if (m) synced.push({ t: Number(m[1]) * 60 + Number(m[2]), text: m[3].trim() });
+    for (const rawLine of String(hit.syncedLyrics).split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || /^\[(ti|ar|al|au|by|length|offset|re|ve):/i.test(line)) continue;
+      const tags = [...line.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)];
+      if (tags.length > 0) {
+        const cleanText = line
+          .replace(/\[\d+:\d+(?:\.\d+)?\]/g, "")
+          .replace(/<\d+:\d+(?:\.\d+)?>/g, "")
+          .replace(/\s{2,}/g, " ")
+          .trim();
+        for (const m of tags) {
+          const sec = Number(m[1]) * 60 + Number(m[2]);
+          if (Number.isFinite(sec) && sec >= 0) {
+            synced.push({ t: Number(sec.toFixed(2)), text: cleanText });
+          }
+        }
+      }
     }
+    synced.sort((a, b) => a.t - b.t);
   }
-  const lyrics = String(hit.plainLyrics || "").trim();
+  const plainFallback = synced.length ? synced.map((r) => r.text).filter(Boolean).join("\n") : "";
+  const lyrics = String(hit.plainLyrics || plainFallback || "").trim();
   if (!lyrics && !synced.length) return null;
-  return { lyrics, synced, title: hit.trackName, artist: hit.artistName };
+  return { lyrics, synced, title: hit.trackName, artist: hit.artistName, duration: Number(hit.duration) || 0 };
 }
 
 function normLyricToken(s) {
@@ -1213,48 +1616,79 @@ function normLyricToken(s) {
     .trim();
 }
 
-function pickBestLyricsHit(list, wantTitle, wantArtist, wantDur) {
+function pickBestLyricsHit(list, wantTitle, wantArtist, wantDur, allKnownArtists = []) {
   if (!Array.isArray(list) || !list.length) return null;
+  const stripParensLocal = (s) => String(s || "").replace(/\s*[\[(][^)\]]*[)\]]/g, " ").replace(/\s+/g, " ").trim();
   const wt = normLyricToken(wantTitle);
+  const wtCore = normLyricToken(stripParensLocal(wantTitle)) || wt;
   const wa = normLyricToken(wantArtist);
+  const knownArtTokens = Array.from(new Set([wa, ...(allKnownArtists || []).map(normLyricToken)].filter(Boolean)));
+  const wantIsAlt = /\b(slowed|sped\s*up|nightcore|remix|live|karaoke)\b/i.test(wantTitle);
   let best = null;
   let bestScore = -1;
   for (const item of list) {
+    if (!item || item.instrumental) continue;
     const parsed = parseLyricsHit(item);
     if (!parsed) continue;
     let score = 0;
-    if (parsed.synced && parsed.synced.length) score += 25;
-    if (parsed.lyrics) score += 10;
     const it = normLyricToken(item.trackName);
+    const itCore = normLyricToken(stripParensLocal(item.trackName)) || it;
     const ia = normLyricToken(item.artistName);
-    if (wt && it) {
-      if (it === wt) score += 40;
-      else if (it.startsWith(wt) || wt.startsWith(it)) score += 28;
-      else if (it.includes(wt) || wt.includes(it)) score += 18;
-    }
-    if (wa && ia) {
-      if (ia === wa) score += 35;
-      else if (ia.includes(wa) || wa.includes(ia)) score += 24;
+    if (wtCore && itCore) {
+      if (itCore === wtCore || it === wt) score += 65;
+      else if (itCore.startsWith(wtCore) || wtCore.startsWith(itCore)) score += 45;
+      else if (it.includes(wtCore) || wtCore.includes(itCore)) score += 28;
       else {
-        const waFirst = wa.split(" ")[0];
-        if (waFirst && waFirst.length > 2 && ia.includes(waFirst)) score += 12;
+        const wtWords = wtCore.split(" ").filter((w) => w.length >= 3);
+        const matchedWords = wtWords.filter((w) => itCore.includes(w));
+        if (wtWords.length > 0 && matchedWords.length >= Math.ceil(wtWords.length * 0.65)) {
+          score += 15;
+        } else {
+          continue;
+        }
       }
     }
-    if (wantDur > 0 && item.duration) {
-      const diff = Math.abs(Number(item.duration) - wantDur);
-      if (diff <= 3) score += 18;
-      else if (diff <= 10) score += 10;
-      else if (diff <= 25) score += 4;
+    if (knownArtTokens.length && ia) {
+      const exactArt = knownArtTokens.some((ka) => ia === ka || ia.includes(ka) || ka.includes(ia));
+      if (exactArt) {
+        score += 55;
+      } else {
+        const anyTok = knownArtTokens
+          .flatMap((ka) => ka.split(" ").filter((w) => w.length > 2))
+          .some((tok) => ia.includes(tok) || it.includes(tok));
+        if (anyTok) score += 22;
+        else score -= 45;
+      }
+    }
+    if (parsed.synced && parsed.synced.length >= 4) score += 85;
+    else if (parsed.synced && parsed.synced.length) score += 35;
+    if (parsed.lyrics) score += 10;
+
+    const itemIsAlt = /\b(slowed|sped\s*up|nightcore|remix|live|karaoke)\b/i.test(`${item.trackName || ""} ${item.albumName || ""}`);
+    if (itemIsAlt && !wantIsAlt) score -= 65;
+
+    const itemDur = Number(item.duration) || (parsed.synced.length ? parsed.synced[parsed.synced.length - 1].t + 6 : 0);
+    if (wantDur > 45 && itemDur > 0) {
+      const diff = Math.abs(itemDur - wantDur);
+      if (diff <= 3) score += 35;
+      else if (diff <= 8) score += 22;
+      else if (diff <= 18) score += 8;
+      else if (diff > 35) score -= 60;
     }
     if (score > bestScore) {
       bestScore = score;
       best = parsed;
     }
   }
-  return best;
+  return bestScore >= 65 ? best : null;
 }
 
 export async function lyricsFor(title, artist, duration) {
+  if (title && typeof title === "object") {
+    duration = title.duration ?? artist;
+    artist = title.artist ?? "";
+    title = title.title ?? title.track ?? "";
+  }
   const rawTitle = String(title || "").trim();
   const rawArtist = String(artist || "").trim();
   const t = tidyTitle(rawTitle);
@@ -1262,7 +1696,7 @@ export async function lyricsFor(title, artist, duration) {
   const dur = Math.max(0, Math.round(Number(duration) || 0));
 
   // Build candidate (track, artist) pairs to handle YouTube "Artist - Title",
-  // "Title - Artist", "Title | Movie", and parenthetical suffixes.
+  // "Title - Artist", "Title | Movie", collaborations, and parenthetical suffixes.
   const stripParens = (s) =>
     String(s || "")
       .replace(/\s*[\[(][^)\]]*[)\]]/g, " ")
@@ -1283,6 +1717,21 @@ export async function lyricsFor(title, artist, duration) {
     candidatePairs.push({ track: ct, artist: ca });
   };
 
+  // Extract individual collaborating artists (e.g. "DJ Snake, Justin Bieber" or "(feat. Justin Bieber)")
+  const collabArtists = rawArtist
+    .split(/\s*(?:,|&|\/|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b|\bx\b)\s*/i)
+    .map((x) => tidyArtist(x).trim())
+    .filter(Boolean);
+  const featMatch = rawTitle.match(/(?:feat\.?|ft\.?|featuring|with)\s+([^)\]-]+)/i);
+  if (featMatch) {
+    for (const part of featMatch[1].split(/\s*(?:,|&)\s*/)) {
+      const ca = tidyArtist(part).trim();
+      if (ca && !collabArtists.some((x) => x.toLowerCase() === ca.toLowerCase())) {
+        collabArtists.push(ca);
+      }
+    }
+  }
+
   // If title contains " - " / " – " / " — " (common in YouTube videos like "Artist - Song")
   const dashParts = t.split(/\s+[-–—]\s+/).map((x) => x.trim()).filter(Boolean);
   if (dashParts.length >= 2) {
@@ -1300,6 +1749,9 @@ export async function lyricsFor(title, artist, duration) {
 
   addPair(t, a);
   if (coreTitle && coreTitle !== t) addPair(coreTitle, a);
+  for (const ca of collabArtists.slice(0, 3)) {
+    addPair(coreTitle || t, ca);
+  }
   if (a) {
     // Also strip leading "Artist - " if still attached
     const escapedA = a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1325,7 +1777,7 @@ export async function lyricsFor(title, artist, duration) {
 
   const primary = candidatePairs[0] || { track: coreTitle || t, artist: a };
 
-  for (const pair of candidatePairs.slice(0, 4)) {
+  for (const pair of candidatePairs.slice(0, 5)) {
     if (pair.artist && pair.track) {
       if (dur > 0) {
         const getWithDur = new URLSearchParams({
@@ -1357,15 +1809,23 @@ export async function lyricsFor(title, artist, duration) {
     pushTry(`https://lrclib.net/api/search?q=${encodeURIComponent(primary.track)}`);
   }
 
+  let bestPlainFallback = null;
+
   for (const { url, headers } of tries) {
     try {
       const data = await fetchJSON(url, { headers }, 7500);
       if (Array.isArray(data)) {
-        const best = pickBestLyricsHit(data, primary.track, primary.artist, dur);
-        if (best) return best;
-      } else {
-        const parsed = parseLyricsHit(data);
-        if (parsed) return parsed;
+        const best = pickBestLyricsHit(data, primary.track, primary.artist || rawArtist, dur, collabArtists);
+        if (best) {
+          if (best.synced && best.synced.length) return best;
+          if (!bestPlainFallback && best.lyrics) bestPlainFallback = best;
+        }
+      } else if (data && typeof data === "object") {
+        const bestSingle = pickBestLyricsHit([data], primary.track, primary.artist || rawArtist, dur, collabArtists) || parseLyricsHit(data);
+        if (bestSingle) {
+          if (bestSingle.synced && bestSingle.synced.length) return bestSingle;
+          if (!bestPlainFallback && bestSingle.lyrics) bestPlainFallback = bestSingle;
+        }
       }
     } catch {}
   }
@@ -1391,9 +1851,12 @@ export async function lyricsFor(title, artist, duration) {
           try {
             const data = await fetchJSON(u, { headers: lrcHeaders }, 7000);
             const best = Array.isArray(data)
-              ? pickBestLyricsHit(data, canonT, canonA, topSong.duration || dur)
+              ? pickBestLyricsHit(data, canonT, canonA, topSong.duration || dur, [canonA, ...collabArtists])
               : parseLyricsHit(data);
-            if (best) return best;
+            if (best) {
+              if (best.synced && best.synced.length) return best;
+              if (!bestPlainFallback && best.lyrics) bestPlainFallback = best;
+            }
           } catch {}
         }
         if (canonA && canonT) {
@@ -1402,6 +1865,8 @@ export async function lyricsFor(title, artist, duration) {
       }
     } catch {}
   }
+
+  if (bestPlainFallback) return bestPlainFallback;
 
   // Stage 3: Fallback to lyrics.ovh for plain lyrics when LRCLIB doesn't have the song
   for (const pair of candidatePairs.slice(0, 3)) {

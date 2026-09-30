@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.9";
+  const APP_VERSION = "1.9.0";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -9331,16 +9331,40 @@
   function synthesizeSyncedLyrics(plainText, durSec) {
     const raw = String(plainText || "").trim();
     if (!raw) return [];
-    const lines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    if (!lines.length) return [];
+    const rawLines = raw.split(/\r?\n/);
+    const entries = [];
+    let pendingStanzaBreak = false;
+    for (const rl of rawLines) {
+      const s = rl.trim();
+      if (!s) {
+        if (entries.length > 0) pendingStanzaBreak = true;
+        continue;
+      }
+      if (/^\[(verse|chorus|bridge|intro|outro|pre-chorus|hook|instrumental|refrain|post-chorus).*?\]$/i.test(s)) {
+        if (entries.length > 0) pendingStanzaBreak = true;
+        continue;
+      }
+      const words = s.split(/\s+/).filter(Boolean).length;
+      const chars = s.length;
+      const weight = Math.max(1.15, Math.min(4.2, 0.7 + words * 0.26 + chars * 0.014));
+      const pauseBefore = pendingStanzaBreak ? 0.95 : 0;
+      pendingStanzaBreak = false;
+      entries.push({ text: s, weight, pauseBefore });
+    }
+    if (!entries.length) return [];
     const totalDur = Math.max(30, Number(durSec) || Number(duration()) || 180);
-    const startPad = Math.min(4, totalDur * 0.03);
-    const usableSpan = Math.max(10, totalDur - startPad - Math.min(6, totalDur * 0.05));
-    const step = lines.length > 1 ? usableSpan / lines.length : usableSpan;
-    return lines.map((text, idx) => ({
-      t: Number((startPad + idx * step).toFixed(2)),
-      text,
-    }));
+    const startPad = Math.min(7.5, Math.max(2.8, totalDur * 0.048));
+    const endPad = Math.min(9.0, Math.max(4.0, totalDur * 0.06));
+    const usableSpan = Math.max(12, totalDur - startPad - endPad);
+    const totalWeight = entries.reduce((acc, e) => acc + e.weight + e.pauseBefore, 0) || 1;
+    const secPerUnit = usableSpan / totalWeight;
+    let cursor = startPad;
+    return entries.map((e) => {
+      cursor += e.pauseBefore * secPerUnit;
+      const lineTime = Number(cursor.toFixed(2));
+      cursor += e.weight * secPerUnit;
+      return { t: lineTime, text: e.text };
+    });
   }
 
   function formatSyncedLrc(synced, plainText = "", trackMeta = null) {
@@ -9381,20 +9405,33 @@
     if (!str) return null;
     const synced = [];
     const plainLines = [];
+    let offsetSec = 0;
     for (const rawLine of str.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line) continue;
-      if (/^\[(ti|ar|al|au|by|length|offset|re|ve):/i.test(line)) continue;
-      const m = line.match(/^\[(\d+):(\d+(?:\.\d+)?)\](.*)$/);
-      if (m) {
-        const t = Number(m[1]) * 60 + Number(m[2]);
-        const text = m[3].trim();
-        synced.push({ t: Number(t.toFixed(2)), text });
+      const offMatch = line.match(/^\[offset:\s*([+-]?\d+)\s*\]$/i);
+      if (offMatch) {
+        offsetSec = (Number(offMatch[1]) || 0) / 1000;
+        continue;
+      }
+      if (/^\[(ti|ar|al|au|by|length|re|ve):/i.test(line)) continue;
+      const tags = [...line.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)];
+      if (tags.length > 0) {
+        const text = line
+          .replace(/\[\d+:\d+(?:\.\d+)?\]/g, "")
+          .replace(/<\d+:\d+(?:\.\d+)?>/g, "")
+          .replace(/\s{2,}/g, " ")
+          .trim();
+        for (const m of tags) {
+          const t = Math.max(0, Number(m[1]) * 60 + Number(m[2]) - offsetSec);
+          synced.push({ t: Number(t.toFixed(2)), text });
+        }
         if (text) plainLines.push(text);
       } else {
         plainLines.push(line);
       }
     }
+    synced.sort((a, b) => a.t - b.t);
     const lyrics = plainLines.join("\n").trim();
     if (!synced.length && !lyrics) return null;
     return { lyrics, synced };
@@ -9756,17 +9793,18 @@
   }
 
   function parseBrowserLyricsHit(hit) {
-    if (!hit) return null;
+    if (!hit || hit.instrumental) return null;
     const synced = [];
     if (hit.syncedLyrics) {
-      for (const line of String(hit.syncedLyrics).split("\n")) {
-        const m = line.match(/\[(\d+):(\d+(?:\.\d+)?)\](.*)/);
-        if (m) synced.push({ t: Number(m[1]) * 60 + Number(m[2]), text: m[3].trim() });
+      const parsedLrc = parseLrcText(hit.syncedLyrics);
+      if (parsedLrc && Array.isArray(parsedLrc.synced) && parsedLrc.synced.length) {
+        synced.push(...parsedLrc.synced);
       }
     }
-    const lyrics = String(hit.plainLyrics || "").trim();
+    const plainFromSynced = synced.length ? synced.map((r) => r.text).filter(Boolean).join("\n") : "";
+    const lyrics = String(hit.plainLyrics || plainFromSynced || "").trim();
     if (!lyrics && !synced.length) return null;
-    return { lyrics, synced };
+    return { lyrics, synced, duration: Number(hit.duration) || 0 };
   }
 
   function cleanLyricsMeta(t) {
@@ -9781,18 +9819,33 @@
       .replace(/\s{2,}/g, " ")
       .trim() || rawTitle;
 
-    let cleanArtist = rawArtist
+    const rawArtistBase = rawArtist
       .split("·")[0]
       .split("|")[0]
       .replace(/\s*-\s*Topic$/i, "")
       .replace(/\bVEVO\b/gi, "")
       .replace(/\s*\b(official|music|channel|records|recordings|entertainment)\b$/i, "")
-      .replace(/\s*\b(feat\.?|ft\.?|with|x|&|,)\s+.*$/i, "")
       .trim();
 
-    if (/^(youtube|various artists|unknown|unknown artist|topic|t-series|zee music company|sony music india|yash raj films|yrf|saregama|tips official|speed records|desi melodies)$/i.test(cleanArtist)) {
-      cleanArtist = "";
+    const isGenericLabel = (s) =>
+      /^(youtube|various artists|unknown|unknown artist|topic|t-series|zee music company|sony music india|yash raj films|yrf|saregama|tips official|speed records|desi melodies)$/i.test(String(s || "").trim());
+
+    const allArtists = rawArtistBase
+      .split(/\s*(?:,|&|\/|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b|\bx\b)\s*/i)
+      .map((s) => s.trim())
+      .filter((s) => s && !isGenericLabel(s));
+
+    const featInTitle = rawTitle.match(/(?:feat\.?|ft\.?|featuring|with)\s+([^)\]-]+)/i);
+    if (featInTitle) {
+      for (const fp of featInTitle[1].split(/\s*(?:,|&)\s*/)) {
+        const fc = fp.trim();
+        if (fc && !isGenericLabel(fc) && !allArtists.some((a) => a.toLowerCase() === fc.toLowerCase())) {
+          allArtists.push(fc);
+        }
+      }
     }
+
+    let cleanArtist = allArtists[0] || "";
 
     // If title is "Artist - Song Title" (common on YouTube), extract both candidates
     const dashParts = cleanTitle.split(/\s+[-–—]\s+/).map((s) => s.trim()).filter(Boolean);
@@ -9803,14 +9856,76 @@
       const right = dashParts.slice(1).join(" - ");
       if (!cleanArtist || left.toLowerCase() === cleanArtist.toLowerCase() || cleanArtist.toLowerCase().includes(left.toLowerCase())) {
         cleanTitle = right;
-        if (!cleanArtist) cleanArtist = left;
+        if (!cleanArtist && !isGenericLabel(left)) {
+          cleanArtist = left;
+          if (!allArtists.length) allArtists.push(left);
+        }
       } else {
         altTitle = right;
         altArtist = left;
+        if (!isGenericLabel(left) && !allArtists.some((a) => a.toLowerCase() === left.toLowerCase())) {
+          allArtists.push(left);
+        }
       }
     }
     const coreTitle = cleanTitle.replace(/\s*[\[(][^)\]]*[)\]]/g, " ").replace(/\s{2,}/g, " ").trim() || cleanTitle;
-    return { cleanTitle, coreTitle, cleanArtist, altTitle, altArtist };
+    return { cleanTitle, coreTitle, cleanArtist, altTitle, altArtist, allArtists };
+  }
+
+  function pickBestBrowserLyricsHit(rows, meta, dur) {
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const fold = (s) =>
+      String(s || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9\u0900-\u0D7F\u0E00-\u0E7F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0600-\u06FF\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const wantT = fold(meta.coreTitle || meta.cleanTitle || "");
+    const wantArts = ((meta.allArtists && meta.allArtists.length) ? meta.allArtists : [meta.cleanArtist]).map(fold).filter(Boolean);
+    const wantIsAlt = /\b(slowed|sped\s*up|nightcore|remix|live|karaoke)\b/i.test(meta.cleanTitle || "");
+    let best = null;
+    let bestScore = -Infinity;
+    for (const item of rows) {
+      const parsed = parseBrowserLyricsHit(item);
+      if (!parsed) continue;
+      let sc = 0;
+      if (parsed.synced && parsed.synced.length >= 4) sc += 120;
+      else if (parsed.lyrics) sc += 20;
+      const it = fold(item.trackName || item.name || "");
+      const itCore = fold(String(item.trackName || item.name || "").replace(/\s*[\[(][^)\]]*[)\]]/g, " ")) || it;
+      const ia = fold(item.artistName || "");
+      if (wantT && itCore) {
+        if (itCore === wantT || it === wantT) sc += 80;
+        else if (itCore.startsWith(wantT) || wantT.startsWith(itCore)) sc += 55;
+        else if (it.includes(wantT) || wantT.includes(itCore)) sc += 30;
+        else {
+          const wWords = wantT.split(" ").filter((w) => w.length >= 3);
+          const mWords = wWords.filter((w) => itCore.includes(w));
+          if (wWords.length > 0 && mWords.length >= Math.ceil(wWords.length * 0.65)) sc += 15;
+          else continue;
+        }
+      }
+      if (wantArts.length && ia) {
+        if (wantArts.some((wa) => ia === wa || ia.includes(wa) || wa.includes(ia))) sc += 70;
+        else sc -= 35;
+      }
+      const itemIsAlt = /\b(slowed|sped\s*up|nightcore|remix|live|karaoke)\b/i.test(`${item.trackName || ""} ${item.albumName || ""}`);
+      if (itemIsAlt && !wantIsAlt) sc -= 110;
+      const itemDur = Number(item.duration) || (parsed.synced.length ? parsed.synced[parsed.synced.length - 1].t + 6 : 0);
+      if (dur > 45 && itemDur > 0) {
+        const diff = Math.abs(itemDur - dur);
+        if (diff <= 4) sc += 55;
+        else if (diff <= 10) sc += 30;
+        else if (diff > 35) sc -= 90;
+      }
+      if (sc > bestScore) {
+        bestScore = sc;
+        best = parsed;
+      }
+    }
+    return bestScore >= 20 ? best : null;
   }
 
   async function fetchLyricsBrowserFallback(meta, dur) {
@@ -9825,6 +9940,11 @@
     };
     addP(meta.coreTitle, meta.cleanArtist);
     addP(meta.cleanTitle, meta.cleanArtist);
+    if (Array.isArray(meta.allArtists)) {
+      for (const ca of meta.allArtists.slice(1, 3)) {
+        addP(meta.coreTitle, ca);
+      }
+    }
     if (meta.altTitle) addP(meta.altTitle, meta.altArtist);
 
     const urls = [];
@@ -9843,6 +9963,7 @@
       urls.push(`https://lrclib.net/api/search?q=${encodeURIComponent(meta.coreTitle)}`);
     }
 
+    let bestPlain = null;
     for (const u of urls) {
       try {
         const res = await fetch(u, {
@@ -9852,15 +9973,22 @@
         if (!res.ok) continue;
         const data = await res.json();
         if (Array.isArray(data)) {
-          const hit = data.find((x) => x && x.syncedLyrics) || data.find((x) => x && x.plainLyrics);
-          const parsed = parseBrowserLyricsHit(hit);
-          if (parsed) return parsed;
+          const picked = pickBestBrowserLyricsHit(data, meta, dur);
+          if (picked) {
+            if (picked.synced && picked.synced.length) return picked;
+            if (!bestPlain && picked.lyrics) bestPlain = picked;
+          }
         } else {
           const parsed = parseBrowserLyricsHit(data);
-          if (parsed) return parsed;
+          if (parsed) {
+            if (parsed.synced && parsed.synced.length) return parsed;
+            if (!bestPlain && parsed.lyrics) bestPlain = parsed;
+          }
         }
       } catch {}
     }
+
+    if (bestPlain) return bestPlain;
 
     for (const p of pairs) {
       if (!p.a || !p.t) continue;
@@ -9890,8 +10018,12 @@
     }
     const key = lyricsKey(t);
     if (state.lyrics && state.lyrics.key === key && (state.lyrics.lyrics || (state.lyrics.synced && state.lyrics.synced.length))) {
-      if (state.view === "now") paintLyricsBox();
-      return;
+      lyActive = -1;
+      if (state.view === "now") paintLyricsBox() || render();
+      highlightLyric(position(), true);
+      if (Array.isArray(state.lyrics.synced) && state.lyrics.synced.length > 0 && !state.lyrics._synthesized) {
+        return;
+      }
     }
     if (t._fromNativeAppCache) {
       const nc = getNativeAppAudioCache(t);
@@ -9906,6 +10038,7 @@
           syncedRows = synthesizeSyncedLyrics(cachedLyr.lyrics, effDur);
           isSynth = true;
         }
+        lyActive = -1;
         state.lyrics = {
           lyrics: cachedLyr.lyrics || "",
           synced: syncedRows,
@@ -9922,8 +10055,10 @@
     }
     const gen = ++lyricsGen;
     lyActive = -1;
-    state.lyrics = { key, lyrics: "", synced: [] };
-    const dur = Math.round(Number(t.duration || duration() || 0)) || 0;
+    if (!state.lyrics || state.lyrics.key !== key) {
+      state.lyrics = { key, lyrics: "", synced: [] };
+    }
+    const dur = Math.round(Number(duration() || t.duration || 0)) || 0;
     const isNetworkOff = Boolean(
       state.offlineMode ||
       state.isNetworkOffline ||
@@ -9936,16 +10071,17 @@
     if (cached && ((Array.isArray(cached.synced) && cached.synced.length) || cached.lyrics)) {
       let syncedRows = Array.isArray(cached.synced) ? cached.synced : [];
       let isSynth = Boolean(cached._synthesized);
+      const effDur = Math.round(Number(duration() || dur || 180));
       if ((!syncedRows.length || isSynth) && cached.lyrics) {
-        const effDur = dur || Math.round(Number(duration() || 180));
         syncedRows = synthesizeSyncedLyrics(cached.lyrics, effDur);
         isSynth = true;
       }
+      lyActive = -1;
       state.lyrics = {
         lyrics: cached.lyrics || "",
         synced: syncedRows,
         _synthesized: isSynth,
-        _syncDur: dur || Math.round(Number(duration() || 180)),
+        _syncDur: effDur,
         key,
       };
       if (state.view === "now") paintLyricsBox() || render();
@@ -9973,23 +10109,26 @@
     } catch {
       if (gen !== lyricsGen) return;
     }
-    // If primary call came back empty and we have an alternate title/artist split, try that on server too
-    if (!found && meta.altTitle) {
+    // If primary call came back without synced lyrics and we have an alternate title/artist or collaborating artist, try that too
+    if ((!found || !found.synced || !found.synced.length) && meta.altTitle) {
       try {
         const data2 = await api(
           `/api/lyrics?title=${encodeURIComponent(meta.altTitle)}&artist=${encodeURIComponent(meta.altArtist)}${dur ? `&duration=${dur}` : ""}`,
           10000
         );
         if (gen !== lyricsGen) return;
-        if (data2 && (data2.lyrics || (Array.isArray(data2.synced) && data2.synced.length))) {
+        if (data2 && ((Array.isArray(data2.synced) && data2.synced.length) || (!found && data2.lyrics))) {
           found = { lyrics: data2.lyrics || "", synced: data2.synced || [] };
         }
       } catch {}
     }
-    // Client-side direct fallback (LRCLIB + lyrics.ovh) if server returned empty or timed out
-    if (!found) {
+    // Client-side direct fallback (LRCLIB + lyrics.ovh) if server returned empty or had no synced timestamps
+    if (!found || !found.synced || !found.synced.length) {
       try {
-        found = await fetchLyricsBrowserFallback(meta, dur);
+        const fb = await fetchLyricsBrowserFallback(meta, Math.round(Number(duration() || dur || 0)));
+        if (fb && ((Array.isArray(fb.synced) && fb.synced.length) || (!found && fb.lyrics))) {
+          found = fb;
+        }
       } catch {}
       if (gen !== lyricsGen) return;
     }
@@ -9998,12 +10137,13 @@
     }
     let finalSynced = (found && Array.isArray(found.synced)) ? found.synced : [];
     let isSynth = Boolean(found && found._synthesized);
-    const finalPlain = (found && found.lyrics) || "";
+    const finalPlain = (found && found.lyrics) || (finalSynced.length ? finalSynced.map((r) => r.text).filter(Boolean).join("\n") : "");
     const effDur = Math.round(Number(duration() || t.duration || dur || 180));
     if (!finalSynced.length && finalPlain) {
       finalSynced = synthesizeSyncedLyrics(finalPlain, effDur);
       isSynth = true;
     }
+    lyActive = -1;
     state.lyrics = {
       lyrics: finalPlain,
       synced: finalSynced,
@@ -10024,7 +10164,7 @@
   function highlightLyric(p, forceScroll) {
     if (!state.lyrics) return;
     const effDur = Math.round(Number(duration() || (current() && current().duration) || 0));
-    if (state.lyrics.lyrics && (!Array.isArray(state.lyrics.synced) || !state.lyrics.synced.length || (state.lyrics._synthesized && effDur > 15 && Math.abs((state.lyrics._syncDur || 0) - effDur) > 3))) {
+    if (state.lyrics.lyrics && (!Array.isArray(state.lyrics.synced) || !state.lyrics.synced.length || (state.lyrics._synthesized && effDur > 15 && Math.abs((state.lyrics._syncDur || 0) - effDur) > 2))) {
       const useDur = effDur > 15 ? effDur : 180;
       state.lyrics.synced = synthesizeSyncedLyrics(state.lyrics.lyrics, useDur);
       state.lyrics._synthesized = true;
@@ -10045,10 +10185,11 @@
       lines = box.querySelectorAll("[data-ly]");
     }
     if (!lines.length || !state.lyrics.synced || !state.lyrics.synced.length) return;
+    const syncP = Math.max(0, (Number(p) || 0) + 0.22);
     let active = -1;
     const rows = state.lyrics.synced;
     for (let i = 0; i < rows.length; i++) {
-      if (p >= (Number(rows[i].t) || 0)) active = i;
+      if (syncP >= (Number(rows[i].t) || 0)) active = i;
     }
     const changed = active !== lyActive;
     if (!changed && !forceScroll) return;
@@ -10062,16 +10203,34 @@
     lyProg = true;
     if (box) {
       const scrollBehavior = isBatterySaver() ? "auto" : "smooth";
-      try {
-        on.scrollIntoView({ behavior: scrollBehavior, block: "center", inline: "nearest" });
-      } catch {
-        const top = on.offsetTop - (box.clientHeight / 2) + (on.clientHeight / 2);
-        box.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior });
+      const boxH = Number(box.clientHeight) || 0;
+      if (boxH > 0 && typeof box.scrollTo === "function" && typeof on.offsetTop === "number") {
+        const top = on.offsetTop - (boxH * 0.42) + ((Number(on.clientHeight) || 28) / 2);
+        try {
+          box.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior });
+        } catch {
+          box.scrollTop = Math.max(0, top);
+        }
+      } else {
+        try {
+          on.scrollIntoView({ behavior: scrollBehavior, block: "center", inline: "nearest" });
+        } catch {
+          const top = on.offsetTop - (box.clientHeight / 2) + (on.clientHeight / 2);
+          box.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior });
+        }
       }
     }
     clearTimeout(highlightLyric._t);
     highlightLyric._t = setTimeout(() => { lyProg = false; }, 360);
   }
+
+  setInterval(() => {
+    if (!state.playing || !state.lyrics || !Array.isArray(state.lyrics.synced) || !state.lyrics.synced.length) return;
+    if (typeof document !== "undefined" && document.hidden) return;
+    if (state.view === "now" || (typeof document !== "undefined" && document.getElementById("lyScroll"))) {
+      highlightLyric(position(), false);
+    }
+  }, 180);
 
   function applySongTheme(hue) {
     if (isSkinTheme()) return;
@@ -12034,6 +12193,16 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.9.0",
+      title: "Muchi 1.9.0",
+      notes: [
+        "Accurate synced lyrics for all songs in the native app with 180ms real-time lyric tracking and collaborating artist lookup.",
+        "Smarter iTunes & Deezer search intelligence returning 40–80 curated vocal songs with exact song first and broad artist catalog picks.",
+        "Fixed Settings → Legal & Privacy back navigation so closing Privacy Policy or Terms of Service returns directly to Settings without reloading.",
+        "Refined native tactile press and click feedback across all buttons, cards, and controls.",
+      ],
+    },
+    {
       ver: "1.8.9",
       title: "Muchi 1.8.9",
       notes: [
@@ -12202,6 +12371,140 @@
     });
     $("mCancel").onclick = () => hideModal();
     modal.onclick = (e) => { if (e.target === modal) hideModal(); };
+  }
+
+  function legalDocumentBody(kind) {
+    if (kind === "terms") {
+      return `
+        <div class="wn-release">
+          <div class="wn-ver">Last updated: September 29, 2026</div>
+          <p style="margin:6px 0 10px;opacity:.9">These Terms of Service govern your use of the Muchi website, progressive web app, mobile application, and related services.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">1. Agreement</div>
+          <p style="margin:6px 0">By accessing or using Muchi, you agree to these Terms of Service and the <a href="/privacy.html" data-legal="privacy">Muchi Privacy Policy</a>. If you do not agree, do not use Muchi.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">2. The service</div>
+          <p style="margin:6px 0">Muchi is a music discovery and playback application. Features may include search, music metadata, playback, lyrics, radio, local playlists, queue controls, downloads where supported, optional Google sign-in, and optional YouTube connection.</p>
+          <p style="margin:6px 0">Features and provider availability may vary by country, device, account, music provider, copyright restrictions, or provider API availability.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">3. Eligibility and accounts</div>
+          <p style="margin:6px 0">You must be old enough to use the service under the laws applicable to you. You are responsible for the accuracy of information you provide and for protecting access to your Google account and Muchi session.</p>
+          <p style="margin:6px 0">Google sign-in identifies your Muchi account. You do not give Muchi your Google password. You may use Muchi without connecting YouTube, but some YouTube Library features require a separate authorization.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">4. Google and YouTube services</div>
+          <p style="margin:6px 0">Google and YouTube are third-party services. If you choose to connect YouTube, you authorize Muchi to use the requested YouTube permissions for the features shown to you. Muchi only performs likes, ratings, playlist additions, or other account actions after your request.</p>
+          <p style="margin:6px 0">Your use of YouTube is also subject to Google's and YouTube's own terms, policies, and privacy practices. Muchi is not Google, YouTube, or a Google product and is not affiliated with Google or YouTube.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">5. Music and third-party content</div>
+          <p style="margin:6px 0">Music, artwork, lyrics, radio streams, metadata, and other content may be supplied by third-party providers. Muchi does not guarantee that any particular song, stream, lyric, artist, album, or provider result will remain available or accurate.</p>
+          <p style="margin:6px 0">You are responsible for using third-party content lawfully and respecting the terms and rights of the applicable provider and rights holder.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">6. Acceptable use</div>
+          <ul class="wn-list">
+            <li>Do not use Muchi to violate law, copyright, privacy, or the terms of a music provider.</li>
+            <li>Do not attempt to bypass authentication, rate limits, security controls, or provider restrictions.</li>
+            <li>Do not use Muchi to distribute malware, spam, abuse, harassment, or deceptive content.</li>
+            <li>Do not scrape, overload, reverse engineer, or interfere with Muchi or its infrastructure.</li>
+            <li>Do not use another person's Google or YouTube account without permission.</li>
+          </ul>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">7. Your content and feedback</div>
+          <p style="margin:6px 0">You retain rights to content you submit to Muchi. You grant Muchi only the limited permission needed to process that content to provide the feature you requested.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">8. Availability, disclaimers &amp; limitation of liability</div>
+          <p style="margin:6px 0">To the maximum extent permitted by law, Muchi is provided "as is" and "as available." Mochi and Muchi will not be liable for indirect, incidental, special, consequential, exemplary, or loss-of-data damages arising from or related to your use of Muchi or third-party services.</p>
+        </div>
+        <div class="wn-release">
+          <div class="wn-ver">9. Contact</div>
+          <p style="margin:6px 0">Questions about these Terms can be sent to <a href="mailto:twiarimascord@gmail.com">twiarimascord@gmail.com</a>.</p>
+        </div>`;
+    }
+    return `
+      <div class="wn-release">
+        <div class="wn-ver">Last updated: September 29, 2026</div>
+        <p style="margin:6px 0 10px;opacity:.9">This Privacy Policy explains how Muchi collects, uses, stores, and shares information when you use the Muchi website, progressive web app, or Muchi mobile application.</p>
+      </div>
+      <div class="wn-release">
+        <div class="wn-ver">1. Who operates Muchi</div>
+        <p style="margin:6px 0">Muchi is operated by <strong>Mochi</strong>. Questions about privacy can be sent to <a href="mailto:twiarimascord@gmail.com">twiarimascord@gmail.com</a>.</p>
+      </div>
+      <div class="wn-release">
+        <div class="wn-ver">2. Information we collect</div>
+        <ul class="wn-list">
+          <li><strong>Google account information:</strong> your Google account identifier, email address, name, and profile image received during Google sign-in. Muchi does not receive or store your Google password.</li>
+          <li><strong>YouTube information (only after you choose Connect YouTube):</strong> liked-video information, playlist information, and identifiers needed to perform a YouTube action that you request.</li>
+          <li><strong>Muchi library and playback information:</strong> local playlists, liked tracks, recent tracks, queue information, preferences, downloads, and playback settings stored on your device or synced when signed in.</li>
+          <li><strong>Search and music requests:</strong> searches, song identifiers, artist names, lyrics requests, radio requests, and related music requests needed to provide the requested feature.</li>
+        </ul>
+      </div>
+      <div class="wn-release">
+        <div class="wn-ver">3. How we use information</div>
+        <ul class="wn-list">
+          <li>To create and maintain your Muchi account and session.</li>
+          <li>To provide playback, search, lyrics, radio, library, playlist, and discovery features.</li>
+          <li>To show your YouTube liked videos and playlists after you separately authorize YouTube.</li>
+          <li>To protect the service, prevent abuse, diagnose errors, and maintain reliability.</li>
+        </ul>
+      </div>
+      <div class="wn-release">
+        <div class="wn-ver">4. Google and YouTube data</div>
+        <p style="margin:6px 0">Muchi's use and transfer of information received from Google APIs complies with the Google API Services User Data Policy, including the Limited Use requirements. Muchi does not sell Google or YouTube data or use it for advertising.</p>
+      </div>
+      <div class="wn-release">
+        <div class="wn-ver">5. Storage, retention &amp; your choices</div>
+        <p style="margin:6px 0">You may use Muchi without connecting YouTube, disconnect YouTube from Settings at any time, sign out, or clear local device storage. You may request access, correction, or deletion of personal information by contacting <a href="mailto:twiarimascord@gmail.com">twiarimascord@gmail.com</a>.</p>
+      </div>`;
+  }
+
+  function openLegalDocument(kind = "privacy") {
+    const isTerms = kind === "terms";
+    const title = isTerms ? "Muchi Terms of Service" : "Muchi Privacy Policy";
+    const otherKind = isTerms ? "privacy" : "terms";
+    const otherLabel = isTerms ? "Privacy Policy" : "Terms of Service";
+    const modal = $("modal");
+    const card = $("modalCard");
+    if (!modal || !card) return;
+    clearTimeout(hideModal._t);
+    modal.classList.add("sheet");
+    card.innerHTML = `<div class="sheet-handle" aria-hidden="true"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">
+        <h2 style="margin:0">${escapeHTML(title)}</h2>
+        <button class="icon-btn" id="legalBackBtn" type="button" aria-label="Back to Settings"><span class="material-symbols-outlined">close</span></button>
+      </div>
+      <div class="wn-scroll" id="legalScrollBody">${legalDocumentBody(isTerms ? "terms" : "privacy")}</div>
+      <div class="modal-actions" style="justify-content:space-between;align-items:center;margin-top:12px">
+        <button class="chip-btn" id="legalSwitchBtn" type="button" data-legal="${otherKind}">${escapeHTML(otherLabel)}</button>
+        <button class="btn ghost" id="mCancel" type="button">Back to Settings</button>
+      </div>`;
+    showEl(modal, true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => modal.classList.add("in"));
+    });
+    const closeLegal = () => hideModal();
+    if ($("mCancel")) $("mCancel").onclick = closeLegal;
+    if ($("legalBackBtn")) $("legalBackBtn").onclick = closeLegal;
+    if ($("legalSwitchBtn")) {
+      $("legalSwitchBtn").onclick = (e) => {
+        e.preventDefault();
+        openLegalDocument(otherKind);
+      };
+    }
+    card.querySelectorAll("[data-legal]").forEach((el) => {
+      if (el.id === "legalSwitchBtn") return;
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        openLegalDocument(el.getAttribute("data-legal") || "privacy");
+      });
+    });
+    modal.onclick = (e) => { if (e.target === modal) closeLegal(); };
   }
   /* In-app updater: Android APK & iOS bundle download in-app without browser
      redirects. Real progress reporting with percentage and progress bar. */
@@ -13668,8 +13971,8 @@
               <div><strong>Legal &amp; Privacy</strong></div>
             </div>
             <div class="set-actions">
-              <a class="chip-btn" href="/privacy.html" target="_blank" rel="noopener" style="text-decoration:none">Privacy Policy</a>
-              <a class="chip-btn" href="/terms.html" target="_blank" rel="noopener" style="text-decoration:none">Terms of Service</a>
+              <a class="chip-btn" id="openPrivacyBtn" data-legal="privacy" href="/privacy.html" style="text-decoration:none">Privacy Policy</a>
+              <a class="chip-btn" id="openTermsBtn" data-legal="terms" href="/terms.html" style="text-decoration:none">Terms of Service</a>
             </div>
           </div>
         </div>
@@ -14892,6 +15195,18 @@
       // Item 8: show the What's New popup in-app — no browser redirect.
       openWhatsNew();
     });
+    const openPrivacyBtn = viewEl.querySelector("#openPrivacyBtn");
+    if (openPrivacyBtn) openPrivacyBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openLegalDocument("privacy");
+    });
+    const openTermsBtn = viewEl.querySelector("#openTermsBtn");
+    if (openTermsBtn) openTermsBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openLegalDocument("terms");
+    });
     const ghBug = viewEl.querySelector("#ghBug");
     if (ghBug) ghBug.addEventListener("click", (e) => {
       const gh = githubRepo();
@@ -15453,6 +15768,220 @@
     }
   }
 
+  const CLIENT_UNRELATED_INSTRUMENTAL_RE = /\b(instrumental|karaoke|backing\s+track|originally\s+performed\s+by|in\s+the\s+style\s+of|made\s+famous\s+by|tribute\s+to|ringtone|8-bit|lullaby\s+rendition|music\s+box|piano\s+rendition|piano\s+version|guitar\s+version|shortened|arr\.\s*by|arranged\s+by|string\s+quartet|orchestral\s+rendition|music\s+for\s+babies|sleep\s+music|white\s+noise|sound\s+effects?|minus\s+one|no\s+lead\s+vocal|with\s+background\s+vocals|lower\s+key|higher\s+key|vocal\s+version|demo\s+version|remix\s+of|cover\s+of|version\s+of)\b/i;
+  const CLIENT_JUNK_PERFORMER_RE = /\b(sing2piano|don't\s+stop\s+piano|piano\s+nest|karaoke|tribute|hit\s+crew|party\s+tyme|ameritz|prosource|starlite|8-bit|lullaby|baby\s+einstein|vitamin\s+string|music\s+box|piano\s+guys|soundtrack\s+orchestra|various\s+artists|unknown\s+artist|former\s+fat\s+boys|soundalike|sing-along|done\s+again|cast\s+of|cast\s+recording|famous\s+by|\d{4}\s+.*hitz|iron\s+hitz)\b/i;
+
+  function parseClientSearchIntent(rawQ) {
+    const q = String(rawQ || "").trim();
+    let songHint = "";
+    let artistHint = "";
+    let hasExplicitSplit = false;
+    const byM = q.match(/^(.+?)\s+\bby\b\s+(.+)$/i);
+    if (byM) {
+      songHint = byM[1].replace(/^["'\s]+|["'\s]+$/g, "").trim();
+      artistHint = byM[2].replace(/^["'\s]+|["'\s]+$/g, "").trim();
+      hasExplicitSplit = true;
+    } else {
+      const dashM = q.match(/^(.+?)\s+[-–—|]\s+(.+)$/);
+      if (dashM) {
+        songHint = dashM[1].trim();
+        artistHint = dashM[2].trim();
+        hasExplicitSplit = true;
+      }
+    }
+    const cleanQuery = hasExplicitSplit
+      ? `${songHint} ${artistHint}`.replace(/\s+/g, " ").trim()
+      : q.replace(/\s+\bby\b\s+/gi, " ").replace(/\s+/g, " ").trim();
+    const stopWords = new Set(["by", "the", "a", "an", "of", "in", "on", "to", "for", "with", "feat", "ft", "featuring", "song", "songs", "music", "official", "audio", "video", "lyrics"]);
+    const allTokens = dzFold(cleanQuery).split(" ").filter((w) => w.length >= 2 && !stopWords.has(w));
+    return {
+      raw: q,
+      cleanQuery,
+      foldQuery: dzFold(cleanQuery),
+      songHint,
+      artistHint,
+      songFold: dzFold(songHint),
+      artistFold: dzFold(artistHint),
+      hasExplicitSplit,
+      allTokens,
+      wantsInstrumental: /\b(instrumental|karaoke|backing\s*track|piano\s*version|lofi|ambient|classical|score|soundtrack)\b/i.test(q),
+    };
+  }
+
+  function rankAndCurateProviderSongs(tracks, rawQuery, maxCount = 75) {
+    if (!Array.isArray(tracks) || !tracks.length) return [];
+    const intent = parseClientSearchIntent(rawQOrQuery(rawQuery));
+    function rawQOrQuery(v) { return String(v || state.query || "").trim(); }
+    const want = intent.foldQuery;
+    const artistMatches = (cand, hint) => {
+      const cf = dzFold(cand);
+      if (!cf || !hint) return false;
+      if (cf === hint || cf.startsWith(hint + " ") || cf.endsWith(" " + hint) || cf.includes(" " + hint + " ")) return true;
+      const toks = hint.split(" ").filter((w) => w.length >= 3);
+      return toks.length > 0 && toks.every((w) => cf.includes(w));
+    };
+
+    let targetArtistFold = "";
+    if (intent.songFold && intent.artistFold) {
+      for (const r of tracks) {
+        if (!r || !r.title) continue;
+        if (!intent.wantsInstrumental && (CLIENT_UNRELATED_INSTRUMENTAL_RE.test(r.title) || CLIENT_JUNK_PERFORMER_RE.test(r.artist || ""))) continue;
+        const tf = dzFold(r.title);
+        if (tf === intent.songFold || tf.startsWith(intent.songFold + " ")) {
+          if (artistMatches(r.artist, intent.artistFold)) {
+            targetArtistFold = dzFold(String(r.artist).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0]);
+            break;
+          }
+          const combined = `${r.artist || ""} ${r.title || ""}`;
+          const featMatches = combined.match(/(?:\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b|&|,)\s*([^()[\],&-]+)/gi) || [];
+          for (const rawM of featMatches) {
+            const cleaned = rawM.replace(/^(?:\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b|&|,)\s*/i, "").trim();
+            if (cleaned && artistMatches(cleaned, intent.artistFold)) {
+              targetArtistFold = dzFold(cleaned);
+              break;
+            }
+          }
+          if (targetArtistFold) break;
+        }
+      }
+    }
+    if (!targetArtistFold) targetArtistFold = intent.artistFold;
+    if (!targetArtistFold && tracks.length > 0) {
+      for (const r of tracks.slice(0, 10)) {
+        if (!r || !r.artist) continue;
+        const prim = String(r.artist).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+        const pf = dzFold(prim);
+        if (pf && pf.length >= 3 && want.includes(pf)) {
+          targetArtistFold = pf;
+          break;
+        }
+      }
+      if (!targetArtistFold && tracks[0] && tracks[0].artist) {
+        targetArtistFold = dzFold(String(tracks[0].artist).split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0]);
+      }
+    }
+
+    const targetSongFold = intent.songFold || (() => {
+      if (!targetArtistFold) return want;
+      const artToks = new Set(targetArtistFold.split(" ").filter(Boolean));
+      const rem = want.split(" ").filter((w) => !artToks.has(w) && w !== "by").join(" ").trim();
+      return rem || want;
+    })();
+
+    const stripDec = (s) =>
+      String(s || "")
+        .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|official|audio|video|lyric|remaster|version|edit|mix|live|explicit|clean|from\s)[^)\]]*[)\]]/gi, "")
+        .replace(/\s*[-–—]\s*(?:remaster(?:ed)?|single|radio\s*edit|version|live|from\s.*).*$/i, "")
+        .trim();
+
+    const queryWantsRemix = /\b(remix|live|acoustic|slowed|sped\s*up)\b/i.test(intent.raw);
+    const scored = [];
+    for (const t of tracks) {
+      if (!t || !t.title || !looksLikeSong(t)) continue;
+      if (!intent.wantsInstrumental) {
+        if (CLIENT_UNRELATED_INSTRUMENTAL_RE.test(t.title) || CLIENT_UNRELATED_INSTRUMENTAL_RE.test(t.album || "")) continue;
+        if (CLIENT_JUNK_PERFORMER_RE.test(t.artist || "") || CLIENT_JUNK_PERFORMER_RE.test(t.album || "")) continue;
+      }
+      const coreTitle = stripDec(t.title) || t.title;
+      const titleFold = dzFold(t.title);
+      const coreTitleFold = dzFold(coreTitle);
+      const artistFoldVal = dzFold(t.artist || "");
+      const primCredit = String(t.artist || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+      const combined = `${artistFoldVal} ${titleFold}`;
+      const isRemix = /\b(remix|live|acoustic|sped\s*up|slowed|reverb|karaoke|instrumental|vip|dub|club\s*mix|extended)\b/i.test(t.title);
+      const canonKey = `${coreTitleFold}|${dzFold(primCredit)}${isRemix ? `|${titleFold}` : ""}`;
+
+      const matchesArtist = Boolean(
+        targetArtistFold &&
+        (artistMatches(t.artist, targetArtistFold) ||
+         artistMatches(t.title, targetArtistFold) ||
+         (intent.artistFold && (artistMatches(t.artist, intent.artistFold) || artistMatches(t.title, intent.artistFold))))
+      );
+      const matchesTitleExact = Boolean(targetSongFold && (coreTitleFold === targetSongFold || titleFold === targetSongFold));
+      const matchesTitlePrefix = Boolean(
+        targetSongFold &&
+        targetSongFold.length >= 3 &&
+        (coreTitleFold.startsWith(targetSongFold + " ") ||
+         titleFold.startsWith(targetSongFold + " ") ||
+         (coreTitleFold.includes(targetSongFold) && Math.abs(coreTitleFold.length - targetSongFold.length) <= 12))
+      );
+
+      let score = 0;
+      let bucket = "related";
+      if (matchesTitleExact && matchesArtist) {
+        bucket = "exact_song";
+        score += 1000 + (!isRemix ? 250 : 0);
+      } else if (matchesTitlePrefix && matchesArtist) {
+        bucket = "exact_song";
+        score += 820 + (!isRemix ? 160 : 0);
+      } else if (matchesTitleExact && !intent.hasExplicitSplit) {
+        bucket = "exact_title";
+        score += 620 + (!isRemix ? 120 : 0);
+      } else if (matchesArtist) {
+        bucket = "target_artist";
+        score += 480 + (artistMatches(primCredit, targetArtistFold) ? 120 : (intent.artistFold && artistMatches(primCredit, intent.artistFold) ? 60 : 0)) + (!isRemix ? 85 : 0);
+      } else if (matchesTitleExact || matchesTitlePrefix) {
+        bucket = "exact_title";
+        score += 410 + (!isRemix ? 70 : 0);
+      } else {
+        bucket = "related";
+        score += 200 + (!isRemix ? 45 : 0);
+      }
+      for (const tok of intent.allTokens) {
+        if (coreTitleFold.includes(tok)) score += 28;
+        if (combined.includes(tok)) score += 24;
+      }
+      if (isRemix && !queryWantsRemix) score -= 180;
+      scored.push({ track: t, canonKey, bucket, score, isRemix });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const seenCanon = new Set();
+    const uniq = [];
+    for (const c of scored) {
+      if (seenCanon.has(c.canonKey)) continue;
+      seenCanon.add(c.canonKey);
+      uniq.push(c);
+    }
+
+    const exactSongs = uniq.filter((c) => c.bucket === "exact_song");
+    exactSongs.sort((a, b) => {
+      if (a.isRemix !== b.isRemix) return a.isRemix ? 1 : -1;
+      return b.score - a.score;
+    });
+    const artistSongs = uniq.filter((c) => c.bucket === "target_artist");
+    const titleSongs = uniq.filter((c) => c.bucket === "exact_title");
+    const relSongs = uniq.filter((c) => c.bucket === "related");
+
+    const out = [];
+    const pushOut = (item) => {
+      if (!item || out.length >= maxCount) return;
+      if (!out.some((x) => x.id === item.track.id)) out.push(item.track);
+    };
+    const nonRemixExact = exactSongs.filter((c) => !c.isRemix);
+    const remixExact = exactSongs.filter((c) => c.isRemix);
+    if (nonRemixExact.length > 0) {
+      for (const ex of nonRemixExact.slice(0, 2)) pushOut(ex);
+    } else {
+      for (const ex of exactSongs.slice(0, 2)) pushOut(ex);
+    }
+    if (!exactSongs.length && titleSongs.length) {
+      for (const et of titleSongs.slice(0, 3)) pushOut(et);
+    }
+    const remExact = nonRemixExact.length > 0 ? [...nonRemixExact.slice(2), ...remixExact] : exactSongs.slice(2);
+    let ai = 0, ti = exactSongs.length ? 0 : 3, ri = 0, exi = 0;
+    while (out.length < maxCount && (ai < artistSongs.length || ti < titleSongs.length || ri < relSongs.length || exi < remExact.length)) {
+      if (ai < artistSongs.length) pushOut(artistSongs[ai++]);
+      if (ai < artistSongs.length) pushOut(artistSongs[ai++]);
+      if (intent.hasExplicitSplit && ai < artistSongs.length) pushOut(artistSongs[ai++]);
+      if (ti < titleSongs.length) pushOut(titleSongs[ti++]);
+      else if (exi < remExact.length) pushOut(remExact[exi++]);
+      if (ri < relSongs.length) pushOut(relSongs[ri++]);
+      if (!intent.hasExplicitSplit && ri < relSongs.length) pushOut(relSongs[ri++]);
+    }
+    return out;
+  }
+
   const providerFetchesInFlight = new Set();
   async function ensureProviderResults(filter) {
     if (!state.query || !state.search) return;
@@ -15470,10 +15999,10 @@
     if (!src) return;
     const targetKey = src === "apple" ? "apple" : src;
     if (providerFetchesInFlight.has(targetKey)) return;
-    if (filter === "itunes" && ((Array.isArray(state.search.itunes) && state.search.itunes.length > 0) || (Array.isArray(state.search.apple) && state.search.apple.length > 0))) {
+    if (filter === "itunes" && ((Array.isArray(state.search.itunes) && state.search.itunes.length >= 25) || (Array.isArray(state.search.apple) && state.search.apple.length >= 25))) {
       return;
     }
-    if (filter === "deezer" && Array.isArray(state.search.deezer) && state.search.deezer.length > 0 && !state.search._deezerSynthesized) {
+    if (filter === "deezer" && Array.isArray(state.search.deezer) && state.search.deezer.length >= 25 && !state.search._deezerSynthesized) {
       return;
     }
     if (src !== "apple" && src !== "deezer" && Array.isArray(state.search[targetKey]) && state.search[targetKey].length > 0) {
@@ -15482,6 +16011,7 @@
     providerFetchesInFlight.add(targetKey);
     render();
     const itCountry = String((state.prefs && state.prefs.country) || "US");
+    const intent = parseClientSearchIntent(q);
     try {
       // 1. Primary targeted backend search (with refresh=1 to bypass stale empty responses)
       try {
@@ -15490,9 +16020,9 @@
           const rawList = data[targetKey] && data[targetKey].length ? data[targetKey] : (data.itunes || []);
           const songs = (src === "deezer" ? rawList.map((t) => normalizeClientDeezerTrack(t)).filter(Boolean) : rawList).filter(looksLikeSong);
           if (songs.length) {
-            state.search[targetKey] = songs;
+            state.search[targetKey] = (src === "apple" || src === "deezer") ? rankAndCurateProviderSongs(songs, q, 75) : songs;
             if (src === "deezer") delete state.search._deezerSynthesized;
-            if (src === "apple") state.search.itunes = songs;
+            if (src === "apple") state.search.itunes = state.search.apple;
             if (Array.isArray(data.artists) && data.artists.length) {
               const seen = new Set((state.search.artists || []).map((a) => (a.name || "").toLowerCase()));
               for (const a of data.artists) {
@@ -15519,12 +16049,25 @@
       }
 
       // 2. iTunes / Apple direct channel fallback
-      if ((src === "apple" || src === "itunes") && (!state.search.itunes || !state.search.itunes.length || !state.search.apple || !state.search.apple.length)) {
+      if ((src === "apple" || src === "itunes") && (!state.search.itunes || state.search.itunes.length < 25 || !state.search.apple || state.search.apple.length < 25)) {
         try {
-          const itRes = await itFetch(`/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`);
-          const rows = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
+          const itJobs = [
+            itFetch(`/search?term=${encodeURIComponent(intent.cleanQuery || q)}&media=music&entity=song&limit=80&country=${encodeURIComponent(itCountry)}`),
+          ];
+          if (intent.hasExplicitSplit && intent.artistHint) {
+            itJobs.push(itFetch(`/search?term=${encodeURIComponent(intent.artistHint)}&media=music&entity=song&limit=60&country=${encodeURIComponent(itCountry)}`).catch(() => null));
+          }
+          const itResList = await Promise.all(itJobs);
+          const rows = [...(state.search.apple || [])];
+          for (const itRes of itResList) {
+            const batch = (itRes && (Array.isArray(itRes.results) ? itRes.results : (Array.isArray(itRes.apple) ? itRes.apple : itRes.itunes))) || [];
+            for (const r of batch) {
+              const norm = normalizeItunesItem(r);
+              if (norm && looksLikeSong(norm)) rows.push(norm);
+            }
+          }
           if (rows.length) {
-            state.search.apple = rows.map((t) => normalizeItunesItem(t)).filter((t) => t && looksLikeSong(t));
+            state.search.apple = rankAndCurateProviderSongs(rows, q, 75);
             state.search.itunes = state.search.apple;
             render();
           }
@@ -15534,17 +16077,27 @@
       }
 
       // 3. Deezer direct & multi-channel fallback
-      if (src === "deezer" && (!state.search.deezer || !state.search.deezer.length || state.search._deezerSynthesized)) {
+      if (src === "deezer" && (!state.search.deezer || state.search.deezer.length < 25 || state.search._deezerSynthesized)) {
         try {
-          const dzRes = await dzFetch(`/search?q=${encodeURIComponent(q)}&limit=50`);
-          const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
-          if (rows.length) {
-            const mapped = rows.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
-            if (mapped.length) {
-              state.search.deezer = mapped;
-              delete state.search._deezerSynthesized;
-              render();
+          const dzJobs = [
+            dzFetch(`/search?q=${encodeURIComponent(intent.cleanQuery || q)}&limit=80`),
+          ];
+          if (intent.hasExplicitSplit && intent.artistHint) {
+            dzJobs.push(dzFetch(`/search?q=${encodeURIComponent(intent.artistHint)}&limit=55`).catch(() => null));
+          }
+          const dzResList = await Promise.all(dzJobs);
+          const mapped = [...(state.search._deezerSynthesized ? [] : (state.search.deezer || []))];
+          for (const dzRes of dzResList) {
+            const rows = (dzRes && (Array.isArray(dzRes.data) ? dzRes.data : (Array.isArray(dzRes.results) ? dzRes.results : dzRes.deezer))) || [];
+            for (const r of rows) {
+              const norm = normalizeClientDeezerTrack(r);
+              if (norm && looksLikeSong(norm)) mapped.push(norm);
             }
+          }
+          if (mapped.length) {
+            state.search.deezer = rankAndCurateProviderSongs(mapped, q, 75);
+            delete state.search._deezerSynthesized;
+            render();
           }
         } catch (dzErr) {
           console.warn("Deezer fallback in ensureProviderResults failed:", dzErr);
@@ -15556,7 +16109,7 @@
             ? state.search.apple
             : ((Array.isArray(state.search.youtube) && state.search.youtube.length) ? state.search.youtube : []);
           if (seed.length) {
-            state.search.deezer = seed.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+            state.search.deezer = rankAndCurateProviderSongs(seed.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t)), q, 75);
             state.search._deezerSynthesized = true;
             render();
           }
@@ -15690,12 +16243,12 @@
       state.search.playlists = list;
     };
 
-    if (!state.search.apple || !state.search.apple.length) {
+    if (!state.search.apple || state.search.apple.length < 25) {
       tasks.push(
-        api(`/api/search?q=${encodeURIComponent(qStr)}&source=apple&refresh=1&${glq()}`, 4000)
+        api(`/api/search?q=${encodeURIComponent(qStr)}&source=apple&refresh=1&${glq()}`, 5000)
           .then((itData) => {
             if (itData && Array.isArray(itData.apple) && itData.apple.length && state.search && state.search.query === qStr && state.query === qStr) {
-              state.search.apple = itData.apple.filter(looksLikeSong);
+              state.search.apple = rankAndCurateProviderSongs(itData.apple.filter(looksLikeSong), qStr, 75);
               state.search.itunes = state.search.apple;
               mergeUniqueArtists(itData.artists);
               mergeUniquePlaylists(itData.playlists);
@@ -15706,15 +16259,15 @@
       );
     }
 
-    if (!state.search.deezer || !state.search.deezer.length || state.search._deezerSynthesized) {
+    if (!state.search.deezer || state.search.deezer.length < 25 || state.search._deezerSynthesized) {
       tasks.push(
         (async () => {
           try {
-            const dzData = await api(`/api/search?q=${encodeURIComponent(qStr)}&source=deezer&refresh=1&${glq()}`, 5000);
+            const dzData = await api(`/api/search?q=${encodeURIComponent(qStr)}&source=deezer&refresh=1&${glq()}`, 5500);
             if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length && state.search && state.search.query === qStr && state.query === qStr) {
               const songs = dzData.deezer.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
               if (songs.length) {
-                state.search.deezer = songs;
+                state.search.deezer = rankAndCurateProviderSongs(songs, qStr, 75);
                 delete state.search._deezerSynthesized;
                 mergeUniqueArtists(dzData.artists);
                 mergeUniquePlaylists(dzData.playlists);
@@ -15724,12 +16277,12 @@
             }
           } catch {}
           try {
-            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(qStr)}&limit=50`, 5000);
+            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(qStr)}&limit=80`, 5000);
             const rows = (dzRes && (dzRes.data || dzRes.results || dzRes.deezer)) || [];
             if (Array.isArray(rows) && rows.length && state.search && state.search.query === qStr && state.query === qStr) {
               const songs = rows.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
               if (songs.length) {
-                state.search.deezer = songs;
+                state.search.deezer = rankAndCurateProviderSongs(songs, qStr, 75);
                 delete state.search._deezerSynthesized;
                 updated = true;
               }
@@ -17675,6 +18228,83 @@
     });
     $("queueList").addEventListener("dragend", () => { dragFrom = -1; renderQueue(); });
     $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") hideModal(); });
+    document.addEventListener("click", (e) => {
+      const legalLink = e.target && e.target.closest
+        ? e.target.closest('[data-legal], a[href="/privacy.html"], a[href="/terms.html"], a[href$="/privacy.html"], a[href$="/terms.html"]')
+        : null;
+      if (!legalLink) return;
+      e.preventDefault();
+      const href = String(legalLink.getAttribute("href") || "").toLowerCase();
+      const kind = legalLink.getAttribute("data-legal") || (href.includes("terms") ? "terms" : "privacy");
+      openLegalDocument(kind);
+    });
+    // Instant native tactile press feedback across all interactive controls
+    {
+      const PRESS_SEL = [
+        "button",
+        "a[href]",
+        "[role=\"button\"]",
+        ".icon-btn",
+        ".chip-btn",
+        ".tonal-btn",
+        ".pill-btn",
+        ".btn",
+        ".fab",
+        ".dock-btn",
+        ".nav-btn",
+        ".ly-icon",
+        ".ly-pill",
+        ".ly-line",
+        ".tab",
+        ".mood-pill",
+        ".taste-pill",
+        ".seg-btn",
+        ".set-ui-card",
+        ".set-theme-chip",
+        ".app-icon-opt",
+        ".sheet-item",
+        ".track-row",
+        ".q-item",
+        ".card",
+        ".playlist-card",
+        ".artist-card",
+        ".radio-card",
+        "[data-play]",
+        "[data-view]",
+        "[data-tab]",
+      ].join(",");
+      let activePressEl = null;
+      let pressDownAt = 0;
+      let releaseTimer = 0;
+      const clearPressed = (immediate = false) => {
+        if (!activePressEl) return;
+        const el = activePressEl;
+        activePressEl = null;
+        clearTimeout(releaseTimer);
+        const elapsed = Date.now() - pressDownAt;
+        if (immediate || elapsed >= 75) {
+          el.classList.remove("is-pressed");
+        } else {
+          releaseTimer = setTimeout(() => el.classList.remove("is-pressed"), Math.max(16, 75 - elapsed));
+        }
+      };
+      document.addEventListener("pointerdown", (e) => {
+        if (e.button && e.button !== 0) return;
+        const t = e.target && e.target.closest ? e.target.closest(PRESS_SEL) : null;
+        if (!t || t.disabled || t.getAttribute("aria-disabled") === "true") return;
+        if (activePressEl && activePressEl !== t) {
+          activePressEl.classList.remove("is-pressed");
+        }
+        clearTimeout(releaseTimer);
+        activePressEl = t;
+        pressDownAt = Date.now();
+        t.classList.add("is-pressed");
+      }, { passive: true });
+      document.addEventListener("pointerup", () => clearPressed(false), { passive: true });
+      document.addEventListener("pointercancel", () => clearPressed(true), { passive: true });
+      window.addEventListener("scroll", () => clearPressed(true), { capture: true, passive: true });
+      window.addEventListener("blur", () => clearPressed(true));
+    }
     audio.addEventListener("ended", () => {
       if (state._xfading) { state._xfading = false; return; }
       // Track finished: mark stopped BEFORE advancing so the play/pause glyph

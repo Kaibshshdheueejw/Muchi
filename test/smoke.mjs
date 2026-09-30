@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.9", APP_VERSION === "1.8.9" && appJs.includes('const APP_VERSION = "1.8.9"'));
+  ok("version: APP_VERSION is 1.9.0", APP_VERSION === "1.9.0" && appJs.includes('const APP_VERSION = "1.9.0"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1909,6 +1909,28 @@ await (async () => {
     androidSvc.includes("983040L") &&
     androidSvc.includes("probeSoundCloudForTitleStatic") &&
     provSrc.includes("CAPPED_1MIN")
+  );
+  ok(
+    "native lyrics sync & iTunes/Deezer search intelligence: multi-tag LRC parser, collaborating artist lyrics lookup, 180ms native sync ticker, 40-80 search results, exact song first, broad artist selection, and anti-instrumental vocal filter",
+    provSrc.includes("function parseItunesSearchIntent(") &&
+    provSrc.includes("limit = 75") &&
+    provSrc.includes("ITUNES_UNRELATED_INSTRUMENTAL_RE") &&
+    readFileSync("src/deezer.js", "utf8").includes("function parseDeezerQueryIntent(") &&
+    readFileSync("src/deezer.js", "utf8").includes("limit = 75") &&
+    readFileSync("src/deezer.js", "utf8").includes("DZ_UNRELATED_INSTRUMENTAL_RE") &&
+    appJs.includes("function rankAndCurateProviderSongs(") &&
+    appJs.includes("function pickBestBrowserLyricsHit(") &&
+    appJs.includes("const syncP = Math.max(0, (Number(p) || 0) + 0.22);")
+  );
+  ok(
+    "v1.9.0 native Legal & Privacy modal & tactile button press feel: openLegalDocument prevents WebView reload on back, and instant .is-pressed + tap-highlight removal active",
+    appJs.includes("function openLegalDocument(") &&
+    appJs.includes('id="openPrivacyBtn"') &&
+    appJs.includes('id="openTermsBtn"') &&
+    appJs.includes('t.classList.add("is-pressed")') &&
+    stylesCss.includes("-webkit-tap-highlight-color: transparent !important;") &&
+    stylesCss.includes(".chip-btn.is-pressed") &&
+    stylesCss.includes(".icon-btn.is-pressed")
   );
 })();
 
