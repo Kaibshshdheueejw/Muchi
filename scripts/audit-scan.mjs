@@ -41,8 +41,8 @@ async function runAudit() {
 
   assert("Version check across all platform targets", !vErrors || vErrors.length === 0, `Version: ${pkg.version}`);
   const gradleCode = Number(gradle.match(/versionCode\s+(\d+)/)?.[1]);
-  assert("Android target is 1.8.5 (code: 39)", pkg.version === "1.8.5" && gradleCode === 39, `versionCode: ${gradleCode}`);
-  assert("iOS target is 1.8.5", pbx.includes("MARKETING_VERSION = 1.8.5;"));
+  assert("Android target is 1.8.6 (code: 40)", pkg.version === "1.8.6" && gradleCode === 40, `versionCode: ${gradleCode}`);
+  assert("iOS target is 1.8.6", pbx.includes("MARKETING_VERSION = 1.8.6;"));
 
   // 2. Equalizer & Dolby Atmos Complete Removal Audit
   console.log("\n--- 2. Equalizer & Dolby Atmos Removal Audit ---");

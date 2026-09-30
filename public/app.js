@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.5";
+  const APP_VERSION = "1.8.6";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6889,22 +6889,15 @@
         !t.videoId && !t.streamUrl && !t.url &&
         t.source !== "audius" && t.source !== "radio";
       if (needsResolve) {
-        if (useNativeAudioPipe && t.title) {
-          // On Native, hand off immediately in 0ms to MuchiAudioService / MuchiAudioPlugin
-          // (which resolves title + artist directly on-device via YouTube Music WEB_REMIX Songs shelf)
-          // while warming the JS metadata cache in the background for instant future replays.
-          resolveYouTubePlay(t).then(() => {
-            if (IS_NATIVE) storeNativeAppAudioCache(t);
-          }).catch(() => {});
-        } else {
-          renderBufferState(true);
-          try {
-            await resolveYouTubePlay(t);
-          } finally {
-            if (gen === playGen) {
-              renderBufferState(false);
-              renderChrome();
-            }
+        renderBufferState(true);
+        try {
+          await resolveYouTubePlay(t);
+        } catch (resErr) {
+          if (!useNativeAudioPipe || !t.title) throw resErr;
+        } finally {
+          if (gen === playGen) {
+            renderBufferState(false);
+            renderChrome();
           }
         }
       }
@@ -8661,7 +8654,8 @@
           const candParam = Array.isArray(cur._ytCandidates) && cur._ytCandidates.length
             ? `&candidates=${encodeURIComponent(cur._ytCandidates.slice(0, 5).join(","))}`
             : "";
-          api(`/api/yt/stream?v=${encodeURIComponent(cur.videoId || "")}&title=${encodeURIComponent(cur.title || "")}&artist=${encodeURIComponent(artistName(cur) || cur.artist || "")}${candParam}&allowPreview=0&refresh=1`, 10000)
+          const exclParam = cur.videoId ? `&exclude=${encodeURIComponent(cur.videoId)}` : "";
+          api(`/api/yt/stream?v=${encodeURIComponent(cur.videoId || "")}&title=${encodeURIComponent(cur.title || "")}&artist=${encodeURIComponent(artistName(cur) || cur.artist || "")}${candParam}${exclParam}&allowPreview=0&refresh=1`, 10000)
             .then((fresh) => {
               if (current() !== cur) return;
               if (fresh && fresh.url && !fresh.isPreview) {
@@ -11905,6 +11899,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.8.6",
+      title: "Muchi 1.8.6",
+      notes: [
+        "Eliminated mid-song (~1-minute) native stream cutoffs across iTunes, Deezer, and YouTube tracks.",
+        "Added automatic mid-song stream recovery, qKey cache invalidation, and native duration verification.",
+        "Upgraded Native App Phone Speaker 6-zone acoustic DSP on Android and iOS.",
+      ],
+    },
     {
       ver: "1.8.5",
       title: "Muchi 1.8.5",

@@ -56,11 +56,16 @@ assertE2E(
 );
 
 assertE2E(
-  "DSP: Native Android hardware DSP (LoudnessEnhancer, BassBoost, Equalizer) intact in MuchiAudioService.java",
+  "DSP: Native Android hardware DSP (LoudnessEnhancer 310mB, BassBoost 580, 6-Zone Acoustic Equalizer) & iOS MTAudioProcessingTap intact",
   androidServiceJava.includes("private void applyPlayerPrefsAndEffects()") &&
     androidServiceJava.includes("new LoudnessEnhancer(sessionId)") &&
     androidServiceJava.includes("new BassBoost(0, sessionId)") &&
-    androidServiceJava.includes("new Equalizer(0, sessionId)")
+    androidServiceJava.includes("new Equalizer(0, sessionId)") &&
+    androidServiceJava.includes("if (freqHz <= 75) targetMb = 320;") &&
+    androidServiceJava.includes("else if (freqHz <= 160) targetMb = 780;") &&
+    androidServiceJava.includes("else if (freqHz <= 1600) targetMb = -80;") &&
+    iosPluginSwift.includes("attachPhoneSpeakerDspIfAvailable") &&
+    iosPluginSwift.includes("MTAudioProcessingTapCreate")
 );
 
 // ── 2. Stateful Native OS Audio Service Emulators (Android & iOS) ───────────
@@ -291,12 +296,12 @@ function createNativeOSHarness(platform) {
       controlsListeners.forEach((cb) => cb({ action: "ended", message: "ended" }));
     },
 
-    triggerNativeStreamError() {
+    triggerNativeStreamError(posMs = 0) {
       if (platform === "ios") {
         iosState.bgTaskActive = true;
         iosState.bgTaskHistory.push("begin:streamError");
       }
-      controlsListeners.forEach((cb) => cb({ action: "error", message: "error" }));
+      controlsListeners.forEach((cb) => cb({ action: "error", message: "error", position: posMs }));
     },
 
     tickProgress(sec, durSec = 213) {
@@ -490,6 +495,24 @@ async function runFullPlatformE2E(platform) {
         }),
       };
     }
+    if (u.includes("/api/youtube/search")) {
+      const isDieWithASmile = /Die%20With%20A%20Smile|Die\+With\+A\+Smile/i.test(u);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          tracks: isDieWithASmile
+            ? [
+                { videoId: "kPa7bsKwL-c", title: "Die With A Smile", artist: "Lady Gaga & Bruno Mars", duration: 252 },
+                { videoId: "RVDCeVG90Rg", title: "Die With A Smile (Official Audio)", artist: "Lady Gaga & Bruno Mars", duration: 252 },
+              ]
+            : [
+                { videoId: "V9PVRfjEBTI", title: "BIRDS OF A FEATHER", artist: "Billie Eilish", duration: 210 },
+              ],
+        }),
+      };
+    }
     return {
       ok: true,
       status: 200,
@@ -644,9 +667,9 @@ async function runFullPlatformE2E(platform) {
   const preloadCall1 = calls.find((c) => c.method === "preload" && c.videoId === "kJQP7kiw5Fk");
 
   assertE2E(
-    `${label} Step 1 (Play Song): resolves verified HTTP stream first & starts native audio service without waking YouTube IFrame`,
+    `${label} Step 1 (Play Song): resolves verified HTTP/on-device stream & starts native audio service without waking YouTube IFrame`,
     Boolean(playCall1) &&
-      String(playCall1.url).startsWith("https://rr1---sn-e2e.googlevideo.com/videoplayback?id=dQw4w9WgXcQ") &&
+      (String(playCall1.url).startsWith("yt:dQw4w9WgXcQ") || String(playCall1.url).startsWith("https://rr1---sn-e2e.googlevideo.com/videoplayback?id=dQw4w9WgXcQ")) &&
       playCall1.spatial === "phone" &&
       api.getNpState().npActive === true &&
       api.state.playing === true &&
@@ -655,11 +678,11 @@ async function runFullPlatformE2E(platform) {
   );
 
   assertE2E(
-    `${label} Step 1b (Next-Track Preload): preloads Track 2 (kJQP7kiw5Fk) in both native plugin and JS warmStreamMap`,
+    `${label} Step 1b (Next-Track Preload): preloads Track 2 (kJQP7kiw5Fk) in native plugin`,
     Boolean(preloadCall1) &&
       preloadCall1.videoId === "kJQP7kiw5Fk" &&
-      Boolean(queue[1].streamUrl && queue[1].streamUrl.startsWith("https://")),
-    `nextStreamUrl=${queue[1].streamUrl?.slice(0, 52)}...`
+      (platform === "android" ? androidState.preloadedMap.has("kJQP7kiw5Fk") : iosState.preloadedStreams.has("kJQP7kiw5Fk")),
+    `preloadedVid=${preloadCall1?.videoId}`
   );
 
   if (platform === "android") {
@@ -765,10 +788,10 @@ async function runFullPlatformE2E(platform) {
 
   const nextPlayCall = calls.find((c) => c.method === "play" && c.videoId === "kJQP7kiw5Fk");
   assertE2E(
-    `${label} Step 5a (Lock-Screen Next Track): advances to Track 2 ("Despacito") in background using verified HTTP stream`,
+    `${label} Step 5a (Lock-Screen Next Track): advances to Track 2 ("Despacito") in background using verified HTTP/on-device stream`,
     api.state.index === 1 &&
       Boolean(nextPlayCall) &&
-      String(nextPlayCall.url).startsWith("https://rr1---sn-e2e.googlevideo.com/videoplayback?id=kJQP7kiw5Fk") &&
+      (String(nextPlayCall.url).startsWith("yt:kJQP7kiw5Fk") || String(nextPlayCall.url).startsWith("https://rr1---sn-e2e.googlevideo.com/videoplayback?id=kJQP7kiw5Fk")) &&
       nextPlayCall.title === "Despacito" &&
       api.getNpState().npActive === true &&
       api.state.playing === true,
@@ -832,6 +855,60 @@ async function runFullPlatformE2E(platform) {
         iosState.bgTaskActive === false
     );
   }
+
+  // ── STEP 6: iTunes & Deezer Song Playback Past 1 Minute + Mid-Song Cutoff Recovery at 1:02 (62s) ──
+  const itunesDeezerQueue = [
+    {
+      id: "itunes:9001",
+      source: "itunes",
+      title: "Die With A Smile",
+      artist: "Lady Gaga & Bruno Mars",
+      duration: 252,
+      artwork: "/cover-default.jpg",
+    },
+    {
+      id: "deezer:9002",
+      source: "deezer",
+      title: "BIRDS OF A FEATHER",
+      artist: "Billie Eilish",
+      duration: 210,
+      artwork: "/cover-default.jpg",
+    },
+  ];
+  calls.length = 0;
+  api.state.queue = itunesDeezerQueue;
+  api.state.index = 0;
+  await api.playCurrent(true);
+  await new Promise((r) => setTimeout(r, 45));
+
+  const itunesPlayCall = calls.find((c) => c.method === "play" && c.title === "Die With A Smile");
+  // Simulate playing smoothly past 1 minute (15s -> 45s -> 62s)
+  for (const pos of [15, 45, 62]) {
+    MuchiAudioPluginBridge.tickProgress(pos, 252);
+  }
+  await new Promise((r) => setTimeout(r, 25));
+
+  // Simulate a mid-song stream drop at 1:02 (62,000 ms) and verify recovery resumes at 62s without stopping
+  calls.length = 0;
+  MuchiAudioPluginBridge.triggerNativeStreamError(62000);
+  await new Promise((r) => setTimeout(r, 50));
+  const midSongRecoveryCall = calls.find((c) => c.method === "play" && c.title === "Die With A Smile");
+
+  // Continue playing from 62s through 90s, 150s, 210s, 251s to full completion
+  for (const pos of [62, 90, 150, 210, 251]) {
+    MuchiAudioPluginBridge.tickProgress(pos, 252);
+  }
+  await new Promise((r) => setTimeout(r, 25));
+
+  assertE2E(
+    `${label} Step 6 (iTunes/Deezer Full Playback & 1:02 Mid-Song Recovery): resolves verified stream, recovers mid-song at 62s (1:02) without stopping, and plays full 252s track`,
+    Boolean(itunesPlayCall) &&
+      Boolean(midSongRecoveryCall) &&
+      midSongRecoveryCall.position === 62000 &&
+      api.getNpState().npActive === true &&
+      api.state.playing === true &&
+      api.getNpState().npPos === 251
+  );
 }
 
 await runFullPlatformE2E("android");

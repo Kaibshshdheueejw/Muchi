@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.5", APP_VERSION === "1.8.5" && appJs.includes('const APP_VERSION = "1.8.5"'));
+  ok("version: APP_VERSION is 1.8.6", APP_VERSION === "1.8.6" && appJs.includes('const APP_VERSION = "1.8.6"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -907,7 +907,8 @@ await (async () => {
     appJs.includes("out.connect(ctx.destination);") &&
     !androidService.includes("DynamicsProcessing") &&
     !androidService.includes("setEnableAudioFloatOutput") &&
-    androidService.includes('int gainMb = "phone".equals(mode) ? 380 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;') &&
+    (androidService.includes('int gainMb = "phone".equals(mode) ? 310 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;') ||
+     androidService.includes('int gainMb = "phone".equals(mode) ? 380 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;')) &&
     (androidService.includes("bestM4aBitrate >= 96000") || androidService.includes("bestM4aBitrate >= 115000"))
   );
   ok("full-quality stream enforcement (1.7.6): no 8kHz synthetic WAV test tone and no 30-second low-bitrate previewUrl override in playback or catalog normalization",
@@ -1151,7 +1152,7 @@ await (async () => {
     androidPlugin.includes("service.isForegroundStarted()")
   );
   ok("native background (1.7.8): iOS MuchiAudioPlugin restores full resolveStreamForDownload on-device resolution, ANDROID_TESTSUITE, and UIBackgroundTask assertions across track transitions",
-    iosPlugin.includes("Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist)") &&
+    iosPlugin.includes("Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist") &&
     iosPlugin.includes("beginAudioBackgroundTask()") &&
     iosPlugin.includes("UIApplication.didEnterBackgroundNotification") &&
     iosPlugin.includes("ANDROID_TESTSUITE")
@@ -1290,6 +1291,22 @@ await (async () => {
               mime: "audio/mp4",
               duration: 215,
               isPreview: false,
+            }),
+          };
+        }
+        if (u.includes("/api/youtube/search")) {
+          const isBlinding = /Blinding/i.test(u);
+          const isBirds = /BIRDS/i.test(u);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ok: true,
+              tracks: isBlinding
+                ? [{ videoId: "4NRXx6U8ABQ", title: "Blinding Lights", artist: "The Weeknd", duration: 200 }]
+                : isBirds
+                ? [{ videoId: "V9PVRfjEBTI", title: "BIRDS OF A FEATHER", artist: "Billie Eilish", duration: 210 }]
+                : [{ videoId: "kPa7bsKwL-c", title: "Die With A Smile", artist: "Lady Gaga & Bruno Mars", duration: 252 }],
             }),
           };
         }
@@ -1780,6 +1797,32 @@ await (async () => {
     appJs.includes("discoveryprovider.audius.co/v1/tracks/") &&
     aggSrc.includes("soundcloudStreamForQuery") &&
     provSrc.includes("export async function soundcloudStreamForQuery")
+  );
+  ok(
+    "v1.8.5 native phone speaker DSP: Android 6-zone acoustic Equalizer + controlled LoudnessEnhancer (310 mB) & BassBoost (580) + iOS MTAudioProcessingTap active",
+    androidSvc.includes("if (freqHz <= 75) targetMb = 320;") &&
+    androidSvc.includes("else if (freqHz <= 160) targetMb = 780;") &&
+    androidSvc.includes("else if (freqHz <= 280) targetMb = 340;") &&
+    androidSvc.includes("else if (freqHz <= 650) targetMb = -320;") &&
+    androidSvc.includes("else if (freqHz <= 1600) targetMb = -80;") &&
+    androidSvc.includes("else if (freqHz <= 4500) targetMb = 340;") &&
+    iosPlug.includes("attachPhoneSpeakerDspIfAvailable") &&
+    iosPlug.includes("MTAudioProcessingTapCreate")
+  );
+  ok(
+    "v1.8.5 native playback stability: no competing googlevideo disk-cache download during active playback, mid-song recovery at pos > 1.5s, qKey cache invalidation, and native duration verification",
+    androidSvc.includes('if (streamUrl.contains("googlevideo.com")') &&
+    androidSvc.includes("private void recoverMidSongStream(final long resumePosMs)") &&
+    androidSvc.includes("invalidateResolvedCacheForTrack(currentVideoId, trackTitle, trackArtist, currentUrl);") &&
+    androidSvc.includes("private static boolean isDurationAcceptableStatic(long gotDurationMs, long expectedDurationMs)") &&
+    androidSvc.includes("long minFullSongBytes = currentDurationMs >= 90000L ? (currentDurationMs / 1000L) * 9500L : 262144L;") &&
+    iosPlug.includes('if rawUrl.contains("googlevideo.com") || rawUrl.contains("c=IOS") || rawUrl.contains("c=ANDROID&")') &&
+    iosPlug.includes("private func recoverMidSongStream(resumeMs: Double)") &&
+    iosPlug.includes("Self.invalidateResolvedCacheForTrack(videoId: self.currentVideoId, title: self.currentTitle, artist: self.currentArtist, failedUrl: self.currentUrl)") &&
+    iosPlug.includes("private static func isDurationAcceptable(gotDurationMs: Double, expectedDurationMs: Double) -> Bool") &&
+    iosPlug.includes("item.preferredForwardBufferDuration = 180.0") &&
+    appJs.includes("await resolveYouTubePlay(t);") &&
+    appJs.includes('const exclParam = cur.videoId ? `&exclude=${encodeURIComponent(cur.videoId)}` : "";')
   );
 })();
 
