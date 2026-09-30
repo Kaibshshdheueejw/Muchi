@@ -101,9 +101,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         setupSessionObservers()
         DispatchQueue.global(qos: .utility).async {
             if let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
-                let legacyDir = base.appendingPathComponent("muchi_audio_cache", isDirectory: true)
-                if FileManager.default.fileExists(atPath: legacyDir.path) {
-                    try? FileManager.default.removeItem(at: legacyDir)
+                let cacheDir = base.appendingPathComponent("muchi_audio_cache", isDirectory: true)
+                let fm = FileManager.default
+                if let urls = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
+                    for u in urls {
+                        if let sz = (try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+                           (sz == 983040 || sz < 1150000) {
+                            try? fm.removeItem(at: u)
+                        }
+                    }
                 }
             }
         }
@@ -930,7 +936,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static func getAudioCacheDir() -> URL? {
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
-        let dir = base.appendingPathComponent("muchi_audio_cache_v2", isDirectory: true)
+        let dir = base.appendingPathComponent("muchi_audio_cache", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
@@ -951,13 +957,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     public static func getCachedAudioFile(videoId: String, title: String, artist: String) -> URL? {
         guard let dir = getAudioCacheDir() else { return nil }
         let fm = FileManager.default
-        let minValidBytes: Int64 = 1150000 // > 1.15 MB minimum to reject 983,040-byte (1-minute) c=IOS/c=ANDROID files
+        let minValidBytes: Int64 = 262144
+        let minUncappedBytes: Int64 = 1150000 // > 1.15 MB minimum to reject 983,040-byte (1-minute) c=IOS/c=ANDROID files
         let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         if !vid.isEmpty {
             let vf = dir.appendingPathComponent(sanitizeAudioCacheKey("vid_\(vid)") + ".m4a")
             if fm.fileExists(atPath: vf.path) {
                 if let attrs = try? fm.attributesOfItem(atPath: vf.path),
-                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value != 983040 {
+                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value >= minUncappedBytes && size.int64Value != 983040 {
                     try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: vf.path)
                     return vf
                 } else {
@@ -970,7 +977,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             let qf = dir.appendingPathComponent(sanitizeAudioCacheKey(qKey) + ".m4a")
             if fm.fileExists(atPath: qf.path) {
                 if let attrs = try? fm.attributesOfItem(atPath: qf.path),
-                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value != 983040 {
+                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value >= minUncappedBytes && size.int64Value != 983040 {
                     try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: qf.path)
                     return qf
                 } else {

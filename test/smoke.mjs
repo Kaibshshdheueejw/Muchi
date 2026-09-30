@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.7", APP_VERSION === "1.8.7" && appJs.includes('const APP_VERSION = "1.8.7"'));
+  ok("version: APP_VERSION is 1.8.9", APP_VERSION === "1.8.9" && appJs.includes('const APP_VERSION = "1.8.9"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1895,6 +1895,21 @@ await (async () => {
     appJs.includes("id=\"sleepModalStatus\"") &&
     appJs.includes("id=\"sleepListeningStatus\"")
   );
+  ok(
+    "v1.8.8 native timer, synced lyrics, and 1-minute stream cap fix: single MainActivity plugin registration, direct _onMuchiNativeProgress + getStatus() polling, cached lyrics highlightLyric sync, and 983040-byte / c=IOS / c=ANDROID stream rejection",
+    (androidMainActivity.match(/registerPlugin\(MuchiAudioPlugin\.class\)/g) || []).length === 1 &&
+    androidPlugin.includes("window._onMuchiNativeProgress") &&
+    androidPlugin.includes("public void getStatus(PluginCall call)") &&
+    iosPlug.includes("window._onMuchiNativeProgress") &&
+    iosPlug.includes("public func getStatus(_ call: CAPPluginCall)") &&
+    appJs.includes("window._onMuchiNativeProgress = handleNativeProgressUpdate;") &&
+    appJs.includes("NP.getStatus()") &&
+    appJs.includes("function isOneMinuteCappedStreamUrl(u)") &&
+    androidSvc.includes("isOneMinuteCappedGoogleVideoUrl") &&
+    androidSvc.includes("983040L") &&
+    androidSvc.includes("probeSoundCloudForTitleStatic") &&
+    provSrc.includes("CAPPED_1MIN")
+  );
 })();
 
 // ── 6. Live worker checks (only when WRANGLER_DEV_URL is set) ───────────────
@@ -2122,14 +2137,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=111");
+  const appJsRes = await fetch(BASE + "/app.js?v=112");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=111");
+  const stylesRes = await fetch(BASE + "/styles.css?v=112");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=111 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=111 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v111", swText.includes("muchi-shell-v111") && swText.includes("/app.js?v=111") && swText.includes("/styles.css?v=111"));
+  ok("client web: app.js?v=112 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=112 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v112", swText.includes("muchi-shell-v112") && swText.includes("/app.js?v=112") && swText.includes("/styles.css?v=112"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────

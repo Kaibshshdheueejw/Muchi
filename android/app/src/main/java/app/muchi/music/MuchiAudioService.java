@@ -325,18 +325,20 @@ public class MuchiAudioService extends Service {
         notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         createChannel();
         initLocks();
-        // Purge legacy v1 audio cache dir that may hold 960KB (1-minute) c=IOS/c=ANDROID files
+        // Purge any < 1.15 MB or 983,040-byte (1-minute) c=IOS/c=ANDROID files in muchi_audio_cache
         sharedResolvePool.execute(() -> {
             try {
                 File oldDir = new File(getCacheDir(), "muchi_audio_cache");
-                if (oldDir.exists()) {
+                if (oldDir.exists() && oldDir.isDirectory()) {
                     File[] oldFiles = oldDir.listFiles();
                     if (oldFiles != null) {
                         for (File f : oldFiles) {
-                            if (f != null) f.delete();
+                            if (f != null && f.isFile() && (f.length() == 983040L || f.length() < 1150000L)) {
+                                //noinspection ResultOfMethodCallIgnored
+                                f.delete();
+                            }
                         }
                     }
-                    oldDir.delete();
                 }
             } catch (Exception ignored) {}
         });
@@ -1247,7 +1249,7 @@ public class MuchiAudioService extends Service {
     private static final ExecutorService sharedResolvePool = Executors.newCachedThreadPool();
     private static final Map<String, CachedStream> resolvedCache = new ConcurrentHashMap<>();
     private static final long RESOLVED_CACHE_TTL_MS = 20 * 60 * 1000L;
-    private static final String AUDIO_CACHE_DIR_NAME = "muchi_audio_cache_v2";
+    private static final String AUDIO_CACHE_DIR_NAME = "muchi_audio_cache";
     private static final long MAX_AUDIO_CACHE_BYTES = 250L * 1024L * 1024L;
     private static final Set<String> activeAudioCacheDownloads = ConcurrentHashMap.newKeySet();
 
@@ -1287,11 +1289,12 @@ public class MuchiAudioService extends Service {
     public static File getCachedAudioFile(Context ctx, String videoId, String title, String artist) {
         File dir = getAudioCacheDir(ctx);
         if (dir == null || !dir.exists()) return null;
-        final long minValidBytes = 1150000L; // >1.15 MB minimum to reject 960KB (983,040-byte) 1-minute capped streams
+        final long minValidBytes = 262144L;
+        final long minUncappedBytes = 1150000L; // >1.15 MB minimum to reject 960KB (983,040-byte) 1-minute capped streams
         if (videoId != null && !videoId.trim().isEmpty()) {
             File vf = new File(dir, sanitizeAudioCacheKey("vid_" + videoId.trim()) + ".m4a");
             if (vf.exists()) {
-                if (vf.length() >= minValidBytes && vf.length() != 983040L) {
+                if (vf.length() >= minValidBytes && vf.length() >= minUncappedBytes && vf.length() != 983040L) {
                     //noinspection ResultOfMethodCallIgnored
                     vf.setLastModified(System.currentTimeMillis());
                     return vf;
@@ -1305,7 +1308,7 @@ public class MuchiAudioService extends Service {
         if (!qKey.isEmpty()) {
             File qf = new File(dir, sanitizeAudioCacheKey(qKey) + ".m4a");
             if (qf.exists()) {
-                if (qf.length() >= minValidBytes && qf.length() != 983040L) {
+                if (qf.length() >= minValidBytes && qf.length() >= minUncappedBytes && qf.length() != 983040L) {
                     //noinspection ResultOfMethodCallIgnored
                     qf.setLastModified(System.currentTimeMillis());
                     return qf;
@@ -1381,7 +1384,7 @@ public class MuchiAudioService extends Service {
                 if (targetFile.exists() && targetFile.length() >= 262144L) return;
                 // Never open a second competing HTTP download connection to googlevideo.com while
                 // ExoPlayer is actively streaming that single-session token (prevents ~1-minute stream cutoffs).
-                if (streamUrl.toLowerCase().contains("googlevideo.com") || isOneMinuteCappedGoogleVideoUrl(streamUrl)) {
+                if (streamUrl.contains("googlevideo.com") || streamUrl.toLowerCase().contains("googlevideo.com") || isOneMinuteCappedGoogleVideoUrl(streamUrl)) {
                     return;
                 }
                 long urlClen = 0L;

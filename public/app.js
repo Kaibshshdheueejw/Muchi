@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.8";
+  const APP_VERSION = "1.8.9";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6344,7 +6344,7 @@
 
   // Persistent Native App Audio Cache: stores resolved song data & lyrics in-app so
   // replaying a song in the Native App plays in 0ms from app cache with zero backend load.
-  const NATIVE_AUDIO_CACHE_KEY = "aura.nativeAudioCache.v2";
+  const NATIVE_AUDIO_CACHE_KEY = "aura.nativeAudioCache.v1";
   const NATIVE_AUDIO_CACHE_MAX = 300;
   const nativeAppAudioCache = new Map();
   function isOneMinuteCappedStreamUrl(u) {
@@ -6358,7 +6358,6 @@
     return false;
   }
   try {
-    localStorage.removeItem("aura.nativeAudioCache.v1");
     const rawCache = localStorage.getItem(NATIVE_AUDIO_CACHE_KEY);
     if (rawCache) {
       const parsed = JSON.parse(rawCache);
@@ -6558,7 +6557,11 @@
       `/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || "")}&artist=${encodeURIComponent(artist || "")}${candParam}${fastParam}&allowPreview=0`,
       timeoutMs
     ).then((d) => {
-      if (d && d.url && !d.isPreview && !isOneMinuteCappedStreamUrl(d.url)) {
+      if (d && d.url && !d.isPreview) {
+        if (isOneMinuteCappedStreamUrl(d.url)) {
+          warmStreamMap.delete(key);
+          return null;
+        }
         if (d.url.startsWith("/")) d.url = API_BASE + d.url;
         const entry = { data: d, promise: null, exp: Date.now() + 12 * 60 * 1000 };
         warmStreamMap.set(key, entry);
@@ -7054,8 +7057,8 @@
     if (t.streamUrl && isOneMinuteCappedStreamUrl(t.streamUrl)) {
       t.streamUrl = "";
     }
-    let resolvedStream = (t.streamUrl && /^https?:\/\//i.test(t.streamUrl) && !t._isPreviewStream && !isOneMinuteCappedStreamUrl(t.streamUrl)) ? t.streamUrl : "";
-    if (!resolvedStream && t.streamUrl && t.streamUrl.startsWith("/") && !t._isPreviewStream && !isOneMinuteCappedStreamUrl(t.streamUrl)) {
+    let resolvedStream = (t.streamUrl && /^https?:\/\//i.test(t.streamUrl) && !t._isPreviewStream) ? t.streamUrl : "";
+    if (!resolvedStream && t.streamUrl && t.streamUrl.startsWith("/") && !t._isPreviewStream) {
       resolvedStream = API_BASE + t.streamUrl;
     }
     if (!resolvedStream) {
@@ -7930,11 +7933,14 @@
     if (npActive) {
       if (state.playing && npPlaying && npPosAt > 0 && Date.now() >= npSeekGuardUntil) {
         const rate = Number(state.prefs.speed || 1) || 1;
-        const elapsed = Math.max(0, Math.min(300.0, ((performance.now() - npPosAt) / 1000) * rate));
+        const rawElapsed = ((performance.now() - npPosAt) / 1000) * rate;
+        const elapsed = Math.max(0, Math.min(300.0, rawElapsed));
         const basePos = npPos || 0;
-        const est = basePos + elapsed;
-        const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
-        return d > 0 ? Math.min(d, est) : est;
+        if (basePos > 0 || npSeenPlaying || rawElapsed > 0.5) {
+          const est = basePos + elapsed;
+          const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+          return d > 0 ? Math.min(d, est) : est;
+        }
       }
       return npPos || 0;
     }
@@ -8887,9 +8893,9 @@
       const now = Date.now();
       const rawPos = v.positionMs != null ? (Number(v.positionMs) || 0) / 1000 : (Number(v.position) || 0);
       const rawDur = v.durationMs != null ? (Number(v.durationMs) || 0) / 1000 : (Number(v.duration) || 0);
-      const sinceTrackStart = now - (npTrackStartedAt || 0);
-      // Only guard against a stale progress tick from a previous song during the first 1200ms after track start
-      const isStaleStartJump = !npSeenPlaying && npInitPos === 0 && sinceTrackStart < 1200 && rawPos > 5.0;
+      // Guard against any stale progress tick (>2.0s) arriving from a previous song right after starting a track from 0:00
+      const isDifferentTrackDur = rawDur > 0 && npDur > 0 && Math.abs(rawDur - npDur) > 2;
+      const isStaleStartJump = !npSeenPlaying && npInitPos === 0 && rawPos > 2.0 && (!v.playing || isDifferentTrackDur);
       if (!isStaleStartJump) {
         if (now < npSeekGuardUntil) {
           if (Math.abs(rawPos - npPos) <= 4.0) {
@@ -12027,6 +12033,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.8.9",
+      title: "Muchi 1.8.9",
+      notes: [
+        "Fixed Native App playback timer and seek bar so progress advances smoothly from 0:00 in real time.",
+        "Fixed Native App synced lyrics highlighting and auto-scrolling during playback.",
+        "Eliminated 1-minute (983 KB) stream cutoffs by filtering capped mobile InnerTube streams and adding on-device SoundCloud and JioSaavn fallbacks.",
+      ],
+    },
     {
       ver: "1.8.8",
       title: "Muchi 1.8.8",

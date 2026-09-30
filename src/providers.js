@@ -409,6 +409,20 @@ const INNERTUBE_PROFILES = [
     ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
     client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
   },
+  {
+    tag: "IOS-19.09",
+    tier: 2,
+    clientId: "5",
+    ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
+    client: { clientName: "IOS", clientVersion: "20.10.4", deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "18.3.2.22D82", hl: "en", gl: "US" },
+  },
+  {
+    tag: "ANDROID-19.09",
+    tier: 2,
+    clientId: "3",
+    ua: "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
+    client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 34, osName: "Android", osVersion: "14", hl: "en", gl: "US" },
+  },
 ];
 
 // One profile probe: direct audio stream or a REJECT carrying "TAG=reason"
@@ -439,7 +453,12 @@ async function innertubeProbe(spec, videoId) {
     }),
   }, INNERTUBE_PLAYER_TIMEOUT);
   const picked = pickInnertubeStream(data);
-  if (picked) return { ...picked, source: `innertube:${spec.tag}` };
+  if (picked) {
+    if (picked.url && picked.url.includes("googlevideo.com") && /[?&]c=(?:IOS|ANDROID)(?:&|$)/i.test(picked.url)) {
+      throw new Error(`${spec.tag}=CAPPED_1MIN`);
+    }
+    return { ...picked, source: `innertube:${spec.tag}` };
+  }
   const status = String((data && data.playabilityStatus && data.playabilityStatus.status) || "NO_AUDIO_FORMATS");
   throw new Error(`${spec.tag}=${status}`);
 }
