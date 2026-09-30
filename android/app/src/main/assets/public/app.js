@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.2";
+  const APP_VERSION = "1.8.3";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6305,6 +6305,10 @@
   let failSkipAt = 0;
   let playGen = 0;
   function skipFailed(msg) {
+    _pendingSeek = 0;
+    ytSeekReset = 0;
+    _pendingSeekApplied = true;
+    _resumeTrackId = null;
     const now = Date.now();
     if (now - failSkipAt > 15000) failSkip = 0;
     failSkipAt = now;
@@ -6446,14 +6450,25 @@
     const now = Date.now();
     if (t._warmedAt && now - t._warmedAt < 45000) return;
     t._warmedAt = now;
+    const NP = nativePlayer();
+    if (IS_NATIVE && NP && typeof NP.preload === "function" && (t.videoId || t.title) && !t._nativePreloaded) {
+      t._nativePreloaded = true;
+      const cands = Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "";
+      NP.preload({
+        videoId: String(t.videoId || ""),
+        candidates: cands,
+        title: String(t.title || ""),
+        artist: String(artistName(t) || t.artist || ""),
+      }).catch(() => {});
+    }
     const warmResolved = (tr) => {
       if (!tr) return;
-      const NP = nativePlayer();
-      if (IS_NATIVE && NP && typeof NP.preload === "function") {
+      const NP2 = nativePlayer();
+      if (IS_NATIVE && NP2 && typeof NP2.preload === "function") {
         if ((tr.videoId || tr.title) && !tr._nativePreloaded) {
           tr._nativePreloaded = true;
           const cands = Array.isArray(tr._ytCandidates) ? tr._ytCandidates.slice(0, 5).join(",") : "";
-          NP.preload({
+          NP2.preload({
             videoId: String(tr.videoId || ""),
             candidates: cands,
             title: String(tr.title || ""),
@@ -6736,10 +6751,11 @@
   async function playCurrent(reset) {
     const t = current();
     if (!t) return;
-    // Only reuse the restored seek when the user resumes the SAME track that
-    // was playing when the app closed; starting anything else clears it so we
-    // never jump a new song to a stale position.
-    if (_resumeTrackId && t && String(t.id || "") !== _resumeTrackId) {
+    // Whenever reset is true (user clicked a song, or skipped next/prev), or when
+    // switching to a different track than the cross-reload restored track, always
+    // clear any pending seek so a new song never jumps to a stale timestamp (0:14 / 0:38).
+    const curIdent = trackKey(t) || String(t.id || "");
+    if (reset || (_resumeTrackId && curIdent !== _resumeTrackId && String(t.id || "") !== _resumeTrackId)) {
       _pendingSeek = 0;
       ytSeekReset = 0;
       _pendingSeekApplied = true;
@@ -6865,19 +6881,12 @@
         t.source !== "audius" && t.source !== "radio";
       if (needsResolve) {
         if (useNativeAudioPipe && t.title) {
-          // On Native, race JS resolution with a short 750ms window; if not cached yet,
-          // hand off immediately to MuchiAudioService / MuchiAudioPlugin which resolves
-          // title + artist directly on-device without waiting for Worker round-trips.
-          renderBufferState(true);
-          try {
-            const resolveP = resolveYouTubePlay(t).catch(() => {});
-            await Promise.race([resolveP, new Promise((r) => setTimeout(r, 750))]);
-          } finally {
-            if (gen === playGen) {
-              renderBufferState(false);
-              renderChrome();
-            }
-          }
+          // On Native, hand off immediately in 0ms to MuchiAudioService / MuchiAudioPlugin
+          // (which resolves title + artist directly on-device via YouTube Music WEB_REMIX in ~350ms)
+          // while warming the JS metadata cache in the background for instant future replays.
+          resolveYouTubePlay(t).then(() => {
+            if (IS_NATIVE) storeNativeAppAudioCache(t);
+          }).catch(() => {});
         } else {
           renderBufferState(true);
           try {
@@ -8373,6 +8382,8 @@
   let npPosAt = 0;        // performance.now() timestamp of last npPos update
   let npDur = 0;          // last known duration (s)
   let npSeenPlaying = false; // true once ExoPlayer/AVPlayer has transitioned to playing for the current track
+  let npInitPos = 0;      // initial start position requested for the current track
+  let npTrackStartedAt = 0; // timestamp when nativePlayTrack was invoked for the current track
   let npCmdUntil = 0;     // guard window after JS play/pause/resume command so stale progress ticks don't flip UI
   let npSeekGuardUntil = 0; // guard window after JS seek command so stale pre-seek ticks don't snap slider back
   let npPermAsked = false; // one-time native notification permission ask
@@ -8455,7 +8466,7 @@
     if (!NP) return false;
     nativeEnsureNotifyPermission();
     const resolvedDur = Number(durationSec) || parseStreamUrlDuration(url) || 0;
-    const initPos = Math.max(0, Number(startPosSec) || (Number(_pendingSeek) > 0 ? Number(_pendingSeek) : 0));
+    const initPos = Math.max(0, Number(startPosSec) || ((!_pendingSeekApplied && Number(_pendingSeek) > 0) ? Number(_pendingSeek) : 0));
     if (initPos > 0) {
       _pendingSeek = 0;
       _pendingSeekApplied = true;
@@ -8463,6 +8474,8 @@
     npActive = true;
     npPlaying = true;
     npSeenPlaying = false;
+    npInitPos = initPos;
+    npTrackStartedAt = Date.now();
     npPos = initPos;
     npPosAt = performance.now();
     npDur = resolvedDur;
@@ -8604,13 +8617,14 @@
     } else if (msg === "error") {
       const rawErrPos = Number(action.position != null ? action.position : 0);
       const errPosSec = rawErrPos > 1000 ? rawErrPos / 1000 : rawErrPos;
-      const savedPos = Math.max(errPosSec || 0, npPos || 0, _pendingSeek || 0);
-      if (savedPos > 0) {
+      const cur = current();
+      const savedPos = npSeenPlaying ? Math.max(errPosSec || 0, npPos || 0, _pendingSeek || 0) : 0;
+      if (savedPos > 0 && cur) {
         _pendingSeek = savedPos;
         _pendingSeekApplied = false;
+        _resumeTrackId = trackKey(cur) || String(cur.id || "");
       }
       if (npActive) { npActive = false; npPlaying = false; npSeenPlaying = false; }
-      const cur = current();
       if ((state.playing || wantPlay) && cur) {
         state.playing = true;
         setWantPlay(true);
@@ -8764,18 +8778,21 @@
           const now = Date.now();
           const rawPos = v.positionMs != null ? (Number(v.positionMs) || 0) / 1000 : (Number(v.position) || 0);
           const rawDur = v.durationMs != null ? (Number(v.durationMs) || 0) / 1000 : (Number(v.duration) || 0);
-          if (now >= npSeekGuardUntil || Math.abs(rawPos - npPos) <= 2) {
+          // Guard against any stale progress tick (>2.0s) arriving from a previous song right after starting a track from 0:00
+          const isDifferentTrackDur = rawDur > 0 && npDur > 0 && Math.abs(rawDur - npDur) > 2;
+          const isStaleStartJump = !npSeenPlaying && npInitPos === 0 && rawPos > 2.0 && (!v.playing || isDifferentTrackDur);
+          if (!isStaleStartJump && (now >= npSeekGuardUntil || Math.abs(rawPos - npPos) <= 2)) {
             npPos = Math.max(0, rawPos);
             npPosAt = performance.now();
           }
-          if (rawDur > 0) {
+          if (rawDur > 0 && !isStaleStartJump) {
             npDur = rawDur;
             const cur = current();
             if (cur && !cur.duration) cur.duration = Math.round(rawDur);
           }
           const isPl = !!v.playing;
           if (isPl) {
-            if (rawPos > 0.05) npSeenPlaying = true;
+            if (!isStaleStartJump && rawPos > 0.05) npSeenPlaying = true;
             npPlaying = true;
             renderBufferState(false);
             if (!state.playing && now >= npCmdUntil) {
@@ -17814,7 +17831,7 @@
     if (_pos > 0.5) {
       _pendingSeek = _pos;
       _pendingSeekApplied = false;
-      _resumeTrackId = _rt && _rt.id ? String(_rt.id) : "";
+      _resumeTrackId = _rt ? (trackKey(_rt) || String(_rt.id || "")) : "";
       if (_rt && (_rt.videoId || _rt.source === "youtube")) ytSeekReset = _pos;
     }
     // The player bar is populated by renderChrome(), which render() calls on

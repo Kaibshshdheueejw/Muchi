@@ -248,6 +248,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             resolvingOnDevice = true
             stopTicker()
             player?.pause()
+            player?.replaceCurrentItem(with: nil)
+            currentItem = nil
             let vid = currentVideoId
             let cands = currentCandidates
             let tTitle = currentTitle
@@ -327,14 +329,21 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         p.playImmediately(atRate: prefSpeed)
         if !streamUrl.isFileURL && (rawUrl.hasPrefix("http://") || rawUrl.hasPrefix("https://")) {
-            Self.cacheStreamToDiskAsync(
-                streamUrl: streamUrl,
-                rawUrl: rawUrl,
-                userAgent: ua,
-                videoId: currentVideoId,
-                title: currentTitle,
-                artist: currentArtist
-            )
+            let expectedSeq = loadSeq
+            let vid = currentVideoId
+            let tTitle = currentTitle
+            let tArtist = currentArtist
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+                guard let self = self, self.loadSeq == expectedSeq, (self.player?.rate ?? 0) > 0 else { return }
+                Self.cacheStreamToDiskAsync(
+                    streamUrl: streamUrl,
+                    rawUrl: rawUrl,
+                    userAgent: ua,
+                    videoId: vid,
+                    title: tTitle,
+                    artist: tArtist
+                )
+            }
         }
         startTicker()
     }
@@ -935,26 +944,59 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 if !qKey.isEmpty { putCachedStream(qKey, hit) }
                 return hit
             }
-            if let rs = probeInnertubeForVideo(vid) {
-                putCachedStream(vid, rs)
+        }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        var searchedVids: [String] = []
+        let searchSem = DispatchSemaphore(value: 0)
+        let startConcurrentSearch = (vids.count <= 1 && !cleanTitle.isEmpty)
+        if startConcurrentSearch {
+            let q = "\(cleanTitle) \(cleanArtist) official audio".trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.global(qos: .userInitiated).async {
+                searchedVids = searchInnertubeVideoIds(q)
+                searchSem.signal()
+            }
+        }
+        var audiusResult: ResolvedStream?
+        let audiusSem = DispatchSemaphore(value: 0)
+        let startConcurrentAudius = !cleanTitle.isEmpty
+        if startConcurrentAudius {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15) {
+                audiusResult = probeAudiusForTitle(title: cleanTitle, artist: artist)
+                audiusSem.signal()
+            }
+        }
+        if !vids.isEmpty {
+            if let rs = probeMultipleVideosParallel(Array(vids.prefix(3))) {
                 if !primary.isEmpty { putCachedStream(primary, rs) }
                 if !qKey.isEmpty { putCachedStream(qKey, rs) }
                 return rs
             }
         }
-        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanTitle.isEmpty {
-            let q = "\(cleanTitle) \(artist.trimmingCharacters(in: .whitespacesAndNewlines)) official audio".trimmingCharacters(in: .whitespacesAndNewlines)
-            for svid in searchInnertubeVideoIds(q) where !vids.contains(svid) {
-                if let rs = probeInnertubeForVideo(svid) {
-                    putCachedStream(svid, rs)
-                    if !primary.isEmpty { putCachedStream(primary, rs) }
-                    if !qKey.isEmpty { putCachedStream(qKey, rs) }
-                    return rs
-                }
+            if startConcurrentSearch {
+                _ = searchSem.wait(timeout: .now() + 2.5)
+            } else {
+                let q = "\(cleanTitle) \(cleanArtist) official audio".trimmingCharacters(in: .whitespacesAndNewlines)
+                searchedVids = searchInnertubeVideoIds(q)
+            }
+            let freshSearch = searchedVids.filter { !$0.isEmpty && !vids.contains($0) }
+            for sv in freshSearch where !vids.contains(sv) { vids.append(sv) }
+            if !freshSearch.isEmpty, let rs = probeMultipleVideosParallel(Array(freshSearch.prefix(3))) {
+                if !primary.isEmpty { putCachedStream(primary, rs) }
+                if !qKey.isEmpty { putCachedStream(qKey, rs) }
+                return rs
             }
         }
-        for vid in vids {
+        if startConcurrentAudius {
+            _ = audiusSem.wait(timeout: .now() + 2.2)
+            if let aud = audiusResult {
+                if !primary.isEmpty { putCachedStream(primary, aud) }
+                if !qKey.isEmpty { putCachedStream(qKey, aud) }
+                return aud
+            }
+        }
+        for vid in vids.prefix(2) {
             if let rs = probePipedForVideo(vid) {
                 putCachedStream(vid, rs)
                 if !primary.isEmpty { putCachedStream(primary, rs) }
@@ -962,12 +1004,49 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 return rs
             }
         }
-        if !cleanTitle.isEmpty, let aud = probeAudiusForTitle(title: cleanTitle, artist: artist) {
-            if !primary.isEmpty { putCachedStream(primary, aud) }
-            if !qKey.isEmpty { putCachedStream(qKey, aud) }
-            return aud
-        }
         return nil
+    }
+
+    private static func probeMultipleVideosParallel(_ videoIds: [String]) -> ResolvedStream? {
+        guard !videoIds.isEmpty else { return nil }
+        if videoIds.count == 1 {
+            let vid = videoIds[0]
+            if let hit = getCachedStream(vid) { return hit }
+            if let rs = probeInnertubeForVideo(vid) {
+                putCachedStream(vid, rs)
+                return rs
+            }
+            return nil
+        }
+        let lock = NSLock()
+        var winner: ResolvedStream?
+        let sem = DispatchSemaphore(value: 0)
+        var remaining = videoIds.count
+        for vid in videoIds {
+            DispatchQueue.global(qos: .userInitiated).async {
+                var found = getCachedStream(vid)
+                if found == nil, let r = probeInnertubeForVideo(vid) {
+                    putCachedStream(vid, r)
+                    found = r
+                }
+                lock.lock()
+                if let f = found, winner == nil {
+                    winner = f
+                    lock.unlock()
+                    sem.signal()
+                    return
+                }
+                remaining -= 1
+                let done = (remaining <= 0 && winner == nil)
+                lock.unlock()
+                if done { sem.signal() }
+            }
+        }
+        _ = sem.wait(timeout: .now() + 2.8)
+        lock.lock()
+        let res = winner
+        lock.unlock()
+        return res
     }
 
     private static func probeInnertubeForVideo(_ videoId: String) -> ResolvedStream? {
@@ -1073,14 +1152,48 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private static func searchInnertubeVideoIds(_ query: String) -> [String] {
+        let safeQ = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        // 1. Primary: YouTube Music WEB_REMIX (~350ms, returns official song videoIds instead of VEVO videos)
+        if let musicUrl = URL(string: "https://music.youtube.com/youtubei/v1/search?prettyPrint=false") {
+            var req = URLRequest(url: musicUrl, timeoutInterval: 2.6)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("https://music.youtube.com", forHTTPHeaderField: "Origin")
+            req.setValue("https://music.youtube.com/", forHTTPHeaderField: "Referer")
+            req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
+            let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240814.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeQ)\"}"
+            req.httpBody = payload.data(using: .utf8)
+
+            var out: [String] = []
+            let sem = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { data, response, _ in
+                defer { sem.signal() }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let data = data, let text = String(data: data, encoding: .utf8),
+                      let regex = try? NSRegularExpression(pattern: "\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"") else { return }
+                let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+                for m in matches {
+                    if let r = Range(m.range(at: 1), in: text) {
+                        let vid = String(text[r])
+                        if !out.contains(vid) {
+                            out.append(vid)
+                            if out.count >= 4 { break }
+                        }
+                    }
+                }
+            }.resume()
+            _ = sem.wait(timeout: .now() + 2.8)
+            if !out.isEmpty { return out }
+        }
+
+        // 2. Fallback: standard YouTube WEB search
         guard let url = URL(string: "https://www.youtube.com/youtubei/v1/search?prettyPrint=false") else { return [] }
-        var req = URLRequest(url: url, timeoutInterval: 4.5)
+        var req = URLRequest(url: url, timeoutInterval: 3.0)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
         req.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
         req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
-        let safeQ = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeQ)\"}"
         req.httpBody = payload.data(using: .utf8)
 
@@ -1102,7 +1215,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             }
         }.resume()
-        _ = sem.wait(timeout: .now() + 4.8)
+        _ = sem.wait(timeout: .now() + 3.2)
         return out
     }
 

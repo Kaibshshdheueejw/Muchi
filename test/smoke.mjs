@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.2", APP_VERSION === "1.8.2" && appJs.includes('const APP_VERSION = "1.8.2"'));
+  ok("version: APP_VERSION is 1.8.3", APP_VERSION === "1.8.3" && appJs.includes('const APP_VERSION = "1.8.3"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1157,7 +1157,7 @@ await (async () => {
     iosPlugin.includes("ANDROID_TESTSUITE")
   );
   ok("native background & notification: MuchiAudioService resolves yt: on-device, maintains MediaStyle foreground notification + WakeLock/WifiLock, and supports handleSessionIntent", androidService.includes("resolveYoutubeStreamOnDevice") && androidService.includes("handleSessionIntent") && androidService.includes("C.WAKE_MODE_NETWORK") && androidService.includes("WifiManager.WifiLock") && androidService.includes("stopPlaybackInternal(boolean notifyJs)"));
-  ok("native background & notification: MuchiAudioPlugin exposes syncSession and setAudioPrefs and deduplicates loadTrack", androidPlugin.includes("public void syncSession(PluginCall call)") && androidPlugin.includes("public void setAudioPrefs(PluginCall call)") && androidService.includes("currentUrl.equals(url)"));
+  ok("native background & notification: MuchiAudioPlugin exposes syncSession and setAudioPrefs and deduplicates loadTrack", androidPlugin.includes("public void syncSession(PluginCall call)") && androidPlugin.includes("public void setAudioPrefs(PluginCall call)") && androidService.includes("url.equals(currentRequestedUrl)"));
   ok("native background & notification: MainActivity keeps WebView media and JS timers alive in background (onPause/onStop/onWindowFocusChanged)", androidMainActivity.includes("keepWebViewAwake()") && androidMainActivity.includes("wv.onResume()") && androidMainActivity.includes("wv.resumeTimers()"));
   ok("native background & notification: app.js syncs native session notification on updateMediaSession and checks npActive first in keepBackgroundPlay", appJs.includes("nativeSyncSession();") && appJs.includes("function nativeSyncSession(") && /function keepBackgroundPlay\(\)\s*\{[\s\S]*?if\s*\(npActive\)/.test(appJs));
   ok("sound quality (1.5.5): WebAudio DSP graph (5-band EQ, bass shelf + harmonic warmth shaper, Haas 3D spatial stereo widener, clarity/air loudness compressor) and native hardware DSP effects active by default", appJs.includes("state.prefs.soundV !== 3") && appJs.includes("function hookSound()") && appJs.includes("function spatialMode()") && appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") && appJs.includes("Math.tanh(3.1 * x) * 0.52") && appJs.includes("out.gain.value = 1.55;") && appJs.includes("function nativeSyncAudioPrefs()") && androidService.includes("applyPlayerPrefsAndEffects") && androidService.includes("LoudnessEnhancer") && androidService.includes("BassBoost") && androidService.includes("Equalizer"));
@@ -1169,7 +1169,7 @@ await (async () => {
     // Expose internal test hook inside VM copy of app.js
     const instrumentedAppJs = appJs.replace(
       "  loadHome();\n  loadTasteRecommendations();",
-      "  window.__muchiE2E = { state, playCurrent, togglePlay, next, prev, keepBackgroundPlay, unlockSound, getNativeAppAudioCache, storeNativeAppAudioCache, getNpState: () => ({ npActive, npPlaying, npDur, npPos, wantPlay }), setNpPos: (p, d) => { npPos = p; if (d) npDur = d; } };\n"
+      "  window.__muchiE2E = { state, playCurrent, playFromList, position, togglePlay, next, prev, keepBackgroundPlay, unlockSound, getNativeAppAudioCache, storeNativeAppAudioCache, getNpState: () => ({ npActive, npPlaying, npDur, npPos, wantPlay, _pendingSeek }), setNpPos: (p, d) => { npPos = p; if (d) npDur = d; }, setPendingSeek: (p, tid) => { _pendingSeek = p; _pendingSeekApplied = false; _resumeTrackId = tid || null; } };\n"
     );
 
     async function runNativeBackgroundE2E(platform) {
@@ -1516,7 +1516,37 @@ await (async () => {
         fetchCalls === 0 &&
         cacheReplayMs < 50;
 
-      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk };
+      // Step 7 (v1.8.3): Verify clicking a new catalog song clears any 0:14 (14.4s) saved session _pendingSeek,
+      // dispatches NP.play immediately (< 20ms, no 750ms wait), and ignores stale 0:14 progress ticks from previous song
+      api.setPendingSeek(14.4, "apple:old_saved_song");
+      api.setNpPos(14.4, 210);
+      calls.length = 0;
+      const catalogList = [
+        { id: "apple:cat_1", source: "apple", title: "Blinding Lights", artist: "The Weeknd", duration: 200, artwork: "/cover-default.jpg" },
+        { id: "apple:cat_2", source: "apple", title: "Espresso", artist: "Sabrina Carpenter", duration: 175, artwork: "/cover-default.jpg" },
+      ];
+      const t0ClickCatalog = Date.now();
+      api.playFromList(catalogList, 0);
+      await new Promise((r) => setTimeout(r, 15));
+      const clickCatalogElapsed = Date.now() - t0ClickCatalog;
+      const catalogPlayCall = calls.find((c) => c.method === "play" && c.title === "Blinding Lights");
+      const posImmediatelyAfterClick = api.position();
+      // Simulate a stale 0:14 progress tick arriving from the previous track while resolvingOnDevice is still buffering
+      progressListeners.forEach((cb) => cb({ position: 14.4, duration: 210, playing: false }));
+      const posAfterStaleTick = api.position();
+      // Now simulate the new track actually starting at 0.4s
+      progressListeners.forEach((cb) => cb({ position: 0.4, duration: 200, playing: true }));
+      const posAfterRealStart = api.position();
+      const zeroJumpOk =
+        Boolean(catalogPlayCall) &&
+        catalogPlayCall.position === 0 &&
+        api.getNpState()._pendingSeek === 0 &&
+        posImmediatelyAfterClick === 0 &&
+        posAfterStaleTick === 0 &&
+        Math.abs(posAfterRealStart - 0.4) < 0.05 &&
+        clickCatalogElapsed < 45;
+
+      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk, zeroJumpOk };
     }
 
     const androidE2E = await runNativeBackgroundE2E("android");
@@ -1529,6 +1559,9 @@ await (async () => {
     ok("Android Native E2E: replaying a played song uses native app audio cache with 0 backend requests and immediate local playback",
       androidE2E.cacheReplayOk
     );
+    ok("Android Native E2E (v1.8.3): clicking any song starts at 0:00 (never jumps to 0:14), skips 750ms wait, and rejects stale progress ticks",
+      androidE2E.zeroJumpOk
+    );
 
     const iosE2E = await runNativeBackgroundE2E("ios");
     ok("iOS Native E2E: play song → resolves verified HTTP stream, starts AVPlayer & preloads next track", iosE2E.step1Ok);
@@ -1540,11 +1573,14 @@ await (async () => {
     ok("iOS Native E2E: replaying a played song uses native app audio cache with 0 backend requests and immediate local playback",
       iosE2E.cacheReplayOk
     );
+    ok("iOS Native E2E (v1.8.3): clicking any song starts at 0:00 (never jumps to 0:14), skips 750ms wait, and rejects stale progress ticks",
+      iosE2E.zeroJumpOk
+    );
 
-    // ── v1.8.2 E2E: Immediate Playback, Tap-Out Background Continuation, and Native App Audio Cache ──
-    ok("v1.8.2 fast playback: DefaultLoadControl (350ms bufferForPlaybackMs), AVPlayer playImmediately, single-batch raced InnerTube, and resolvedStreamCache + Promise.any",
+    // ── v1.8.2 & v1.8.3 E2E: Immediate Playback, Zero-Jump Timer, and Native App Audio Cache ──
+    ok("v1.8.2 fast playback: DefaultLoadControl (200ms bufferForPlaybackMs), AVPlayer playImmediately, single-batch raced InnerTube, and resolvedStreamCache + Promise.any",
       androidService.includes("DefaultLoadControl") &&
-      androidService.includes("350,") &&
+      androidService.includes("200,") &&
       iosPlugin.includes("automaticallyWaitsToMinimizeStalling = false") &&
       iosPlugin.includes("playImmediately(atRate: prefSpeed)") &&
       aggregateJs.includes("const resolvedStreamCache = new Map();") &&
@@ -1556,13 +1592,13 @@ await (async () => {
       appJs.includes("if (IS_NATIVE) return;") &&
       androidService.includes(".build(),\n                        false);") &&
       appJs.includes("let nativeAppInBackground = false;") &&
-      appJs.includes("if (rawPos > 0.05) npSeenPlaying = true;") &&
+      appJs.includes("if (!isStaleStartJump && rawPos > 0.05) npSeenPlaying = true;") &&
       appJs.includes("if ((document.hidden || nativeAppInBackground) && wantPlay && state.prefs.bgPlay !== false)")
     );
     ok("v1.8.2 native app audio cache: MuchiAudioService & MuchiAudioPlugin cache played streams to muchi_audio_cache on disk and app.js persists aura.nativeAudioCache.v1 for 0-backend-load instant replay",
       androidService.includes('private static final String AUDIO_CACHE_DIR_NAME = "muchi_audio_cache";') &&
       androidService.includes("getCachedAudioFile(this, currentVideoId, trackTitle, trackArtist)") &&
-      androidService.includes("cacheStreamToDiskAsync(getApplicationContext(), streamUrl, effectiveUaForCache, currentVideoId, trackTitle, trackArtist)") &&
+      androidService.includes("cacheStreamToDiskAsync(appCtx, cacheUrl, effectiveUaForCache, cacheVid, cacheTitle, cacheArtist);") &&
       iosPlugin.includes('appendingPathComponent("muchi_audio_cache", isDirectory: true)') &&
       iosPlugin.includes("Self.getCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist)") &&
       iosPlugin.includes("Self.cacheStreamToDiskAsync(") &&
@@ -1570,6 +1606,16 @@ await (async () => {
       appJs.includes("function storeNativeAppAudioCache(") &&
       appJs.includes("function getNativeAppAudioCache(") &&
       appJs.includes("t._fromNativeAppCache = true;")
+    );
+    ok("v1.8.3 zero-jump native playback: tick() guards !resolvingOnDevice, loadTrack avoids yt: deduplication collision, WEB_REMIX search + parallel candidate probing active, and disk cache download waits for STATE_READY + 6s",
+      androidService.includes("long rawDur = resolvingOnDevice ? C.TIME_UNSET : player.getDuration();") &&
+      androidService.includes('boolean sameIdentity = url != null && !url.equals("yt:")') &&
+      androidService.includes("https://music.youtube.com/youtubei/v1/search?prettyPrint=false") &&
+      androidService.includes("probeMultipleVideoIdsParallel") &&
+      androidService.includes("ticker.postDelayed(() -> {") &&
+      iosPlugin.includes("player?.replaceCurrentItem(with: nil)") &&
+      iosPlugin.includes("https://music.youtube.com/youtubei/v1/search?prettyPrint=false") &&
+      iosPlugin.includes("probeMultipleVideosParallel")
     );
   }
 
@@ -1897,14 +1943,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=109");
+  const appJsRes = await fetch(BASE + "/app.js?v=110");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=109");
+  const stylesRes = await fetch(BASE + "/styles.css?v=110");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=109 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=109 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v109", swText.includes("muchi-shell-v109") && swText.includes("/app.js?v=109") && swText.includes("/styles.css?v=109"));
+  ok("client web: app.js?v=110 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=110 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v110", swText.includes("muchi-shell-v110") && swText.includes("/app.js?v=110") && swText.includes("/styles.css?v=110"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────
