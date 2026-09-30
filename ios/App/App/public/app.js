@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.3";
+  const APP_VERSION = "1.8.4";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6376,19 +6376,27 @@
         break;
       }
     }
+    const rawStreamUrl = String(extra.streamUrl || t.streamUrl || (existing && existing.streamUrl) || "");
+    const cleanStreamUrl = /^yt:/i.test(rawStreamUrl) ? "" : rawStreamUrl;
+    const resolvedVid = String(extra.videoId || t.videoId || (existing && existing.videoId) || "");
+    const resolvedCands = Array.isArray(extra.candidates)
+      ? extra.candidates.slice(0, 10)
+      : Array.isArray(t._ytCandidates)
+        ? t._ytCandidates.slice(0, 10)
+        : (existing && existing.candidates) || [];
+    const resolvedLyrics = extra.lyrics !== undefined ? extra.lyrics : (existing && existing.lyrics) || null;
+    if (!resolvedVid && !cleanStreamUrl && !resolvedCands.length && !resolvedLyrics) {
+      return existing || null;
+    }
     const entry = {
-      videoId: String(extra.videoId || t.videoId || (existing && existing.videoId) || ""),
-      streamUrl: String(extra.streamUrl || t.streamUrl || (existing && existing.streamUrl) || ""),
-      candidates: Array.isArray(extra.candidates)
-        ? extra.candidates.slice(0, 10)
-        : Array.isArray(t._ytCandidates)
-          ? t._ytCandidates.slice(0, 10)
-          : (existing && existing.candidates) || [],
+      videoId: resolvedVid,
+      streamUrl: cleanStreamUrl,
+      candidates: resolvedCands,
       artwork: String(extra.artwork || t.artwork || (existing && existing.artwork) || ""),
       duration: Number(extra.duration || t.duration || (existing && existing.duration) || 0),
       title: String(t.title || (existing && existing.title) || ""),
       artist: String(artistName(t) || t.artist || (existing && existing.artist) || ""),
-      lyrics: extra.lyrics !== undefined ? extra.lyrics : (existing && existing.lyrics) || null,
+      lyrics: resolvedLyrics,
       lyricsChecked: Boolean(extra.lyricsChecked || (existing && existing.lyricsChecked)),
       cachedAt: Date.now(),
     };
@@ -6766,6 +6774,7 @@
     if (reset) {
       t._nativeRefreshTried = false;
       t._nativeOnDeviceTried = false;
+      t._nativeOnDeviceVid = "";
       t._nativeYtFallbackTried = false;
       t._nativeFallbackTried = false;
       t._webYtFallbackTried = false;
@@ -6882,7 +6891,7 @@
       if (needsResolve) {
         if (useNativeAudioPipe && t.title) {
           // On Native, hand off immediately in 0ms to MuchiAudioService / MuchiAudioPlugin
-          // (which resolves title + artist directly on-device via YouTube Music WEB_REMIX in ~350ms)
+          // (which resolves title + artist directly on-device via YouTube Music WEB_REMIX Songs shelf)
           // while warming the JS metadata cache in the background for instant future replays.
           resolveYouTubePlay(t).then(() => {
             if (IS_NATIVE) storeNativeAppAudioCache(t);
@@ -7007,6 +7016,7 @@
     // routing through the Cloudflare Worker /api/stream datacenter proxy (which
     // triggers Googlevideo 403 IP-binding rejections after the initial buffer).
     t._nativeOnDeviceTried = true;
+    t._nativeOnDeviceVid = String(t.videoId || "");
     if (t.videoId) {
       t.streamUrl = `yt:${t.videoId}`;
     } else {
@@ -8628,8 +8638,9 @@
       if ((state.playing || wantPlay) && cur) {
         state.playing = true;
         setWantPlay(true);
-        if (!cur._nativeOnDeviceTried && cur.videoId && nativePlayer()) {
+        if ((!cur._nativeOnDeviceTried || (cur.videoId && cur._nativeOnDeviceVid !== String(cur.videoId))) && cur.videoId && nativePlayer()) {
           cur._nativeOnDeviceTried = true;
+          cur._nativeOnDeviceVid = String(cur.videoId);
           cur.streamUrl = `yt:${cur.videoId}`;
           cur._isPreviewStream = false;
           cur._playingViaAudio = true;
@@ -8645,7 +8656,7 @@
           const candParam = Array.isArray(cur._ytCandidates) && cur._ytCandidates.length
             ? `&candidates=${encodeURIComponent(cur._ytCandidates.slice(0, 5).join(","))}`
             : "";
-          api(`/api/yt/stream?v=${encodeURIComponent(cur.videoId || "")}&title=${encodeURIComponent(cur.title || "")}&artist=${encodeURIComponent(artistName(cur) || cur.artist || "")}${candParam}&refresh=1`, 10000)
+          api(`/api/yt/stream?v=${encodeURIComponent(cur.videoId || "")}&title=${encodeURIComponent(cur.title || "")}&artist=${encodeURIComponent(artistName(cur) || cur.artist || "")}${candParam}&allowPreview=0&refresh=1`, 10000)
             .then((fresh) => {
               if (current() !== cur) return;
               if (fresh && fresh.url && !fresh.isPreview) {

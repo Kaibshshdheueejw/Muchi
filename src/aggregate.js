@@ -1328,38 +1328,30 @@ export async function handleYtStream(url) {
     const searchOneAudQuery = async (q) => {
       const audHits = await audiusSearch(q);
       if (!Array.isArray(audHits) || !audHits.length) throw new Error("empty");
-      const matched =
-        audHits.find((a) => {
-          if (!a || (Number(a.duration) || 0) < 45) return false;
-          const rawGotTitle = String(a.title || "");
-          const gotTitle = rawGotTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-          const gotCore = rawGotTitle
-            .replace(/\s*[\[(]\s*(?:feat\.?|ft\.?|featuring|with|from)\s+[^)\]]+[)\]]/gi, "")
-            .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, " ")
-            .trim();
-          const gotArtist = String(a.artist || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-          const titleOk =
-            (gotTitle && wantTitle && (gotTitle.includes(wantTitle) || wantTitle.includes(gotTitle))) ||
-            (gotTitle && wantCore && (gotTitle.includes(wantCore) || wantCore.includes(gotTitle))) ||
-            (gotCore && wantCore && (gotCore.includes(wantCore) || wantCore.includes(gotCore)));
-          const artistOk =
-            !artistTokens.length ||
-            artistTokens.some(
-              (tok) => gotArtist.includes(tok) || tok.includes(gotArtist) || gotTitle.includes(tok)
-            );
-          return titleOk && artistOk;
-        }) ||
-        audHits.find((a) => {
-          if (!a || (Number(a.duration) || 0) < 60) return false;
-          const gotCore = String(a.title || "")
-            .replace(/\s*[\[(][^)\]]*[)\]]/g, "")
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, " ")
-            .trim();
-          return Boolean(wantCore && gotCore && (gotCore === wantCore || gotCore.startsWith(wantCore + " ")));
-        });
+      const wantIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit)\b/i.test(wantTitle);
+      const matched = audHits.find((a) => {
+        if (!a || (Number(a.duration) || 0) < 60) return false;
+        const rawGotTitle = String(a.title || "");
+        const gotTitle = rawGotTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const gotCore = rawGotTitle
+          .replace(/\s*[\[(]\s*(?:feat\.?|ft\.?|featuring|with|from)\s+[^)\]]+[)\]]/gi, "")
+          .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim();
+        const gotIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|karaoke|instrumental)\b/i.test(gotTitle);
+        if (!wantIsRemix && gotIsRemix) return false;
+        const gotArtist = String(a.artist || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const titleOk =
+          Boolean(gotTitle && wantTitle && (gotTitle === wantTitle || gotTitle.startsWith(wantTitle + " "))) ||
+          Boolean(gotCore && wantCore && (gotCore === wantCore || gotCore.startsWith(wantCore + " ")));
+        const artistOk =
+          !artistTokens.length ||
+          artistTokens.some(
+            (tok) => gotArtist.includes(tok) || (gotArtist && tok.includes(gotArtist))
+          );
+        return titleOk && artistOk;
+      });
       if (!matched) throw new Error("no match");
       const audId = String(matched.trackId || matched.id || "").replace(/^audius:/, "");
       if (!audId) throw new Error("no id");

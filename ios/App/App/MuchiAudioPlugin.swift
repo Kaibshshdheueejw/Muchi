@@ -760,22 +760,31 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     public static func getCachedAudioFile(videoId: String, title: String, artist: String) -> URL? {
         guard let dir = getAudioCacheDir() else { return nil }
         let fm = FileManager.default
+        let minValidBytes: Int64 = 262144 // 256 KB minimum to reject truncated/partial stream files
         let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         if !vid.isEmpty {
             let vf = dir.appendingPathComponent(sanitizeAudioCacheKey("vid_\(vid)") + ".m4a")
-            if let attrs = try? fm.attributesOfItem(atPath: vf.path),
-               let size = attrs[.size] as? NSNumber, size.int64Value > 32768 {
-                try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: vf.path)
-                return vf
+            if fm.fileExists(atPath: vf.path) {
+                if let attrs = try? fm.attributesOfItem(atPath: vf.path),
+                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes {
+                    try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: vf.path)
+                    return vf
+                } else {
+                    try? fm.removeItem(at: vf)
+                }
             }
         }
         let qKey = queryCacheKey(title: title, artist: artist)
         if !qKey.isEmpty {
             let qf = dir.appendingPathComponent(sanitizeAudioCacheKey(qKey) + ".m4a")
-            if let attrs = try? fm.attributesOfItem(atPath: qf.path),
-               let size = attrs[.size] as? NSNumber, size.int64Value > 32768 {
-                try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: qf.path)
-                return qf
+            if fm.fileExists(atPath: qf.path) {
+                if let attrs = try? fm.attributesOfItem(atPath: qf.path),
+                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes {
+                    try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: qf.path)
+                    return qf
+                } else {
+                    try? fm.removeItem(at: qf)
+                }
             }
         }
         return nil
@@ -821,6 +830,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static func cacheStreamToDiskAsync(streamUrl: URL, rawUrl: String, userAgent: String, videoId: String, title: String, artist: String) {
         if getCachedAudioFile(videoId: videoId, title: title, artist: artist) != nil { return }
+        if rawUrl.contains("googlevideo.com") && (rawUrl.contains("c=IOS") || rawUrl.contains("c=ANDROID&")) {
+            return
+        }
         let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         let primaryKey = !vid.isEmpty ? sanitizeAudioCacheKey("vid_\(vid)") : sanitizeAudioCacheKey(queryCacheKey(title: title, artist: artist))
         guard !primaryKey.isEmpty else { return }
@@ -834,6 +846,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         activeAudioCacheDownloads.insert(primaryKey)
         cacheLock.unlock()
+
+        var urlClen: Int64 = 0
+        if let regex = try? NSRegularExpression(pattern: "(?:[?&]|%26)clen(?:=|%3D)([0-9]+)"),
+           let match = regex.firstMatch(in: rawUrl, range: NSRange(rawUrl.startIndex..., in: rawUrl)),
+           let r = Range(match.range(at: 1), in: rawUrl),
+           let parsed = Int64(rawUrl[r]) {
+            urlClen = parsed
+        }
 
         var req = URLRequest(url: streamUrl, timeoutInterval: 25.0)
         let ua = userAgent.isEmpty ? userAgentForStreamUrl(rawUrl) : userAgent
@@ -852,9 +872,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                   let tempUrl = tempUrl,
                   let dir = getAudioCacheDir() else { return }
             let fm = FileManager.default
+            let expectedBytes = http.expectedContentLength > 0 ? http.expectedContentLength : urlClen
             guard let attrs = try? fm.attributesOfItem(atPath: tempUrl.path),
-                  let size = attrs[.size] as? NSNumber,
-                  size.int64Value > 32768 && size.int64Value < 45 * 1024 * 1024 else { return }
+                  let size = attrs[.size] as? NSNumber else { return }
+            let written = size.int64Value
+            let completeEnough = written >= 262144
+                && written < 45 * 1024 * 1024
+                && (expectedBytes <= 0 || written >= (expectedBytes * 98) / 100)
+            guard completeEnough else { return }
             let targetUrl = dir.appendingPathComponent(primaryKey + ".m4a")
             try? fm.removeItem(at: targetUrl)
             if (try? fm.moveItem(at: tempUrl, to: targetUrl)) != nil {
@@ -951,19 +976,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let searchSem = DispatchSemaphore(value: 0)
         let startConcurrentSearch = (vids.count <= 1 && !cleanTitle.isEmpty)
         if startConcurrentSearch {
-            let q = "\(cleanTitle) \(cleanArtist) official audio".trimmingCharacters(in: .whitespacesAndNewlines)
+            let q = "\(cleanTitle) \(cleanArtist)".trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.global(qos: .userInitiated).async {
                 searchedVids = searchInnertubeVideoIds(q)
                 searchSem.signal()
-            }
-        }
-        var audiusResult: ResolvedStream?
-        let audiusSem = DispatchSemaphore(value: 0)
-        let startConcurrentAudius = !cleanTitle.isEmpty
-        if startConcurrentAudius {
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15) {
-                audiusResult = probeAudiusForTitle(title: cleanTitle, artist: artist)
-                audiusSem.signal()
             }
         }
         if !vids.isEmpty {
@@ -975,33 +991,33 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         if !cleanTitle.isEmpty {
             if startConcurrentSearch {
-                _ = searchSem.wait(timeout: .now() + 2.5)
-            } else {
-                let q = "\(cleanTitle) \(cleanArtist) official audio".trimmingCharacters(in: .whitespacesAndNewlines)
+                _ = searchSem.wait(timeout: .now() + 2.8)
+            }
+            if searchedVids.isEmpty {
+                let q = "\(cleanTitle) \(cleanArtist)".trimmingCharacters(in: .whitespacesAndNewlines)
                 searchedVids = searchInnertubeVideoIds(q)
             }
             let freshSearch = searchedVids.filter { !$0.isEmpty && !vids.contains($0) }
             for sv in freshSearch where !vids.contains(sv) { vids.append(sv) }
-            if !freshSearch.isEmpty, let rs = probeMultipleVideosParallel(Array(freshSearch.prefix(3))) {
+            if !freshSearch.isEmpty, let rs = probeMultipleVideosParallel(Array(freshSearch.prefix(4))) {
                 if !primary.isEmpty { putCachedStream(primary, rs) }
                 if !qKey.isEmpty { putCachedStream(qKey, rs) }
                 return rs
             }
         }
-        if startConcurrentAudius {
-            _ = audiusSem.wait(timeout: .now() + 2.2)
-            if let aud = audiusResult {
-                if !primary.isEmpty { putCachedStream(primary, aud) }
-                if !qKey.isEmpty { putCachedStream(qKey, aud) }
-                return aud
-            }
-        }
-        for vid in vids.prefix(2) {
+        for vid in vids.prefix(3) {
             if let rs = probePipedForVideo(vid) {
                 putCachedStream(vid, rs)
                 if !primary.isEmpty { putCachedStream(primary, rs) }
                 if !qKey.isEmpty { putCachedStream(qKey, rs) }
                 return rs
+            }
+        }
+        if !cleanTitle.isEmpty {
+            if let aud = probeAudiusForTitle(title: cleanTitle, artist: cleanArtist) {
+                if !primary.isEmpty { putCachedStream(primary, aud) }
+                if !qKey.isEmpty { putCachedStream(qKey, aud) }
+                return aud
             }
         }
         return nil
@@ -1051,13 +1067,30 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static func probeInnertubeForVideo(_ videoId: String) -> ResolvedStream? {
         guard !videoId.isEmpty, let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false") else { return nil }
-        let fastProfiles: [(id: String, ver: String, ua: String, body: String)] = [
+        let primaryProfiles: [(id: String, ver: String, ua: String, body: String)] = [
             (
                 "28",
                 "1.61.48",
                 "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.61.48\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             ),
+            (
+                "28",
+                "1.60.19",
+                "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.60.19\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            ),
+            (
+                "30",
+                "1.9",
+                "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_TESTSUITE\",\"clientVersion\":\"1.9\",\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            )
+        ]
+        if let hit = probeInnertubeBatch(primaryProfiles, endpoint: endpoint) {
+            return hit
+        }
+        let secondaryProfiles: [(id: String, ver: String, ua: String, body: String)] = [
             (
                 "5",
                 "20.10.4",
@@ -1071,7 +1104,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             )
         ]
-        return probeInnertubeBatch(fastProfiles, endpoint: endpoint)
+        return probeInnertubeBatch(secondaryProfiles, endpoint: endpoint)
     }
 
     private static func probeInnertubeBatch(_ profiles: [(id: String, ver: String, ua: String, body: String)], endpoint: URL) -> ResolvedStream? {
@@ -1152,8 +1185,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private static func searchInnertubeVideoIds(_ query: String) -> [String] {
-        let safeQ = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        // 1. Primary: YouTube Music WEB_REMIX (~350ms, returns official song videoIds instead of VEVO videos)
+        let cleanQ = query.replacingOccurrences(of: "\\bofficial\\s+audio\\b", with: "", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let effCleanQ = cleanQ.isEmpty ? query.trimmingCharacters(in: .whitespacesAndNewlines) : cleanQ
+        let safeCleanQ = effCleanQ.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let safeRawQ = query.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        var out: [String] = []
+
+        // 1a. Primary: YouTube Music WEB_REMIX Songs-shelf search
         if let musicUrl = URL(string: "https://music.youtube.com/youtubei/v1/search?prettyPrint=false") {
             var req = URLRequest(url: musicUrl, timeoutInterval: 2.6)
             req.httpMethod = "POST"
@@ -1161,10 +1201,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             req.setValue("https://music.youtube.com", forHTTPHeaderField: "Origin")
             req.setValue("https://music.youtube.com/", forHTTPHeaderField: "Referer")
             req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
-            let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240814.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeQ)\"}"
+            let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240814.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeCleanQ)\",\"params\":\"EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D\"}"
             req.httpBody = payload.data(using: .utf8)
 
-            var out: [String] = []
             let sem = DispatchSemaphore(value: 0)
             URLSession.shared.dataTask(with: req) { data, response, _ in
                 defer { sem.signal() }
@@ -1177,12 +1216,41 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                         let vid = String(text[r])
                         if !out.contains(vid) {
                             out.append(vid)
-                            if out.count >= 4 { break }
+                            if out.count >= 5 { break }
                         }
                     }
                 }
             }.resume()
             _ = sem.wait(timeout: .now() + 2.8)
+            if out.count >= 3 { return out }
+
+            // 1b. Secondary: unfiltered WEB_REMIX search
+            var req1b = URLRequest(url: musicUrl, timeoutInterval: 2.6)
+            req1b.httpMethod = "POST"
+            req1b.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req1b.setValue("https://music.youtube.com", forHTTPHeaderField: "Origin")
+            req1b.setValue("https://music.youtube.com/", forHTTPHeaderField: "Referer")
+            req1b.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
+            let payload1b = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240814.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeRawQ)\"}"
+            req1b.httpBody = payload1b.data(using: .utf8)
+            let sem1b = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req1b) { data, response, _ in
+                defer { sem1b.signal() }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let data = data, let text = String(data: data, encoding: .utf8),
+                      let regex = try? NSRegularExpression(pattern: "\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"") else { return }
+                let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+                for m in matches {
+                    if let r = Range(m.range(at: 1), in: text) {
+                        let vid = String(text[r])
+                        if !out.contains(vid) {
+                            out.append(vid)
+                            if out.count >= 6 { break }
+                        }
+                    }
+                }
+            }.resume()
+            _ = sem1b.wait(timeout: .now() + 2.8)
             if !out.isEmpty { return out }
         }
 
@@ -1194,10 +1262,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
         req.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
         req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
-        let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeQ)\"}"
+        let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeRawQ)\"}"
         req.httpBody = payload.data(using: .utf8)
 
-        var out: [String] = []
         let sem = DispatchSemaphore(value: 0)
         URLSession.shared.dataTask(with: req) { data, response, _ in
             defer { sem.signal() }
@@ -1210,7 +1277,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     let vid = String(text[r])
                     if !out.contains(vid) {
                         out.append(vid)
-                        if out.count >= 4 { break }
+                        if out.count >= 5 { break }
                     }
                 }
             }
@@ -1339,10 +1406,13 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     let userDict = item["user"] as? [String: Any]
                     let rawArtist = "\((userDict?["name"] as? String) ?? "") \((userDict?["handle"] as? String) ?? "")"
                     let gotArtist = rawArtist.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-                    let titleMatch = (!wantTitle.isEmpty && !gotTitle.isEmpty && (gotTitle.contains(wantTitle) || wantTitle.contains(gotTitle)))
-                        || (!wantCore.isEmpty && !gotTitle.isEmpty && (gotTitle.contains(wantCore) || wantCore.contains(gotTitle) || (!gotCore.isEmpty && (gotCore.contains(wantCore) || wantCore.contains(gotCore)))))
-                    let artistMatch = artistTokens.isEmpty || artistTokens.contains(where: { gotArtist.contains($0) || $0.contains(gotArtist) || gotTitle.contains($0) })
-                    if (titleMatch && artistMatch) || (durSec >= 60 && !wantCore.isEmpty && (gotCore == wantCore || gotCore.hasPrefix(wantCore + " "))) {
+                    let titleMatch = (!wantTitle.isEmpty && !gotTitle.isEmpty && (gotTitle == wantTitle || gotTitle.hasPrefix(wantTitle + " ")))
+                        || (!wantCore.isEmpty && !gotCore.isEmpty && (gotCore == wantCore || gotCore.hasPrefix(wantCore + " ")))
+                    let wantIsRemix = wantTitle.range(of: "\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit)\\b", options: .regularExpression) != nil
+                    let gotIsRemix = gotTitle.range(of: "\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit|karaoke|instrumental)\\b", options: .regularExpression) != nil
+                    if !wantIsRemix && gotIsRemix { continue }
+                    let artistMatch = artistTokens.isEmpty || artistTokens.contains(where: { gotArtist.contains($0) || (!gotArtist.isEmpty && $0.contains(gotArtist)) })
+                    if titleMatch && artistMatch && durSec >= 60 {
                         if let encId = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
                             let streamUrl = "https://discoveryprovider.audius.co/v1/tracks/\(encId)/stream?app_name=MUCHI"
                             found = ResolvedStream(url: streamUrl, userAgent: defaultUA, durationMs: durSec * 1000.0, mimeType: "audio/mpeg")

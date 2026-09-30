@@ -1165,21 +1165,32 @@ public class MuchiAudioService extends Service {
     public static File getCachedAudioFile(Context ctx, String videoId, String title, String artist) {
         File dir = getAudioCacheDir(ctx);
         if (dir == null || !dir.exists()) return null;
+        final long minValidBytes = 262144L; // 256 KB minimum to reject truncated/partial stream files
         if (videoId != null && !videoId.trim().isEmpty()) {
             File vf = new File(dir, sanitizeAudioCacheKey("vid_" + videoId.trim()) + ".m4a");
-            if (vf.exists() && vf.length() > 32768L) {
-                //noinspection ResultOfMethodCallIgnored
-                vf.setLastModified(System.currentTimeMillis());
-                return vf;
+            if (vf.exists()) {
+                if (vf.length() >= minValidBytes) {
+                    //noinspection ResultOfMethodCallIgnored
+                    vf.setLastModified(System.currentTimeMillis());
+                    return vf;
+                } else {
+                    //noinspection ResultOfMethodCallIgnored
+                    vf.delete();
+                }
             }
         }
         String qKey = queryCacheKey(title, artist);
         if (!qKey.isEmpty()) {
             File qf = new File(dir, sanitizeAudioCacheKey(qKey) + ".m4a");
-            if (qf.exists() && qf.length() > 32768L) {
-                //noinspection ResultOfMethodCallIgnored
-                qf.setLastModified(System.currentTimeMillis());
-                return qf;
+            if (qf.exists()) {
+                if (qf.length() >= minValidBytes) {
+                    //noinspection ResultOfMethodCallIgnored
+                    qf.setLastModified(System.currentTimeMillis());
+                    return qf;
+                } else {
+                    //noinspection ResultOfMethodCallIgnored
+                    qf.delete();
+                }
             }
         }
         return null;
@@ -1245,7 +1256,20 @@ public class MuchiAudioService extends Service {
                 File dir = getAudioCacheDir(ctx);
                 if (dir == null) return;
                 File targetFile = new File(dir, primaryKey + ".m4a");
-                if (targetFile.exists() && targetFile.length() > 32768L) return;
+                if (targetFile.exists() && targetFile.length() >= 262144L) return;
+                // Avoid opening a competing un-ranged download on IOS/ANDROID googlevideo URLs
+                // that enforce a 1MB open-ended range ceiling or single-connection throttling.
+                if (streamUrl.contains("googlevideo.com")
+                        && (streamUrl.contains("c=IOS") || streamUrl.contains("c=ANDROID&"))) {
+                    return;
+                }
+                long urlClen = 0L;
+                try {
+                    java.util.regex.Matcher mClen = java.util.regex.Pattern.compile("(?:[?&]|%26)clen(?:=|%3D)([0-9]+)").matcher(streamUrl);
+                    if (mClen.find()) {
+                        urlClen = Long.parseLong(mClen.group(1));
+                    }
+                } catch (Exception ignored) {}
                 tmpFile = new File(dir, primaryKey + "." + System.currentTimeMillis() + ".tmp");
                 con = (HttpURLConnection) new URL(streamUrl).openConnection();
                 con.setConnectTimeout(10000);
@@ -1260,6 +1284,8 @@ public class MuchiAudioService extends Service {
                 }
                 int code = con.getResponseCode();
                 if (code >= 200 && code < 300) {
+                    long headerLen = con.getContentLengthLong();
+                    long expectedBytes = headerLen > 0 ? headerLen : urlClen;
                     long written = 0L;
                     try (InputStream in = con.getInputStream();
                          FileOutputStream fos = new FileOutputStream(tmpFile)) {
@@ -1272,7 +1298,9 @@ public class MuchiAudioService extends Service {
                         }
                         fos.flush();
                     }
-                    if (written > 32768L) {
+                    boolean completeEnough = written >= 262144L
+                            && (expectedBytes <= 0L || written >= (expectedBytes * 98L) / 100L);
+                    if (completeEnough) {
                         if (targetFile.exists()) {
                             //noinspection ResultOfMethodCallIgnored
                             targetFile.delete();
@@ -1381,7 +1409,7 @@ public class MuchiAudioService extends Service {
     }
 
     private ResolvedStream resolveYoutubeStreamOnDevice(String primaryVid, String candidatesCsv, String title, String artist) {
-        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, resolveExecutor);
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, sharedResolvePool);
     }
 
     private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist, ExecutorService pool) {
@@ -1413,32 +1441,19 @@ public class MuchiAudioService extends Service {
             }
         }
 
-        final ExecutorService exec = pool != null ? pool : sharedResolvePool;
+        // Always use the unbounded sharedResolvePool for concurrent child tasks so calling
+        // from a single-threaded executor (like resolveExecutor) never deadlocks!
+        final ExecutorService exec = sharedResolvePool;
         final String cleanTitle = title != null ? title.trim() : "";
         final String cleanArtist = artist != null ? artist.trim() : "";
 
         // If we don't have extra candidates yet and we have a song title, kick off a fast
-        // YouTube Music WEB_REMIX search concurrently so if primaryVid is empty or a gated
-        // VEVO video, the official audio track videoIds are already ready in ~350ms!
+        // YouTube Music WEB_REMIX search concurrently so if primaryVid is empty (iTunes/Deezer)
+        // or a gated VEVO video, the official audio track videoIds are ready in ~350ms!
         java.util.concurrent.Future<List<String>> searchFuture = null;
         if (vids.size() <= 1 && !cleanTitle.isEmpty()) {
-            final String searchQ = (cleanTitle + " " + cleanArtist + " official audio").trim();
+            final String searchQ = (cleanTitle + " " + cleanArtist).trim();
             searchFuture = exec.submit(() -> searchInnertubeVideoIdsStatic(searchQ));
-        }
-
-        // Start Audius full-track stream probe concurrently after a 150ms head-start so direct
-        // InnerTube hits (<250ms) win with zero overhead, while VEVO/gated tracks already have
-        // Audius in flight in parallel instead of waiting for YouTube tiers to time out first.
-        java.util.concurrent.Future<ResolvedStream> audiusFuture = null;
-        if (!cleanTitle.isEmpty()) {
-            audiusFuture = exec.submit(() -> {
-                try {
-                    Thread.sleep(150);
-                } catch (InterruptedException ie) {
-                    return null;
-                }
-                return probeAudiusForTitleStatic(cleanTitle, cleanArtist);
-            });
         }
 
         // Probe available candidate videoIds in parallel (up to 3 concurrently)
@@ -1446,7 +1461,6 @@ public class MuchiAudioService extends Service {
             ResolvedStream directHit = probeMultipleVideoIdsParallel(vids, Math.min(3, vids.size()), exec);
             if (directHit != null) {
                 if (searchFuture != null) searchFuture.cancel(true);
-                if (audiusFuture != null) audiusFuture.cancel(true);
                 if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, directHit);
                 if (!qKey.isEmpty()) putCachedStream(qKey, directHit);
                 return directHit;
@@ -1458,13 +1472,13 @@ public class MuchiAudioService extends Service {
             List<String> searched = null;
             if (searchFuture != null) {
                 try {
-                    searched = searchFuture.get(2500, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    searched = searchFuture.get(2800, java.util.concurrent.TimeUnit.MILLISECONDS);
                 } catch (Exception ignored) {
                     searchFuture.cancel(true);
                 }
             }
-            if (searched == null) {
-                String q = (cleanTitle + " " + cleanArtist + " official audio").trim();
+            if (searched == null || searched.isEmpty()) {
+                String q = (cleanTitle + " " + cleanArtist).trim();
                 searched = searchInnertubeVideoIdsStatic(q);
             }
             List<String> freshSearchVids = new ArrayList<>();
@@ -1477,9 +1491,8 @@ public class MuchiAudioService extends Service {
                 }
             }
             if (!freshSearchVids.isEmpty()) {
-                ResolvedStream searchHit = probeMultipleVideoIdsParallel(freshSearchVids, Math.min(3, freshSearchVids.size()), exec);
+                ResolvedStream searchHit = probeMultipleVideoIdsParallel(freshSearchVids, Math.min(4, freshSearchVids.size()), exec);
                 if (searchHit != null) {
-                    if (audiusFuture != null) audiusFuture.cancel(true);
                     if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, searchHit);
                     if (!qKey.isEmpty()) putCachedStream(qKey, searchHit);
                     return searchHit;
@@ -1487,32 +1500,18 @@ public class MuchiAudioService extends Service {
             }
         }
 
-        // Check if the concurrent Audius probe already resolved a full-length stream
-        if (audiusFuture != null) {
-            try {
-                ResolvedStream audHit = audiusFuture.get(2200, java.util.concurrent.TimeUnit.MILLISECONDS);
-                if (audHit != null && audHit.url != null && !audHit.url.isEmpty()) {
-                    if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, audHit);
-                    if (!qKey.isEmpty()) putCachedStream(qKey, audHit);
-                    return audHit;
-                }
-            } catch (Exception ignored) {
-                audiusFuture.cancel(true);
-            }
-        }
-
         // Fast parallel fallback: race Piped instances concurrently
         java.util.concurrent.CompletionService<ResolvedStream> fallbackRace =
                 new java.util.concurrent.ExecutorCompletionService<>(exec);
         List<java.util.concurrent.Future<ResolvedStream>> fbFutures = new ArrayList<>();
-        for (int i = 0; i < Math.min(2, vids.size()); i++) {
+        for (int i = 0; i < Math.min(3, vids.size()); i++) {
             final String pVid = vids.get(i);
             fbFutures.add(fallbackRace.submit(() -> probePipedForVideoStatic(pVid)));
         }
         try {
             for (int i = 0; i < fbFutures.size(); i++) {
                 java.util.concurrent.Future<ResolvedStream> done =
-                        fallbackRace.poll(3000, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        fallbackRace.poll(3500, java.util.concurrent.TimeUnit.MILLISECONDS);
                 if (done == null) break;
                 try {
                     ResolvedStream rs = done.get();
@@ -1527,6 +1526,16 @@ public class MuchiAudioService extends Service {
         } finally {
             for (java.util.concurrent.Future<ResolvedStream> f : fbFutures) {
                 f.cancel(true);
+            }
+        }
+
+        // Last-resort fallback: probe Audius only after YouTube InnerTube & Piped have been tried
+        if (!cleanTitle.isEmpty()) {
+            ResolvedStream audHit = probeAudiusForTitleStatic(cleanTitle, cleanArtist);
+            if (audHit != null && audHit.url != null && !audHit.url.isEmpty()) {
+                if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, audHit);
+                if (!qKey.isEmpty()) putCachedStream(qKey, audHit);
+                return audHit;
             }
         }
         return null;
@@ -1572,15 +1581,35 @@ public class MuchiAudioService extends Service {
 
     private static ResolvedStream probeInnertubeForVideoStatic(String videoId, ExecutorService pool) {
         if (videoId == null || videoId.isEmpty()) return null;
-        // Race ANDROID_VR, IOS, and ANDROID in a single parallel batch so the fastest
-        // working profile returns in ~180-250ms (1 network round-trip instead of 2).
-        String[][] fastProfiles = new String[][] {
+        // Tier 1: Race ANDROID_VR (1.61.48 & 1.60.19) and ANDROID_TESTSUITE (1.9) first!
+        // Unlike IOS/ANDROID profiles (which enforce a 1MB open-ended Range ceiling on googlevideo),
+        // ANDROID_VR and ANDROID_TESTSUITE return full-length streams that play from 0:00 to end
+        // without mid-song range cutoffs.
+        String[][] primaryProfiles = new String[][] {
             {
                 "28",
                 "1.61.48",
                 "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.61.48\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             },
+            {
+                "28",
+                "1.60.19",
+                "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.60.19\",\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12L\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            },
+            {
+                "30",
+                "1.9",
+                "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+                "{\"context\":{\"client\":{\"clientName\":\"ANDROID_TESTSUITE\",\"clientVersion\":\"1.9\",\"androidSdkVersion\":30,\"osName\":\"Android\",\"osVersion\":\"11\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
+            }
+        };
+        ResolvedStream hit = probeInnertubeBatchStatic(primaryProfiles, sharedResolvePool);
+        if (hit != null) return hit;
+
+        // Tier 2 fallback: IOS and ANDROID profiles
+        String[][] secondaryProfiles = new String[][] {
             {
                 "5",
                 "20.10.4",
@@ -1594,7 +1623,7 @@ public class MuchiAudioService extends Service {
                 "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"" + videoId + "\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
             }
         };
-        return probeInnertubeBatchStatic(fastProfiles, pool);
+        return probeInnertubeBatchStatic(secondaryProfiles, sharedResolvePool);
     }
 
     private static ResolvedStream probeInnertubeBatchStatic(String[][] profiles, ExecutorService pool) {
@@ -1706,9 +1735,13 @@ public class MuchiAudioService extends Service {
 
     private static List<String> searchInnertubeVideoIdsStatic(String query) {
         List<String> out = new ArrayList<>();
-        String safeQ = query.replace("\\", "\\\\").replace("\"", "\\\"");
-        // 1. Primary: YouTube Music WEB_REMIX search (~200KB response in ~350ms, returns
-        //    official YouTube Music audio track videoIds instead of gated VEVO music videos).
+        String cleanQ = query.replaceAll("(?i)\\bofficial\\s+audio\\b", "").replaceAll("\\s+", " ").trim();
+        if (cleanQ.isEmpty()) cleanQ = query.trim();
+        String safeCleanQ = cleanQ.replace("\\", "\\\\").replace("\"", "\\\"");
+        String safeRawQ = query.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        // 1a. Primary: YouTube Music WEB_REMIX Songs-shelf search (params: EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D)
+        //     Returns official ATV album audio tracks first instead of gated VEVO videos or covers.
         HttpURLConnection con = null;
         try {
             con = (HttpURLConnection) new URL("https://music.youtube.com/youtubei/v1/search?prettyPrint=false").openConnection();
@@ -1720,14 +1753,14 @@ public class MuchiAudioService extends Service {
             con.setRequestProperty("Origin", "https://music.youtube.com");
             con.setRequestProperty("Referer", "https://music.youtube.com/");
             con.setRequestProperty("User-Agent", DEFAULT_UA);
-            String payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240814.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"" + safeQ + "\"}";
+            String payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240814.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"" + safeCleanQ + "\",\"params\":\"EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D\"}";
             try (OutputStream os = con.getOutputStream()) {
                 os.write(payload.getBytes(StandardCharsets.UTF_8));
             }
             if (con.getResponseCode() == 200) {
                 String text = readStreamString(con.getInputStream());
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"").matcher(text);
-                while (m.find() && out.size() < 4) {
+                while (m.find() && out.size() < 5) {
                     String vid = m.group(1);
                     if (vid != null && !out.contains(vid)) out.add(vid);
                 }
@@ -1735,6 +1768,36 @@ public class MuchiAudioService extends Service {
         } catch (Exception ignored) {
         } finally {
             if (con != null) con.disconnect();
+        }
+        if (out.size() >= 3) return out;
+
+        // 1b. Secondary: unfiltered YouTube Music WEB_REMIX search
+        HttpURLConnection con1b = null;
+        try {
+            con1b = (HttpURLConnection) new URL("https://music.youtube.com/youtubei/v1/search?prettyPrint=false").openConnection();
+            con1b.setRequestMethod("POST");
+            con1b.setConnectTimeout(2200);
+            con1b.setReadTimeout(2600);
+            con1b.setDoOutput(true);
+            con1b.setRequestProperty("Content-Type", "application/json");
+            con1b.setRequestProperty("Origin", "https://music.youtube.com");
+            con1b.setRequestProperty("Referer", "https://music.youtube.com/");
+            con1b.setRequestProperty("User-Agent", DEFAULT_UA);
+            String payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240814.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"" + safeRawQ + "\"}";
+            try (OutputStream os = con1b.getOutputStream()) {
+                os.write(payload.getBytes(StandardCharsets.UTF_8));
+            }
+            if (con1b.getResponseCode() == 200) {
+                String text = readStreamString(con1b.getInputStream());
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"").matcher(text);
+                while (m.find() && out.size() < 6) {
+                    String vid = m.group(1);
+                    if (vid != null && !out.contains(vid)) out.add(vid);
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (con1b != null) con1b.disconnect();
         }
         if (!out.isEmpty()) return out;
 
@@ -1750,14 +1813,14 @@ public class MuchiAudioService extends Service {
             con2.setRequestProperty("Origin", "https://www.youtube.com");
             con2.setRequestProperty("Referer", "https://www.youtube.com/");
             con2.setRequestProperty("User-Agent", DEFAULT_UA);
-            String payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"" + safeQ + "\"}";
+            String payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"" + safeRawQ + "\"}";
             try (OutputStream os = con2.getOutputStream()) {
                 os.write(payload.getBytes(StandardCharsets.UTF_8));
             }
             if (con2.getResponseCode() == 200) {
                 String text = readStreamString(con2.getInputStream());
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"").matcher(text);
-                while (m.find() && out.size() < 4) {
+                while (m.find() && out.size() < 5) {
                     String vid = m.group(1);
                     if (vid != null && !out.contains(vid)) out.add(vid);
                 }
@@ -1892,18 +1955,20 @@ public class MuchiAudioService extends Service {
                         String gotArtist = (user != null ? user.optString("name", "") + " " + user.optString("handle", "") : "")
                                 .toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
                         boolean titleMatch = (!wantTitle.isEmpty() && !gotTitle.isEmpty()
-                                && (gotTitle.contains(wantTitle) || wantTitle.contains(gotTitle)))
-                                || (!wantCore.isEmpty() && !gotTitle.isEmpty()
-                                && (gotTitle.contains(wantCore) || wantCore.contains(gotTitle)
-                                || (!gotCore.isEmpty() && (gotCore.contains(wantCore) || wantCore.contains(gotCore)))));
+                                && (gotTitle.equals(wantTitle) || gotTitle.startsWith(wantTitle + " ")))
+                                || (!wantCore.isEmpty() && !gotCore.isEmpty()
+                                && (gotCore.equals(wantCore) || gotCore.startsWith(wantCore + " ")));
+                        boolean wantIsRemix = wantTitle.matches(".*\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit)\\b.*");
+                        boolean gotIsRemix = gotTitle.matches(".*\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit|karaoke|instrumental)\\b.*");
+                        if (!wantIsRemix && gotIsRemix) continue;
                         boolean artistMatch = artistTokens.isEmpty();
                         for (String tok : artistTokens) {
-                            if (gotArtist.contains(tok) || tok.contains(gotArtist) || gotTitle.contains(tok)) {
+                            if (gotArtist.contains(tok) || (!gotArtist.isEmpty() && tok.contains(gotArtist))) {
                                 artistMatch = true;
                                 break;
                             }
                         }
-                        if ((titleMatch && artistMatch) || (durSec >= 60L && !wantCore.isEmpty() && (gotCore.equals(wantCore) || gotCore.startsWith(wantCore + " ")))) {
+                        if (titleMatch && artistMatch && durSec >= 60L) {
                             String streamUrl = "https://discoveryprovider.audius.co/v1/tracks/"
                                     + java.net.URLEncoder.encode(id, "UTF-8") + "/stream?app_name=MUCHI";
                             return new ResolvedStream(streamUrl, DEFAULT_UA, durSec * 1000L, "audio/mpeg");

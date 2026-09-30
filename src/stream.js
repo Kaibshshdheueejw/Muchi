@@ -166,8 +166,9 @@ async function pipeUrl(request, src, accept, overrideMime) {
 
   // Googlevideo IOS/ANDROID streams reject open-ended "Range: bytes=0-" with HTTP 403
   // but accept bounded <= 960 KB Range chunks ("Range: bytes=0-983039"). When a full-file
-  // download (!range) hits 403 on open-ended Range, stream the file in 960 KB chunks.
-  if (isYt && !range && (!r || r.status === 403)) {
+  // or open-ended initial Range: bytes=0- request hits 403, stream the file in 960 KB chunks.
+  const isOpenEndedZeroRange = !range || /^bytes=0-\s*$/i.test(String(range).trim());
+  if (isYt && isOpenEndedZeroRange && (!r || r.status === 403)) {
     try {
       const CHUNK_SIZE = 983040; // 960 KB (< 1 MB Googlevideo IOS/ANDROID chunk ceiling)
       let clen = 0;

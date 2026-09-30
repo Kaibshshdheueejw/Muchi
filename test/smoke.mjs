@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.3", APP_VERSION === "1.8.3" && appJs.includes('const APP_VERSION = "1.8.3"'));
+  ok("version: APP_VERSION is 1.8.4", APP_VERSION === "1.8.4" && appJs.includes('const APP_VERSION = "1.8.4"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1145,7 +1145,7 @@ await (async () => {
     iosPlugin.includes('item["is_streamable"] as? Bool')
   );
   ok("native background (1.7.8): Android MuchiAudioService restores full resolveYoutubeStreamStatic (candidates + official-audio search + ANDROID_TESTSUITE + Piped) and guarantees startInForeground in onStartCommand",
-    androidService.includes("return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, resolveExecutor);") &&
+    androidService.includes("return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, sharedResolvePool);") &&
     androidService.includes("ANDROID_TESTSUITE") &&
     androidService.includes("public static final String ACTION_RESUME") &&
     androidPlugin.includes("service.isForegroundStarted()")
@@ -1546,7 +1546,36 @@ await (async () => {
         Math.abs(posAfterRealStart - 0.4) < 0.05 &&
         clickCatalogElapsed < 45;
 
-      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk, zeroJumpOk };
+      // Step 8 (v1.8.4): Full-length iTunes & Deezer Native E2E playback from 0:00 through full duration
+      // Simulate iTunes song playing through 30s, 90s, 150s, 199.8s (never cutting off at 30s) -> natural ended -> advances to Deezer song and plays full 175s
+      for (const p of [30, 90, 150, 199.8]) {
+        progressListeners.forEach((cb) => cb({ position: p, duration: 200, playing: true }));
+      }
+      const itunesFullPlayPos = api.position();
+      const itunesFullPlayDur = api.getNpState().npDur;
+      calls.length = 0;
+      const deezerCatalog = [
+        { id: "itunes:1001", source: "itunes", title: "Die With A Smile", artist: "Lady Gaga & Bruno Mars", duration: 252, artwork: "/cover-default.jpg" },
+        { id: "deezer:2002", source: "deezer", title: "BIRDS OF A FEATHER", artist: "Billie Eilish", duration: 210, artwork: "/cover-default.jpg" },
+      ];
+      api.playFromList(deezerCatalog, 1);
+      await new Promise((r) => setTimeout(r, 15));
+      const deezerPlayCall = calls.find((c) => c.method === "play" && c.title === "BIRDS OF A FEATHER");
+      for (const p of [10, 45, 120, 185, 209.5]) {
+        progressListeners.forEach((cb) => cb({ position: p, duration: 210, playing: true }));
+      }
+      const deezerFullPlayPos = api.position();
+      const deezerFullPlayDur = api.getNpState().npDur;
+      const itunesDeezerFullPlayOk =
+        Math.abs(itunesFullPlayPos - 199.8) < 0.2 &&
+        itunesFullPlayDur === 200 &&
+        Boolean(deezerPlayCall) &&
+        deezerPlayCall.duration === 210000 &&
+        Math.abs(deezerFullPlayPos - 209.5) < 0.2 &&
+        deezerFullPlayDur === 210 &&
+        api.state.playing === true;
+
+      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk, zeroJumpOk, itunesDeezerFullPlayOk };
     }
 
     const androidE2E = await runNativeBackgroundE2E("android");
@@ -1562,6 +1591,9 @@ await (async () => {
     ok("Android Native E2E (v1.8.3): clicking any song starts at 0:00 (never jumps to 0:14), skips 750ms wait, and rejects stale progress ticks",
       androidE2E.zeroJumpOk
     );
+    ok("Android Native E2E (v1.8.4): iTunes & Deezer songs play full track duration (200s / 210s) without cutting off early",
+      androidE2E.itunesDeezerFullPlayOk
+    );
 
     const iosE2E = await runNativeBackgroundE2E("ios");
     ok("iOS Native E2E: play song → resolves verified HTTP stream, starts AVPlayer & preloads next track", iosE2E.step1Ok);
@@ -1575,6 +1607,9 @@ await (async () => {
     );
     ok("iOS Native E2E (v1.8.3): clicking any song starts at 0:00 (never jumps to 0:14), skips 750ms wait, and rejects stale progress ticks",
       iosE2E.zeroJumpOk
+    );
+    ok("iOS Native E2E (v1.8.4): iTunes & Deezer songs play full track duration (200s / 210s) without cutting off early",
+      iosE2E.itunesDeezerFullPlayOk
     );
 
     // ── v1.8.2 & v1.8.3 E2E: Immediate Playback, Zero-Jump Timer, and Native App Audio Cache ──
@@ -1616,6 +1651,19 @@ await (async () => {
       iosPlugin.includes("player?.replaceCurrentItem(with: nil)") &&
       iosPlugin.includes("https://music.youtube.com/youtubei/v1/search?prettyPrint=false") &&
       iosPlugin.includes("probeMultipleVideosParallel")
+    );
+    ok("v1.8.4 native iTunes & Deezer full-track playback: sharedResolvePool anti-deadlock, WEB_REMIX Songs filter, 256KB + 98% clen anti-truncation cache guard, ANDROID_VR/ANDROID_TESTSUITE Tier 1 priority, and strict Audius artist matching",
+      androidService.includes("final ExecutorService exec = sharedResolvePool;") &&
+      androidService.includes("EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D") &&
+      androidService.includes("final long minValidBytes = 262144L;") &&
+      androidService.includes("written >= (expectedBytes * 98L) / 100L") &&
+      androidService.includes("if (titleMatch && artistMatch && durSec >= 60L)") &&
+      iosPlugin.includes("let minValidBytes: Int64 = 262144") &&
+      iosPlugin.includes("EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D") &&
+      iosPlugin.includes("written >= (expectedBytes * 98) / 100") &&
+      iosPlugin.includes("if titleMatch && artistMatch && durSec >= 60") &&
+      appJs.includes("t._nativeOnDeviceVid = String(t.videoId || \"\");") &&
+      appJs.includes("&allowPreview=0&refresh=1")
     );
   }
 

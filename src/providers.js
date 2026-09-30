@@ -180,8 +180,10 @@ export async function searchYouTube(query, gl, fast) {
   }
   if (!out.length) throw new Error(errors.join(" | ") || "YouTube search failed");
   const qn = String(query || "").toLowerCase().trim();
-  const words = qn.split(/\s+/).filter((w) => w.length > 1);
-  const cjkRuns = qn.match(/[\u3040-\u30ff\u3400-\u9fff]{2,}/g) || [];
+  const cleanQn = qn.replace(/\b(?:official\s+audio|official\s+video|official\s+music\s+video|official|audio|video|lyrics?)\b/gi, "").replace(/\s+/g, " ").trim() || qn;
+  const words = cleanQn.split(/\s+/).filter((w) => w.length > 1 && !/^(feat|ft|with|and|the)$/.test(w));
+  const wantCover = /\b(cover|karaoke|instrumental|tribute|remix|live)\b/i.test(qn);
+  const cjkRuns = cleanQn.match(/[\u3040-\u30ff\u3400-\u9fff]{2,}/g) || [];
   const cjkBigrams = [];
   for (const run of cjkRuns) {
     for (let i = 0; i < run.length - 1; i++) {
@@ -191,17 +193,36 @@ export async function searchYouTube(query, gl, fast) {
   const score = (t) => {
     const title = String(t.title || "").toLowerCase();
     const artist = String(t.artist || "").toLowerCase();
-    if (!qn) return 0;
-    if (title === qn) return 200;
-    if (title.includes(qn)) return 120;
-    if (`${title} ${artist}`.includes(qn)) return 90;
+    if (!cleanQn) return 0;
     let s = 0;
+    if (title === cleanQn) s += 160;
+    else if (`${title} ${artist}` === cleanQn) s += 180;
+    else if (`${title} ${artist}`.includes(cleanQn)) s += 110;
+    let titleMatches = 0;
+    let artistMatches = 0;
     for (const w of words) {
-      if (title.includes(w)) s += 18;
-      if (artist.includes(w)) s += 10;
+      const inTitle = title.includes(w);
+      const inArtist = artist.includes(w);
+      if (inTitle) {
+        s += 16;
+        titleMatches++;
+      }
+      if (inArtist) {
+        s += 18;
+        artistMatches++;
+      }
+    }
+    if (titleMatches > 0 && artistMatches > 0) {
+      s += 45; // Both song title and artist channel match the query
+    } else if (artistMatches === 0 && words.length >= 2) {
+      s -= 30; // Cover/re-upload channel that stuffed artist name into video title
+    }
+    if (!wantCover && /\b(cover|karaoke|instrumental|tribute|8d|sped\s*up|slowed|nightcore)\b/i.test(`${title} ${artist}`)) {
+      s -= 65;
     }
     for (const bg of cjkBigrams) {
       if (title.includes(bg)) s += 14;
+      if (artist.includes(bg)) s += 14;
     }
     return s;
   };
