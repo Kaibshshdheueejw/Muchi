@@ -173,7 +173,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     public void play(PluginCall call) {
         String url = call.getString("url", "");
         String videoId = call.getString("videoId", "");
-        if (url.isEmpty() && !videoId.isEmpty()) {
+        String rawTitle = call.getString("title", "");
+        if (url.isEmpty() && (!videoId.isEmpty() || !rawTitle.isEmpty())) {
             url = "yt:" + videoId;
         }
         if (url.isEmpty()) {
@@ -195,6 +196,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_ARTIST, call.getString("artist", ""));
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, call.getString("artwork", ""));
         i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, readLong(call, "duration", 0L));
+        i.putExtra(MuchiAudioService.EXTRA_POSITION_MS, readLong(call, "position", 0L));
         if (call.hasOption("volume")) {
             Double v = call.getDouble("volume", 100.0);
             i.putExtra(MuchiAudioService.EXTRA_VOLUME, v != null ? v.floatValue() : 100f);

@@ -1,5 +1,5 @@
-const CACHE = "muchi-shell-v108";
-const SHELL = ["/", "/index.html", "/terms.html", "/privacy.html", "/styles.css?v=108", "/app.js?v=108", "/meta.js", "/logo.png?v=53", "/cover-default.jpg", "/manifest.json"];
+const CACHE = "muchi-shell-v109";
+const SHELL = ["/", "/index.html", "/terms.html", "/privacy.html", "/styles.css?v=109", "/app.js?v=109", "/meta.js", "/logo.png?v=53", "/cover-default.jpg", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

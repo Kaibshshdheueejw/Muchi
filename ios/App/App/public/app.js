@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.1";
+  const APP_VERSION = "1.8.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -4015,6 +4015,12 @@
   }
 
   function hookSound() {
+    // On Native (Android/iOS), MuchiAudioService / MuchiAudioPlugin handles playback
+    // and hardware Sound Stage DSP (LoudnessEnhancer + BassBoost + Equalizer).
+    // Never attach WebAudio createMediaElementSource(audio) in the native WebView,
+    // as WebAudio AudioContext is suspended by the OS on app backgrounding and
+    // steals Android AudioFocus from ExoPlayer.
+    if (IS_NATIVE) return;
     const mode = spatialMode();
     try {
       if (mode === "off" && !fx.src) return;
@@ -6058,8 +6064,16 @@
 
   // Supplements related candidates with peer/related artists in the same language & musical culture
   // and sequences them through the Spotify-style similarity -> gradual exploration engine.
+  const _inFlightSmartRelated = new Map();
   async function gatherSmartRelatedCandidates(seed, excludeTracks = [], max = 18) {
     if (!seed || seed.source === "radio") return [];
+    const inflightKey = String(canonicalSongKey(seed) || seed.id || seed.title || "");
+    if (inflightKey && _inFlightSmartRelated.has(inflightKey)) {
+      const shared = await _inFlightSmartRelated.get(inflightKey);
+      return Array.isArray(shared) ? shared.slice(0, max) : [];
+    }
+    const targetMax = Math.max(max, 18);
+    const task = (async () => {
     const vibe = inferTrackVibeClient(seed);
     const searchGl =
       vibe.langCulture === "south_asian" ? "IN" :
@@ -6136,6 +6150,13 @@
       relatedArtists,
       excludeTracks,
     });
+    })();
+    _inFlightSmartRelated.set(inflightKey, task);
+    try {
+      return await task;
+    } finally {
+      _inFlightSmartRelated.delete(inflightKey);
+    }
   }
 
   let isQueueRecsLoading = false;
@@ -6206,7 +6227,7 @@
           state.queue = state.queue.concat(toAdd);
           renderQueue();
           renderChrome();
-          loadQueueRecs(true);
+          if (state.queueRecs.length < 4) loadQueueRecs(true);
           return true;
         }
       }
@@ -6301,18 +6322,153 @@
   // In-memory resolution cache: playQuery -> {videoId, candidates, artwork, duration, streamUrl}.
   const ytResolveCache = new Map();
   const YT_RESOLVE_CACHE_MAX = 500;
-  function ytResolveStore(q, videoId, artwork, duration, candidates = [], streamUrl = "") {
+
+  // Persistent Native App Audio Cache: stores resolved song data & lyrics in-app so
+  // replaying a song in the Native App plays in 0ms from app cache with zero backend load.
+  const NATIVE_AUDIO_CACHE_KEY = "aura.nativeAudioCache.v1";
+  const NATIVE_AUDIO_CACHE_MAX = 300;
+  const nativeAppAudioCache = new Map();
+  try {
+    const rawCache = localStorage.getItem(NATIVE_AUDIO_CACHE_KEY);
+    if (rawCache) {
+      const parsed = JSON.parse(rawCache);
+      if (Array.isArray(parsed)) {
+        for (const [k, v] of parsed) {
+          if (k && v && typeof v === "object") nativeAppAudioCache.set(k, v);
+        }
+      }
+    }
+  } catch {}
+
+  function persistNativeAppAudioCache() {
+    try {
+      const entries = Array.from(nativeAppAudioCache.entries()).slice(-NATIVE_AUDIO_CACHE_MAX);
+      localStorage.setItem(NATIVE_AUDIO_CACHE_KEY, JSON.stringify(entries));
+    } catch {}
+  }
+
+  function getNativeAudioCacheKeys(t) {
+    if (!t) return [];
+    const sk = canonicalSongKey(t);
+    const tk = trackKey(t);
+    const q0 = buildTrackPlayQueries(t)[0] || "";
+    return [
+      t.videoId ? `vid:${t.videoId}` : "",
+      t.id ? `id:${t.id}` : "",
+      tk ? `tk:${tk}` : "",
+      sk ? `sk:${sk}` : "",
+      q0 ? `q:${q0.toLowerCase()}` : "",
+    ].filter(Boolean);
+  }
+
+  function storeNativeAppAudioCache(t, extra = {}) {
+    if (!t || t.source === "radio") return null;
+    const keys = getNativeAudioCacheKeys(t);
+    if (!keys.length) return null;
+    let existing = null;
+    for (const k of keys) {
+      if (nativeAppAudioCache.has(k)) {
+        existing = nativeAppAudioCache.get(k);
+        break;
+      }
+    }
+    const entry = {
+      videoId: String(extra.videoId || t.videoId || (existing && existing.videoId) || ""),
+      streamUrl: String(extra.streamUrl || t.streamUrl || (existing && existing.streamUrl) || ""),
+      candidates: Array.isArray(extra.candidates)
+        ? extra.candidates.slice(0, 10)
+        : Array.isArray(t._ytCandidates)
+          ? t._ytCandidates.slice(0, 10)
+          : (existing && existing.candidates) || [],
+      artwork: String(extra.artwork || t.artwork || (existing && existing.artwork) || ""),
+      duration: Number(extra.duration || t.duration || (existing && existing.duration) || 0),
+      title: String(t.title || (existing && existing.title) || ""),
+      artist: String(artistName(t) || t.artist || (existing && existing.artist) || ""),
+      lyrics: extra.lyrics !== undefined ? extra.lyrics : (existing && existing.lyrics) || null,
+      lyricsChecked: Boolean(extra.lyricsChecked || (existing && existing.lyricsChecked)),
+      cachedAt: Date.now(),
+    };
+    for (const k of keys) {
+      if (nativeAppAudioCache.has(k)) nativeAppAudioCache.delete(k);
+      nativeAppAudioCache.set(k, entry);
+    }
+    while (nativeAppAudioCache.size > NATIVE_AUDIO_CACHE_MAX * 3) {
+      const oldest = nativeAppAudioCache.keys().next().value;
+      if (oldest === undefined) break;
+      nativeAppAudioCache.delete(oldest);
+    }
+    persistNativeAppAudioCache();
+    return entry;
+  }
+
+  function getNativeAppAudioCache(t) {
+    if (!t || t.source === "radio") return null;
+    const keys = getNativeAudioCacheKeys(t);
+    for (const k of keys) {
+      const hit = nativeAppAudioCache.get(k);
+      if (hit && (hit.videoId || hit.streamUrl || hit.title)) {
+        return hit;
+      }
+    }
+    return null;
+  }
+
+  function ytResolveStore(q, videoId, artwork, duration, candidates = [], streamUrl = "", songKey = "") {
     if (ytResolveCache.size >= YT_RESOLVE_CACHE_MAX) {
       const first = ytResolveCache.keys().next().value;
       if (first !== undefined) ytResolveCache.delete(first);
     }
-    ytResolveCache.set(q, {
+    const entry = {
       videoId: videoId || "",
       candidates: Array.isArray(candidates) ? candidates.slice(0, 10) : [],
       artwork: artwork || "",
       duration: duration || 0,
       streamUrl: streamUrl || "",
-    });
+    };
+    if (q) ytResolveCache.set(q, entry);
+    if (songKey) ytResolveCache.set(`sk:${songKey}`, entry);
+  }
+
+  function applyYtResolveCacheHit(t, cachedHit) {
+    if (!t || !cachedHit || (!cachedHit.videoId && !cachedHit.streamUrl)) return false;
+    if (cachedHit.videoId) t.videoId = cachedHit.videoId;
+    if (cachedHit.candidates && cachedHit.candidates.length) t._ytCandidates = cachedHit.candidates.slice();
+    if (cachedHit.streamUrl && !t.streamUrl) t.streamUrl = cachedHit.streamUrl;
+    if (!t.origSource) t.origSource = t.source;
+    if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
+    if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
+    if (cachedHit.duration && !t.duration) t.duration = cachedHit.duration;
+    return true;
+  }
+
+  function warmTrack(t) {
+    if (!t || t.source === "radio") return;
+    const now = Date.now();
+    if (t._warmedAt && now - t._warmedAt < 45000) return;
+    t._warmedAt = now;
+    const warmResolved = (tr) => {
+      if (!tr) return;
+      const NP = nativePlayer();
+      if (IS_NATIVE && NP && typeof NP.preload === "function") {
+        if ((tr.videoId || tr.title) && !tr._nativePreloaded) {
+          tr._nativePreloaded = true;
+          const cands = Array.isArray(tr._ytCandidates) ? tr._ytCandidates.slice(0, 5).join(",") : "";
+          NP.preload({
+            videoId: String(tr.videoId || ""),
+            candidates: cands,
+            title: String(tr.title || ""),
+            artist: String(artistName(tr) || tr.artist || ""),
+          }).catch(() => {});
+        }
+      } else if (tr.videoId && !tr.streamUrl) {
+        getWarmStream(tr.videoId, tr.title || "", artistName(tr) || tr.artist || "", tr._ytCandidates || [], 5000, true).catch(() => {});
+      }
+    };
+    if (!t.videoId && !t.streamUrl && !t.url && t.source !== "audius") {
+      resolveYouTubePlay(t).then(() => warmResolved(t)).catch(() => {});
+    } else {
+      warmResolved(t);
+    }
   }
 
   // In-flight & warm stream cache: videoId -> { promise, data, exp }
@@ -6380,12 +6536,24 @@
   async function resolveFallbackStreamUrl(t, skipYtStream = false) {
     if (!t) return "";
     if (!skipYtStream && t.streamUrl && !t._isPreviewStream) return t.streamUrl;
+    if (!skipYtStream && t.videoId) {
+      try {
+        const warm = await getWarmStream(t.videoId, t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 5500, true);
+        if (warm && warm.url && !warm.isPreview) {
+          t.streamUrl = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
+          t._isPreviewStream = false;
+          if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
+          if (warm.duration && !t.duration) t.duration = Number(warm.duration);
+          return t.streamUrl;
+        }
+      } catch {}
+    }
     const candParam = Array.isArray(t._ytCandidates) && t._ytCandidates.length
       ? `&candidates=${encodeURIComponent(t._ytCandidates.slice(0, 5).join(","))}`
       : "";
     if (!skipYtStream && (t.videoId || t.title)) {
       try {
-        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0`, 10000);
+        const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0`, 6500);
         if (sData && sData.url && !sData.isPreview) {
           t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
           t._isPreviewStream = false;
@@ -6401,7 +6569,7 @@
       const q = queries[i];
       if (!q) continue;
       try {
-        const sData = await api(`/api/yt/stream?title=${encodeURIComponent(q)}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0&refresh=1`, 9000);
+        const sData = await api(`/api/yt/stream?title=${encodeURIComponent(q)}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0&refresh=1`, 6000);
         if (sData && sData.url && !sData.isPreview) {
           t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
           t._isPreviewStream = false;
@@ -6420,17 +6588,11 @@
     const queries = buildTrackPlayQueries(t);
     const q = queries[0] || "";
     if (!q) throw new Error("No playable version");
+    const sk = canonicalSongKey(t);
 
-    // Instant path: already resolved this exact query this session.
-    const cachedHit = ytResolveCache.get(q);
-    if (cachedHit && (cachedHit.videoId || cachedHit.streamUrl)) {
-      if (cachedHit.videoId) t.videoId = cachedHit.videoId;
-      if (cachedHit.candidates && cachedHit.candidates.length) t._ytCandidates = cachedHit.candidates.slice();
-      if (cachedHit.streamUrl && !t.streamUrl) t.streamUrl = cachedHit.streamUrl;
-      if (!t.origSource) t.origSource = t.source;
-      if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
-      if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
-      if (cachedHit.duration && !t.duration) t.duration = cachedHit.duration;
+    // Instant path: already resolved this exact query or canonical song this session.
+    const cachedHit = ytResolveCache.get(q) || (sk ? ytResolveCache.get(`sk:${sk}`) : null);
+    if (applyYtResolveCacheHit(t, cachedHit)) {
       return t;
     }
 
@@ -6440,10 +6602,11 @@
       return Array.isArray(arr) ? arr.filter((x) => x && (x.videoId || x.streamUrl)) : [];
     };
 
-    // 1. Race fast primary YouTube search with stripped secondary query (350ms head start)
+    // 1. Race fast primary YouTube search with stripped secondary query (80ms head start)
+    let secondaryRaceTimer = null;
     try {
       const searchRaces = [
-        api(`/api/youtube/search?q=${encodeURIComponent(q)}&fast=1&${glq()}`, 3200).then((d) => {
+        api(`/api/youtube/search?q=${encodeURIComponent(q)}&fast=1&${glq()}`, 2600).then((d) => {
           const r = extractRows(d);
           if (!r.length) throw new Error("empty");
           return r;
@@ -6451,21 +6614,28 @@
       ];
       if (queries[2] && queries[2] !== q) {
         searchRaces.push(
-          new Promise((res, rej) =>
-            setTimeout(() => {
-              api(`/api/youtube/search?q=${encodeURIComponent(queries[2])}&fast=1&${glq()}`, 3000)
+          new Promise((res, rej) => {
+            secondaryRaceTimer = setTimeout(() => {
+              secondaryRaceTimer = null;
+              api(`/api/youtube/search?q=${encodeURIComponent(queries[2])}&fast=1&${glq()}`, 2500)
                 .then((d) => {
                   const r = extractRows(d);
                   if (!r.length) throw new Error("empty");
                   return r;
                 })
                 .then(res, rej);
-            }, 350)
-          )
+            }, 80);
+          })
         );
       }
       rows = await Promise.any(searchRaces);
-    } catch {}
+    } catch {
+    } finally {
+      if (secondaryRaceTimer) {
+        clearTimeout(secondaryRaceTimer);
+        secondaryRaceTimer = null;
+      }
+    }
 
     // 2. Fallback: full /api/youtube/search + Piped browser search raced in parallel
     if (!Array.isArray(rows) || !rows.some((x) => x && (x.videoId || x.streamUrl))) {
@@ -6493,7 +6663,7 @@
             return mapped;
           });
       })();
-      const serverAttempt = api(`/api/youtube/search?q=${encodeURIComponent(qFallback)}&${glq()}`, 4500).then((d) => {
+      const serverAttempt = api(`/api/youtube/search?q=${encodeURIComponent(qFallback)}&${glq()}`, 3800).then((d) => {
         const r = extractRows(d);
         if (!r.length) throw new Error("empty server");
         return r;
@@ -6517,7 +6687,7 @@
       if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
       if (hit.duration && !t.duration) t.duration = hit.duration;
       if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
-      ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0, t._ytCandidates || [], t.streamUrl || "");
+      ytResolveStore(q, t.videoId, t.artwork, hit.duration || 0, t._ytCandidates || [], t.streamUrl || "", sk);
       return t;
     }
 
@@ -6526,7 +6696,7 @@
       if (!t.origSource) t.origSource = t.source;
       if (hit.duration && !t.duration) t.duration = hit.duration;
       if ((!t.artwork || t.artwork === "/cover-default.jpg") && hit.artwork) t.artwork = hit.artwork;
-      ytResolveStore(q, "", t.artwork, hit.duration || 0, [], t.streamUrl);
+      ytResolveStore(q, "", t.artwork, hit.duration || 0, [], t.streamUrl, sk);
       return t;
     }
 
@@ -6534,7 +6704,7 @@
     const fallbackUrl = await resolveFallbackStreamUrl(t);
     if (fallbackUrl) {
       t.streamUrl = fallbackUrl;
-      ytResolveStore(q, "", t.artwork, t.duration || 0, [], fallbackUrl);
+      ytResolveStore(q, "", t.artwork, t.duration || 0, [], fallbackUrl, sk);
       return t;
     }
 
@@ -6627,16 +6797,23 @@
     while (state.index + 1 < state.queue.length && isSameSongClient(state.queue[state.index + 1], t)) {
       state.queue.splice(state.index + 1, 1);
     }
+    stopTimer();
+
+    // Check Native App Audio Cache synchronously so replaying a cached song in the
+    // Native App immediately fetches from app cache and puts zero load on the backend.
+    const nativeCachedEntry = IS_NATIVE ? getNativeAppAudioCache(t) : null;
+    if (nativeCachedEntry) {
+      applyYtResolveCacheHit(t, nativeCachedEntry);
+      t._fromNativeAppCache = true;
+      if (nativeCachedEntry.lyrics && (nativeCachedEntry.lyrics.lyrics || (nativeCachedEntry.lyrics.synced && nativeCachedEntry.lyrics.synced.length))) {
+        state.lyrics = { ...nativeCachedEntry.lyrics, key: lyricsKey(t) };
+      }
+    } else {
+      t._fromNativeAppCache = false;
+    }
+
     // Always load lyrics (uses IndexedDB / saved download cache when offline)
     loadLyrics(t);
-    if (!isNetworkOff) {
-      loadQueueRecs(t);
-      const remainingUpcoming = Array.isArray(state.queue) ? (state.queue.length - 1 - state.index) : 0;
-      if (remainingUpcoming <= 2 && t.source !== "radio") {
-        fillRelatedQueue(t);
-      }
-    }
-    stopTimer();
 
     try {
       const saved = findSavedTrack(t);
@@ -6672,6 +6849,14 @@
         }
       }
 
+      // Check synchronous resolution cache before deciding if network resolution is needed
+      if (!t.videoId && !t.streamUrl && !t.url && t.source !== "audius" && t.source !== "radio") {
+        const q0 = buildTrackPlayQueries(t)[0] || "";
+        const sk0 = canonicalSongKey(t);
+        const syncHit = (q0 && ytResolveCache.get(q0)) || (sk0 && ytResolveCache.get(`sk:${sk0}`));
+        if (syncHit) applyYtResolveCacheHit(t, syncHit);
+      }
+
       // Metadata-only sources (apple/itunes/deezer from the iTunes or Deezer
       // catalogs, and any youtube row still missing a resolved videoId) have
       // no direct audio stream — resolve them to a real stream before playing.
@@ -6679,19 +6864,35 @@
         !t.videoId && !t.streamUrl && !t.url &&
         t.source !== "audius" && t.source !== "radio";
       if (needsResolve) {
-        renderBufferState(true);
-        try {
-          await resolveYouTubePlay(t);
-        } finally {
-          if (gen === playGen) {
-            renderBufferState(false);
-            renderChrome();
+        if (useNativeAudioPipe && t.title) {
+          // On Native, race JS resolution with a short 750ms window; if not cached yet,
+          // hand off immediately to MuchiAudioService / MuchiAudioPlugin which resolves
+          // title + artist directly on-device without waiting for Worker round-trips.
+          renderBufferState(true);
+          try {
+            const resolveP = resolveYouTubePlay(t).catch(() => {});
+            await Promise.race([resolveP, new Promise((r) => setTimeout(r, 750))]);
+          } finally {
+            if (gen === playGen) {
+              renderBufferState(false);
+              renderChrome();
+            }
+          }
+        } else {
+          renderBufferState(true);
+          try {
+            await resolveYouTubePlay(t);
+          } finally {
+            if (gen === playGen) {
+              renderBufferState(false);
+              renderChrome();
+            }
           }
         }
       }
       if (gen !== playGen) return;
 
-      if (t.videoId && !t._playingViaAudio) {
+      if ((t.videoId || (useNativeAudioPipe && t.title && !t.streamUrl && !t.url && t.source !== "audius" && t.source !== "radio")) && !t._playingViaAudio) {
         // On native shells, play YouTube as a background audio stream when
         // possible so the OS media notification + lock-screen controls work
         // and music keeps playing with the screen off. Falls back to the
@@ -6702,6 +6903,8 @@
           // resolved + handed to native player; nothing more to do here
         } else {
           try {
+            if (!t.videoId) await resolveYouTubePlay(t);
+            if (gen !== playGen) return;
             await playYouTube(t, reset);
           } catch (ytErr) {
             if (gen !== playGen) return;
@@ -6717,6 +6920,22 @@
       }
 
       if (gen !== playGen) return;
+      if (IS_NATIVE) {
+        storeNativeAppAudioCache(t);
+      }
+      if (!isNetworkOff && !t._fromNativeAppCache) {
+        setTimeout(() => {
+          if (gen !== playGen) return;
+          loadQueueRecs(t);
+          const remainingUpcoming = Array.isArray(state.queue) ? (state.queue.length - 1 - state.index) : 0;
+          if (remainingUpcoming <= 2 && t.source !== "radio") {
+            fillRelatedQueue(t);
+          }
+          if (state.index + 1 < state.queue.length) {
+            warmTrack(state.queue[state.index + 1]);
+          }
+        }, 120);
+      }
       failSkip = 0;
       state.playing = true;
       setWantPlay(true);
@@ -6767,7 +6986,7 @@
 
   // Try to play a YouTube track through the native audio pipeline
   async function playYtWithAudio(t, reset) {
-    if (!t || !t.videoId) return false;
+    if (!t || (!t.videoId && !t.title)) return false;
     if (!IS_NATIVE || !nativePlayer()) return false;
     if (state.prefs.ytAudio === false) return false;
     if (state.showVideo) return false;
@@ -6779,7 +6998,11 @@
     // routing through the Cloudflare Worker /api/stream datacenter proxy (which
     // triggers Googlevideo 403 IP-binding rejections after the initial buffer).
     t._nativeOnDeviceTried = true;
-    t.streamUrl = `yt:${t.videoId}`;
+    if (t.videoId) {
+      t.streamUrl = `yt:${t.videoId}`;
+    } else {
+      t.streamUrl = "yt:";
+    }
     t._isPreviewStream = false;
     if (dur > 0) t.duration = dur;
     t._playingViaAudio = true;
@@ -6857,7 +7080,7 @@
       url = activeOfflineBlobUrl;
     } else if (!isNetworkOff) {
       url = t.streamUrl || t.url || "";
-      if (IS_NATIVE && nativePlayer() && t.videoId && (!url || url.includes("/api/stream") || url.includes("/api/yt/stream"))) {
+      if (IS_NATIVE && nativePlayer() && t.videoId && !t._nativeOnDeviceTried && (!url || url.includes("/api/stream") || url.includes("/api/yt/stream"))) {
         url = `yt:${t.videoId}`;
         t._nativeOnDeviceTried = true;
       }
@@ -7197,6 +7420,16 @@
     return ytWait;
   }
 
+  // Pre-warm the YouTube IFrame player on Web during idle time after boot so the
+  // very first song click plays in 0ms without waiting for iframe initialization.
+  if (!IS_NATIVE && typeof window !== "undefined") {
+    setTimeout(() => {
+      if (!state.yt && !ytWait && !npActive) {
+        ensureYT("").catch(() => {});
+      }
+    }, 500);
+  }
+
   function onYouTubeError(code) {
     const want = ytWanted;
     const cur = current();
@@ -7207,7 +7440,7 @@
     }
     if (ytRetry < 2) {
       ytRetry += 1;
-      setTimeout(() => retryYouTube(want, ytToken), 220 * ytRetry);
+      setTimeout(() => retryYouTube(want, ytToken), 180 * ytRetry);
     } else {
       recoverYouTubeAlt(cur);
     }
@@ -7216,7 +7449,17 @@
   async function recoverYouTubeAlt(t) {
     if (!t || current() !== t) return;
     if (!(t._blockedVideoIds instanceof Set)) t._blockedVideoIds = new Set();
-    if (t.videoId) t._blockedVideoIds.add(String(t.videoId));
+    const blockedVid = t.videoId ? String(t.videoId) : "";
+    if (blockedVid) t._blockedVideoIds.add(blockedVid);
+
+    // 0. Instant path: if background warm stream already resolved direct audio for this track, play it in 0ms!
+    const warmEntry = blockedVid ? warmStreamMap.get(blockedVid) : null;
+    if ((t.streamUrl && !t._isPreviewStream) || (warmEntry && warmEntry.data && warmEntry.data.url)) {
+      if (!t.streamUrl && warmEntry && warmEntry.data && warmEntry.data.url) {
+        t.streamUrl = warmEntry.data.url;
+      }
+      if (current() === t && await playFallbackAudioForTrack(t)) return;
+    }
 
     // 1. Try already-fetched candidate videoIds first (zero network wait, no ping-pong loop)
     if (Array.isArray(t._ytCandidates) && t._blockedVideoIds.size <= 3) {
@@ -7231,14 +7474,19 @@
       }
     }
 
-    // 2. Search for an embeddable lyric/audio upload if we haven't exhausted attempts
-    if (t._blockedVideoIds.size <= 3) {
+    // 2. Race direct audio stream resolution with embeddable lyric/audio upload search
+    if (current() === t) {
+      const okAudio = await playFallbackAudioForTrack(t);
+      if (okAudio || current() !== t) return;
+    }
+
+    if (t._blockedVideoIds.size <= 3 && current() === t) {
       const queries = buildTrackPlayQueries(t);
       const baseQ = queries[3] || queries[2] || `${t.title || ""} ${t.artist || ""}`.trim();
       const altQ = `${baseQ} lyrics audio`.trim();
       if (altQ) {
         try {
-          const data = await api(`/api/youtube/search?q=${encodeURIComponent(altQ)}&${glq()}`, 8000);
+          const data = await api(`/api/youtube/search?q=${encodeURIComponent(altQ)}&fast=1&${glq()}`, 4000);
           const rows = (data && data.tracks) || (data && data.results) || [];
           const hit = rows.find((x) => x && x.videoId && !t._blockedVideoIds.has(String(x.videoId)));
           if (hit && current() === t) {
@@ -7249,11 +7497,6 @@
           }
         } catch {}
       }
-    }
-
-    // 3. Fallback to direct audio stream (<audio>) so blocked YouTube embeds never break Deezer/catalog playback
-    if (current() === t) {
-      await playFallbackAudioForTrack(t);
     }
   }
 
@@ -7267,7 +7510,7 @@
         setTimeout(() => {
           if (token !== ytToken) return;
           try { state.yt.playVideo(); } catch {}
-        }, 120);
+        }, 100);
       } else {
         state.yt.loadVideoById(id);
       }
@@ -7305,9 +7548,9 @@
           if (st2 === -1 || st2 === 5) {
             playFallbackAudioForTrack(t);
           }
-        }, 1800);
+        }, 1100);
       }
-    }, 3200);
+    }, 2000);
   }
 
   async function playYouTube(t) {
@@ -7320,6 +7563,11 @@
     ytSwitching = true;
     ytRetry = 0;
     stopOthers("yt");
+    // Warm the direct audio stream in parallel so if this YouTube video is VEVO/embed-gated
+    // or blocked from autoplaying, fallback audio starts in 0ms.
+    if (!IS_NATIVE && !t.streamUrl) {
+      getWarmStream(id, t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 5000, true).catch(() => {});
+    }
     if (state.prefs.autoVideo || state.showVideo) {
       state.showVideo = true;
       showEl($("ytWrap"), true);
@@ -7732,8 +7980,12 @@
     checkBufferResume();
 
     // Proactive queue refill: replenish queue with related tracks when approaching end of queue
-    if (state.playing && state.prefs.autoplay !== false && (state.queue.length - 1 - state.index <= 1)) {
-      ensureQueueRefill();
+    if (state.playing && p > 8 && state.prefs.autoplay !== false && (state.queue.length - 1 - state.index <= 1)) {
+      const nowRefill = Date.now();
+      if (!state._lastRefillAttemptAt || nowRefill - state._lastRefillAttemptAt > 15000) {
+        state._lastRefillAttemptAt = nowRefill;
+        ensureQueueRefill();
+      }
     }
     // Audio playback optimization: pre-resolve next track stream and pre-warm for gapless playback
     if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
@@ -8034,6 +8286,7 @@
     } catch {}
   }
 
+  let nativeAppInBackground = false;
   function keepBackgroundPlay() {
     if (state.prefs.bgPlay === false || !wantPlay) return;
     const t = current();
@@ -8042,7 +8295,20 @@
       if (!npPlaying && Date.now() >= npCmdUntil) nativeResumePlayback();
       return;
     }
-    if (!document.hidden) unlockSound();
+    if (IS_NATIVE && nativePlayer() && (document.hidden || nativeAppInBackground) && t.source !== "radio") {
+      const resumeSec = Math.max(0, Number(position()) || 0);
+      try { if (state.yt && state.yt.pauseVideo) state.yt.pauseVideo(); } catch {}
+      try { audio.pause(); } catch {}
+      const cands = Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "";
+      const handoffUrl = (t.streamUrl && !t.streamUrl.startsWith("yt:") && !t._isPreviewStream)
+        ? (t.streamUrl.startsWith("/") ? API_BASE + t.streamUrl : t.streamUrl)
+        : `yt:${t.videoId || ""}`;
+      t._playingViaAudio = true;
+      if (nativePlayTrack(handoffUrl, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", cands, resumeSec)) {
+        return;
+      }
+    }
+    if (!document.hidden && !nativeAppInBackground) unlockSound();
     if ((t.videoId || t.source === "youtube") && !t._playingViaAudio) {
       if (IS_NATIVE) nativeSyncSession();
       if (!state.yt || !state.yt.getPlayerState) return;
@@ -8464,6 +8730,17 @@
           if (!goBackInApp() && window.Capacitor.getPlatform() === "android") App.minimizeApp();
         });
       } catch {}
+      try {
+        App.addListener("appStateChange", (st) => {
+          const active = Boolean(st && st.isActive);
+          nativeAppInBackground = !active;
+          if (!active && wantPlay && state.prefs.bgPlay !== false) {
+            keepBackgroundPlay();
+            setTimeout(keepBackgroundPlay, 150);
+            setTimeout(keepBackgroundPlay, 500);
+          }
+        });
+      } catch {}
     }
     // (v1.5.4) MusicControls listener removed — the plugin is no longer
     // used (its killer service + duplicate MediaSession fought the native
@@ -8498,7 +8775,7 @@
           }
           const isPl = !!v.playing;
           if (isPl) {
-            npSeenPlaying = true;
+            if (rawPos > 0.05) npSeenPlaying = true;
             npPlaying = true;
             renderBufferState(false);
             if (!state.playing && now >= npCmdUntil) {
@@ -8509,7 +8786,11 @@
             }
             if (!state.timer) startTimer();
           } else {
-            if (now >= npCmdUntil && npSeenPlaying) {
+            if ((document.hidden || nativeAppInBackground) && wantPlay && state.prefs.bgPlay !== false) {
+              if (now >= npCmdUntil) {
+                nativeResumePlayback();
+              }
+            } else if (now >= npCmdUntil && npSeenPlaying) {
               npPlaying = false;
               npPosAt = 0;
               if (state.playing) {
@@ -9456,6 +9737,20 @@
       if (state.view === "now") paintLyricsBox();
       return;
     }
+    if (t._fromNativeAppCache) {
+      const nc = getNativeAppAudioCache(t);
+      if (nc && nc.lyrics && (nc.lyrics.lyrics || (Array.isArray(nc.lyrics.synced) && nc.lyrics.synced.length))) {
+        state.lyrics = { ...nc.lyrics, key };
+        if (state.view === "now") paintLyricsBox() || render();
+        return;
+      }
+      const idbLy = await getOfflineLyrics(t);
+      if (idbLy && (idbLy.lyrics || (Array.isArray(idbLy.synced) && idbLy.synced.length))) {
+        state.lyrics = { ...idbLy, key };
+        if (state.view === "now") paintLyricsBox() || render();
+      }
+      return;
+    }
     const gen = ++lyricsGen;
     lyActive = -1;
     state.lyrics = { key, lyrics: "", synced: [] };
@@ -9549,6 +9844,9 @@
     };
     if (finalPlain || finalSynced.length) {
       saveOfflineLyrics(t, state.lyrics).catch(() => {});
+    }
+    if (IS_NATIVE) {
+      storeNativeAppAudioCache(t, { lyrics: state.lyrics, lyricsChecked: true });
     }
     if (state.view === "now") paintLyricsBox() || render();
     highlightLyric(position(), true);

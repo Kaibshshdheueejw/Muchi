@@ -360,11 +360,10 @@ function streamQualityScore(s) {
 // If Google ever gates this endpoint too, this tier simply returns null and
 // the existing Piped fan-out (Tier 2) + the client's iframe fallback keep
 // working exactly as before — nothing regresses.
-const INNERTUBE_PLAYER_TIMEOUT = 4500;
+const INNERTUBE_PLAYER_TIMEOUT = 2800;
 const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
-// Multiple client profiles, raced in parallel with ANDROID_VR prioritized in Tier 1A.
-// ANDROID_VR returns full-file streamable googlevideo URLs without PO-token / range-chunk
-// 403 blocks, whereas IOS/ANDROID are staggered by 250ms as Tier 1B fallbacks.
+// Multiple client profiles, raced in parallel in Tier 1 so the fastest
+// working profile (ANDROID_VR, IOS, or ANDROID) wins in a single round-trip.
 const INNERTUBE_PROFILES = [
   {
     tag: "ANDROID_VR-1.61",
@@ -374,25 +373,25 @@ const INNERTUBE_PROFILES = [
     client: { clientName: "ANDROID_VR", clientVersion: "1.61.48", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
   },
   {
-    tag: "ANDROID_VR-1.60",
-    tier: 1,
-    clientId: "28",
-    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-    client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
-  },
-  {
     tag: "IOS-19.09",
-    tier: 2,
+    tier: 1,
     clientId: "5",
     ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
     client: { clientName: "IOS", clientVersion: "20.10.4", deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "18.3.2.22D82", hl: "en", gl: "US" },
   },
   {
     tag: "ANDROID-19.09",
-    tier: 2,
+    tier: 1,
     clientId: "3",
     ua: "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
     client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 34, osName: "Android", osVersion: "14", hl: "en", gl: "US" },
+  },
+  {
+    tag: "ANDROID_VR-1.60",
+    tier: 2,
+    clientId: "28",
+    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    client: { clientName: "ANDROID_VR", clientVersion: "1.60.19", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
   },
 ];
 
@@ -453,19 +452,15 @@ export async function youtubeAudioStream(videoId) {
       })
     )
   );
-  const tier2 = new Promise((resolve, reject) => {
-    setTimeout(() => {
-      Promise.any(
-        PIPED_STREAM_INSTANCES.map((base) =>
-          fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, PIPED_API_TIMEOUT).then((data) => {
-            const picked = pickPipedStream(data);
-            if (!picked) throw new Error("empty piped stream");
-            return picked;
-          })
-        )
-      ).then(resolve, reject);
-    }, 150);
-  });
+  const tier2 = Promise.any(
+    PIPED_STREAM_INSTANCES.slice(0, 3).map((base) =>
+      fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, 1600).then((data) => {
+        const picked = pickPipedStream(data);
+        if (!picked) throw new Error("empty piped stream");
+        return picked;
+      })
+    )
+  );
   try {
     return await Promise.any([tier1B, tier2]);
   } catch {
@@ -483,8 +478,8 @@ export async function youtubeAudioStreamDirect(videoId) {
   if (!id) return null;
   const specs = [
     INNERTUBE_PROFILES[0], // ANDROID_VR-1.61
-    INNERTUBE_PROFILES[2], // IOS-19.09
-    INNERTUBE_PROFILES[3], // ANDROID-19.09
+    INNERTUBE_PROFILES[1], // IOS-19.09
+    INNERTUBE_PROFILES[2], // ANDROID-19.09
   ].filter(Boolean);
   try {
     return await Promise.any(specs.map((spec) => innertubeProbe(spec, id)));
