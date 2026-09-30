@@ -384,7 +384,9 @@ function streamQualityScore(s) {
 const INNERTUBE_PLAYER_TIMEOUT = 2800;
 const INNERTUBE_API = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
 // Multiple client profiles, raced in parallel in Tier 1 so the fastest
-// working profile (ANDROID_VR, IOS, or ANDROID) wins in a single round-trip.
+// uncapped profile (ANDROID_VR or ANDROID_TESTSUITE) wins in a single round-trip.
+// Note: IOS and ANDROID mobile clients are excluded because googlevideo.com
+// enforces a hard 983,040-byte (~60 second) limit without a browser PO token.
 const INNERTUBE_PROFILES = [
   {
     tag: "ANDROID_VR-1.61",
@@ -394,18 +396,11 @@ const INNERTUBE_PROFILES = [
     client: { clientName: "ANDROID_VR", clientVersion: "1.61.48", androidSdkVersion: 32, osName: "Android", osVersion: "12L", deviceMake: "Oculus", deviceModel: "Quest 3", hl: "en", gl: "US" },
   },
   {
-    tag: "IOS-19.09",
+    tag: "ANDROID_TESTSUITE-1.9",
     tier: 1,
-    clientId: "5",
-    ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
-    client: { clientName: "IOS", clientVersion: "20.10.4", deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "18.3.2.22D82", hl: "en", gl: "US" },
-  },
-  {
-    tag: "ANDROID-19.09",
-    tier: 1,
-    clientId: "3",
-    ua: "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
-    client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 34, osName: "Android", osVersion: "14", hl: "en", gl: "US" },
+    clientId: "30",
+    ua: "com.google.android.youtube/1.9 (Linux; U; Android 12; US) gzip",
+    client: { clientName: "ANDROID_TESTSUITE", clientVersion: "1.9", androidSdkVersion: 31, osName: "Android", osVersion: "12", hl: "en", gl: "US" },
   },
   {
     tag: "ANDROID_VR-1.60",

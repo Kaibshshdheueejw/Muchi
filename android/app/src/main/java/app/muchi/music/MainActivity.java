@@ -31,8 +31,6 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(MuchiDownloadPlugin.class);
         super.onCreate(savedInstanceState);
         if (getBridge() != null) {
-            getBridge().registerPlugin(MuchiAudioPlugin.class);
-            getBridge().registerPlugin(MuchiDownloadPlugin.class);
             WebView wv = getBridge().getWebView();
             if (wv != null) {
                 WebSettings ws = wv.getSettings();

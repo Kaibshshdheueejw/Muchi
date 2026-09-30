@@ -49,6 +49,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     public static final String NOTIFICATIONS_ALIAS = "notifications";
     private static final long BIND_TIMEOUT_MS = 8000;
+    private static final java.util.Set<MuchiAudioPlugin> activeInstances =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
 
     private MuchiAudioService.LocalBinder service;
     private boolean bound = false;
@@ -95,12 +97,14 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     @Override
     public void load() {
         super.load();
+        activeInstances.add(this);
         MuchiAudioService.setStaticListener(this);
         ensureService(null);
     }
 
     @Override
     protected void handleOnDestroy() {
+        activeInstances.remove(this);
         main.removeCallbacks(bindTimeout);
         if (bindTimeout != null) main.removeCallbacks(bindTimeout);
         if (pendingPlay != null) {
@@ -108,8 +112,10 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             pendingPlay = null;
             try { pc.resolve(); } catch (Exception ignored) {}
         }
-        MuchiAudioService.setStaticListener(null);
-        if (service != null) {
+        if (activeInstances.isEmpty()) {
+            MuchiAudioService.setStaticListener(null);
+        }
+        if (service != null && activeInstances.isEmpty()) {
             try {
                 service.setListener(null);
             } catch (Exception ignored) {}
@@ -217,8 +223,9 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             try {
                 if (!service.isForegroundStarted()) {
                     startService(i);
+                } else {
+                    service.playIntent(i);
                 }
-                service.playIntent(i);
                 call.resolve();
                 return;
             } catch (Exception ignored) {
@@ -344,6 +351,24 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         long position = readLong(call, "position", 0L);
         ensureService(() -> { if (service != null) service.seekToPlayback(position); });
         call.resolve();
+    }
+
+    @PluginMethod
+    public void getStatus(PluginCall call) {
+        JSObject ret = new JSObject();
+        if (service != null) {
+            try {
+                ret.put("positionMs", service.getCurrentPositionMs());
+                ret.put("durationMs", service.getCurrentDurationMs());
+                ret.put("playing", service.getIsPlaying());
+                call.resolve(ret);
+                return;
+            } catch (Exception ignored) {}
+        }
+        ret.put("positionMs", 0L);
+        ret.put("durationMs", 0L);
+        ret.put("playing", false);
+        call.resolve(ret);
     }
 
     @PluginMethod
@@ -509,17 +534,39 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
 
     @Override
     public void onControls(String message, long positionMs) {
-        try {
-            if (getBridge() != null && getBridge().getWebView() != null) {
-                android.webkit.WebView wv = getBridge().getWebView();
-                wv.onResume();
-                wv.resumeTimers();
-            }
-        } catch (Exception ignored) {}
         JSObject data = new JSObject();
         data.put("message", message);
         data.put("position", positionMs);
         notifyListeners("muchiControls", data);
+        for (MuchiAudioPlugin inst : activeInstances) {
+            if (inst != null && inst != this) {
+                try { inst.notifyListeners("muchiControls", data); } catch (Exception ignored) {}
+            }
+        }
+        try {
+            MuchiAudioPlugin host = this;
+            if ((host.getBridge() == null || host.getBridge().getWebView() == null) && !activeInstances.isEmpty()) {
+                for (MuchiAudioPlugin inst : activeInstances) {
+                    if (inst != null && inst.getBridge() != null && inst.getBridge().getWebView() != null) {
+                        host = inst;
+                        break;
+                    }
+                }
+            }
+            if (host.getBridge() != null && host.getBridge().getWebView() != null) {
+                final android.webkit.WebView wv = host.getBridge().getWebView();
+                final String safeMsg = message != null ? message.replace("\\", "\\\\").replace("'", "\\'") : "";
+                final String js = "try{if(window._onMuchiNativeControls)window._onMuchiNativeControls({message:'"
+                        + safeMsg + "',position:" + positionMs + "});}catch(e){}";
+                wv.post(() -> {
+                    try {
+                        wv.onResume();
+                        wv.resumeTimers();
+                        wv.evaluateJavascript(js, null);
+                    } catch (Exception ignored) {}
+                });
+            }
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -529,5 +576,31 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         data.put("durationMs", durationMs);
         data.put("playing", playing);
         notifyListeners("muchiProgress", data);
+        for (MuchiAudioPlugin inst : activeInstances) {
+            if (inst != null && inst != this) {
+                try { inst.notifyListeners("muchiProgress", data); } catch (Exception ignored) {}
+            }
+        }
+        try {
+            MuchiAudioPlugin host = this;
+            if ((host.getBridge() == null || host.getBridge().getWebView() == null) && !activeInstances.isEmpty()) {
+                for (MuchiAudioPlugin inst : activeInstances) {
+                    if (inst != null && inst.getBridge() != null && inst.getBridge().getWebView() != null) {
+                        host = inst;
+                        break;
+                    }
+                }
+            }
+            if (host.getBridge() != null && host.getBridge().getWebView() != null) {
+                final android.webkit.WebView wv = host.getBridge().getWebView();
+                final String js = "try{if(window._onMuchiNativeProgress)window._onMuchiNativeProgress({positionMs:"
+                        + positionMs + ",durationMs:" + durationMs + ",playing:" + (playing ? "true" : "false") + "});}catch(e){}";
+                wv.post(() -> {
+                    try {
+                        wv.evaluateJavascript(js, null);
+                    } catch (Exception ignored) {}
+                });
+            }
+        } catch (Exception ignored) {}
     }
 }

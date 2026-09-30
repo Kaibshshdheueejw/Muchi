@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.7";
+  const APP_VERSION = "1.8.8";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6344,16 +6344,30 @@
 
   // Persistent Native App Audio Cache: stores resolved song data & lyrics in-app so
   // replaying a song in the Native App plays in 0ms from app cache with zero backend load.
-  const NATIVE_AUDIO_CACHE_KEY = "aura.nativeAudioCache.v1";
+  const NATIVE_AUDIO_CACHE_KEY = "aura.nativeAudioCache.v2";
   const NATIVE_AUDIO_CACHE_MAX = 300;
   const nativeAppAudioCache = new Map();
+  function isOneMinuteCappedStreamUrl(u) {
+    const s = String(u || "");
+    if (!s) return false;
+    let decoded = s;
+    try { decoded = decodeURIComponent(s); } catch {}
+    const combined = s + " " + decoded;
+    if (!combined.includes("googlevideo.com")) return false;
+    if (/[?&]c=(?:IOS|ANDROID)(?:&|$|%26)/i.test(combined)) return true;
+    return false;
+  }
   try {
+    localStorage.removeItem("aura.nativeAudioCache.v1");
     const rawCache = localStorage.getItem(NATIVE_AUDIO_CACHE_KEY);
     if (rawCache) {
       const parsed = JSON.parse(rawCache);
       if (Array.isArray(parsed)) {
         for (const [k, v] of parsed) {
-          if (k && v && typeof v === "object") nativeAppAudioCache.set(k, v);
+          if (k && v && typeof v === "object") {
+            if (v.streamUrl && isOneMinuteCappedStreamUrl(v.streamUrl)) v.streamUrl = "";
+            nativeAppAudioCache.set(k, v);
+          }
         }
       }
     }
@@ -6392,7 +6406,7 @@
       }
     }
     const rawStreamUrl = String(extra.streamUrl || t.streamUrl || (existing && existing.streamUrl) || "");
-    const cleanStreamUrl = /^yt:/i.test(rawStreamUrl) ? "" : rawStreamUrl;
+    const cleanStreamUrl = (/^yt:/i.test(rawStreamUrl) || isOneMinuteCappedStreamUrl(rawStreamUrl)) ? "" : rawStreamUrl;
     const resolvedVid = String(extra.videoId || t.videoId || (existing && existing.videoId) || "");
     const resolvedCands = Array.isArray(extra.candidates)
       ? extra.candidates.slice(0, 10)
@@ -6544,7 +6558,7 @@
       `/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || "")}&artist=${encodeURIComponent(artist || "")}${candParam}${fastParam}&allowPreview=0`,
       timeoutMs
     ).then((d) => {
-      if (d && d.url && !d.isPreview) {
+      if (d && d.url && !d.isPreview && !isOneMinuteCappedStreamUrl(d.url)) {
         if (d.url.startsWith("/")) d.url = API_BASE + d.url;
         const entry = { data: d, promise: null, exp: Date.now() + 12 * 60 * 1000 };
         warmStreamMap.set(key, entry);
@@ -7034,12 +7048,14 @@
     const urlDur = parseStreamUrlDuration(t.streamUrl || "");
     if (!dur && urlDur > 0) dur = urlDur;
 
-    // 1. Connect Native App to the Cloudflare Backend (/api/yt/stream) just like Web:
-    //    If we don't already have a resolved http(s) streamUrl on the track, resolve via
-    //    getWarmStream (which hits https://muchi.twiarimascord.workers.dev/api/yt/stream
-    //    and returns a verified M4A/MP3 stream proxied through /api/stream with zero IP mismatch).
-    let resolvedStream = (t.streamUrl && /^https?:\/\//i.test(t.streamUrl) && !t._isPreviewStream) ? t.streamUrl : "";
-    if (!resolvedStream && t.streamUrl && t.streamUrl.startsWith("/") && !t._isPreviewStream) {
+    // 1. Connect Native App to uncapped streams with zero delay:
+    //    Reject any 1-minute capped c=IOS/c=ANDROID URLs, check warm stream cache with a fast 450ms budget,
+    //    and otherwise let MuchiAudioService resolve uncapped ANDROID_VR / ANDROID_TESTSUITE / JioSaavn / SoundCloud streams directly on-device.
+    if (t.streamUrl && isOneMinuteCappedStreamUrl(t.streamUrl)) {
+      t.streamUrl = "";
+    }
+    let resolvedStream = (t.streamUrl && /^https?:\/\//i.test(t.streamUrl) && !t._isPreviewStream && !isOneMinuteCappedStreamUrl(t.streamUrl)) ? t.streamUrl : "";
+    if (!resolvedStream && t.streamUrl && t.streamUrl.startsWith("/") && !t._isPreviewStream && !isOneMinuteCappedStreamUrl(t.streamUrl)) {
       resolvedStream = API_BASE + t.streamUrl;
     }
     if (!resolvedStream) {
@@ -7049,10 +7065,10 @@
           t.title || "",
           artistName(t) || t.artist || "",
           t._ytCandidates || [],
-          3400,
+          450,
           false
         );
-        if (warm && warm.url && !warm.isPreview) {
+        if (warm && warm.url && !warm.isPreview && !isOneMinuteCappedStreamUrl(warm.url)) {
           resolvedStream = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
           if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
           if (warm.duration && !dur) dur = Number(warm.duration);
@@ -7914,14 +7930,11 @@
     if (npActive) {
       if (state.playing && npPlaying && npPosAt > 0 && Date.now() >= npSeekGuardUntil) {
         const rate = Number(state.prefs.speed || 1) || 1;
-        const elapsed = Math.max(0, Math.min(12.0, ((performance.now() - npPosAt) / 1000) * rate));
-        // Only extrapolate from 0 once native player has confirmed playing or after initial buffer
+        const elapsed = Math.max(0, Math.min(300.0, ((performance.now() - npPosAt) / 1000) * rate));
         const basePos = npPos || 0;
-        if (basePos > 0 || npSeenPlaying) {
-          const est = basePos + elapsed;
-          const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
-          return d > 0 ? Math.min(d, est) : est;
-        }
+        const est = basePos + elapsed;
+        const d = npDur || t.duration || parseStreamUrlDuration(t.streamUrl || t.url || "") || 0;
+        return d > 0 ? Math.min(d, est) : est;
       }
       return npPos || 0;
     }
@@ -8049,6 +8062,22 @@
     }
     // When screen is off and native service owns playback, skip redundant JS polling
     if (document.hidden && npActive) return;
+    if (npActive && !document.hidden) {
+      const sinceLastSync = performance.now() - (npPosAt || 0);
+      if (sinceLastSync > 900) {
+        const NP = nativePlayer();
+        if (NP && typeof NP.getStatus === "function" && !NP._statusPollInFlight) {
+          NP._statusPollInFlight = true;
+          NP.getStatus().then((st) => {
+            if (st && typeof window._onMuchiNativeProgress === "function") {
+              window._onMuchiNativeProgress(st);
+            }
+          }).catch(() => {}).finally(() => {
+            NP._statusPollInFlight = false;
+          });
+        }
+      }
+    }
     const d = duration();
     const p = position();
     tickCrossfade(d, p);
@@ -8848,79 +8877,85 @@
     // media session inside MuchiAudioService — both echo through
     // muchiControls below, so the web layer stays the single queue owner.
     const NP = P.MuchiAudio;
+    function handleNativeProgressUpdate(e) {
+      if (state.sleep && state.sleep.mode === "mins" && state.sleep.until > 0 && Date.now() >= state.sleep.until) {
+        pauseForSleep();
+        return;
+      }
+      if (!npActive) return;
+      const v = e || {};
+      const now = Date.now();
+      const rawPos = v.positionMs != null ? (Number(v.positionMs) || 0) / 1000 : (Number(v.position) || 0);
+      const rawDur = v.durationMs != null ? (Number(v.durationMs) || 0) / 1000 : (Number(v.duration) || 0);
+      const sinceTrackStart = now - (npTrackStartedAt || 0);
+      // Only guard against a stale progress tick from a previous song during the first 1200ms after track start
+      const isStaleStartJump = !npSeenPlaying && npInitPos === 0 && sinceTrackStart < 1200 && rawPos > 5.0;
+      if (!isStaleStartJump) {
+        if (now < npSeekGuardUntil) {
+          if (Math.abs(rawPos - npPos) <= 4.0) {
+            npSeekGuardUntil = 0;
+            npPos = Math.max(0, rawPos);
+            npPosAt = performance.now();
+          }
+        } else {
+          npPos = Math.max(0, rawPos);
+          npPosAt = performance.now();
+        }
+      }
+      if (rawDur > 0 && !isStaleStartJump) {
+        npDur = rawDur;
+        const cur = current();
+        if (cur && (!cur.duration || Math.abs(cur.duration - rawDur) > 2)) {
+          cur.duration = Math.round(rawDur);
+        }
+      }
+      const isPl = !!v.playing;
+      if (isPl) {
+        if (!isStaleStartJump) npSeenPlaying = true;
+        npPlaying = true;
+        renderBufferState(false);
+        if (!state.playing && now >= npCmdUntil) {
+          state.playing = true;
+          setWantPlay(true);
+          showEl($("eqBars"), true);
+          renderChrome();
+        }
+        if (!state.timer) startTimer();
+      } else {
+        if ((document.hidden || nativeAppInBackground) && wantPlay && state.prefs.bgPlay !== false) {
+          if (now >= npCmdUntil) {
+            nativeResumePlayback();
+          }
+        } else if (now >= npCmdUntil && npSeenPlaying) {
+          npPlaying = false;
+          npPosAt = 0;
+          if (state.playing) {
+            state.playing = false;
+            setWantPlay(false);
+            showEl($("eqBars"), false);
+            renderChrome();
+          }
+        }
+      }
+      const lastProgObj = NP || window;
+      if (!isBatterySaver() || !lastProgObj._lastUiProgAt || (now - lastProgObj._lastUiProgAt >= 900)) {
+        lastProgObj._lastUiProgAt = now;
+        updateProgress();
+      }
+    }
+    window._onMuchiNativeProgress = handleNativeProgressUpdate;
+    window._onMuchiNativeControls = (e) => {
+      const now = Date.now();
+      const msg = (e && (e.message || e.action)) || "";
+      if (window._lastMuchiCtrlMsg === msg && now - (window._lastMuchiCtrlAt || 0) < 80) return;
+      window._lastMuchiCtrlMsg = msg;
+      window._lastMuchiCtrlAt = now;
+      nativeHandleControls(e || {});
+    };
     if (NP) {
       try {
-        // POST_NOTIFICATIONS is asked via nativeEnsureNotifyPermission() at
-        // the FIRST native play (in nativePlayTrack) — the moment the
-        // notification actually needs it, per Play policy. The old
-        // app-launch ask was removed together with the web
-        // Notification.requestPermission duplicate that fired alongside it.
-        NP.addListener("muchiControls", (e) => nativeHandleControls(e || {}));
-        NP.addListener("muchiProgress", (e) => {
-          if (state.sleep && state.sleep.mode === "mins" && state.sleep.until > 0 && Date.now() >= state.sleep.until) {
-            pauseForSleep();
-            return;
-          }
-          if (!npActive) return;
-          const v = e || {};
-          const now = Date.now();
-          const rawPos = v.positionMs != null ? (Number(v.positionMs) || 0) / 1000 : (Number(v.position) || 0);
-          const rawDur = v.durationMs != null ? (Number(v.durationMs) || 0) / 1000 : (Number(v.duration) || 0);
-          // Guard against any stale progress tick (>2.0s) arriving from a previous song right after starting a track from 0:00
-          const isDifferentTrackDur = rawDur > 0 && npDur > 0 && Math.abs(rawDur - npDur) > 2;
-          const isStaleStartJump = !npSeenPlaying && npInitPos === 0 && rawPos > 2.0 && (!v.playing || isDifferentTrackDur);
-          if (!isStaleStartJump) {
-            if (now < npSeekGuardUntil) {
-              if (Math.abs(rawPos - npPos) <= 4.0) {
-                npSeekGuardUntil = 0;
-                npPos = Math.max(0, rawPos);
-                npPosAt = performance.now();
-              }
-            } else {
-              npPos = Math.max(0, rawPos);
-              npPosAt = performance.now();
-            }
-          }
-          if (rawDur > 0 && !isStaleStartJump) {
-            npDur = rawDur;
-            const cur = current();
-            if (cur && (!cur.duration || Math.abs(cur.duration - rawDur) > 2)) {
-              cur.duration = Math.round(rawDur);
-            }
-          }
-          const isPl = !!v.playing;
-          if (isPl) {
-            if (!isStaleStartJump) npSeenPlaying = true;
-            npPlaying = true;
-            renderBufferState(false);
-            if (!state.playing && now >= npCmdUntil) {
-              state.playing = true;
-              setWantPlay(true);
-              showEl($("eqBars"), true);
-              renderChrome();
-            }
-            if (!state.timer) startTimer();
-          } else {
-            if ((document.hidden || nativeAppInBackground) && wantPlay && state.prefs.bgPlay !== false) {
-              if (now >= npCmdUntil) {
-                nativeResumePlayback();
-              }
-            } else if (now >= npCmdUntil && npSeenPlaying) {
-              npPlaying = false;
-              npPosAt = 0;
-              if (state.playing) {
-                state.playing = false;
-                setWantPlay(false);
-                showEl($("eqBars"), false);
-                renderChrome();
-              }
-            }
-          }
-          if (!isBatterySaver() || !NP._lastUiProgAt || (now - NP._lastUiProgAt >= 900)) {
-            NP._lastUiProgAt = now;
-            updateProgress();
-          }
-        });
+        NP.addListener("muchiControls", (e) => window._onMuchiNativeControls(e || {}));
+        NP.addListener("muchiProgress", (e) => handleNativeProgressUpdate(e || {}));
       } catch {}
     }
     const DL = P.MuchiDownload;
@@ -9854,17 +9889,30 @@
     }
     if (t._fromNativeAppCache) {
       const nc = getNativeAppAudioCache(t);
-      if (nc && nc.lyrics && (nc.lyrics.lyrics || (Array.isArray(nc.lyrics.synced) && nc.lyrics.synced.length))) {
-        state.lyrics = { ...nc.lyrics, key };
+      const cachedLyr = (nc && nc.lyrics && (nc.lyrics.lyrics || (Array.isArray(nc.lyrics.synced) && nc.lyrics.synced.length)))
+        ? nc.lyrics
+        : null;
+      if (cachedLyr) {
+        const effDur = Math.round(Number(duration() || t.duration || 180));
+        let syncedRows = Array.isArray(cachedLyr.synced) ? cachedLyr.synced : [];
+        let isSynth = Boolean(cachedLyr._synthesized);
+        if ((!syncedRows.length || isSynth) && cachedLyr.lyrics) {
+          syncedRows = synthesizeSyncedLyrics(cachedLyr.lyrics, effDur);
+          isSynth = true;
+        }
+        state.lyrics = {
+          lyrics: cachedLyr.lyrics || "",
+          synced: syncedRows,
+          _synthesized: isSynth,
+          _syncDur: effDur,
+          key,
+        };
         if (state.view === "now") paintLyricsBox() || render();
-        return;
+        highlightLyric(position(), true);
+        if (syncedRows.length && !isSynth) {
+          return;
+        }
       }
-      const idbLy = await getOfflineLyrics(t);
-      if (idbLy && (idbLy.lyrics || (Array.isArray(idbLy.synced) && idbLy.synced.length))) {
-        state.lyrics = { ...idbLy, key };
-        if (state.view === "now") paintLyricsBox() || render();
-      }
-      return;
     }
     const gen = ++lyricsGen;
     lyActive = -1;
@@ -11979,6 +12027,23 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.8.8",
+      title: "Muchi 1.8.8",
+      notes: [
+        "Verified Native App timer, seek bar, and synced lyrics auto-scroll with direct WebView progress sync and native status polling.",
+        "Verified full-length playback past 1 minute by removing 983 KB capped mobile InnerTube streams and adding on-device SoundCloud and JioSaavn fallbacks.",
+      ],
+    },
+    {
+      ver: "1.8.7",
+      title: "Muchi 1.8.7",
+      notes: [
+        "Fixed Native App playback timer and seek bar so progress advances smoothly from 0:00 in real time.",
+        "Fixed Native App synced lyrics highlighting and auto-scrolling during playback.",
+        "Eliminated 1-minute (983 KB) stream cutoffs by filtering capped mobile streams and adding full-track on-device fallbacks.",
+      ],
+    },
     {
       ver: "1.8.6",
       title: "Muchi 1.8.6",

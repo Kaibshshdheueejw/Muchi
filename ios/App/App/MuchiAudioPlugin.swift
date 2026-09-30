@@ -36,6 +36,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "emit", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "syncSession", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setAudioPrefs", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getStatus", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setAppIcon", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getAppIcon", returnType: CAPPluginReturnPromise)
     ]
@@ -98,6 +99,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     override public func load() {
         setupRemoteCommands()
         setupSessionObservers()
+        DispatchQueue.global(qos: .utility).async {
+            if let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+                let legacyDir = base.appendingPathComponent("muchi_audio_cache", isDirectory: true)
+                if FileManager.default.fileExists(atPath: legacyDir.path) {
+                    try? FileManager.default.removeItem(at: legacyDir)
+                }
+            }
+        }
     }
 
     /* ── system audio events ─────────────────────────────────────────
@@ -569,6 +578,37 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    @objc public func getStatus(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                call.resolve(["positionMs": 0, "durationMs": 0, "playing": false])
+                return
+            }
+            guard let p = self.player, let item = self.currentItem else {
+                call.resolve([
+                    "positionMs": Int(max(self.pendingSeekMs, self.lastKnownPositionMs)),
+                    "durationMs": Int(max(0, self.fallbackDurationMs)),
+                    "playing": self.resolvingOnDevice
+                ])
+                return
+            }
+            let pos = p.currentTime()
+            var posSec = pos.isNumeric && pos.seconds.isFinite && pos.seconds >= 0 ? pos.seconds : 0
+            if self.pendingSeekMs > 0 && item.status != .readyToPlay {
+                posSec = self.pendingSeekMs / 1000.0
+            }
+            let rawDurMs = (item.duration.isNumeric && item.duration.seconds.isFinite && item.duration.seconds > 0)
+                ? (item.duration.seconds * 1000.0)
+                : self.fallbackDurationMs
+            let isPlayingNow = self.resolvingOnDevice || p.rate > 0 || p.timeControlStatus == .waitingToPlayAtSpecifiedRate || self.pendingSeekMs > 0
+            call.resolve([
+                "positionMs": Int(posSec * 1000.0),
+                "durationMs": Int(max(0, rawDurMs)),
+                "playing": isPlayingNow
+            ])
+        }
+    }
+
     @objc public func setAppIcon(_ call: CAPPluginCall) {
         let requested = call.getString("icon") ?? "default"
         UserDefaults.standard.set(requested, forKey: "muchi.app_icon")
@@ -717,11 +757,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 ? (item.duration.seconds * 1000.0)
                 : self.fallbackDurationMs
             let isPlayingNow = self.resolvingOnDevice || p.rate > 0 || p.timeControlStatus == .waitingToPlayAtSpecifiedRate || self.pendingSeekMs > 0
+            let posMsInt = Int(posSec * 1000.0)
+            let durMsInt = Int(max(0, rawDurMs))
             self.notifyListeners("muchiProgress", data: [
-                "positionMs": Int(posSec * 1000.0),
-                "durationMs": Int(max(0, rawDurMs)),
+                "positionMs": posMsInt,
+                "durationMs": durMsInt,
                 "playing": isPlayingNow
             ])
+            self.bridge?.webView?.evaluateJavaScript(
+                "window._onMuchiNativeProgress&&window._onMuchiNativeProgress({positionMs:\(posMsInt),durationMs:\(durMsInt),playing:\(isPlayingNow ? "true" : "false")});",
+                completionHandler: nil
+            )
             var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = posSec
             if rawDurMs > 0 {
@@ -884,7 +930,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static func getAudioCacheDir() -> URL? {
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
-        let dir = base.appendingPathComponent("muchi_audio_cache", isDirectory: true)
+        let dir = base.appendingPathComponent("muchi_audio_cache_v2", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
@@ -905,13 +951,13 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     public static func getCachedAudioFile(videoId: String, title: String, artist: String) -> URL? {
         guard let dir = getAudioCacheDir() else { return nil }
         let fm = FileManager.default
-        let minValidBytes: Int64 = 262144 // 256 KB minimum to reject truncated/partial stream files
+        let minValidBytes: Int64 = 1150000 // > 1.15 MB minimum to reject 983,040-byte (1-minute) c=IOS/c=ANDROID files
         let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         if !vid.isEmpty {
             let vf = dir.appendingPathComponent(sanitizeAudioCacheKey("vid_\(vid)") + ".m4a")
             if fm.fileExists(atPath: vf.path) {
                 if let attrs = try? fm.attributesOfItem(atPath: vf.path),
-                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes {
+                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value != 983040 {
                     try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: vf.path)
                     return vf
                 } else {
@@ -924,7 +970,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             let qf = dir.appendingPathComponent(sanitizeAudioCacheKey(qKey) + ".m4a")
             if fm.fileExists(atPath: qf.path) {
                 if let attrs = try? fm.attributesOfItem(atPath: qf.path),
-                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes {
+                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value != 983040 {
                     try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: qf.path)
                     return qf
                 } else {
@@ -1266,21 +1312,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         if let hit = probeInnertubeBatch(videoId: videoId, profiles: primaryProfiles, endpoint: endpoint, expectedDurationMs: expectedDurationMs) {
             return hit
         }
-        let secondaryProfiles: [(id: String, ver: String, ua: String, body: String)] = [
-            (
-                "5",
-                "20.10.4",
-                "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X; en_US)",
-                "{\"context\":{\"client\":{\"clientName\":\"IOS\",\"clientVersion\":\"20.10.4\",\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.2.22D82\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
-            ),
-            (
-                "3",
-                "20.10.38",
-                "com.google.android.youtube/20.10.38 (Linux; U; Android 14; en_US) gzip",
-                "{\"context\":{\"client\":{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.38\",\"androidSdkVersion\":34,\"osName\":\"Android\",\"osVersion\":\"14\",\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"\(videoId)\",\"contentCheckOk\":true,\"racyCheckOk\":true}"
-            )
-        ]
-        return probeInnertubeBatch(videoId: videoId, profiles: secondaryProfiles, endpoint: endpoint, expectedDurationMs: expectedDurationMs)
+        return nil
     }
 
     private static func probeInnertubeBatch(videoId: String, profiles: [(id: String, ver: String, ua: String, body: String)], endpoint: URL, expectedDurationMs: Double = 0) -> ResolvedStream? {
@@ -1492,6 +1524,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             if (root["isPreview"] as? Bool) == true { return }
             guard let rawUrl = (root["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !rawUrl.isEmpty else { return }
             let fullUrl = rawUrl.hasPrefix("/") ? "\(cloudflareBackendBase)\(rawUrl)" : rawUrl
+            let decodedFull = fullUrl.removingPercentEncoding ?? fullUrl
+            if decodedFull.contains("googlevideo.com") && (decodedFull.contains("c=IOS&") || decodedFull.contains("c=ANDROID&")) {
+                return
+            }
             let durSec = (root["duration"] as? Double) ?? Double((root["duration"] as? Int) ?? 0)
             var durMs = durSec > 0 ? durSec * 1000.0 : 0
             if durMs <= 0 {
