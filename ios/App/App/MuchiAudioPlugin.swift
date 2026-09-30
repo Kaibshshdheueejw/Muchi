@@ -53,6 +53,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var triedOnDeviceResolve = false
     private var resolvingOnDevice = false
     private var pendingSeekMs: Double = 0
+    private var pendingSeekSetAt: CFAbsoluteTime = 0
     private var lastKnownPositionMs: Double = 0
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
@@ -204,6 +205,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         fallbackDurationMs = max(0, durMs)
         let startPosMs = max(0, call.getDouble("position") ?? 0)
         pendingSeekMs = startPosMs
+        pendingSeekSetAt = startPosMs > 0 ? CFAbsoluteTimeGetCurrent() : 0
         lastKnownPositionMs = startPosMs
 
         let volPct = call.getDouble("volume") ?? 100.0
@@ -414,11 +416,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let ms = max(0, call.getDouble("position") ?? 0)
         lastKnownPositionMs = ms
         pendingSeekMs = ms
+        pendingSeekSetAt = CFAbsoluteTimeGetCurrent()
         if !resolvingOnDevice, let p = player {
             let target = CMTime(seconds: ms / 1000.0, preferredTimescale: 600)
-            p.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
-                if finished {
-                    self?.pendingSeekMs = 0
+            let tol = CMTime(seconds: 0.3, preferredTimescale: 600)
+            p.seek(to: target, toleranceBefore: tol, toleranceAfter: tol) { [weak self] _ in
+                guard let self = self else { return }
+                self.pendingSeekMs = 0
+                if (self.player?.rate ?? 0) == 0 {
+                    self.player?.playImmediately(atRate: self.prefSpeed)
                 }
             }
         }
@@ -583,21 +589,23 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             let pos = p.currentTime()
             var posSec = pos.isNumeric && pos.seconds.isFinite && pos.seconds >= 0 ? pos.seconds : 0
-            if self.pendingSeekMs > 0 && (item.status != .readyToPlay || abs(posSec * 1000.0 - self.pendingSeekMs) > 1500) {
+            let seekElapsed = CFAbsoluteTimeGetCurrent() - self.pendingSeekSetAt
+            if self.pendingSeekMs > 0 && (item.status != .readyToPlay || (abs(posSec * 1000.0 - self.pendingSeekMs) >= 4000.0 && seekElapsed < 2.2)) {
                 posSec = self.pendingSeekMs / 1000.0
             } else if posSec > 0 {
                 self.lastKnownPositionMs = posSec * 1000.0
-                if self.pendingSeekMs > 0 && abs(posSec * 1000.0 - self.pendingSeekMs) <= 1500 {
+                if self.pendingSeekMs > 0 && (abs(posSec * 1000.0 - self.pendingSeekMs) < 4000.0 || seekElapsed >= 2.2) {
                     self.pendingSeekMs = 0
                 }
             }
             let rawDurMs = (item.duration.isNumeric && item.duration.seconds.isFinite && item.duration.seconds > 0)
                 ? (item.duration.seconds * 1000.0)
                 : self.fallbackDurationMs
+            let isPlayingNow = self.resolvingOnDevice || p.rate > 0 || p.timeControlStatus == .waitingToPlayAtSpecifiedRate || self.pendingSeekMs > 0
             self.notifyListeners("muchiProgress", data: [
                 "positionMs": Int(posSec * 1000.0),
                 "durationMs": Int(max(0, rawDurMs)),
-                "playing": p.rate > 0
+                "playing": isPlayingNow
             ])
             var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = posSec
@@ -1393,25 +1401,38 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     if durSec < 45 { continue }
                     let rawItemTitle = (item["title"] as? String) ?? ""
                     let gotTitle = rawItemTitle.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-                    let gotCoreRaw = rawItemTitle.replacingOccurrences(
-                        of: "\\s*[\\[(][^)\\]]*(?:feat\\.?|ft\\.?|featuring|with|from\\b)[^)\\]]*[)\\]]",
+                    let strippedTitle = rawItemTitle.replacingOccurrences(
+                        of: "\\s*[\\[(][^)\\]]*(?:feat\\.?|ft\\.?|featuring|with|from\\b|official|video|audio|lyric|remaster|version|hd|hq|4k|\\d+kbps|[A-Za-z0-9_-]{11})[^)\\]]*[)\\]]",
                         with: "",
                         options: [.regularExpression, .caseInsensitive]
                     ).replacingOccurrences(
                         of: "\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$",
                         with: "",
                         options: [.regularExpression, .caseInsensitive]
-                    )
-                    let gotCore = gotCoreRaw.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let gotCore = strippedTitle.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let dashSegments = strippedTitle.components(separatedBy: " - ")
                     let userDict = item["user"] as? [String: Any]
                     let rawArtist = "\((userDict?["name"] as? String) ?? "") \((userDict?["handle"] as? String) ?? "")"
                     let gotArtist = rawArtist.lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-                    let titleMatch = (!wantTitle.isEmpty && !gotTitle.isEmpty && (gotTitle == wantTitle || gotTitle.hasPrefix(wantTitle + " ")))
+                    let combinedArtistText = "\(gotArtist) \(gotTitle)".trimmingCharacters(in: .whitespacesAndNewlines)
+                    var titleMatch = (!wantTitle.isEmpty && !gotTitle.isEmpty && (gotTitle == wantTitle || gotTitle.hasPrefix(wantTitle + " ")))
                         || (!wantCore.isEmpty && !gotCore.isEmpty && (gotCore == wantCore || gotCore.hasPrefix(wantCore + " ")))
+                    if !titleMatch {
+                        for seg in dashSegments {
+                            let cleanSeg = seg.replacingOccurrences(of: "\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$", with: "", options: [.regularExpression, .caseInsensitive])
+                                .lowercased().replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !cleanSeg.isEmpty && ((!wantTitle.isEmpty && (cleanSeg == wantTitle || cleanSeg.hasPrefix(wantTitle + " ")))
+                                || (!wantCore.isEmpty && (cleanSeg == wantCore || cleanSeg.hasPrefix(wantCore + " ")))) {
+                                titleMatch = true
+                                break
+                            }
+                        }
+                    }
                     let wantIsRemix = wantTitle.range(of: "\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit)\\b", options: .regularExpression) != nil
                     let gotIsRemix = gotTitle.range(of: "\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit|karaoke|instrumental)\\b", options: .regularExpression) != nil
                     if !wantIsRemix && gotIsRemix { continue }
-                    let artistMatch = artistTokens.isEmpty || artistTokens.contains(where: { gotArtist.contains($0) || (!gotArtist.isEmpty && $0.contains(gotArtist)) })
+                    let artistMatch = artistTokens.isEmpty || artistTokens.contains(where: { combinedArtistText.contains($0) || (!gotArtist.isEmpty && $0.contains(gotArtist)) })
                     if titleMatch && artistMatch && durSec >= 60 {
                         if let encId = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
                             let streamUrl = "https://discoveryprovider.audius.co/v1/tracks/\(encId)/stream?app_name=MUCHI"

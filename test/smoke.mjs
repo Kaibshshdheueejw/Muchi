@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.8.4", APP_VERSION === "1.8.4" && appJs.includes('const APP_VERSION = "1.8.4"'));
+  ok("version: APP_VERSION is 1.8.5", APP_VERSION === "1.8.5" && appJs.includes('const APP_VERSION = "1.8.5"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1763,6 +1763,23 @@ await (async () => {
     appJs.includes("async function ytRemoveFromPlaylist(track, activePl)") &&
     readFileSync("src/oauth.js", "utf8").includes('path === "/api/youtube/unlike"') &&
     readFileSync("src/oauth.js", "utf8").includes('path === "/api/youtube/playlist/remove"')
+  );
+
+  // Native 4-API full playback + random seek (1:20 / 80s) synchronization checks
+  const androidSvc = readFileSync("android/app/src/main/java/app/muchi/music/MuchiAudioService.java", "utf8");
+  const iosPlug = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
+  const aggSrc = readFileSync("src/aggregate.js", "utf8");
+  const provSrc = readFileSync("src/providers.js", "utf8");
+  ok(
+    "native seek & 4-API full playback: Android/iOS pendingSeekMs keyframe tolerance (4000ms) + 2.2s expiry + JS npSeekGuardUntil unlock + Audius/SoundCloud full-track fallback",
+    androidSvc.includes("pendingSeekSetAtMs") &&
+    androidSvc.includes("Math.abs(rawPos - pendingSeekMs) >= 4000L && seekElapsed < 2200L") &&
+    iosPlug.includes("pendingSeekSetAt") &&
+    iosPlug.includes("abs(posSec * 1000.0 - self.pendingSeekMs) >= 4000.0 && seekElapsed < 2.2") &&
+    appJs.includes("Math.abs(rawPos - npPos) <= 4.0") &&
+    appJs.includes("discoveryprovider.audius.co/v1/tracks/") &&
+    aggSrc.includes("soundcloudStreamForQuery") &&
+    provSrc.includes("export async function soundcloudStreamForQuery")
   );
 })();
 

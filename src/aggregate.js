@@ -12,7 +12,7 @@ import {
   searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
   itunesSearch, appleRssMostPlayed,
   audiusSearch, audiusStreamUrl, audiusTrending, audiusUnderground, audiusUserSearch, audiusUserTracks,
-  radioSearch, radioBrowser, lyricsFor, resolveShelfPlaylist,
+  soundcloudStreamForQuery, radioSearch, radioBrowser, lyricsFor, resolveShelfPlaylist,
 } from "./providers.js";
 import {
   regionCode, utcDay, utcWeekKey, weekSeedOffset,
@@ -1306,12 +1306,52 @@ export async function handleYtStream(url) {
     .map((s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim())
     .filter((s) => s.length >= 2);
 
-  // Start Audius resolution after a 120ms head-start so direct InnerTube hits (<120ms)
-  // win with zero extra work, while VEVO/datacenter-gated tracks already have Audius
-  // in flight in parallel instead of waiting for Tier 1 to time out first.
+  const wantTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const wantCore = coreTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const wantIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|remake)\b/i.test(wantTitle);
+
+  const matchAudiusTrack = (a, allowCoverOrEdit = false) => {
+    if (!a || (Number(a.duration) || 0) < 60) return false;
+    const rawGotTitle = String(a.title || "");
+    const gotTitle = rawGotTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const strippedTitle = rawGotTitle
+      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|from\b|official|video|audio|lyric|remaster|version|hd|hq|4k|\d+kbps|[A-Za-z0-9_-]{11})[^)\]]*[)\]]/gi, "")
+      .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
+      .trim();
+    const gotCore = strippedTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const dashParts = strippedTitle
+      .split(/\s+[-–—|]\s+/)
+      .map((p) => p.replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim())
+      .filter(Boolean);
+    const gotIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|remake|karaoke|instrumental)\b/i.test(gotTitle);
+    if (!wantIsRemix && gotIsRemix && !allowCoverOrEdit) return false;
+    if (!wantIsRemix && /\b(karaoke|instrumental)\b/i.test(gotTitle)) return false;
+    const gotArtist = String(a.artist || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const combinedArtistText = `${gotArtist} ${gotTitle}`.trim();
+    const titleCandidates = [gotTitle, gotCore, ...dashParts];
+    const titleOk = allowCoverOrEdit
+      ? Boolean(wantCore && gotTitle.includes(wantCore))
+      : titleCandidates.some(
+          (cand) =>
+            cand &&
+            ((wantTitle && (cand === wantTitle || cand.startsWith(wantTitle + " "))) ||
+              (wantCore && (cand === wantCore || cand.startsWith(wantCore + " "))))
+        );
+    const artistOk =
+      !artistTokens.length ||
+      artistTokens.some(
+        (tok) => combinedArtistText.includes(tok) || (gotArtist && tok.includes(gotArtist))
+      );
+    return titleOk && artistOk;
+  };
+
+  const audiusHitsPool = [];
+  // Start Audius resolution after a 120ms head-start (or 0ms if no videoId) so direct
+  // InnerTube hits (<120ms) win with zero extra work, while VEVO/datacenter-gated tracks
+  // already have Audius in flight in parallel.
   const audiusPromise = (async () => {
     if (!searchQuery || !title || fast) throw new Error("no query");
-    await new Promise((r) => setTimeout(r, 120));
+    if (id) await new Promise((r) => setTimeout(r, 120));
     const queries = [
       ...new Set(
         [
@@ -1322,36 +1362,14 @@ export async function handleYtStream(url) {
         ].filter(Boolean)
       ),
     ];
-    const wantTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const wantCore = coreTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
     const searchOneAudQuery = async (q) => {
       const audHits = await audiusSearch(q);
       if (!Array.isArray(audHits) || !audHits.length) throw new Error("empty");
-      const wantIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit)\b/i.test(wantTitle);
-      const matched = audHits.find((a) => {
-        if (!a || (Number(a.duration) || 0) < 60) return false;
-        const rawGotTitle = String(a.title || "");
-        const gotTitle = rawGotTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-        const gotCore = rawGotTitle
-          .replace(/\s*[\[(]\s*(?:feat\.?|ft\.?|featuring|with|from)\s+[^)\]]+[)\]]/gi, "")
-          .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, " ")
-          .trim();
-        const gotIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|karaoke|instrumental)\b/i.test(gotTitle);
-        if (!wantIsRemix && gotIsRemix) return false;
-        const gotArtist = String(a.artist || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-        const titleOk =
-          Boolean(gotTitle && wantTitle && (gotTitle === wantTitle || gotTitle.startsWith(wantTitle + " "))) ||
-          Boolean(gotCore && wantCore && (gotCore === wantCore || gotCore.startsWith(wantCore + " ")));
-        const artistOk =
-          !artistTokens.length ||
-          artistTokens.some(
-            (tok) => gotArtist.includes(tok) || (gotArtist && tok.includes(gotArtist))
-          );
-        return titleOk && artistOk;
-      });
+      for (const h of audHits) {
+        if (h && !audiusHitsPool.some((x) => x.id === h.id)) audiusHitsPool.push(h);
+      }
+      const matched = audHits.find((a) => matchAudiusTrack(a, false));
       if (!matched) throw new Error("no match");
       const audId = String(matched.trackId || matched.id || "").replace(/^audius:/, "");
       if (!audId) throw new Error("no id");
@@ -1368,7 +1386,18 @@ export async function handleYtStream(url) {
       };
     };
 
-    return await Promise.any(queries.slice(0, 3).map((q) => searchOneAudQuery(q)));
+    try {
+      return await Promise.any(queries.slice(0, 3).map((q) => searchOneAudQuery(q)));
+    } catch {
+      const scStrict = await soundcloudStreamForQuery(title, artist, false).catch(() => null);
+      if (scStrict && scStrict.url) {
+        return {
+          ...scStrict,
+          url: `/api/stream?url=${encodeURIComponent(scStrict.url)}${buildMetaExtra(id)}`,
+        };
+      }
+      throw new Error("no strict audius/sc match");
+    }
   })();
 
   if (id) {
@@ -1382,7 +1411,7 @@ export async function handleYtStream(url) {
       }
       const stream = await Promise.any(fastRaces);
       if (stream && stream.url) {
-        if (stream.source === "audius") {
+        if (stream.source === "audius" || stream.source === "soundcloud") {
           return rememberAndReturn(stream);
         }
         const useVid = stream.videoId || id;
@@ -1413,8 +1442,8 @@ export async function handleYtStream(url) {
     if (searchQuery && candidateIds.length < 3) {
       try {
         const [audioHits, lyricHits] = await Promise.allSettled([
-          searchYouTube(`${searchQuery} official audio`, { fast: true }),
-          searchYouTube(`${searchQuery} lyrics`, { fast: true }),
+          searchYouTube(`${searchQuery} official audio`, "US", true),
+          searchYouTube(`${searchQuery} lyrics`, "US", true),
         ]);
         const merged = [
           ...(audioHits.status === "fulfilled" && Array.isArray(audioHits.value) ? audioHits.value : []),
@@ -1457,6 +1486,37 @@ export async function handleYtStream(url) {
       return rememberAndReturn(winner);
     }
   } catch {}
+
+  // Tier 4 fallback (only reached if YouTube InnerTube is blocked on datacenter IP AND no
+  // strict non-remix original existed on Audius/SoundCloud): allow full-length covers/remakes/edits
+  // matching both title and artist so playback never fails with an empty URL.
+  if (title) {
+    try {
+      const relaxedAud = audiusHitsPool.find((a) => matchAudiusTrack(a, true) && Number(a.duration) >= 90 && Number(a.duration) <= 420);
+      if (relaxedAud) {
+        const audId = String(relaxedAud.trackId || relaxedAud.id || "").replace(/^audius:/, "");
+        const audUrl = audId ? await audiusStreamUrl(audId) : "";
+        if (audUrl) {
+          return rememberAndReturn({
+            url: `/api/stream?url=${encodeURIComponent(audUrl)}${buildMetaExtra(id)}`,
+            format: "mp3",
+            mimeType: "audio/mpeg",
+            quality: "320k",
+            duration: Number(relaxedAud.duration) || 0,
+            source: "audius",
+            isPreview: false,
+          });
+        }
+      }
+      const scRelaxed = await soundcloudStreamForQuery(title, artist, true).catch(() => null);
+      if (scRelaxed && scRelaxed.url) {
+        return rememberAndReturn({
+          ...scRelaxed,
+          url: `/api/stream?url=${encodeURIComponent(scRelaxed.url)}${buildMetaExtra(id)}`,
+        });
+      }
+    } catch {}
+  }
 
   // Never return 30-second low-bitrate Deezer/iTunes previews; always use the full-quality stream or YouTube player.
   return json(200, { url: "", error: "No direct audio stream available" });

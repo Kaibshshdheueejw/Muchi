@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.8.4";
+  const APP_VERSION = "1.8.5";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -7106,7 +7106,10 @@
     }
 
     if (!url && t.source === "audius" && t.trackId) {
-      if (IS_NATIVE) {
+      if (IS_NATIVE && nativePlayer()) {
+        url = `https://discoveryprovider.audius.co/v1/tracks/${encodeURIComponent(t.trackId)}/stream?app_name=MUCHI`;
+        t.streamUrl = url;
+      } else if (IS_NATIVE) {
         try {
           const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`, 5000);
           if (data && data.url) {
@@ -8546,8 +8549,10 @@
     const NP = nativePlayer();
     if (!NP || !npActive) return false;
     npPos = Math.max(0, Number(sec) || 0);
+    npInitPos = npPos;
     npPosAt = performance.now();
     npSeekGuardUntil = Date.now() + 2500;
+    npCmdUntil = Math.max(npCmdUntil, Date.now() + 2500);
     NP.seekTo({ position: Math.round(npPos * 1000) }).catch(() => {});
     return true;
   }
@@ -8792,9 +8797,17 @@
           // Guard against any stale progress tick (>2.0s) arriving from a previous song right after starting a track from 0:00
           const isDifferentTrackDur = rawDur > 0 && npDur > 0 && Math.abs(rawDur - npDur) > 2;
           const isStaleStartJump = !npSeenPlaying && npInitPos === 0 && rawPos > 2.0 && (!v.playing || isDifferentTrackDur);
-          if (!isStaleStartJump && (now >= npSeekGuardUntil || Math.abs(rawPos - npPos) <= 2)) {
-            npPos = Math.max(0, rawPos);
-            npPosAt = performance.now();
+          if (!isStaleStartJump) {
+            if (now < npSeekGuardUntil) {
+              if (Math.abs(rawPos - npPos) <= 4.0) {
+                npSeekGuardUntil = 0;
+                npPos = Math.max(0, rawPos);
+                npPosAt = performance.now();
+              }
+            } else {
+              npPos = Math.max(0, rawPos);
+              npPosAt = performance.now();
+            }
           }
           if (rawDur > 0 && !isStaleStartJump) {
             npDur = rawDur;
@@ -11892,6 +11905,14 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.8.5",
+      title: "Muchi 1.8.5",
+      notes: [
+        "Verified full-track native audio playback and instant random timer seeking (1:20+) across YouTube, iTunes, Deezer, and Audius.",
+        "Improved keyframe seek tolerance and native audio cache MIME detection on Android and iOS.",
+      ],
+    },
     {
       ver: "1.8.1",
       title: "Muchi 1.8.1",

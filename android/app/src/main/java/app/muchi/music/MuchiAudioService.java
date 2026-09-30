@@ -150,16 +150,19 @@ public class MuchiAudioService extends Service {
             ticker.post(() -> {
                 long targetMs = Math.max(0L, positionMs);
                 lastKnownPositionMs = targetMs;
+                endedNotified = false;
                 if (mirrorMode) {
                     mirrorPositionMs = targetMs;
                     updatePlaybackState(mirrorPlaying, mirrorPositionMs);
                 } else if (resolvingOnDevice || player == null || player.getPlaybackState() == Player.STATE_IDLE) {
                     pendingSeekMs = targetMs;
+                    pendingSeekSetAtMs = android.os.SystemClock.elapsedRealtime();
                     updatePlaybackState(true, targetMs);
                 } else {
                     pendingSeekMs = targetMs;
+                    pendingSeekSetAtMs = android.os.SystemClock.elapsedRealtime();
                     player.seekTo(targetMs);
-                    if (player.getPlayWhenReady() && !player.isPlaying()) {
+                    if ((player.getPlayWhenReady() && !player.isPlaying()) || player.getPlaybackState() == Player.STATE_ENDED) {
                         player.play();
                     }
                     updatePlaybackState(isCurrentlyPlaying(), targetMs);
@@ -221,6 +224,7 @@ public class MuchiAudioService extends Service {
     private volatile boolean resolvingOnDevice = false;
     private volatile boolean isForegroundStarted = false;
     private volatile long pendingSeekMs = 0L;
+    private volatile long pendingSeekSetAtMs = 0L;
     private volatile long lastKnownPositionMs = 0L;
     private volatile long lastLoadTrackAtMs = 0L;
 
@@ -265,13 +269,14 @@ public class MuchiAudioService extends Service {
             } else {
                 int st = player.getPlaybackState();
                 long rawPos = (st == Player.STATE_IDLE) ? 0L : Math.max(0L, player.getCurrentPosition());
-                if (pendingSeekMs > 0 && (st != Player.STATE_READY || Math.abs(rawPos - pendingSeekMs) >= 1500)) {
+                long seekElapsed = android.os.SystemClock.elapsedRealtime() - pendingSeekSetAtMs;
+                if (pendingSeekMs > 0 && (st != Player.STATE_READY || (Math.abs(rawPos - pendingSeekMs) >= 4000L && seekElapsed < 2200L))) {
                     positionMs = pendingSeekMs;
                 } else {
                     positionMs = rawPos;
                     if (positionMs > 0 && (player.isPlaying() || st == Player.STATE_READY)) {
                         lastKnownPositionMs = positionMs;
-                        if (pendingSeekMs > 0 && Math.abs(positionMs - pendingSeekMs) < 1500) {
+                        if (pendingSeekMs > 0 && (Math.abs(positionMs - pendingSeekMs) < 4000L || seekElapsed >= 2200L)) {
                             pendingSeekMs = 0L;
                         }
                     }
@@ -730,15 +735,18 @@ public class MuchiAudioService extends Service {
             public void onSeekTo(long position) {
                 long targetMs = Math.max(0L, position);
                 lastKnownPositionMs = targetMs;
+                endedNotified = false;
                 if (mirrorMode) {
                     mirrorPositionMs = targetMs;
                     updatePlaybackState(mirrorPlaying, mirrorPositionMs);
                     emitControls("seek", mirrorPositionMs);
                 } else if (resolvingOnDevice || player == null || player.getPlaybackState() == Player.STATE_IDLE) {
                     pendingSeekMs = targetMs;
+                    pendingSeekSetAtMs = android.os.SystemClock.elapsedRealtime();
                     updatePlaybackState(true, targetMs);
                 } else {
                     pendingSeekMs = targetMs;
+                    pendingSeekSetAtMs = android.os.SystemClock.elapsedRealtime();
                     player.seekTo(targetMs);
                 }
             }
@@ -825,6 +833,7 @@ public class MuchiAudioService extends Service {
         currentUrl = url;
         endedNotified = false;
         pendingSeekMs = Math.max(0L, startPosMs);
+        pendingSeekSetAtMs = pendingSeekMs > 0 ? android.os.SystemClock.elapsedRealtime() : 0L;
         lastKnownPositionMs = pendingSeekMs;
         final int seq = ++loadSeq;
 
@@ -1947,23 +1956,37 @@ public class MuchiAudioService extends Service {
                         if (id.isEmpty() || durSec < 45L) continue;
                         String rawItemTitle = item.optString("title", "");
                         String gotTitle = rawItemTitle.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
-                        String gotCore = rawItemTitle
-                                .replaceAll("(?i)\\s*[\\[(][^)\\]]*(?:feat\\.?|ft\\.?|featuring|with|from\\b)[^)\\]]*[)\\]]", "")
+                        String strippedTitle = rawItemTitle
+                                .replaceAll("(?i)\\s*[\\[(][^)\\]]*(?:feat\\.?|ft\\.?|featuring|with|from\\b|official|video|audio|lyric|remaster|version|hd|hq|4k|\\d+kbps|[A-Za-z0-9_-]{11})[^)\\]]*[)\\]]", "")
                                 .replaceAll("(?i)\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$", "")
-                                .toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+                                .trim();
+                        String gotCore = strippedTitle.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+                        String[] dashSegments = strippedTitle.split("\\s+[-–—|]\\s+");
                         JSONObject user = item.optJSONObject("user");
                         String gotArtist = (user != null ? user.optString("name", "") + " " + user.optString("handle", "") : "")
                                 .toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+                        String combinedArtistText = (gotArtist + " " + gotTitle).trim();
                         boolean titleMatch = (!wantTitle.isEmpty() && !gotTitle.isEmpty()
                                 && (gotTitle.equals(wantTitle) || gotTitle.startsWith(wantTitle + " ")))
                                 || (!wantCore.isEmpty() && !gotCore.isEmpty()
                                 && (gotCore.equals(wantCore) || gotCore.startsWith(wantCore + " ")));
+                        if (!titleMatch) {
+                            for (String seg : dashSegments) {
+                                String cleanSeg = seg.replaceAll("(?i)\\s+(?:feat\\.?|ft\\.?|featuring)\\s+.*$", "")
+                                        .toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+                                if (!cleanSeg.isEmpty() && ((!wantTitle.isEmpty() && (cleanSeg.equals(wantTitle) || cleanSeg.startsWith(wantTitle + " ")))
+                                        || (!wantCore.isEmpty() && (cleanSeg.equals(wantCore) || cleanSeg.startsWith(wantCore + " "))))) {
+                                    titleMatch = true;
+                                    break;
+                                }
+                            }
+                        }
                         boolean wantIsRemix = wantTitle.matches(".*\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit)\\b.*");
                         boolean gotIsRemix = gotTitle.matches(".*\\b(remix|bootleg|flip|mashup|cover|sped up|slowed|edit|karaoke|instrumental)\\b.*");
                         if (!wantIsRemix && gotIsRemix) continue;
                         boolean artistMatch = artistTokens.isEmpty();
                         for (String tok : artistTokens) {
-                            if (gotArtist.contains(tok) || (!gotArtist.isEmpty() && tok.contains(gotArtist))) {
+                            if (combinedArtistText.contains(tok) || (!gotArtist.isEmpty() && tok.contains(gotArtist))) {
                                 artistMatch = true;
                                 break;
                             }

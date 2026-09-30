@@ -941,12 +941,17 @@ export async function appleRssMostPlayed(country = "IN", limit = 50) {
 }
 
 export async function audiusSearch(query) {
-  const data = await fetchJSON(
-    `https://api.audius.co/v1/tracks/search?query=${encodeURIComponent(query)}&app_name=${APP_NAME}&limit=50`,
-    {},
-    6000
-  );
-  return (data.data || []).map(mapAudiusTrack).filter(Boolean);
+  const q = encodeURIComponent(query);
+  const endpoints = [
+    `https://discoveryprovider.audius.co/v1/tracks/search?query=${q}&app_name=${APP_NAME}&limit=30`,
+    `https://api.audius.co/v1/tracks/search?query=${q}&app_name=${APP_NAME}&limit=30`,
+  ];
+  try {
+    const data = await Promise.any(endpoints.map((ep) => fetchJSON(ep, {}, 4000)));
+    return ((data && data.data) || []).map(mapAudiusTrack).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 export async function audiusTrending(genre) {
@@ -1016,6 +1021,96 @@ export async function audiusStreamUrl(trackId) {
   } catch {}
 
   return `https://api.audius.co/v1/tracks/${id}/stream?app_name=${APP_NAME}`;
+}
+
+let cachedScClientId = "so5r9Dsxv6jJRgHa5fGXfevkxr4VgNJf";
+let cachedScClientIdExp = 0;
+
+async function getSoundCloudClientId() {
+  if (cachedScClientId && Date.now() < cachedScClientIdExp) return cachedScClientId;
+  try {
+    const home = await fetchText("https://soundcloud.com", {}, 3000);
+    const scripts = [...home.matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)].map((m) => m[1]);
+    for (const s of scripts.slice(-3)) {
+      const js = await fetchText(s, {}, 3000);
+      const m = js.match(/client_id\s*:\s*"([a-zA-Z0-9]{32})"/);
+      if (m && m[1]) {
+        cachedScClientId = m[1];
+        cachedScClientIdExp = Date.now() + 60 * 60 * 1000;
+        return cachedScClientId;
+      }
+    }
+  } catch {}
+  return cachedScClientId;
+}
+
+export async function soundcloudStreamForQuery(title, artist = "", allowCoverOrEdit = false) {
+  const cleanTitle = String(title || "").trim();
+  const cleanArtist = String(artist || "").trim();
+  if (!cleanTitle) return null;
+  const coreTitle = cleanTitle
+    .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|from\b|official|video|audio|lyric|remaster|version)[^)\]]*[)\]]/gi, "")
+    .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
+    .trim() || cleanTitle;
+  const artistTokens = cleanArtist
+    .replace(/\s*[\[(]?\s*(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
+    .split(/\s*(?:,|&|\/|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)
+    .map((s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim())
+    .filter((s) => s.length >= 2);
+  const wantCore = coreTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const wantIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|remake)\b/i.test(cleanTitle);
+
+  const cid = await getSoundCloudClientId();
+  if (!cid) return null;
+  const q = `${coreTitle} ${cleanArtist.split(",")[0] || ""}`.trim();
+  const data = await fetchJSON(
+    `https://api-v2.soundcloud.com/search/tracks?q=${encodeURIComponent(q)}&client_id=${encodeURIComponent(cid)}&limit=20`,
+    {},
+    3500
+  ).catch(() => null);
+  const collection = (data && Array.isArray(data.collection)) ? data.collection : [];
+  if (!collection.length) return null;
+
+  const candidates = [];
+  for (const t of collection) {
+    if (!t || !t.media || !Array.isArray(t.media.transcodings)) continue;
+    const durMs = Number(t.duration) || 0;
+    const fullDurMs = Number(t.full_duration) || durMs;
+    // Reject 30s Go+ previews (where duration is 30000ms != full_duration) and clips < 90s or > 480s
+    if (durMs < 90000 || durMs > 480000 || Math.abs(durMs - fullDurMs) > 5000) continue;
+    const prog = t.media.transcodings.find((x) => x && x.format && x.format.protocol === "progressive" && x.url);
+    if (!prog) continue;
+    const rawTitle = String(t.title || "");
+    const normTitle = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const normUser = String((t.user && (t.user.username || t.user.permalink)) || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const combined = `${normTitle} ${normUser}`;
+    if (!wantCore || !combined.includes(wantCore)) continue;
+    const artistOk = !artistTokens.length || artistTokens.some((tok) => combined.includes(tok));
+    if (!artistOk) continue;
+    const isRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|remake|karaoke|instrumental)\b/i.test(rawTitle);
+    if (!wantIsRemix && isRemix && !allowCoverOrEdit) continue;
+    const durSec = Math.round(durMs / 1000);
+    const score = (isRemix ? 0 : 100) - Math.abs(durSec - 205) * 0.2;
+    candidates.push({ progUrl: prog.url, duration: durSec, score });
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  for (const c of candidates.slice(0, 2)) {
+    try {
+      const sRes = await fetchJSON(`${c.progUrl}?client_id=${encodeURIComponent(cid)}`, {}, 2500);
+      if (sRes && sRes.url) {
+        return {
+          url: sRes.url,
+          format: "mp3",
+          mimeType: "audio/mpeg",
+          quality: "128k",
+          duration: c.duration,
+          source: "soundcloud",
+          isPreview: false,
+        };
+      }
+    } catch {}
+  }
+  return null;
 }
 
 export async function radioSearch(query, limit = 24, quality, codec) {

@@ -1,6 +1,6 @@
 {
   "name": "muchi",
-  "version": "1.8.4",
+  "version": "1.8.5",
   "private": true,
   "description": "MUCHI — YouTube Music + Spotify-style player on Cloudflare Workers (D1 + KV). Official YouTube playback, Audius independent artists, live radio. Web (PWA) + Android + iOS (Capacitor).",
   "type": "module",
@@ -10,6 +10,7 @@
     "start": "node server.js",
     "lint": "node --check server.js",
     "test": "node test/smoke.mjs",
+    "smoketest": "node test/smoke.mjs",
     "test:live": "WRANGLER_DEV_URL=http://127.0.0.1:3000 node test/smoke.mjs",
     "setup": "node scripts/setup.mjs",
     "check:release": "node scripts/check-release.mjs",
