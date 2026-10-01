@@ -1295,13 +1295,6 @@ export async function handleYtStream(url) {
     return json(200, payload);
   };
 
-  const resolveForVideoId = async (vid) => {
-    if (refresh) invalidateCached(`ytstream:${vid}`);
-    const s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid));
-    if (s && s.url) return { ...s, videoId: vid };
-    throw new Error("empty stream");
-  };
-
   const artistParts = artist
     .replace(/\s*[\[(]?\s*(?:feat\.?|ft\.?|featuring)\s+.*$/i, "")
     .split(/\s*(?:,|&|\/|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)
@@ -1313,7 +1306,20 @@ export async function handleYtStream(url) {
 
   const wantTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const wantCore = coreTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const wantIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|remake)\b/i.test(wantTitle);
+  const wantIsRemix = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|edit|remake|karaoke|instrumental|live)\b/i.test(wantTitle);
+  const UNWANTED_REMIX_VIDEO_RE = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|bass\s*boosted|karaoke|instrumental|tribute|parody|reaction|ringtone)\b/i;
+
+  const resolveForVideoId = async (vid) => {
+    if (refresh) invalidateCached(`ytstream:${vid}`);
+    const s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid));
+    if (s && s.url) {
+      if (title && !wantIsRemix && s.videoTitle && UNWANTED_REMIX_VIDEO_RE.test(String(s.videoTitle))) {
+        throw new Error("unwanted remix videoTitle");
+      }
+      return { ...s, videoId: vid };
+    }
+    throw new Error("empty stream");
+  };
 
   const matchAudiusTrack = (a, allowCoverOrEdit = false) => {
     if (!a || (Number(a.duration) || 0) < 60) return false;
@@ -1351,12 +1357,11 @@ export async function handleYtStream(url) {
   };
 
   const audiusHitsPool = [];
-  // Start Audius resolution after a 120ms head-start (or 0ms if no videoId) so direct
-  // InnerTube hits (<120ms) win with zero extra work, while VEVO/datacenter-gated tracks
-  // already have Audius in flight in parallel.
+  const allowAudiusFallback = url.searchParams.get("allowAudius") === "1";
+  // Only allow Audius/SoundCloud fallback when explicitly requested (never hijack standard YouTube/iTunes/Deezer songs with remixes).
   const audiusPromise = (async () => {
     await Promise.resolve();
-    if (!searchQuery || !title || fast) throw new Error("skip audius");
+    if (!allowAudiusFallback || !searchQuery || !title || fast) throw new Error("skip audius");
     if (id) await new Promise((r) => setTimeout(r, 120));
     const queries = [
       ...new Set(
@@ -1415,7 +1420,7 @@ export async function handleYtStream(url) {
         p.catch(() => {});
         fastRaces.push(p);
       }
-      if (!fast && title) {
+      if (!fast && title && allowAudiusFallback) {
         const p = new Promise((res, rej) => setTimeout(() => audiusPromise.then(res, rej), 650));
         p.catch(() => {});
         fastRaces.push(p);
@@ -1446,8 +1451,7 @@ export async function handleYtStream(url) {
     return json(200, { url: "", error: "fast tier exhausted" });
   }
 
-  // Tier 2 & Tier 3 raced concurrently with Promise.any: whichever resolves a valid
-  // full-length stream first (candidate YouTube audio OR Audius) wins immediately!
+  // Tier 2: candidate YouTube official audio / lyric videoIds
   const candidateIds = rawCandidates.slice(2);
 
   const ytAltPromise = (async () => {
@@ -1468,6 +1472,8 @@ export async function handleYtStream(url) {
           if (!vid || vid === id || candidateIds.includes(vid)) continue;
           // Skip shorts / 30s clips when looking for a full song
           if (dur > 0 && dur < 45) continue;
+          const itemText = `${item.title || ""} ${item.artist || ""}`;
+          if (title && !wantIsRemix && UNWANTED_REMIX_VIDEO_RE.test(itemText)) continue;
           candidateIds.push(vid);
           if (candidateIds.length >= 5) break;
         }
@@ -1480,6 +1486,7 @@ export async function handleYtStream(url) {
         const proxied = `/api/stream?url=${encodeURIComponent(altStream.url)}${buildMetaExtra(useVid)}`;
         return {
           url: proxied,
+          directUrl: altStream.url,
           videoId: useVid,
           format: altStream.format || "",
           mimeType: altStream.mimeType || "",
@@ -1501,38 +1508,8 @@ export async function handleYtStream(url) {
     }
   } catch {}
 
-  // Tier 4 fallback (only reached if YouTube InnerTube is blocked on datacenter IP AND no
-  // strict non-remix original existed on Audius/SoundCloud): allow full-length covers/remakes/edits
-  // matching both title and artist so playback never fails with an empty URL.
-  if (title) {
-    try {
-      const relaxedAud = audiusHitsPool.find((a) => matchAudiusTrack(a, true) && Number(a.duration) >= 90 && Number(a.duration) <= 420);
-      if (relaxedAud) {
-        const audId = String(relaxedAud.trackId || relaxedAud.id || "").replace(/^audius:/, "");
-        const audUrl = audId ? await audiusStreamUrl(audId) : "";
-        if (audUrl) {
-          return rememberAndReturn({
-            url: `/api/stream?url=${encodeURIComponent(audUrl)}${buildMetaExtra(id)}`,
-            format: "mp3",
-            mimeType: "audio/mpeg",
-            quality: "320k",
-            duration: Number(relaxedAud.duration) || 0,
-            source: "audius",
-            isPreview: false,
-          });
-        }
-      }
-      const scRelaxed = await soundcloudStreamForQuery(title, artist, true).catch(() => null);
-      if (scRelaxed && scRelaxed.url) {
-        return rememberAndReturn({
-          ...scRelaxed,
-          url: `/api/stream?url=${encodeURIComponent(scRelaxed.url)}${buildMetaExtra(id)}`,
-        });
-      }
-    } catch {}
-  }
-
-  // Never return 30-second low-bitrate Deezer/iTunes previews; always use the full-quality stream or YouTube player.
+  // Like v1.5.6–v1.6.7: never return 30-second previews or unofficial SoundCloud/Audius remixes/covers;
+  // return empty url so the native/web player resolves on-device or plays via the official YouTube player.
   return json(200, { url: "", error: "No direct audio stream available" });
 }
 

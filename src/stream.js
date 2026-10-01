@@ -322,30 +322,6 @@ export async function handleStream(request, url) {
         } catch {}
       }
     } catch {}
-
-    if (title) {
-      try {
-        const audHits = await audiusSearch(q);
-        if (Array.isArray(audHits) && audHits.length) {
-          const wantTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-          const matchAud = audHits.find((a) => {
-            if (!a || (Number(a.duration) || 0) < 45) return false;
-            const gotTitle = String(a.title || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-            return gotTitle && wantTitle && (gotTitle.includes(wantTitle) || wantTitle.includes(gotTitle));
-          });
-          if (matchAud) {
-            const audId = String(matchAud.trackId || matchAud.id || "").replace(/^audius:/, "");
-            if (audId) {
-              const audUrl = await audiusStreamUrl(audId);
-              if (audUrl) {
-                const rAud = await pipeUrl(request, audUrl, "audio/mpeg, audio/*;q=0.9, */*;q=0.8", "audio/mpeg");
-                if (rAud.status < 400) return rAud;
-              }
-            }
-          }
-        }
-      } catch {}
-    }
   }
 
   return primaryRes;

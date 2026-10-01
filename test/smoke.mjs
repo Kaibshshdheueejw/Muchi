@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.1", APP_VERSION === "1.9.1" && appJs.includes('const APP_VERSION = "1.9.1"'));
+  ok("version: APP_VERSION is 1.9.2", APP_VERSION === "1.9.2" && appJs.includes('const APP_VERSION = "1.9.2"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1297,6 +1297,7 @@ await (async () => {
         if (u.includes("/api/youtube/search")) {
           const isBlinding = /Blinding/i.test(u);
           const isBirds = /BIRDS/i.test(u);
+          const isLevitating = /Levitating/i.test(u);
           return {
             ok: true,
             status: 200,
@@ -1306,6 +1307,11 @@ await (async () => {
                 ? [{ videoId: "4NRXx6U8ABQ", title: "Blinding Lights", artist: "The Weeknd", duration: 200 }]
                 : isBirds
                 ? [{ videoId: "V9PVRfjEBTI", title: "BIRDS OF A FEATHER", artist: "Billie Eilish", duration: 210 }]
+                : isLevitating
+                ? [
+                    { videoId: "remixDJ9999", title: "Levitating (DJ Club Bootleg Sped Up Remix)", artist: "DJ Club", duration: 203 },
+                    { videoId: "TUVcZfQe-Kw", title: "Dua Lipa - Levitating (Official Audio)", artist: "Dua Lipa", duration: 203 },
+                  ]
                 : [{ videoId: "kPa7bsKwL-c", title: "Die With A Smile", artist: "Lady Gaga & Bruno Mars", duration: 252 }],
             }),
           };
@@ -1632,7 +1638,35 @@ await (async () => {
         cycle30Ok &&
         sleepExpiredPausedOk;
 
-      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk, zeroJumpOk, itunesDeezerFullPlayOk, timerAndCloudflareOk };
+      // Step 10 (v1.9.1+ Old-is-Gold Pure YouTube/Piped Native Audio & Anti-Remix E2E):
+      // (a) When YouTube search returns a remix candidate first followed by Official Audio, resolveYouTubePlay
+      //     rejects the remix candidate and selects the official videoId ("TUVcZfQe-Kw", never "remixDJ9999").
+      // (b) When a track has a stale SoundCloud/Audius remix streamUrl persisted from an older session,
+      //     playCurrent strips it immediately and plays the genuine YouTube stream instead.
+      calls.length = 0;
+      const antiRemixList = [
+        {
+          id: "itunes:lev_1",
+          source: "itunes",
+          title: "Levitating",
+          artist: "Dua Lipa",
+          duration: 203,
+          streamUrl: "https://cf-media.sndcdn.com/stale_dj_remix_track.mp3",
+          artwork: "/cover-default.jpg",
+        },
+      ];
+      api.playFromList(antiRemixList, 0);
+      await new Promise((r) => setTimeout(r, 25));
+      const levPlayCall = calls.find((c) => c.method === "play" && c.title === "Levitating");
+      const antiRemixE2EOk =
+        Boolean(levPlayCall) &&
+        levPlayCall.videoId === "TUVcZfQe-Kw" &&
+        !String(levPlayCall.url).includes("sndcdn.com") &&
+        !String(levPlayCall.url).includes("audius.co") &&
+        !String(levPlayCall.candidates || "").includes("remixDJ9999") &&
+        String(levPlayCall.url).includes("googlevideo.com");
+
+      return { step1Ok, step2Ok, step3Ok, nextOk, prevOk, endedOk, errRecoveryOk, cacheReplayOk, zeroJumpOk, itunesDeezerFullPlayOk, timerAndCloudflareOk, antiRemixE2EOk };
     }
 
     const androidE2E = await runNativeBackgroundE2E("android");
@@ -1654,6 +1688,9 @@ await (async () => {
     ok("Android Native E2E (v1.8.6): Cloudflare backend stream resolution + Player Timer UI (1:05 / 3:30) + Sleep Timer UI live countdown & auto-pause",
       androidE2E.timerAndCloudflareOk
     );
+    ok("Android Native E2E (Old-is-Gold Anti-Remix): strips stale SoundCloud/Audius URLs, rejects remix videoId candidates, and plays exact Official Audio YouTube stream",
+      androidE2E.antiRemixE2EOk
+    );
 
     const iosE2E = await runNativeBackgroundE2E("ios");
     ok("iOS Native E2E: play song → resolves verified HTTP stream, starts AVPlayer & preloads next track", iosE2E.step1Ok);
@@ -1673,6 +1710,9 @@ await (async () => {
     );
     ok("iOS Native E2E (v1.8.6): Cloudflare backend stream resolution + Player Timer UI (1:05 / 3:30) + Sleep Timer UI live countdown & auto-pause",
       iosE2E.timerAndCloudflareOk
+    );
+    ok("iOS Native E2E (Old-is-Gold Anti-Remix): strips stale SoundCloud/Audius URLs, rejects remix videoId candidates, and plays exact Official Audio YouTube stream",
+      iosE2E.antiRemixE2EOk
     );
 
     // ── v1.8.2 & v1.8.3 E2E: Immediate Playback, Zero-Jump Timer, and Native App Audio Cache ──
@@ -1941,8 +1981,84 @@ await (async () => {
     provSrc.includes('upsertArtist(aName, (d.artist && d.artist.id) || aName') &&
     provSrc.includes("const wantIsRemix =") &&
     androidSvc.includes("boolean wantIsRemix =") &&
-    androidSvc.includes("long deadlineMs = System.currentTimeMillis() + 2600L;")
+    androidSvc.includes("isVideoTitleAcceptableStatic")
   );
+  ok(
+    "Old-is-Gold (v1.5.6–1.6.7) pure YouTube/Piped native audio & anti-remix architecture: WEB 'official audio' search priority, title anti-remix guard across Android/iOS/Worker/JS, and .v192_clean cache purge",
+    androidSvc.includes('new File(oldDir, ".v192_clean")') &&
+    androidSvc.includes("private static boolean isVideoTitleAcceptableStatic(String gotTitle, String expectedTitle)") &&
+    androidSvc.includes('String safeRawQ = (cleanQ + " official audio")') &&
+    iosPlug.includes('appendingPathComponent(".v192_clean")') &&
+    iosPlug.includes("private static func isVideoTitleAcceptable(gotTitle: String?, expectedTitle: String?) -> Bool") &&
+    iosPlug.includes("let safeRawQ = \"\\(effCleanQ) official audio\"") &&
+    appJs.includes('const cleanFlagKey = "aura.nativeAudioCache.v192_clean";') &&
+    appJs.includes("function isUnwantedRemixStreamUrl(u, source = \"\")") &&
+    appJs.includes("function isUnwantedRemixCandidateTitle(gotTitle, wantTitle)") &&
+    aggSrc.includes("UNWANTED_REMIX_VIDEO_RE.test(String(s.videoTitle))") &&
+    provSrc.includes('videoTitle: String((data && data.title) || "")') &&
+    provSrc.includes('videoTitle: String((data.videoDetails && data.videoDetails.title) || "")')
+  );
+
+  // Real functional test of v1.9.2 handleYtStream anti-remix guard:
+  // When primary videoId is an unsolicited remix ("Levitating (DJ Club Sped Up Remix)") and candidate
+  // videoId is the Official Audio ("Dua Lipa - Levitating (Official Audio)"), handleYtStream rejects
+  // the remix video and returns the exact Official Audio stream!
+  {
+    const { handleYtStream } = await import("../src/aggregate.js");
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async (u, init = {}) => {
+        const urlStr = String(u);
+        if (urlStr.includes("youtubei/v1/player")) {
+          const bodyStr = init && init.body ? String(init.body) : "";
+          const isRemixVid = bodyStr.includes("remixVid001");
+          return new Response(
+            JSON.stringify({
+              playabilityStatus: { status: "OK" },
+              streamingData: {
+                adaptiveFormats: [
+                  {
+                    itag: 140,
+                    mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+                    bitrate: 128000,
+                    url: isRemixVid
+                      ? "https://rr1---sn-test.googlevideo.com/videoplayback?id=remixVid001&c=ANDROID_VR&dur=203.0"
+                      : "https://rr1---sn-test.googlevideo.com/videoplayback?id=TUVcZfQe-Kw&c=ANDROID_VR&dur=203.0",
+                  },
+                ],
+              },
+              videoDetails: {
+                videoId: isRemixVid ? "remixVid001" : "TUVcZfQe-Kw",
+                title: isRemixVid
+                  ? "Dua Lipa - Levitating (DJ Club Bootleg Sped Up Remix)"
+                  : "Dua Lipa - Levitating (Official Audio)",
+                lengthSeconds: "203",
+                durationSeconds: "203",
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 500 });
+      };
+      const testUrl = new URL(
+        "https://muchi.twiarimascord.workers.dev/api/yt/stream?v=remixVid001&candidates=TUVcZfQe-Kw&title=Levitating&artist=Dua%20Lipa&refresh=1"
+      );
+      const res = await handleYtStream(testUrl);
+      const data = await res.json();
+      ok(
+        "v1.9.2 functional test: handleYtStream (/api/yt/stream) rejects remix videoTitle and resolves exact Official Audio videoId",
+        Boolean(data) &&
+          data.videoId === "TUVcZfQe-Kw" &&
+          data.source === "youtube" &&
+          data.isPreview === false &&
+          String(data.directUrl || "").includes("id=TUVcZfQe-Kw") &&
+          !String(data.directUrl || "").includes("remixVid001")
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
 })();
 
 // ── 6. Live worker checks (only when WRANGLER_DEV_URL is set) ───────────────

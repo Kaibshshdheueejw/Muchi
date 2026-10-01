@@ -34,6 +34,9 @@ export async function youtubeMusicSearch(query, gl, timeoutMs = 6500, extra = {}
   }, timeoutMs);
   const out = [];
   walkCollect(data, out, new Set(), new Set(), searchWalkOpts(extra, true));
+  for (const r of out) {
+    if (r && typeof r === "object") r._fromMusic = true;
+  }
   const bag = { artists: [], playlists: [], seenPl: new Set(), seenArt: new Set() };
   walkCatalog(data, bag);
   return { tracks: out, artists: bag.artists, playlists: bag.playlists };
@@ -55,6 +58,9 @@ export async function youtubeWebSearch(query, gl, timeoutMs = 6500, extra = {}) 
   }, timeoutMs);
   const out = [];
   walkCollect(data, out, new Set(), new Set(), searchWalkOpts(extra, false));
+  for (const r of out) {
+    if (r && typeof r === "object") r._fromWeb = true;
+  }
   const bag = { artists: [], playlists: [], seenPl: new Set(), seenArt: new Set() };
   walkCatalog(data, bag);
   return { tracks: out, artists: bag.artists, playlists: bag.playlists };
@@ -122,30 +128,14 @@ export async function searchYouTube(query, gl, fast) {
   const errors = [];
   const extra = { limit: fast ? 24 : 60, musicOnly: true, loose: false };
   if (fast) {
-    try {
-      // Prioritize YouTube Music (WEB_REMIX + YT_SONGS_PARAMS) studio masters;
-      // give web search a 350ms head-start delay so studio masters always win when available.
-      const fastHit = await Promise.any([
-        youtubeMusicSearch(query, gl, 2000, { ...extra, params: YT_SONGS_PARAMS }).then((r) => {
-          const rows = Array.isArray(r) ? r : (r && r.tracks) || [];
-          if (!rows.length) throw new Error("empty music search");
-          return r;
-        }),
-        new Promise((res, rej) =>
-          setTimeout(() => {
-            youtubeWebSearch(query, gl, 1800, { limit: 24, musicOnly: true, loose: false })
-              .then((r) => {
-                const rows = Array.isArray(r) ? r : (r && r.tracks) || [];
-                if (!rows.length) throw new Error("empty web search");
-                return r;
-              })
-              .then(res, rej);
-          }, 350)
-        ),
-      ]);
-      add(fastHit);
-    } catch (e) {
-      errors.push(String(e && e.message ? e.message : e));
+    const fastJobs = [
+      youtubeMusicSearch(query, gl, 2100, { ...extra, params: YT_SONGS_PARAMS }),
+      youtubeWebSearch(query, gl, 2100, { limit: 24, musicOnly: true, loose: false }),
+    ];
+    const settled = await Promise.allSettled(fastJobs);
+    for (const s of settled) {
+      if (s.status === "fulfilled") add(s.value);
+      else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
     }
   } else {
     const jobs = [
@@ -182,7 +172,7 @@ export async function searchYouTube(query, gl, fast) {
   const qn = String(query || "").toLowerCase().trim();
   const cleanQn = qn.replace(/\b(?:official\s+audio|official\s+video|official\s+music\s+video|official|audio|video|lyrics?)\b/gi, "").replace(/\s+/g, " ").trim() || qn;
   const words = cleanQn.split(/\s+/).filter((w) => w.length > 1 && !/^(feat|ft|with|and|the)$/.test(w));
-  const wantCover = /\b(cover|karaoke|instrumental|tribute|remix|live)\b/i.test(qn);
+  const wantCover = /\b(cover|karaoke|instrumental|tribute|remix|bootleg|flip|mashup|sped\s*up|slowed|reverb|nightcore|live)\b/i.test(qn);
   const cjkRuns = cleanQn.match(/[\u3040-\u30ff\u3400-\u9fff]{2,}/g) || [];
   const cjkBigrams = [];
   for (const run of cjkRuns) {
@@ -214,11 +204,12 @@ export async function searchYouTube(query, gl, fast) {
     }
     if (titleMatches > 0 && artistMatches > 0) {
       s += 45; // Both song title and artist channel match the query
+      if (t._fromWeb) s += 12; // Prefer WEB official audio/video IDs playable by both Web IFrame and Native ANDROID_VR
     } else if (artistMatches === 0 && words.length >= 2) {
       s -= 30; // Cover/re-upload channel that stuffed artist name into video title
     }
-    if (!wantCover && /\b(cover|karaoke|instrumental|tribute|8d|sped\s*up|slowed|nightcore)\b/i.test(`${title} ${artist}`)) {
-      s -= 65;
+    if (!wantCover && /\b(remix|bootleg|flip|mashup|cover|karaoke|instrumental|tribute|8d|sped\s*up|slowed|reverb|nightcore|parody|reaction)\b/i.test(`${title} ${artist}`)) {
+      s -= 95;
     }
     for (const bg of cjkBigrams) {
       if (title.includes(bg)) s += 14;
@@ -356,6 +347,7 @@ export function pickPipedStream(data) {
     // Expose the numeric bitrate so callers can surface/track it.
     bitrate: best.bitrate || "",
     duration: (data && data.duration) || 0,
+    videoTitle: String((data && data.title) || ""),
   };
 }
 
@@ -564,6 +556,7 @@ export function pickInnertubeStream(data) {
     quality: String(best.itag || ""),
     bitrate: String(best.bitrate || ""),
     duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || Number(data.videoDetails && data.videoDetails.lengthSeconds) || urlDuration(best.url),
+    videoTitle: String((data.videoDetails && data.videoDetails.title) || ""),
   };
 }
 

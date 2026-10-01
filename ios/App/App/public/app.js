@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.1";
+  const APP_VERSION = "1.9.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6376,14 +6376,35 @@
     if (/[?&]c=(?:IOS|ANDROID)(?:&|$|%26)/i.test(combined)) return true;
     return false;
   }
+  function isUnwantedRemixStreamUrl(u, source = "") {
+    const s = String(u || "").toLowerCase();
+    if (!s || source === "audius") return false;
+    let decoded = s;
+    try { decoded = decodeURIComponent(s).toLowerCase(); } catch {}
+    const combined = s + " " + decoded;
+    return combined.includes("sndcdn.com") || combined.includes("audius.co") || combined.includes("open-audio-validator");
+  }
+  function isUnwantedRemixCandidateTitle(gotTitle, wantTitle) {
+    const want = String(wantTitle || "").toLowerCase();
+    const got = String(gotTitle || "").toLowerCase();
+    if (!got) return false;
+    const wantIsRemix = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|edit|remake|karaoke|instrumental|live)\b/i.test(want);
+    if (wantIsRemix) return false;
+    return /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|bass\s*boosted|karaoke|instrumental|tribute|parody|reaction|ringtone)\b/i.test(got);
+  }
   try {
+    const cleanFlagKey = "aura.nativeAudioCache.v192_clean";
+    if (!localStorage.getItem(cleanFlagKey)) {
+      localStorage.removeItem(NATIVE_AUDIO_CACHE_KEY);
+      localStorage.setItem(cleanFlagKey, "1");
+    }
     const rawCache = localStorage.getItem(NATIVE_AUDIO_CACHE_KEY);
     if (rawCache) {
       const parsed = JSON.parse(rawCache);
       if (Array.isArray(parsed)) {
         for (const [k, v] of parsed) {
           if (k && v && typeof v === "object") {
-            if (v.streamUrl && isOneMinuteCappedStreamUrl(v.streamUrl)) v.streamUrl = "";
+            if (v.streamUrl && (isOneMinuteCappedStreamUrl(v.streamUrl) || isUnwantedRemixStreamUrl(v.streamUrl))) v.streamUrl = "";
             nativeAppAudioCache.set(k, v);
           }
         }
@@ -6424,7 +6445,7 @@
       }
     }
     const rawStreamUrl = String(extra.streamUrl || t.streamUrl || (existing && existing.streamUrl) || "");
-    const cleanStreamUrl = (/^yt:/i.test(rawStreamUrl) || isOneMinuteCappedStreamUrl(rawStreamUrl)) ? "" : rawStreamUrl;
+    const cleanStreamUrl = (/^yt:/i.test(rawStreamUrl) || isOneMinuteCappedStreamUrl(rawStreamUrl) || isUnwantedRemixStreamUrl(rawStreamUrl, t.source)) ? "" : rawStreamUrl;
     const resolvedVid = String(extra.videoId || t.videoId || (existing && existing.videoId) || "");
     const resolvedCands = Array.isArray(extra.candidates)
       ? extra.candidates.slice(0, 10)
@@ -6492,7 +6513,7 @@
     if (!t || !cachedHit || (!cachedHit.videoId && !cachedHit.streamUrl)) return false;
     if (cachedHit.videoId) t.videoId = cachedHit.videoId;
     if (cachedHit.candidates && cachedHit.candidates.length) t._ytCandidates = cachedHit.candidates.slice();
-    if (cachedHit.streamUrl && !t.streamUrl) t.streamUrl = cachedHit.streamUrl;
+    if (cachedHit.streamUrl && !t.streamUrl && !isUnwantedRemixStreamUrl(cachedHit.streamUrl, t.source)) t.streamUrl = cachedHit.streamUrl;
     if (!t.origSource) t.origSource = t.source;
     if (t.source !== "apple" && t.source !== "deezer" && t.source !== "itunes") t.source = "youtube";
     if ((!t.artwork || t.artwork === "/cover-default.jpg") && cachedHit.artwork) t.artwork = cachedHit.artwork;
@@ -6577,7 +6598,7 @@
       timeoutMs
     ).then((d) => {
       if (d && d.url && !d.isPreview) {
-        if (isOneMinuteCappedStreamUrl(d.url)) {
+        if (isOneMinuteCappedStreamUrl(d.url) || d.source === "soundcloud" || d.source === "audius" || isUnwantedRemixStreamUrl(d.url, "youtube")) {
           warmStreamMap.delete(key);
           return null;
         }
@@ -6623,11 +6644,14 @@
 
   async function resolveFallbackStreamUrl(t, skipYtStream = false) {
     if (!t) return "";
+    if (t.streamUrl && isUnwantedRemixStreamUrl(t.streamUrl, t.source)) {
+      t.streamUrl = "";
+    }
     if (!skipYtStream && t.streamUrl && !t._isPreviewStream) return t.streamUrl;
     if (!skipYtStream && t.videoId) {
       try {
         const warm = await getWarmStream(t.videoId, t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 5500, true);
-        if (warm && warm.url && !warm.isPreview) {
+        if (warm && warm.url && !warm.isPreview && !isUnwantedRemixStreamUrl(warm.url, t.source)) {
           t.streamUrl = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
           t._isPreviewStream = false;
           if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
@@ -6642,7 +6666,7 @@
     if (!skipYtStream && (t.videoId || t.title)) {
       try {
         const sData = await api(`/api/yt/stream?v=${encodeURIComponent(t.videoId || "")}&title=${encodeURIComponent(t.title || "")}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0`, 6500);
-        if (sData && sData.url && !sData.isPreview) {
+        if (sData && sData.url && !sData.isPreview && !isUnwantedRemixStreamUrl(sData.url, t.source) && (t.source === "audius" || (sData.source !== "soundcloud" && sData.source !== "audius"))) {
           t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
           t._isPreviewStream = false;
           if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
@@ -6651,14 +6675,18 @@
         }
       } catch {}
     }
-    // Try secondary stripped query via /api/yt/stream (1.6.6 full-track resolution, never 30s preview clips)
-    const queries = buildTrackPlayQueries(t);
-    for (let i = 0; i < Math.min(queries.length, 2); i++) {
-      const q = queries[i];
-      if (!q) continue;
+    // Try secondary stripped title via /api/yt/stream (1.6.6 full-track resolution, never 30s preview clips)
+    const rawTitle = String(t.title || "").trim();
+    const cleanTitle = rawTitle
+      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|with|remaster|live|radio edit|explicit|clean|version|deluxe|bonus|soundtrack|from\s)[^)\]]*[)\]]/gi, "")
+      .replace(/\s+-\s+.*?(?:remaster|version|edit|live|mono|stereo|deluxe).*$/i, "")
+      .trim() || rawTitle;
+    const rawArtist = String(artistName(t) || t.artist || "").trim();
+    const primaryArtist = rawArtist.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\swith\s|\/)\s*/i)[0].trim() || rawArtist;
+    if (cleanTitle) {
       try {
-        const sData = await api(`/api/yt/stream?title=${encodeURIComponent(q)}&artist=${encodeURIComponent(t.artist || "")}${candParam}&allowPreview=0&refresh=1`, 6000);
-        if (sData && sData.url && !sData.isPreview) {
+        const sData = await api(`/api/yt/stream?title=${encodeURIComponent(cleanTitle)}&artist=${encodeURIComponent(primaryArtist)}${candParam}&allowPreview=0&refresh=1`, 6000);
+        if (sData && sData.url && !sData.isPreview && !isUnwantedRemixStreamUrl(sData.url, t.source)) {
           t.streamUrl = sData.url.startsWith("/") ? API_BASE + sData.url : sData.url;
           t._isPreviewStream = false;
           if (sData.videoId && !t.videoId) t.videoId = sData.videoId;
@@ -6761,7 +6789,9 @@
       } catch {}
     }
 
-    const validRows = (Array.isArray(rows) ? rows : []).filter((x) => x && (x.videoId || x.streamUrl));
+    const rawValidRows = (Array.isArray(rows) ? rows : []).filter((x) => x && (x.videoId || x.streamUrl));
+    const nonRemixRows = rawValidRows.filter((x) => !isUnwantedRemixCandidateTitle(`${x.title || ""} ${x.artist || ""}`, t.title));
+    const validRows = nonRemixRows.length ? nonRemixRows : rawValidRows;
     const blockedSet = t._blockedVideoIds instanceof Set ? t._blockedVideoIds : new Set();
     const candidates = validRows.map((x) => x.videoId).filter((vid) => vid && !blockedSet.has(vid));
     if (candidates.length) {
@@ -6836,6 +6866,12 @@
     }
     const gen = ++playGen;
     t._playingViaAudio = false;
+    if (t.streamUrl && isUnwantedRemixStreamUrl(t.streamUrl, t.source)) {
+      t.streamUrl = "";
+    }
+    if (t.url && isUnwantedRemixStreamUrl(t.url, t.source)) {
+      t.url = "";
+    }
     if (reset) {
       t._nativeRefreshTried = false;
       t._nativeOnDeviceTried = false;
@@ -7072,8 +7108,8 @@
 
     // 1. Connect Native App to uncapped streams with zero delay:
     //    Reject any 1-minute capped c=IOS/c=ANDROID URLs, check warm stream cache with a fast 450ms budget,
-    //    and otherwise let MuchiAudioService resolve uncapped ANDROID_VR / ANDROID_TESTSUITE / JioSaavn / SoundCloud streams directly on-device.
-    if (t.streamUrl && isOneMinuteCappedStreamUrl(t.streamUrl)) {
+    //    and otherwise let MuchiAudioService resolve uncapped ANDROID_VR / ANDROID_TESTSUITE / Piped streams directly on-device.
+    if (t.streamUrl && (isOneMinuteCappedStreamUrl(t.streamUrl) || isUnwantedRemixStreamUrl(t.streamUrl, t.source))) {
       t.streamUrl = "";
     }
     let resolvedStream = (t.streamUrl && /^https?:\/\//i.test(t.streamUrl) && !t._isPreviewStream) ? t.streamUrl : "";
@@ -7192,6 +7228,12 @@
       }
       url = activeOfflineBlobUrl;
     } else if (!isNetworkOff) {
+      if (t.streamUrl && isUnwantedRemixStreamUrl(t.streamUrl, t.source)) {
+        t.streamUrl = "";
+      }
+      if (t.url && isUnwantedRemixStreamUrl(t.url, t.source)) {
+        t.url = "";
+      }
       url = t.streamUrl || t.url || "";
       if (IS_NATIVE && nativePlayer() && t.videoId && !t._nativeOnDeviceTried && !url) {
         url = `yt:${t.videoId}`;
