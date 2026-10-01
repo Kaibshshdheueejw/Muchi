@@ -112,12 +112,16 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
             pendingPlay = null;
             try { pc.resolve(); } catch (Exception ignored) {}
         }
+        boolean activityFinishing = getActivity() != null && getActivity().isFinishing();
         if (activeInstances.isEmpty()) {
             MuchiAudioService.setStaticListener(null);
         }
         if (service != null && activeInstances.isEmpty()) {
             try {
                 service.setListener(null);
+                if (activityFinishing) {
+                    service.stopAll();
+                }
             } catch (Exception ignored) {}
         }
         if (bound) {
@@ -125,6 +129,11 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
                 getContext().unbindService(conn);
             } catch (Exception ignored) {}
             bound = false;
+        }
+        if (activityFinishing) {
+            try {
+                getContext().stopService(new Intent(getContext(), MuchiAudioService.class));
+            } catch (Exception ignored) {}
         }
         service = null;
         pending.clear();

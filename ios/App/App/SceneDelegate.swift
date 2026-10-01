@@ -23,4 +23,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
         SceneDelegateProxy.shared.scene(scene, continue: userActivity)
     }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        MuchiAudioPlugin.sharedInstance?.stopOnAppClose()
+    }
 }

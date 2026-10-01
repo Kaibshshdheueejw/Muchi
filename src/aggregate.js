@@ -1110,17 +1110,19 @@ export async function handleSearch(env, url) {
       return result;
     }
 
-    // source === "all": Run all providers concurrently in parallel
+    // source === "all": Run all providers concurrently in parallel (sharing iTunes catalog promise with Deezer to halve subrequests & CPU)
     const fastWait = (promise, ms, fallback) =>
       Promise.race([promise, new Promise((res) => setTimeout(() => res(fallback), ms))]);
 
+    const sharedItunesPromise = itunesSearch(q, { includeExtra: true, country: gl, limit: 75 }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+
     const allTasks = [
-      ["youtube", fastWait(searchYouTube(q, gl).catch(() => []), 2800, [])],
-      ["apple", fastWait(itunesSearch(q, { includeExtra: true, country: gl, limit: 75 }), 3400, { songs: [], artists: [], playlists: [] })],
-      ["deezer", fastWait(deezerSearch(q, { limit: 75, includeExtra: true, country: gl }), 3400, { songs: [], artists: [], playlists: [] })],
-      ["audius", fastWait(audiusSearch(q).catch(() => []), 2500, [])],
-      ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2200, [])],
-      ["audiusUsers", fastWait(audiusUserSearch(q), 2200, [])],
+      ["youtube", fastWait(searchYouTube(q, gl, true).catch(() => []), 2600, [])],
+      ["apple", fastWait(sharedItunesPromise, 3200, { songs: [], artists: [], playlists: [] })],
+      ["deezer", fastWait(deezerSearch(q, { limit: 75, includeExtra: true, country: gl, standbyItunesPromise: sharedItunesPromise, skipYoutubeFallback: true }), 3200, { songs: [], artists: [], playlists: [] })],
+      ["audius", fastWait(audiusSearch(q).catch(() => []), 2200, [])],
+      ["radio", fastWait(radioSearch(q, 16, url.searchParams.get("quality")), 2000, [])],
+      ["audiusUsers", fastWait(audiusUserSearch(q), 2000, [])],
     ];
     const settled = await Promise.allSettled(allTasks.map((t) => t[1]));
     settled.forEach((s, i) => {
@@ -1306,15 +1308,37 @@ export async function handleYtStream(url) {
 
   const wantTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const wantCore = coreTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const wantIsRemix = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|edit|remake|karaoke|instrumental|live)\b/i.test(wantTitle);
-  const UNWANTED_REMIX_VIDEO_RE = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|bass\s*boosted|karaoke|instrumental|tribute|parody|reaction|ringtone)\b/i;
+  const wantIsRemix = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|edit|remake|karaoke|instrumental|live|acoustic|lullaby|8-bit|orchestra|symphony|piano)\b/i.test(`${wantTitle} ${artist.toLowerCase()}`);
+  const UNWANTED_REMIX_VIDEO_RE = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|bass\s*boosted|karaoke|instrumental|tribute|parody|reaction|ringtone|lullaby|8-bit|bardcore|medieval|symphony|orchestra)\b/i;
+
+  const isStreamMetadataAcceptable = (s) => {
+    if (!s || !s.videoTitle) return true;
+    const gotT = String(s.videoTitle || "").toLowerCase();
+    const gotA = String(s.videoAuthor || "").toLowerCase();
+    const gotD = String(s.videoShortDesc || "").toLowerCase();
+    if (title && !wantIsRemix && UNWANTED_REMIX_VIDEO_RE.test(`${gotT} ${gotA}`)) {
+      return false;
+    }
+    const combinedMeta = `${gotT} ${gotA} ${gotD}`.replace(/[^a-z0-9]+/g, " ").trim();
+    if (artistTokens.length > 0 && !/^(youtube|unknown|various artists|artist|muchi)$/i.test(artist.trim())) {
+      const combinedNoSpace = combinedMeta.replace(/\s+/g, "");
+      const anyMatched = artistTokens.some((tok) => {
+        const tokNoSpace = tok.replace(/\s+/g, "");
+        if (combinedMeta.includes(tok) || (tokNoSpace && combinedNoSpace.includes(tokNoSpace))) return true;
+        const subToks = tok.split(/\s+/).filter((w) => w.length >= 3 && !/^(the|and|band|dj|mc|lil|young)$/.test(w));
+        return subToks.length > 0 && subToks.every((w) => combinedMeta.includes(w));
+      });
+      if (!anyMatched) return false;
+    }
+    return true;
+  };
 
   const resolveForVideoId = async (vid) => {
     if (refresh) invalidateCached(`ytstream:${vid}`);
     const s = await cached(`ytstream:${vid}`, 15 * 60 * 1000, () => youtubeAudioStream(vid));
     if (s && s.url) {
-      if (title && !wantIsRemix && s.videoTitle && UNWANTED_REMIX_VIDEO_RE.test(String(s.videoTitle))) {
-        throw new Error("unwanted remix videoTitle");
+      if (!isStreamMetadataAcceptable(s)) {
+        throw new Error("unacceptable video metadata (remix or wrong artist)");
       }
       return { ...s, videoId: vid };
     }

@@ -482,7 +482,7 @@ function parseDeezerQueryIntent(rawQuery) {
 const DZ_UNRELATED_INSTRUMENTAL_RE = /\b(instrumental|karaoke|backing\s+track|originally\s+performed\s+by|in\s+the\s+style\s+of|made\s+famous\s+by|tribute\s+to|ringtone|8-bit|lullaby\s+rendition|music\s+box|piano\s+rendition|piano\s+version|guitar\s+version|shortened|arr\.\s*by|arranged\s+by|string\s+quartet|orchestral\s+rendition|music\s+for\s+babies|sleep\s+music|white\s+noise|sound\s+effects?|minus\s+one|no\s+lead\s+vocal|with\s+background\s+vocals|lower\s+key|higher\s+key|vocal\s+version|demo\s+version|remix\s+of|cover\s+of|version\s+of)\b/i;
 const DZ_JUNK_PERFORMER_RE = /\b(sing2piano|don't\s+stop\s+piano|piano\s+nest|karaoke|tribute|hit\s+crew|party\s+tyme|ameritz|prosource|starlite|8-bit|lullaby|baby\s+einstein|vitamin\s+string|music\s+box|piano\s+guys|soundtrack\s+orchestra|various\s+artists|unknown\s+artist|former\s+fat\s+boys|soundalike|sing-along|done\s+again|cast\s+of|cast\s+recording|famous\s+by|\d{4}\s+.*hitz|iron\s+hitz)\b/i;
 
-export async function deezerSearch(query, { limit = 75, includeExtra = true, country = "US" } = {}) {
+export async function deezerSearch(query, { limit = 75, includeExtra = true, country = "US", standbyItunesPromise: externalItunesPromise = null, skipYoutubeFallback = false } = {}) {
   const q = clean(query).slice(0, 80);
   if (!q) return { songs: [], artists: [], playlists: [] };
 
@@ -599,7 +599,7 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
     return [];
   })();
 
-  const standbyItunesPromise = itunesSearch(q, { includeExtra, country: country || "US", limit: maxSongs }).catch(() => null);
+  const standbyItunesPromise = externalItunesPromise || itunesSearch(q, { includeExtra, country: country || "US", limit: maxSongs }).catch(() => null);
 
   const trackRows = await dzPrimaryPromise;
 
@@ -936,7 +936,7 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
       }
     }
 
-    if (songs.length < 15) {
+    if (songs.length < 15 && !skipYoutubeFallback) {
       try {
         const ytVal = await searchYouTube(`${intent.cleanQuery || q} official audio`, country || "US", true);
         if (Array.isArray(ytVal)) {

@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.2";
+  const APP_VERSION = "1.9.3";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6388,14 +6388,37 @@
     const want = String(wantTitle || "").toLowerCase();
     const got = String(gotTitle || "").toLowerCase();
     if (!got) return false;
-    const wantIsRemix = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|edit|remake|karaoke|instrumental|live)\b/i.test(want);
+    const wantIsRemix = /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|edit|remake|karaoke|instrumental|live|acoustic|lullaby|8-bit|orchestra|symphony|piano)\b/i.test(want);
     if (wantIsRemix) return false;
-    return /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|bass\s*boosted|karaoke|instrumental|tribute|parody|reaction|ringtone)\b/i.test(got);
+    return /\b(remix|re-mix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|bass\s*boosted|karaoke|instrumental|tribute|parody|reaction|ringtone|lullaby|8-bit|bardcore|medieval|symphony|orchestra)\b/i.test(got);
+  }
+  function isCandidateArtistAcceptable(cand, wantTitle, wantArtist) {
+    if (!cand) return false;
+    const gotText = `${cand.title || ""} ${cand.artist || ""}`.toLowerCase();
+    if (isUnwantedRemixCandidateTitle(gotText, `${wantTitle || ""} ${wantArtist || ""}`)) return false;
+    const rawWantArt = String(wantArtist || "").trim().toLowerCase();
+    if (!rawWantArt || /^(youtube|unknown|various artists|artist|muchi)$/.test(rawWantArt)) return true;
+    const artistParts = rawWantArt
+      .replace(/\s*[\[(][^)\]]*[)\]]/g, " ")
+      .split(/\s*(?:,|&|\/|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b|\bx\b)\s*/i)
+      .map((s) => s.replace(/[^a-z0-9]+/g, " ").trim())
+      .filter((s) => s.length >= 2);
+    if (!artistParts.length) return true;
+    const metaClean = gotText.replace(/[^a-z0-9]+/g, " ").trim();
+    const metaNoSpace = metaClean.replace(/\s+/g, "");
+    return artistParts.some((part) => {
+      const partNoSpace = part.replace(/\s+/g, "");
+      if (metaClean.includes(part) || (partNoSpace && metaNoSpace.includes(partNoSpace))) return true;
+      const artToks = part.split(/\s+/).filter((w) => w.length >= 3 && !/^(the|and|band|dj|mc|lil|young)$/.test(w));
+      return artToks.length > 0 && artToks.every((w) => metaClean.includes(w));
+    });
   }
   try {
-    const cleanFlagKey = "aura.nativeAudioCache.v192_clean";
+    const cleanFlagKey = "aura.nativeAudioCache.v193_clean";
     if (!localStorage.getItem(cleanFlagKey)) {
       localStorage.removeItem(NATIVE_AUDIO_CACHE_KEY);
+      localStorage.removeItem("aura.ytResolveCache.v1");
+      localStorage.removeItem("aura.ytResolveCache.v2");
       localStorage.setItem(cleanFlagKey, "1");
     }
     const rawCache = localStorage.getItem(NATIVE_AUDIO_CACHE_KEY);
@@ -6790,8 +6813,9 @@
     }
 
     const rawValidRows = (Array.isArray(rows) ? rows : []).filter((x) => x && (x.videoId || x.streamUrl));
+    const artistMatchedRows = rawValidRows.filter((x) => isCandidateArtistAcceptable(x, t.title, artistName(t) || t.artist));
     const nonRemixRows = rawValidRows.filter((x) => !isUnwantedRemixCandidateTitle(`${x.title || ""} ${x.artist || ""}`, t.title));
-    const validRows = nonRemixRows.length ? nonRemixRows : rawValidRows;
+    const validRows = artistMatchedRows.length ? artistMatchedRows : (nonRemixRows.length ? nonRemixRows : rawValidRows);
     const blockedSet = t._blockedVideoIds instanceof Set ? t._blockedVideoIds : new Set();
     const candidates = validRows.map((x) => x.videoId).filter((vid) => vid && !blockedSet.has(vid));
     if (candidates.length) {
@@ -6986,13 +7010,22 @@
       // Metadata-only sources (apple/itunes/deezer from the iTunes or Deezer
       // catalogs, and any youtube row still missing a resolved videoId) have
       // no direct audio stream — resolve them to a real stream before playing.
+      // On Native App (useNativeAudioPipe), MuchiAudioService resolves directly on-device
+      // in ~350ms, so hand off immediately in 0ms without blocking on network resolveYouTubePlay!
       const needsResolve =
         !t.videoId && !t.streamUrl && !t.url &&
         t.source !== "audius" && t.source !== "radio";
       if (needsResolve) {
         renderBufferState(true);
         try {
-          await resolveYouTubePlay(t);
+          if (useNativeAudioPipe && t.title) {
+            await Promise.race([
+              resolveYouTubePlay(t),
+              new Promise((_, rej) => setTimeout(() => rej(new Error("native fast handoff")), 750)),
+            ]);
+          } else {
+            await resolveYouTubePlay(t);
+          }
         } catch (resErr) {
           if (!useNativeAudioPipe || !t.title) throw resErr;
         } finally {
@@ -7118,14 +7151,7 @@
     }
     if (!resolvedStream) {
       try {
-        const warm = await getWarmStream(
-          t.videoId || "",
-          t.title || "",
-          artistName(t) || t.artist || "",
-          t._ytCandidates || [],
-          450,
-          false
-        );
+        const warm = await getWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 450, true);
         if (warm && warm.url && !warm.isPreview && !isOneMinuteCappedStreamUrl(warm.url) && (t.source === "audius" || (warm.source !== "soundcloud" && warm.source !== "audius" && !/sndcdn\.com|audius\.co/i.test(warm.url)))) {
           resolvedStream = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
           if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
@@ -16538,6 +16564,14 @@
         setSearchCache(qKey, data);
         render(); // Immediately render results without waiting for secondary fallbacks
 
+        // Pre-warm the top 2 search results on Native App so tapping the #1 song plays immediately
+        if (IS_NATIVE) {
+          const topPool = [...((data.youtube || []).slice(0, 1)), ...((data.apple || []).slice(0, 1))];
+          for (const tr of topPool) {
+            if (tr) warmTrack(tr);
+          }
+        }
+
         backgroundEnrichSearch(qTrim, qKey);
         if (state.filter && state.filter !== "all" && state.filter !== "songs") {
           ensureProviderResults(state.filter);
@@ -16545,6 +16579,44 @@
         return;
       }
     } catch (e) {
+      if (state.query !== qTrim) return;
+      // Resilient online fallback: if /api/search timed out or hiccupped, fetch fast YouTube + direct iTunes before falling back to local library
+      try {
+        const itCountry = String((state.prefs && state.prefs.country) || "US");
+        const [ytFastRes, itDirectRes] = await Promise.allSettled([
+          api(`/api/youtube/search?q=${encodeURIComponent(qTrim)}&fast=1&${glq()}`, 4500),
+          itFetch(`/search?term=${encodeURIComponent(qTrim)}&media=music&entity=song&limit=50&country=${encodeURIComponent(itCountry)}`, 4500),
+        ]);
+        if (state.query !== qTrim) return;
+        const ytRows = (ytFastRes.status === "fulfilled" && ytFastRes.value && (ytFastRes.value.tracks || ytFastRes.value.youtube)) || [];
+        const itRows = (itDirectRes.status === "fulfilled" && itDirectRes.value && itDirectRes.value.results) || [];
+        const cleanYt = Array.isArray(ytRows) ? ytRows.filter(looksLikeSong) : [];
+        const cleanIt = Array.isArray(itRows) ? rankAndCurateProviderSongs(itRows.filter(looksLikeSong), qTrim, 50) : [];
+        if (cleanYt.length || cleanIt.length) {
+          const synthDz = (cleanIt.length ? cleanIt : cleanYt).map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+          const fallbackData = {
+            query: qTrim,
+            youtube: cleanYt,
+            apple: cleanIt,
+            itunes: cleanIt,
+            deezer: synthDz,
+            _deezerSynthesized: true,
+            audius: [],
+            radio: [],
+            artists: [],
+            playlists: [],
+          };
+          state.search = fallbackData;
+          setSearchCache(qKey, fallbackData);
+          render();
+          if (IS_NATIVE) {
+            const topTr = cleanYt[0] || cleanIt[0];
+            if (topTr) warmTrack(topTr);
+          }
+          backgroundEnrichSearch(qTrim, qKey);
+          return;
+        }
+      } catch {}
       if (state.query !== qTrim) return;
       toast("Search failed. Checking local library…");
       const qLower = qTrim.toLowerCase();

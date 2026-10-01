@@ -206,10 +206,10 @@ export async function searchYouTube(query, gl, fast) {
       s += 45; // Both song title and artist channel match the query
       if (t._fromWeb) s += 12; // Prefer WEB official audio/video IDs playable by both Web IFrame and Native ANDROID_VR
     } else if (artistMatches === 0 && words.length >= 2) {
-      s -= 30; // Cover/re-upload channel that stuffed artist name into video title
+      s -= 140; // Unrelated artist / cover / re-upload that does not match the queried artist
     }
-    if (!wantCover && /\b(remix|bootleg|flip|mashup|cover|karaoke|instrumental|tribute|8d|sped\s*up|slowed|reverb|nightcore|parody|reaction)\b/i.test(`${title} ${artist}`)) {
-      s -= 95;
+    if (!wantCover && /\b(remix|bootleg|flip|mashup|cover|karaoke|instrumental|tribute|8d|sped\s*up|slowed|reverb|nightcore|parody|reaction|lullaby|8-bit|bardcore|medieval|symphony|orchestra)\b/i.test(`${title} ${artist}`)) {
+      s -= 120;
     }
     for (const bg of cjkBigrams) {
       if (title.includes(bg)) s += 14;
@@ -348,6 +348,8 @@ export function pickPipedStream(data) {
     bitrate: best.bitrate || "",
     duration: (data && data.duration) || 0,
     videoTitle: String((data && data.title) || ""),
+    videoAuthor: String((data && (data.uploader || data.uploaderName)) || ""),
+    videoShortDesc: String((data && data.description) || ""),
   };
 }
 
@@ -557,6 +559,8 @@ export function pickInnertubeStream(data) {
     bitrate: String(best.bitrate || ""),
     duration: Number(data.videoDetails && data.videoDetails.durationSeconds) || Number(data.videoDetails && data.videoDetails.lengthSeconds) || urlDuration(best.url),
     videoTitle: String((data.videoDetails && data.videoDetails.title) || ""),
+    videoAuthor: String((data.videoDetails && data.videoDetails.author) || ""),
+    videoShortDesc: String((data.videoDetails && data.videoDetails.shortDescription) || ""),
   };
 }
 
@@ -583,6 +587,7 @@ export function mapAudiusTrack(t) {
 }
 
 const itunesCache = new Map();
+const itunesInFlight = new Map();
 const ITUNES_CACHE_TTL = 10 * 60 * 1000;
 let itunesRateLimitedUntil = 0;
 
@@ -660,6 +665,20 @@ export async function itunesSearch(query, { includeExtra = true, country = "", l
   if (cached && cached.exp > Date.now()) {
     return cached.val;
   }
+  const inFlight = itunesInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+  const promise = _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra, country });
+  itunesInFlight.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    itunesInFlight.delete(cacheKey);
+  }
+}
+
+async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra = true, country = "" } = {}) {
 
   const intent = parseItunesSearchIntent(cleanQ);
   const qClean = encodeURIComponent(intent.cleanQuery || cleanQ);

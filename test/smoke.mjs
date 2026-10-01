@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.2", APP_VERSION === "1.9.2" && appJs.includes('const APP_VERSION = "1.9.2"'));
+  ok("version: APP_VERSION is 1.9.3", APP_VERSION === "1.9.3" && appJs.includes('const APP_VERSION = "1.9.3"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1984,19 +1984,27 @@ await (async () => {
     androidSvc.includes("isVideoTitleAcceptableStatic")
   );
   ok(
-    "Old-is-Gold (v1.5.6–1.6.7) pure YouTube/Piped native audio & anti-remix architecture: WEB 'official audio' search priority, title anti-remix guard across Android/iOS/Worker/JS, and .v192_clean cache purge",
-    androidSvc.includes('new File(oldDir, ".v192_clean")') &&
+    "Old-is-Gold (v1.5.6–1.6.7) pure YouTube/Piped native audio & anti-remix architecture: WEB 'official audio' search priority, title+artist anti-remix/wrong-artist guard across Android/iOS/Worker/JS, and .v193_clean cache purge",
+    androidSvc.includes('new File(oldDir, ".v193_clean")') &&
     androidSvc.includes("private static boolean isVideoTitleAcceptableStatic(String gotTitle, String expectedTitle)") &&
+    androidSvc.includes("private static boolean isVideoMetadataAcceptableStatic(") &&
+    androidSvc.includes("stopPlaybackInternal(true);") &&
+    androidMainActivity.includes("stopService(new Intent(this, MuchiAudioService.class));") &&
     androidSvc.includes('String safeRawQ = (cleanQ + " official audio")') &&
-    iosPlug.includes('appendingPathComponent(".v192_clean")') &&
+    iosPlug.includes('appendingPathComponent(".v193_clean")') &&
     iosPlug.includes("private static func isVideoTitleAcceptable(gotTitle: String?, expectedTitle: String?) -> Bool") &&
+    iosPlug.includes("private static func isVideoMetadataAcceptable(") &&
+    iosPlug.includes("UIApplication.willTerminateNotification") &&
     iosPlug.includes("let safeRawQ = \"\\(effCleanQ) official audio\"") &&
-    appJs.includes('const cleanFlagKey = "aura.nativeAudioCache.v192_clean";') &&
+    appJs.includes('const cleanFlagKey = "aura.nativeAudioCache.v193_clean";') &&
     appJs.includes("function isUnwantedRemixStreamUrl(u, source = \"\")") &&
     appJs.includes("function isUnwantedRemixCandidateTitle(gotTitle, wantTitle)") &&
-    aggSrc.includes("UNWANTED_REMIX_VIDEO_RE.test(String(s.videoTitle))") &&
+    appJs.includes("function isCandidateArtistAcceptable(cand, wantTitle, wantArtist)") &&
+    aggSrc.includes("isStreamMetadataAcceptable(s)") &&
     provSrc.includes('videoTitle: String((data && data.title) || "")') &&
-    provSrc.includes('videoTitle: String((data.videoDetails && data.videoDetails.title) || "")')
+    provSrc.includes('videoAuthor: String((data && (data.uploader || data.uploaderName)) || "")') &&
+    provSrc.includes('videoTitle: String((data.videoDetails && data.videoDetails.title) || "")') &&
+    provSrc.includes('videoAuthor: String((data.videoDetails && data.videoDetails.author) || "")')
   );
 
   // Real functional test of v1.9.2 handleYtStream anti-remix guard:
@@ -2054,6 +2062,126 @@ await (async () => {
           data.isPreview === false &&
           String(data.directUrl || "").includes("id=TUVcZfQe-Kw") &&
           !String(data.directUrl || "").includes("remixVid001")
+      );
+
+      globalThis.fetch = async (u, init = {}) => {
+        const urlStr = String(u);
+        if (urlStr.includes("youtubei/v1/player")) {
+          const bodyStr = init && init.body ? String(init.body) : "";
+          const isWrongArtistVid = bodyStr.includes("sbDiCL5JHTY");
+          return new Response(
+            JSON.stringify({
+              playabilityStatus: { status: "OK" },
+              streamingData: {
+                adaptiveFormats: [
+                  {
+                    itag: 140,
+                    mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+                    bitrate: 128000,
+                    url: isWrongArtistVid
+                      ? "https://rr1---sn-test.googlevideo.com/videoplayback?id=sbDiCL5JHTY&c=ANDROID_VR&dur=188.0"
+                      : "https://rr1---sn-test.googlevideo.com/videoplayback?id=7-x3uD5z1bQ&c=ANDROID_VR&dur=174.0",
+                  },
+                ],
+              },
+              videoDetails: {
+                videoId: isWrongArtistVid ? "sbDiCL5JHTY" : "7-x3uD5z1bQ",
+                title: isWrongArtistVid
+                  ? "Watermelon Sugar"
+                  : "Harry Styles - Watermelon Sugar (Official Audio)",
+                author: isWrongArtistVid
+                  ? "Abiodun Steady - Topic"
+                  : "HarryStylesVEVO",
+                shortDescription: isWrongArtistVid
+                  ? "Provided to YouTube by DistroKid · Watermelon Sugar · Abiodun Steady"
+                  : "Official Audio by Harry Styles performing Watermelon Sugar.",
+                lengthSeconds: isWrongArtistVid ? "188" : "174",
+                durationSeconds: isWrongArtistVid ? "188" : "174",
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 500 });
+      };
+      const wsUrl = new URL(
+        "https://muchi.twiarimascord.workers.dev/api/yt/stream?v=sbDiCL5JHTY&candidates=7-x3uD5z1bQ&title=Watermelon%20Sugar&artist=Harry%20Styles&refresh=1"
+      );
+      const wsRes = await handleYtStream(wsUrl);
+      const wsData = await wsRes.json();
+      ok(
+        "v1.9.3 functional test: handleYtStream (/api/yt/stream) rejects wrong-artist Topic upload (Abiodun Steady - Topic) and resolves exact Harry Styles stream",
+        Boolean(wsData) &&
+          wsData.videoId === "7-x3uD5z1bQ" &&
+          String(wsData.directUrl || "").includes("id=7-x3uD5z1bQ") &&
+          !String(wsData.directUrl || "").includes("sbDiCL5JHTY")
+      );
+
+      globalThis.fetch = async (u, init = {}) => {
+        const urlStr = String(u);
+        if (urlStr.includes("youtubei/v1/player")) {
+          const bodyStr = init && init.body ? String(init.body) : "";
+          const isWrongUploader = bodyStr.includes("wrongCollab1");
+          return new Response(
+            JSON.stringify({
+              playabilityStatus: { status: "OK" },
+              streamingData: {
+                adaptiveFormats: [
+                  {
+                    itag: 140,
+                    mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+                    bitrate: 128000,
+                    url: isWrongUploader
+                      ? "https://rr1---sn-test.googlevideo.com/videoplayback?id=wrongCollab1&c=ANDROID_VR&dur=251.0"
+                      : "https://rr1---sn-test.googlevideo.com/videoplayback?id=kPa7bsKwL-c&c=ANDROID_VR&dur=251.0",
+                  },
+                ],
+              },
+              videoDetails: {
+                videoId: isWrongUploader ? "wrongCollab1" : "kPa7bsKwL-c",
+                title: "Die With A Smile",
+                author: isWrongUploader ? "Random Tribute Band - Topic" : "Lady Gaga - Topic",
+                shortDescription: isWrongUploader
+                  ? "Provided to YouTube · Die With A Smile · Random Tribute Band"
+                  : "Provided to YouTube by Interscope · Die With A Smile · Lady Gaga · Bruno Mars",
+                lengthSeconds: "251",
+                durationSeconds: "251",
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 500 });
+      };
+      const collabUrl = new URL(
+        "https://muchi.twiarimascord.workers.dev/api/yt/stream?v=wrongCollab1&candidates=kPa7bsKwL-c&title=Die%20With%20A%20Smile&artist=Lady%20Gaga%2C%20Bruno%20Mars&refresh=1"
+      );
+      const collabRes = await handleYtStream(collabUrl);
+      const collabData = await collabRes.json();
+      ok(
+        "v1.9.3 functional test: multi-artist collaboration (Lady Gaga, Bruno Mars) rejects tribute uploader and accepts official Lady Gaga - Topic stream",
+        Boolean(collabData) &&
+          collabData.videoId === "kPa7bsKwL-c" &&
+          String(collabData.directUrl || "").includes("id=kPa7bsKwL-c")
+      );
+
+      const mainActSrc = readFileSync("android/app/src/main/java/app/muchi/music/MainActivity.java", "utf8");
+      const androidPlugSrc = readFileSync("android/app/src/main/java/app/muchi/music/MuchiAudioPlugin.java", "utf8");
+      const iosAppDelSrc = readFileSync("ios/App/App/AppDelegate.swift", "utf8");
+      const iosSceneDelSrc = readFileSync("ios/App/App/SceneDelegate.swift", "utf8");
+      ok(
+        "v1.9.3 native lifecycle & search resilience: Android (onTaskRemoved + MainActivity.onDestroy + MuchiAudioPlugin.handleOnDestroy) & iOS (AppDelegate + SceneDelegate) stop audio on app close, and runSearch has fast online fallback + top-3 pre-warming",
+        androidSvc.includes("public void onTaskRemoved(Intent rootIntent)") &&
+          androidSvc.includes("stopPlaybackInternal(true);") &&
+          mainActSrc.includes("MuchiAudioService.ACTION_STOP") &&
+          mainActSrc.includes("boolean finishing = isFinishing();") &&
+          androidPlugSrc.includes("if (activityFinishing)") &&
+          androidPlugSrc.includes("service.stopAll();") &&
+          iosPlugin.includes("public func stopOnAppClose()") &&
+          iosAppDelSrc.includes("MuchiAudioPlugin.sharedInstance?.stopOnAppClose()") &&
+          iosSceneDelSrc.includes("MuchiAudioPlugin.sharedInstance?.stopOnAppClose()") &&
+          appJs.includes('/api/youtube/search?q=${encodeURIComponent(qTrim)}&fast=1') &&
+          appJs.includes("const topPool = [...((data.youtube || []).slice(0, 1)), ...((data.apple || []).slice(0, 1))];")
       );
     } finally {
       globalThis.fetch = realFetch;
@@ -2286,14 +2414,14 @@ if (BASE) {
   ok("favicon non-error in dev", favicon.status === 200 || favicon.status === 302);
 
   // ── 7. Client Web + Cloudflare Worker E2E (Deezer, iTunes & Catalog Proxies) ──
-  const appJsRes = await fetch(BASE + "/app.js?v=112");
+  const appJsRes = await fetch(BASE + "/app.js?v=113");
   const appJsText = await appJsRes.text();
-  const stylesRes = await fetch(BASE + "/styles.css?v=112");
+  const stylesRes = await fetch(BASE + "/styles.css?v=113");
   const stylesText = await stylesRes.text();
   const swText = await (await fetch(BASE + "/sw.js")).text();
-  ok("client web: app.js?v=112 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
-  ok("client web: styles.css?v=112 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v112", swText.includes("muchi-shell-v112") && swText.includes("/app.js?v=112") && swText.includes("/styles.css?v=112"));
+  ok("client web: app.js?v=113 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
+  ok("client web: styles.css?v=113 served 200", stylesRes.status === 200 && stylesText.length > 50000);
+  ok("client web: sw.js cache matches v113", swText.includes("muchi-shell-v113") && swText.includes("/app.js?v=113") && swText.includes("/styles.css?v=113"));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────
