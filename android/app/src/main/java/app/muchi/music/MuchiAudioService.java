@@ -1737,10 +1737,22 @@ public class MuchiAudioService extends Service {
                 return r;
             }));
         }
+        long deadlineMs = System.currentTimeMillis() + 2600L;
         try {
+            // All candidates run concurrently in parallel; check in priority order (0, 1, 2...)
+            // so the primary official videoId always wins over secondary fallback candidates.
+            for (int i = 0; i < futures.size(); i++) {
+                long waitMs = Math.max(150L, deadlineMs - System.currentTimeMillis());
+                try {
+                    ResolvedStream rs = futures.get(i).get(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (rs != null && rs.url != null && !rs.url.isEmpty()) {
+                        return rs;
+                    }
+                } catch (Exception ignored) {}
+            }
             for (int i = 0; i < count; i++) {
                 java.util.concurrent.Future<ResolvedStream> done =
-                        race.poll(2600, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        race.poll(50, java.util.concurrent.TimeUnit.MILLISECONDS);
                 if (done == null) break;
                 try {
                     ResolvedStream rs = done.get();
@@ -2114,6 +2126,7 @@ public class MuchiAudioService extends Service {
         String q = (coreTitle + " " + coreArtist).trim();
         String wantCore = coreTitle.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
         String wantArt = coreArtist.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+        boolean wantIsRemix = cleanTitle.toLowerCase().matches(".*\\b(remix|bootleg|flip|mashup|cover|sped\\s*up|slowed|reverb|nightcore|8d|edit|remake|live|acoustic|instrumental|karaoke)\\b.*");
         HttpURLConnection con = null;
         try {
             String searchUrl = "https://api-v2.soundcloud.com/search/tracks?q="
@@ -2140,6 +2153,9 @@ public class MuchiAudioService extends Service {
                     String gotUser = (user != null ? user.optString("username", "") : "").toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
                     if (!wantCore.isEmpty() && !gotTitle.contains(wantCore)) continue;
                     if (!wantArt.isEmpty() && !(gotTitle + " " + gotUser).contains(wantArt)) continue;
+                    if (!wantIsRemix && (gotTitle + " " + gotUser).matches(".*\\b(remix|bootleg|flip|mashup|cover|sped\\s*up|slowed|reverb|nightcore|8d|bass\\s*boosted|karaoke|instrumental|live|acoustic|tribute|type\\s*beat|refix)\\b.*")) {
+                        continue;
+                    }
                     JSONObject media = item.optJSONObject("media");
                     JSONArray transcodings = media != null ? media.optJSONArray("transcodings") : null;
                     if (transcodings == null) continue;

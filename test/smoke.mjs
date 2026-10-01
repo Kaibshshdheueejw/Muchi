@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.0", APP_VERSION === "1.9.0" && appJs.includes('const APP_VERSION = "1.9.0"'));
+  ok("version: APP_VERSION is 1.9.1", APP_VERSION === "1.9.1" && appJs.includes('const APP_VERSION = "1.9.1"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1931,6 +1931,17 @@ await (async () => {
     stylesCss.includes("-webkit-tap-highlight-color: transparent !important;") &&
     stylesCss.includes(".chip-btn.is-pressed") &&
     stylesCss.includes(".icon-btn.is-pressed")
+  );
+  ok(
+    "v1.9.1 Web vs Native App search, artist page, and exact song playback parity: residential iTunes/Deezer enrichment, parallel Deezer+iTunes artist Popular interleaving, and anti-remix playback guard",
+    appJs.includes("state.search._appleSynthesized") &&
+    appJs.includes("const dzPromise = deezerBrowserCatalog(nm0).catch(() => null);") &&
+    appJs.includes("const itPromise = itunesBrowserCatalog(nm0).catch(() => null);") &&
+    appJs.includes('warm.source !== "soundcloud" && warm.source !== "audius"') &&
+    provSrc.includes('upsertArtist(aName, (d.artist && d.artist.id) || aName') &&
+    provSrc.includes("const wantIsRemix =") &&
+    androidSvc.includes("boolean wantIsRemix =") &&
+    androidSvc.includes("long deadlineMs = System.currentTimeMillis() + 2600L;")
   );
 })();
 

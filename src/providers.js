@@ -487,6 +487,7 @@ export async function youtubeAudioStream(videoId) {
       })
     )
   );
+  tier1B.catch(() => {});
   const tier2 = Promise.any(
     PIPED_STREAM_INSTANCES.slice(0, 3).map((base) =>
       fetchJSON(`${base}/streams/${encodeURIComponent(id)}`, {}, 1600).then((data) => {
@@ -496,6 +497,7 @@ export async function youtubeAudioStream(videoId) {
       })
     )
   );
+  tier2.catch(() => {});
   try {
     return await Promise.any([tier1B, tier2]);
   } catch {
@@ -713,8 +715,6 @@ export async function itunesSearch(query, { includeExtra = true, country = "", l
   }
   if (intent.hasExplicitSplit && intent.songHint && intent.artistHint) {
     calls.push(fetchSongsTerm(encodeURIComponent(intent.artistHint), 65));
-    calls.push(fetchSongsTerm(encodeURIComponent(intent.songHint), 50));
-    if (q !== qClean) calls.push(fetchSongsTerm(q, 45));
   } else if (q !== qClean) {
     calls.push(fetchSongsTerm(q, 60));
   }
@@ -895,25 +895,33 @@ export async function itunesSearch(query, { includeExtra = true, country = "", l
   const seenArt = new Set();
   const seenAlb = new Set();
 
-  const upsertArtist = (name, id, artwork) => {
+  const upsertArtist = (name, id, artwork, src = "apple") => {
     const cleanName = String(name || "").trim();
     if (!cleanName || (!intent.wantsInstrumental && ITUNES_JUNK_PERFORMER_RE.test(cleanName))) return;
     const k = foldArtist(cleanName);
     if (!k) return;
+    const prov = src === "deezer" ? "deezer" : "apple";
+    const fullId = String(id || cleanName).startsWith("artist:")
+      ? String(id)
+      : `artist:${prov}:${id || cleanName}`;
     if (!seenArt.has(k)) {
       seenArt.add(k);
       artists.push({
-        id: `artist:apple:${id || cleanName}`,
+        id: fullId,
         kind: "artist",
         name: cleanName,
         artwork: artwork || "/cover-default.jpg",
-        source: "apple",
+        source: prov,
         query: cleanName,
       });
     } else {
       const existing = artists.find((x) => foldArtist(x.name) === k);
       if (existing && (!existing.artwork || existing.artwork === "/cover-default.jpg") && artwork && artwork !== "/cover-default.jpg") {
         existing.artwork = artwork;
+      }
+      if (existing && existing.source !== "apple" && prov === "apple" && /^\d+$/.test(String(id || ""))) {
+        existing.id = `artist:apple:${id}`;
+        existing.source = "apple";
       }
     }
   };
@@ -1174,17 +1182,18 @@ export async function itunesSearch(query, { includeExtra = true, country = "", l
           collectionName: cName,
           trackTimeMillis: durSec * 1000,
           artworkUrl100: artUrl,
+          _synthesized: true,
         });
-        upsertArtist(aName, (d.artist && d.artist.id) || aName, (d.artist && (d.artist.picture_big || d.artist.picture_medium)) || artUrl);
+        upsertArtist(aName, (d.artist && d.artist.id) || aName, (d.artist && (d.artist.picture_big || d.artist.picture_medium)) || artUrl, "deezer");
         if (d.album && d.album.id && cName && !seenAlb.has(String(d.album.id))) {
           seenAlb.add(String(d.album.id));
           playlists.push({
-            id: `album:${d.album.id}`,
+            id: `deezer-album:${d.album.id}`,
             kind: "playlist",
             title: cName,
             artist: aName,
             artwork: artUrl,
-            source: "apple",
+            source: "deezer",
             query: `${cName} ${aName}`.trim(),
           });
         }
@@ -1459,7 +1468,7 @@ export async function soundcloudStreamForQuery(title, artist = "", allowCoverOrE
     .map((s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim())
     .filter((s) => s.length >= 2);
   const wantCore = coreTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const wantIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|remake)\b/i.test(cleanTitle);
+  const wantIsRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|edit|remake|live|acoustic|instrumental|karaoke)\b/i.test(cleanTitle);
 
   const cid = await getSoundCloudClientId();
   if (!cid) return null;
@@ -1482,16 +1491,18 @@ export async function soundcloudStreamForQuery(title, artist = "", allowCoverOrE
     const prog = t.media.transcodings.find((x) => x && x.format && x.format.protocol === "progressive" && x.url);
     if (!prog) continue;
     const rawTitle = String(t.title || "");
+    const rawUser = String((t.user && (t.user.username || t.user.permalink)) || "");
     const normTitle = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const normUser = String((t.user && (t.user.username || t.user.permalink)) || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const normUser = rawUser.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     const combined = `${normTitle} ${normUser}`;
-    if (!wantCore || !combined.includes(wantCore)) continue;
+    if (!wantCore || !normTitle.includes(wantCore)) continue;
     const artistOk = !artistTokens.length || artistTokens.some((tok) => combined.includes(tok));
     if (!artistOk) continue;
-    const isRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|edit|remake|karaoke|instrumental)\b/i.test(rawTitle);
+    const isRemix = /\b(remix|bootleg|flip|mashup|cover|sped\s*up|slowed|reverb|nightcore|8d|bass\s*boosted|edit|remake|karaoke|instrumental|live|acoustic|tribute|type\s*beat|refix)\b/i.test(`${rawTitle} ${rawUser}`);
     if (!wantIsRemix && isRemix && !allowCoverOrEdit) continue;
     const durSec = Math.round(durMs / 1000);
-    const score = (isRemix ? 0 : 100) - Math.abs(durSec - 205) * 0.2;
+    const userMatchesArtist = artistTokens.length > 0 && artistTokens.some((tok) => normUser.includes(tok));
+    const score = (isRemix ? 0 : 100) + (userMatchesArtist ? 40 : 0) - Math.abs(durSec - 205) * 0.2;
     candidates.push({ progUrl: prog.url, duration: durSec, score });
   }
   candidates.sort((a, b) => b.score - a.score);

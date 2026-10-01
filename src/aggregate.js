@@ -1168,13 +1168,18 @@ export async function handleSearch(env, url) {
     if (!result.deezer.length && (result.apple.length || (result.youtube && result.youtube.length))) {
       const seed = result.apple.length ? result.apple : result.youtube;
       result.deezer = strictSongs(seed.map((t) => normalizeDeezerTrack(t)).filter(Boolean));
+      result._deezerSynthesized = true;
     }
     if (!result.apple.length && result.deezer.length) {
       result.apple = result.deezer.map((t) => ({
         ...t,
         id: `apple:${t.rawId || String(t.id || "").replace(/^deezer:/, "")}`,
         source: "apple",
+        _synthesized: true,
       }));
+      result._appleSynthesized = true;
+    } else if (result.apple.some((t) => t && t._synthesized)) {
+      result._appleSynthesized = true;
     }
     result.itunes = result.apple;
     result.audius = strictSongs(result.audius || []);
@@ -1350,7 +1355,8 @@ export async function handleYtStream(url) {
   // InnerTube hits (<120ms) win with zero extra work, while VEVO/datacenter-gated tracks
   // already have Audius in flight in parallel.
   const audiusPromise = (async () => {
-    if (!searchQuery || !title || fast) throw new Error("no query");
+    await Promise.resolve();
+    if (!searchQuery || !title || fast) throw new Error("skip audius");
     if (id) await new Promise((r) => setTimeout(r, 120));
     const queries = [
       ...new Set(
@@ -1399,15 +1405,20 @@ export async function handleYtStream(url) {
       throw new Error("no strict audius/sc match");
     }
   })();
+  audiusPromise.catch(() => {});
 
   if (id) {
     try {
       const fastRaces = [resolveForVideoId(id)];
       for (const candId of rawCandidates.slice(0, 2)) {
-        fastRaces.push(new Promise((res, rej) => setTimeout(() => resolveForVideoId(candId).then(res, rej), 120)));
+        const p = new Promise((res, rej) => setTimeout(() => resolveForVideoId(candId).then(res, rej), 120));
+        p.catch(() => {});
+        fastRaces.push(p);
       }
       if (!fast && title) {
-        fastRaces.push(new Promise((res, rej) => setTimeout(() => audiusPromise.then(res, rej), 650)));
+        const p = new Promise((res, rej) => setTimeout(() => audiusPromise.then(res, rej), 650));
+        p.catch(() => {});
+        fastRaces.push(p);
       }
       const stream = await Promise.any(fastRaces);
       if (stream && stream.url) {
@@ -1440,6 +1451,7 @@ export async function handleYtStream(url) {
   const candidateIds = rawCandidates.slice(2);
 
   const ytAltPromise = (async () => {
+    await Promise.resolve();
     if (searchQuery && candidateIds.length < 3) {
       try {
         const [audioHits, lyricHits] = await Promise.allSettled([
@@ -1480,6 +1492,7 @@ export async function handleYtStream(url) {
     }
     throw new Error("no yt alt");
   })();
+  ytAltPromise.catch(() => {});
 
   try {
     const winner = await Promise.any([ytAltPromise, audiusPromise]);
@@ -1554,44 +1567,56 @@ export async function handleArtist(url) {
         let alb = [];
         let songs = [];
         let nm = "";
-        if (appleId) {
+        if (appleId && /^\d+$/.test(String(appleId))) {
+          let idMatchesArtist = true;
           try {
             const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=album&limit=25`);
             const rows = (look && look.results) || [];
             const self = rows.find((r) => r.wrapperType === "artist") || {};
-            if (self.artistName && (!targetFold || matchesTargetArtist(self.artistName))) {
+            if (targetFold && (!self.artistName || !matchesTargetArtist(self.artistName))) {
+              idMatchesArtist = false;
+            } else if (self.artistName) {
               nm = self.artistName;
             }
-            for (const al of rows) {
-              if (al.wrapperType !== "collection" && al.collectionType !== "Album") continue;
-              if (!art && al.artworkUrl100) art = String(al.artworkUrl100).replace("100x100bb", "600x600bb");
-              alb.push({
-                id: `album:${al.collectionId}`,
-                kind: "playlist",
-                title: al.collectionName || "Album",
-                artist: al.artistName || nm || artistName,
-                artwork: String(al.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
-                source: "apple",
-                query: `${al.collectionName || ""} ${al.artistName || nm || artistName}`.trim(),
-              });
+            if (idMatchesArtist) {
+              for (const al of rows) {
+                if (al.wrapperType !== "collection" && al.collectionType !== "Album") continue;
+                if (!art && al.artworkUrl100) art = String(al.artworkUrl100).replace("100x100bb", "600x600bb");
+                alb.push({
+                  id: `album:${al.collectionId}`,
+                  kind: "playlist",
+                  title: al.collectionName || "Album",
+                  artist: al.artistName || nm || artistName,
+                  artwork: String(al.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
+                  source: "apple",
+                  query: `${al.collectionName || ""} ${al.artistName || nm || artistName}`.trim(),
+                });
+              }
             }
           } catch {}
-          try {
-            const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=song&limit=30`);
-            for (const t of (look && look.results) || []) {
-              if (!t.trackId || t.wrapperType === "artist") continue;
-              songs.push({
-                id: `apple:${t.trackId}`,
-                source: "apple",
-                title: t.trackName || "Song",
-                artist: t.artistName || nm || artistName,
-                album: t.collectionName || "",
-                duration: Math.round((t.trackTimeMillis || 0) / 1000),
-                artwork: String(t.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
-                playQuery: `${t.trackName || ""} ${t.artistName || nm || artistName} official audio`.trim(),
-              });
-            }
-          } catch {}
+          if (idMatchesArtist) {
+            try {
+              const look = await fetchJSON(`https://itunes.apple.com/lookup?id=${encodeURIComponent(appleId)}&entity=song&limit=30`);
+              const rows = (look && look.results) || [];
+              const self = rows.find((r) => r.wrapperType === "artist") || {};
+              if (!targetFold || !self.artistName || matchesTargetArtist(self.artistName)) {
+                for (const t of rows) {
+                  if (!t.trackId || t.wrapperType === "artist") continue;
+                  if (targetFold && t.artistName && !matchesTargetArtist(t.artistName)) continue;
+                  songs.push({
+                    id: `apple:${t.trackId}`,
+                    source: "apple",
+                    title: t.trackName || "Song",
+                    artist: t.artistName || nm || artistName,
+                    album: t.collectionName || "",
+                    duration: Math.round((t.trackTimeMillis || 0) / 1000),
+                    artwork: String(t.artworkUrl100 || "").replace("100x100bb", "600x600bb") || "/cover-default.jpg",
+                    playQuery: `${t.trackName || ""} ${t.artistName || nm || artistName} official audio`.trim(),
+                  });
+                }
+              }
+            } catch {}
+          }
         }
         if (!songs.length && (q || name)) {
           try {
@@ -1631,11 +1656,18 @@ export async function handleArtist(url) {
       artwork = ap.art || "";
       if (ap.nm && matchesTargetArtist(ap.nm)) artistName = ap.nm;
       albums = ap.alb;
-      const normKey = (t) => `${String(t.title || "").toLowerCase()}|${String(t.artist || "").toLowerCase()}`;
-      const haveYt = new Set(ytRows.map((t) => normKey(t)));
-      const appleRest = ap.songs.filter((t) => !haveYt.has(normKey(t)));
-      let songs = [...ytRows, ...appleRest];
-      if (dz && (!dz.artist.name || matchesTargetArtist(dz.artist.name))) {
+      const normKey = (t) => `${canonSongTitle(t.title || "")}|${canonPrimaryArtist(t.artist || artistName || "")}`;
+      let songs = [];
+      const seenSong = new Set();
+      const pushUniqueSong = (t) => {
+        if (!t || !t.title) return;
+        const k = normKey(t);
+        if (!k || seenSong.has(k)) return;
+        seenSong.add(k);
+        songs.push(t);
+      };
+      const dzValid = dz && (!dz.artist.name || matchesTargetArtist(dz.artist.name));
+      if (dzValid) {
         if (!artwork && dz.artist.artwork) artwork = dz.artist.artwork;
         if (dz.artist.name && matchesTargetArtist(dz.artist.name)) artistName = dz.artist.name;
         const seenAlb = new Set(albums.map((al) => String(al.title || "").toLowerCase()));
@@ -1644,13 +1676,22 @@ export async function handleArtist(url) {
           seenAlb.add(String(al.title || "").toLowerCase());
           albums.push(al);
         }
-        const seenSong = new Set(songs.map((t) => normKey(t)));
-        for (const t of dz.songs) {
-          const k = normKey(t);
-          if (seenSong.has(k)) continue;
-          seenSong.add(k);
-          songs.push(t);
-        }
+      }
+      // Lead with verified top hits (Deezer top 25 + Apple top 25 + non-acoustic YouTube matches)
+      // so the Popular shelf and top of All Songs are identical and hit-ranked across Web and Native.
+      const dzTopSlice = dzValid && Array.isArray(dz.songs) ? dz.songs.slice(0, 25) : [];
+      const apTopSlice = Array.isArray(ap.songs) ? ap.songs.slice(0, 25) : [];
+      const ytStudioRows = (ytRows || []).filter((t) => !/\b(acoustic|live|remix|visualizer|short\s*version)\b/i.test(t.title || ""));
+      const maxTop = Math.max(dzTopSlice.length, apTopSlice.length, ytStudioRows.length);
+      for (let i = 0; i < maxTop; i++) {
+        if (i < dzTopSlice.length) pushUniqueSong(dzTopSlice[i]);
+        if (i < apTopSlice.length) pushUniqueSong(apTopSlice[i]);
+        if (i < ytStudioRows.length) pushUniqueSong(ytStudioRows[i]);
+      }
+      for (const t of ap.songs || []) pushUniqueSong(t);
+      for (const t of ytRows || []) pushUniqueSong(t);
+      if (dzValid && Array.isArray(dz.songs)) {
+        for (const t of dz.songs) pushUniqueSong(t);
       }
       // STRICT "songs only": Topic re-uploads, "Top … Playlist" videos,
       // 2-hour mixes and other non-songs never reach the profile.
@@ -1659,6 +1700,7 @@ export async function handleArtist(url) {
       return {
         name: artistName || q || name,
         artwork,
+        popular: songs.slice(0, 20),
         songs: songs.slice(0, 500),
         albums: albums.slice(0, 120),
         tracks: songs.slice(0, 16),

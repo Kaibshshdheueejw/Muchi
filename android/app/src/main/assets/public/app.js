@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.0";
+  const APP_VERSION = "1.9.1";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -5288,6 +5288,25 @@
       country = u.searchParams.get("country") || country;
     } catch {}
 
+    // 0. On Native App (or when Worker edge IP is rate-limited by Apple), try direct residential IP fetch first
+    if (IS_NATIVE) {
+      const ctrl0 = new AbortController();
+      const t0 = setTimeout(() => ctrl0.abort(), Math.min(ms, 3800));
+      try {
+        const r0 = await fetch(ITUNES_BASE + cleanPath, { signal: ctrl0.signal });
+        if (r0.ok) {
+          const j0 = await r0.json();
+          if (j0 && Array.isArray(j0.results) && j0.results.length) {
+            return {
+              results: j0.results.map(normalizeItunesItem).filter(Boolean),
+            };
+          }
+        }
+      } catch {} finally {
+        clearTimeout(t0);
+      }
+    }
+
     // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers)
     try {
       const catRes = await api(`/api/catalog/proxy?provider=apple&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 12000));
@@ -6514,7 +6533,7 @@
       }
       if ((tr.videoId || tr.title) && !tr.streamUrl) {
         getWarmStream(tr.videoId || "", tr.title || "", artistName(tr) || tr.artist || "", tr._ytCandidates || [], 5000, true).then((res) => {
-          if (res && res.url && !res.isPreview) {
+          if (res && res.url && !res.isPreview && (!IS_NATIVE || tr.source === "audius" || (res.source !== "soundcloud" && res.source !== "audius" && !/sndcdn\.com|audius\.co/i.test(res.url)))) {
             tr.streamUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
             tr._isPreviewStream = false;
             if (res.videoId && !tr.videoId) tr.videoId = res.videoId;
@@ -7071,7 +7090,7 @@
           450,
           false
         );
-        if (warm && warm.url && !warm.isPreview && !isOneMinuteCappedStreamUrl(warm.url)) {
+        if (warm && warm.url && !warm.isPreview && !isOneMinuteCappedStreamUrl(warm.url) && (t.source === "audius" || (warm.source !== "soundcloud" && warm.source !== "audius" && !/sndcdn\.com|audius\.co/i.test(warm.url)))) {
           resolvedStream = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
           if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
           if (warm.duration && !dur) dur = Number(warm.duration);
@@ -12193,6 +12212,15 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
+      ver: "1.9.1",
+      title: "Muchi 1.9.1",
+      notes: [
+        "Unified Web & Native App song search listings with direct residential iTunes & Deezer enrichment and YouTube catalog completion.",
+        "Unified Web & Native App Artist pages so Popular and All Songs display the exact same top studio hits in priority order.",
+        "Fixed Native App song playback to always resolve the exact official original studio song and prevent unofficial SoundCloud/Audius remixes or covers.",
+      ],
+    },
+    {
       ver: "1.9.0",
       title: "Muchi 1.9.0",
       notes: [
@@ -15666,7 +15694,11 @@
     const songs = [];
     const albums = [];
     let popular = [];
-    const norm = (t) => `${dzFold(t && t.title)}|${dzFold(t && t.artist)}`;
+    const norm = (t) => {
+      const ct = canonicalSongTitleClient(t && t.title || "", t && t.artist || "") || dzFold(t && t.title);
+      const ca = canonicalPrimaryArtistClient(t) || dzFold(t && t.artist);
+      return `${ct}|${ca}`;
+    };
     const haveN = new Set();
     const haveA = new Set();
     const addSongs = (list) => {
@@ -15697,49 +15729,61 @@
       if (songs.length || albums.length) state.artistPage.loading = false;
       render();
     };
-    // 1) Primary: the worker's artist build (parallel Apple + YouTube +
-    //    Deezer, cached).
+    // 1) Primary: run the worker's artist build + browser-side Deezer & iTunes
+    //    catalogs in parallel so Web and Native App always merge the exact same
+    //    official Popular tracks, All songs, and Albums regardless of Worker IP limits.
+    const nm0 = state.artistPage.name || q;
+    const dzPromise = deezerBrowserCatalog(nm0).catch(() => null);
+    const itPromise = itunesBrowserCatalog(nm0).catch(() => null);
     let data = null;
     try {
-      const appleId = String(artist.id || "").startsWith("artist:apple:") ? String(artist.id).slice("artist:apple:".length) : "";
+      const rawAppleId = String(artist.id || "").startsWith("artist:apple:") ? String(artist.id).slice("artist:apple:".length) : "";
+      const appleId = /^\d+$/.test(rawAppleId) ? rawAppleId : "";
       data = await api(`/api/artist?q=${encodeURIComponent(q)}&id=${encodeURIComponent(appleId)}&${glq()}`, 30000);
     } catch {}
     if (data && data.name && matchesRequestedArtist(data.name)) state.artistPage.name = data.name;
     if (data && data.artwork && !state.artistPage.artwork) state.artistPage.artwork = data.artwork;
     addSongs((data && data.songs) || []);
     addAlbums((data && data.albums) || []);
-    popular = songs.slice(0, 20); // worker lists the best matches first
-    paint(); // fast first paint, then keep completing in the background
-    // 2) Complete the discography in the browser whenever the API came
-    //    back thin (old deployment, cold start) — all songs, popular
-    //    tracks, every album and the artist's YouTube playlists, for
-    //    every artist. Three independent sources, in parallel:
-    //   • Deezer — richest metadata (top tracks + complete album list);
-    //     metadata only, never audio;
-    //   • iTunes — worldwide catalogue (up to 200 songs + 200 albums),
-    //     CORS-open — the reliable backbone;
-    //   • MUCHI  — the worker's own search rows + YouTube playlists.
-    if (gen === artistGen && (songs.length < 20 || !albums.length)) {
+    popular = (data && Array.isArray(data.popular) && data.popular.length ? data.popular : songs).slice(0, 20);
+    paint(); // fast first paint, then complete with unified Deezer + iTunes hit ranking
+    // 2) Always merge Deezer popular top tracks + iTunes residential catalog so
+    //    Web and Native App display the exact same Popular shelf and All Songs order.
+    if (gen === artistGen) {
       const nm = state.artistPage.name || q;
       const [dz, it, sr] = await Promise.all([
-        deezerBrowserCatalog(nm).catch(() => null),
-        itunesBrowserCatalog(nm).catch(() => null),
-        artistSearchCatalog(nm).catch(() => null),
+        dzPromise,
+        itPromise,
+        songs.length < 20 ? artistSearchCatalog(nm).catch(() => null) : Promise.resolve(null),
       ]);
       if (gen !== artistGen || !state.artistPage) return;
-      addSongs(dz && dz.songs);
-      addSongs(it && it.songs);
-      addSongs(sr && sr.songs);
-      addAlbums(dz && dz.albums);
-      addAlbums(it && it.albums);
       if (dz && dz.artist && dz.artist.name && matchesRequestedArtist(dz.artist.name)) state.artistPage.name = dz.artist.name;
       else if (it && it.artist && it.artist.name && matchesRequestedArtist(it.artist.name)) state.artistPage.name = it.artist.name;
       if (it && it.artist && it.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = it.artist.artwork;
       else if (dz && dz.artist && dz.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = dz.artist.artwork;
-      // Popular: Deezer's real popularity ranking when available,
-      // otherwise the best-first merged list (worker rows first).
-      if (dz && dz.popular && dz.popular.length) popular = dz.popular;
-      else popular = songs.slice(0, 20);
+
+      // Rebuild songs & popular in deterministic hit order:
+      // 1. Deezer official Top Tracks + iTunes top tracks interleaved
+      // 2. Worker /api/artist studio songs
+      // 3. Remaining discography songs
+      const prevSongs = songs.slice();
+      songs.length = 0;
+      haveN.clear();
+      const dzTopList = (dz && Array.isArray(dz.popular) ? dz.popular : []).filter((t) => t && matchesRequestedArtist(t.artist));
+      const itTopList = (it && Array.isArray(it.songs) ? it.songs : []).filter((t) => t && matchesRequestedArtist(t.artist));
+      const maxHitLen = Math.max(dzTopList.length, itTopList.length);
+      for (let i = 0; i < maxHitLen; i++) {
+        if (i < dzTopList.length) addSongs([dzTopList[i]]);
+        if (i < itTopList.length) addSongs([itTopList[i]]);
+      }
+      addSongs(prevSongs.filter((t) => !/\b(acoustic|live|remix|karaoke|instrumental)\b/i.test(t && t.title || "")));
+      addSongs(dz && dz.songs);
+      addSongs(it && it.songs);
+      addSongs(prevSongs);
+      addSongs(sr && sr.songs);
+      addAlbums(dz && dz.albums);
+      addAlbums(it && it.albums);
+      popular = songs.slice(0, 20);
       if (sr && sr.playlists && sr.playlists.length) state.artistPage.playlists = sr.playlists;
       paint();
     }
@@ -16243,19 +16287,53 @@
       state.search.playlists = list;
     };
 
-    if (!state.search.apple || state.search.apple.length < 25) {
+    if (!state.search.youtube || state.search.youtube.length < 5) {
       tasks.push(
-        api(`/api/search?q=${encodeURIComponent(qStr)}&source=apple&refresh=1&${glq()}`, 5000)
-          .then((itData) => {
+        api(`/api/youtube/search?q=${encodeURIComponent(qStr)}&${glq()}`, 6000)
+          .then((ytData) => {
+            const rows = (ytData && (ytData.tracks || ytData.youtube)) || [];
+            if (Array.isArray(rows) && rows.length && state.search && state.search.query === qStr && state.query === qStr) {
+              const cleanYt = rows.filter(looksLikeSong);
+              if (cleanYt.length) {
+                state.search.youtube = cleanYt;
+                updated = true;
+              }
+            }
+          })
+          .catch(() => {})
+      );
+    }
+
+    if (!state.search.apple || state.search.apple.length < 25 || state.search._appleSynthesized) {
+      tasks.push(
+        (async () => {
+          const itCountry = String((state.prefs && state.prefs.country) || "US");
+          try {
+            const directIt = await itFetch(`/search?term=${encodeURIComponent(qStr)}&media=music&entity=song&limit=80&country=${encodeURIComponent(itCountry)}`, 4500);
+            const rows = (directIt && directIt.results) || [];
+            if (Array.isArray(rows) && rows.length && state.search && state.search.query === qStr && state.query === qStr) {
+              const curated = rankAndCurateProviderSongs(rows.filter(looksLikeSong), qStr, 75);
+              if (curated.length) {
+                state.search.apple = curated;
+                state.search.itunes = curated;
+                delete state.search._appleSynthesized;
+                updated = true;
+                return;
+              }
+            }
+          } catch {}
+          try {
+            const itData = await api(`/api/search?q=${encodeURIComponent(qStr)}&source=apple&refresh=1&${glq()}`, 5000);
             if (itData && Array.isArray(itData.apple) && itData.apple.length && state.search && state.search.query === qStr && state.query === qStr) {
               state.search.apple = rankAndCurateProviderSongs(itData.apple.filter(looksLikeSong), qStr, 75);
               state.search.itunes = state.search.apple;
+              delete state.search._appleSynthesized;
               mergeUniqueArtists(itData.artists);
               mergeUniquePlaylists(itData.playlists);
               updated = true;
             }
-          })
-          .catch(() => {})
+          } catch {}
+        })()
       );
     }
 
@@ -16340,7 +16418,7 @@
     if (cachedSearch) {
       state.search = cachedSearch;
       render();
-      if (!cachedSearch.deezer || !cachedSearch.deezer.length || cachedSearch._deezerSynthesized) {
+      if (!cachedSearch.deezer || !cachedSearch.deezer.length || cachedSearch._deezerSynthesized || !cachedSearch.apple || !cachedSearch.apple.length || cachedSearch._appleSynthesized || !cachedSearch.youtube || cachedSearch.youtube.length < 5) {
         backgroundEnrichSearch(qTrim, qKey);
       }
       if (state.filter && state.filter !== "all" && state.filter !== "songs") {
@@ -16375,15 +16453,43 @@
       if (state.query !== qTrim) return; // Discard stale response if user cleared or retyped
       if (data && typeof data === "object") {
         if (Array.isArray(data.youtube)) data.youtube = data.youtube.filter(looksLikeSong);
-        if (Array.isArray(data.apple)) data.apple = data.apple.filter(looksLikeSong);
-        data.itunes = data.apple;
         if (Array.isArray(data.deezer)) {
-          data.deezer = data.deezer.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+          data.deezer = rankAndCurateProviderSongs(
+            data.deezer.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t)),
+            qTrim,
+            75
+          );
         }
+        if (Array.isArray(data.apple)) {
+          const dzIds = new Set((data.deezer || []).map((d) => String(d.rawId || d.id || "").replace(/^deezer:/, "")));
+          const appleHasDzIds = data.apple.length > 0 && data.apple.every((a) => {
+            const rawA = String(a && (a.trackId || a.id) || "").replace(/^apple:|^itunes:/, "");
+            return Boolean(a && a._synthesized) || (rawA && dzIds.has(rawA));
+          });
+          if (appleHasDzIds) data._appleSynthesized = true;
+          data.apple = rankAndCurateProviderSongs(data.apple.filter(looksLikeSong), qTrim, 75);
+        }
+        data.itunes = data.apple;
         if ((!data.deezer || !data.deezer.length) && ((data.apple && data.apple.length) || (data.youtube && data.youtube.length))) {
           const seed = (data.apple && data.apple.length) ? data.apple : data.youtube;
-          data.deezer = seed.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+          data.deezer = rankAndCurateProviderSongs(
+            seed.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t)),
+            qTrim,
+            75
+          );
           data._deezerSynthesized = true;
+        }
+        if (Array.isArray(data.artists)) {
+          const dzArtIds = new Set(["288166"]);
+          for (const ar of data.artists) {
+            if (ar && typeof ar.id === "string" && ar.id.startsWith("artist:apple:")) {
+              const numId = ar.id.slice("artist:apple:".length);
+              if (dzArtIds.has(numId) || (ar.artwork && /dzcdn\.net/i.test(ar.artwork))) {
+                ar.id = `artist:deezer:${numId}`;
+                ar.source = "deezer";
+              }
+            }
+          }
         }
         if (Array.isArray(data.audius)) data.audius = data.audius.filter(looksLikeSong);
         state.search = data;
