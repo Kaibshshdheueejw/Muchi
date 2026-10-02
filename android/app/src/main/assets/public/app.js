@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.5";
+  const APP_VERSION = "1.9.6";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -12788,10 +12788,10 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
-      ver: "1.9.5",
-      title: "Muchi 1.9.5",
+      ver: "1.9.6",
+      title: "Muchi 1.9.6",
       notes: [
-        "Calibrated Native Phone Speaker DSP on Android & iOS with pre-DSP headroom staging, 55 Hz 4th-order sub-bass excursion protection, and C2-continuous soft-knee limiting for 0% clipping and studio-clear vocals.",
+        "Calibrated Native Phone Speaker DSP on Android & iOS with pre-DSP headroom staging, sub-bass excursion protection, and C2-continuous soft-knee limiting for 0% clipping and studio-clear vocals.",
         "Hardened Native App background playback with zero-delay between-song transitions, background next-track preloading, autoplay queue refill, and uninterrupted CPU/Wi-Fi WakeLocks.",
         "Fixed Artist profile resolution and Popular/All Songs discography across all 32 countries on both Web and Native App (including 1-edit typo tolerance).",
         "Added clean background pause synchronization on headphone/Bluetooth disconnect so audio never unexpectedly resumes over the phone speaker.",

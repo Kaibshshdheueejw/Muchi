@@ -65,7 +65,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
     private func beginAudioBackgroundTask() {
-        DispatchQueue.main.async { [weak self] in
+        let acquire = { [weak self] in
             guard let self = self else { return }
             if self.bgTask != .invalid {
                 UIApplication.shared.endBackgroundTask(self.bgTask)
@@ -78,6 +78,11 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     self.bgTask = .invalid
                 }
             }
+        }
+        if Thread.isMainThread {
+            acquire()
+        } else {
+            DispatchQueue.main.async(execute: acquire)
         }
     }
 
@@ -304,6 +309,25 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
         let isUnsupportedWebm = lowUrl.contains("mime=audio%2fwebm") || lowUrl.contains("mime=audio/webm") || lowUrl.contains(" codecs=\"opus\"")
         if lowUrl.hasPrefix("yt:") || (isUnsupportedWebm && !currentVideoId.isEmpty) {
+            let syncQKey = Self.queryCacheKey(title: currentTitle, artist: currentArtist)
+            let syncHit = (!currentVideoId.isEmpty ? Self.getCachedStream(currentVideoId) : nil)
+                ?? (!syncQKey.isEmpty ? Self.getCachedStream(syncQKey) : nil)
+            if let hit = syncHit, !hit.url.isEmpty,
+               Self.isDurationAcceptable(gotDurationMs: hit.durationMs, expectedDurationMs: fallbackDurationMs),
+               let hitUrl = URL(string: hit.url) {
+                triedOnDeviceResolve = true
+                resolvingOnDevice = false
+                currentUrl = hit.url
+                if !hit.videoId.isEmpty && currentVideoId.isEmpty {
+                    currentVideoId = hit.videoId
+                }
+                if hit.durationMs > 0 && fallbackDurationMs <= 0 {
+                    fallbackDurationMs = hit.durationMs
+                }
+                startPlayer(with: hitUrl, rawUrl: hit.url, userAgent: hit.userAgent)
+                call.resolve()
+                return
+            }
             triedOnDeviceResolve = true
             resolvingOnDevice = true
             stopTicker()
@@ -476,7 +500,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc public func resume(_ call: CAPPluginCall) {
-        player?.play()
+        configureAudioSession()
+        if !resolvingOnDevice, currentItem != nil {
+            player?.playImmediately(atRate: prefSpeed)
+        }
         updateRate()
         call.resolve()
     }
@@ -977,7 +1004,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private func updateRate() {
         var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-        info[MPNowPlayingInfoPropertyPlaybackRate] = (player?.rate ?? 0) > 0 ? 1 : 0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = (resolvingOnDevice || (player?.rate ?? 0) > 0) ? 1 : 0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
@@ -1016,11 +1043,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.changePlaybackPositionCommand.isEnabled = true
 
         cc.playCommand.addTarget { [weak self] _ in
-            self?.beginAudioBackgroundTask()
-            self?.configureAudioSession()
-            self?.emitControls("play", positionMs: 0)
-            self?.player?.play()
-            self?.updateRate()
+            guard let self = self else { return .commandFailed }
+            self.beginAudioBackgroundTask()
+            self.configureAudioSession()
+            self.emitControls("play", positionMs: 0)
+            if !self.resolvingOnDevice, self.currentItem != nil {
+                self.player?.playImmediately(atRate: self.prefSpeed)
+            }
+            self.updateRate()
             return .success
         }
         cc.pauseCommand.addTarget { [weak self] _ in
@@ -1038,7 +1068,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.beginAudioBackgroundTask()
                 self.configureAudioSession()
                 self.emitControls("play", positionMs: 0)
-                self.player?.play()
+                if !self.resolvingOnDevice, self.currentItem != nil {
+                    self.player?.playImmediately(atRate: self.prefSpeed)
+                }
             }
             self.updateRate()
             return .success
@@ -1071,20 +1103,6 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             return .commandFailed
         }
-    }
-
-    private func emitControls(_ message: String, positionMs: Int = 0) {
-        self.notifyListeners("muchiControls", data: [
-            "message": message,
-            "position": positionMs
-        ])
-        let safeMsg = message
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        self.bridge?.webView?.evaluateJavaScript(
-            "window._onMuchiNativeControls&&window._onMuchiNativeControls({message:\"\(safeMsg)\",position:\(positionMs)});",
-            completionHandler: nil
-        )
     }
 
     deinit {
@@ -1503,14 +1521,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             let freshSearch = searchedVids.filter { !$0.isEmpty && !vids.contains($0) && (!hasExclusions || !excludedVids.contains($0)) }
             for sv in freshSearch where !vids.contains(sv) { vids.append(sv) }
-            if !freshSearch.isEmpty, let rs = probeMultipleVideosParallel(Array(freshSearch.prefix(5)), expectedDurationMs: expectedDurationMs, expectedTitle: cleanTitle, expectedArtist: cleanArtist) {
+            if !freshSearch.isEmpty, let rs = probeMultipleVideosParallel(Array(freshSearch.prefix(8)), expectedDurationMs: expectedDurationMs, expectedTitle: cleanTitle, expectedArtist: cleanArtist) {
                 if !primary.isEmpty { putCachedStream(primary, rs) }
                 if !qKey.isEmpty { putCachedStream(qKey, rs) }
                 return rs
             }
         }
         let cfVid = vids.first ?? primary
-        if let cfHit = probeCloudflareBackend(videoId: cfVid, candidates: candidates, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs) {
+        let effectiveCands = !candidates.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? candidates
+            : Array(vids.prefix(6)).joined(separator: ",")
+        if let cfHit = probeCloudflareBackend(videoId: cfVid, candidates: effectiveCands, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs) {
             if !cfVid.isEmpty { putCachedStream(cfVid, cfHit) }
             if !primary.isEmpty { putCachedStream(primary, cfHit) }
             if !qKey.isEmpty { putCachedStream(qKey, cfHit) }
@@ -1695,15 +1716,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let safeRawQ = "\(effCleanQ) official audio".replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         var out: [String] = []
 
-        // 1. Primary: standard YouTube WEB search ("<cleanQ> official audio") so ANDROID_VR gets playable official audio IDs first
-        if let url = URL(string: "https://www.youtube.com/youtubei/v1/search?prettyPrint=false") {
+        // 1. Primary: standard YouTube WEB search ("<cleanQ> official audio" + "<cleanQ> lyrics") so ANDROID_VR gets both official audio and un-gated lyric video IDs
+        let safeLyricQ = "\(effCleanQ) lyrics".replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        for webQuery in [safeRawQ, safeLyricQ] {
+            guard let url = URL(string: "https://www.youtube.com/youtubei/v1/search?prettyPrint=false") else { continue }
             var req = URLRequest(url: url, timeoutInterval: 2.6)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
             req.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
             req.setValue(defaultUA, forHTTPHeaderField: "User-Agent")
-            let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(safeRawQ)\"}"
+            let payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"\(webQuery)\"}"
             req.httpBody = payload.data(using: .utf8)
 
             let sem = DispatchSemaphore(value: 0)
@@ -1713,19 +1736,22 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                       let data = data, let text = String(data: data, encoding: .utf8),
                       let regex = try? NSRegularExpression(pattern: "\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"") else { return }
                 let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+                var addedForQuery = 0
                 for m in matches {
                     if let r = Range(m.range(at: 1), in: text) {
                         let vid = String(text[r])
                         if !out.contains(vid) {
                             out.append(vid)
-                            if out.count >= 6 { break }
+                            addedForQuery += 1
+                            if addedForQuery >= 4 || out.count >= 8 { break }
                         }
                     }
                 }
             }.resume()
             _ = sem.wait(timeout: .now() + 2.8)
+            if out.count >= 6 { break }
         }
-        if out.count >= 3 { return out }
+        if out.count >= 4 { return out }
 
         // 2. Secondary: YouTube Music WEB_REMIX Songs-shelf search
         if let musicUrl = URL(string: "https://music.youtube.com/youtubei/v1/search?prettyPrint=false") {

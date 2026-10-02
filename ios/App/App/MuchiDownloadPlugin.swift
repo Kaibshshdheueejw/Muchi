@@ -173,7 +173,7 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func downloadChunkedOrDirect(id: String, urlStr: String, userAgent: String, tempFile: URL) -> (ok: Bool, mime: String?, error: String?) {
-        guard let u = URL(string: urlStr) else {
+        guard URL(string: urlStr) != nil else {
             return (false, nil, "invalid download URL")
         }
         let chunkSize: Int64 = 983040 // 960 KB (< 1 MB Googlevideo IOS/ANDROID chunk ceiling)
@@ -431,7 +431,7 @@ public class MuchiDownloadPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func writeId3v2(to url: URL, title: String, artist: String, album: String, genre: String, artwork: Data?) {
-        guard var data = try? Data(contentsOf: url) else { return }
+        guard let data = try? Data(contentsOf: url) else { return }
         // Strip an existing ID3v2 tag (10-byte header + synchsafe size).
         var audio = data
         if data.count >= 10 && data.prefix(3) == Data([0x49, 0x44, 0x33]) {

@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.5";
+  const APP_VERSION = "1.9.6";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -6660,6 +6660,7 @@
     const now = Date.now();
     if (t._warmedAt && now - t._warmedAt < 45000) return;
     t._warmedAt = now;
+    t._gaplessWarmAt = now;
     const NP = nativePlayer();
     if (IS_NATIVE && NP && typeof NP.preload === "function" && (t.videoId || t.title) && !t._nativePreloaded) {
       t._nativePreloaded = true;
@@ -6846,6 +6847,15 @@
   async function resolveYouTubePlay(t) {
     if (!t) return t;
     if (t.videoId) return t;
+    if (t._ytResolvePromise) return t._ytResolvePromise;
+    const p = _resolveYouTubePlayImpl(t).finally(() => {
+      if (t._ytResolvePromise === p) t._ytResolvePromise = null;
+    });
+    t._ytResolvePromise = p;
+    return p;
+  }
+
+  async function _resolveYouTubePlayImpl(t) {
     const queries = buildTrackPlayQueries(t);
     const q = queries[0] || "";
     if (!q) throw new Error("No playable version");
@@ -8355,7 +8365,10 @@
     // Audio playback optimization: pre-resolve next track stream via Cloudflare backend & native preload for gapless playback
     if (state.playing && p > 6 && state.index + 1 < state.queue.length) {
       const nextT = state.queue[state.index + 1];
-      if (nextT && (nextT.videoId || nextT.title) && !nextT.streamUrl && !nextT._resolving && nextT.source !== "audius" && nextT.source !== "radio") {
+      const nowWarm = Date.now();
+      if (nextT && (nextT.videoId || nextT.title) && !nextT.streamUrl && !nextT._resolving && (!nextT._gaplessWarmAt || nowWarm - nextT._gaplessWarmAt > 60000) && nextT.source !== "audius" && nextT.source !== "radio") {
+        nextT._gaplessWarmAt = nowWarm;
+        nextT._resolving = true;
         const NP = nativePlayer();
         if (IS_NATIVE && NP && typeof NP.preload === "function" && !nextT._nativePreloaded) {
           nextT._nativePreloaded = true;
@@ -8367,41 +8380,44 @@
             artist: String(artistName(nextT) || nextT.artist || ""),
           }).catch(() => {});
         }
-        nextT._resolving = true;
-        getWarmStream(nextT.videoId || "", nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
-          if (res && res.url && !res.isPreview) {
-            const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
-            nextT.streamUrl = fullUrl;
-            nextT._isPreviewStream = false;
-            if (res.videoId && !nextT.videoId) nextT.videoId = res.videoId;
-            if (res.duration && !nextT.duration) nextT.duration = Number(res.duration);
-            if (!IS_NATIVE && !nextT._prefetched) {
-              nextT._prefetched = true;
-              fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+        const warmNextStream = () => {
+          getWarmStream(nextT.videoId || "", nextT.title || "", artistName(nextT) || nextT.artist || "", nextT._ytCandidates || [], 8000, false).then((res) => {
+            if (res && res.url && !res.isPreview) {
+              const fullUrl = res.url.startsWith("/") ? API_BASE + res.url : res.url;
+              nextT.streamUrl = fullUrl;
+              nextT._isPreviewStream = false;
+              if (res.videoId && !nextT.videoId) nextT.videoId = res.videoId;
+              if (res.duration && !nextT.duration) nextT.duration = Number(res.duration);
+              if (!IS_NATIVE && !nextT._prefetched) {
+                nextT._prefetched = true;
+                fetch(fullUrl, { headers: { Range: "bytes=0-131071" } }).catch(() => {});
+              }
             }
-          }
-        }).catch(() => {}).finally(() => { nextT._resolving = false; });
+          }).catch(() => {}).finally(() => { nextT._resolving = false; });
+        };
+        if (!nextT.videoId && (nextT.source === "apple" || nextT.source === "deezer" || nextT.source === "itunes")) {
+          resolveYouTubePlay(nextT).then(() => {
+            const NP2 = nativePlayer();
+            if (IS_NATIVE && NP2 && typeof NP2.preload === "function" && nextT.videoId) {
+              const cands2 = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
+              NP2.preload({
+                videoId: String(nextT.videoId),
+                candidates: cands2,
+                title: String(nextT.title || ""),
+                artist: String(artistName(nextT) || nextT.artist || ""),
+              }).catch(() => {});
+            }
+            warmNextStream();
+          }).catch(() => { warmNextStream(); });
+        } else {
+          warmNextStream();
+        }
       } else if (nextT && nextT.source === "audius" && nextT.trackId && !nextT.streamUrl) {
         nextT.streamUrl = `${API_BASE}/api/audius/file/${encodeURIComponent(nextT.trackId)}`;
         if (!nextT._prefetched) {
           nextT._prefetched = true;
           fetch(nextT.streamUrl, { headers: { Range: "bytes=0-65535" } }).catch(() => {});
         }
-      } else if (nextT && !nextT.videoId && !nextT.streamUrl && !nextT._resolving && (nextT.source === "apple" || nextT.source === "deezer" || nextT.source === "itunes")) {
-        nextT._resolving = true;
-        resolveYouTubePlay(nextT).then(() => {
-          const NP = nativePlayer();
-          if (IS_NATIVE && NP && typeof NP.preload === "function" && nextT.videoId && !nextT._nativePreloaded) {
-            nextT._nativePreloaded = true;
-            const cands = Array.isArray(nextT._ytCandidates) ? nextT._ytCandidates.slice(0, 5).join(",") : "";
-            NP.preload({
-              videoId: String(nextT.videoId),
-              candidates: cands,
-              title: String(nextT.title || ""),
-              artist: String(artistName(nextT) || nextT.artist || ""),
-            }).catch(() => {});
-          }
-        }).catch(() => {}).finally(() => { nextT._resolving = false; });
       }
     }
 
@@ -9016,10 +9032,10 @@
             });
           return;
         }
-        if ((!cur._nativeOnDeviceTried || (cur.videoId && cur._nativeOnDeviceVid !== String(cur.videoId))) && cur.videoId && nativePlayer()) {
+        if ((!cur._nativeOnDeviceTried || (cur.videoId && cur._nativeOnDeviceVid !== String(cur.videoId))) && (cur.videoId || cur.title) && nativePlayer()) {
           cur._nativeOnDeviceTried = true;
-          cur._nativeOnDeviceVid = String(cur.videoId);
-          cur.streamUrl = `yt:${cur.videoId}`;
+          cur._nativeOnDeviceVid = String(cur.videoId || cur.title || "");
+          cur.streamUrl = `yt:${cur.videoId || ""}`;
           cur._isPreviewStream = false;
           cur._playingViaAudio = true;
           playAudio(cur).catch(() => {
@@ -12788,10 +12804,10 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
-      ver: "1.9.5",
-      title: "Muchi 1.9.5",
+      ver: "1.9.6",
+      title: "Muchi 1.9.6",
       notes: [
-        "Calibrated Native Phone Speaker DSP on Android & iOS with pre-DSP headroom staging, 55 Hz 4th-order sub-bass excursion protection, and C2-continuous soft-knee limiting for 0% clipping and studio-clear vocals.",
+        "Calibrated Native Phone Speaker DSP on Android & iOS with pre-DSP headroom staging, sub-bass excursion protection, and C2-continuous soft-knee limiting for 0% clipping and studio-clear vocals.",
         "Hardened Native App background playback with zero-delay between-song transitions, background next-track preloading, autoplay queue refill, and uninterrupted CPU/Wi-Fi WakeLocks.",
         "Fixed Artist profile resolution and Popular/All Songs discography across all 32 countries on both Web and Native App (including 1-edit typo tolerance).",
         "Added clean background pause synchronization on headphone/Bluetooth disconnect so audio never unexpectedly resumes over the phone speaker.",

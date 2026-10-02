@@ -814,7 +814,7 @@ public class MuchiAudioService extends Service {
         mirrorMode = false;
 
         long nowMs = System.currentTimeMillis();
-        boolean sameIdentity = url != null && !url.equals("yt:")
+        boolean sameIdentity = url != null && (!url.equals("yt:") || !newTitle.isEmpty())
                 && newTitle.equals(trackTitle)
                 && newArtist.equals(trackArtist)
                 && newVideoId.equals(currentVideoId)
@@ -919,8 +919,28 @@ public class MuchiAudioService extends Service {
         }
 
         // If URL is a "yt:<videoId>" token (Worker couldn't resolve on its datacenter IP),
-        // resolve the direct high-bitrate stream on the user's phone IP!
+        // first check if preloadStream already cached the resolved stream in memory for 0ms start,
+        // and otherwise resolve the direct high-bitrate stream on the user's phone IP!
         if (url != null && url.startsWith("yt:")) {
+            String syncQKey = queryCacheKey(trackTitle, trackArtist);
+            ResolvedStream syncHit = (!currentVideoId.isEmpty()) ? getCachedStream(currentVideoId) : null;
+            if (syncHit == null && !syncQKey.isEmpty()) {
+                syncHit = getCachedStream(syncQKey);
+            }
+            if (syncHit != null && syncHit.url != null && !syncHit.url.isEmpty()
+                    && isDurationAcceptableStatic(syncHit.durationMs, currentDurationMs)) {
+                triedOnDeviceResolve = true;
+                resolvingOnDevice = false;
+                currentUrl = syncHit.url;
+                if (syncHit.videoId != null && !syncHit.videoId.isEmpty() && currentVideoId.isEmpty()) {
+                    currentVideoId = syncHit.videoId;
+                }
+                if (syncHit.durationMs > 0 && currentDurationMs <= 0) {
+                    currentDurationMs = syncHit.durationMs;
+                }
+                startExoPlayerWithUrl(syncHit.url, syncHit.userAgent, currentDurationMs);
+                return;
+            }
             triedOnDeviceResolve = true;
             resolvingOnDevice = true;
             ticker.removeCallbacks(tick);
@@ -1791,7 +1811,7 @@ public class MuchiAudioService extends Service {
                 }
             }
             if (!freshSearchVids.isEmpty()) {
-                ResolvedStream searchHit = probeMultipleVideoIdsParallel(freshSearchVids, Math.min(5, freshSearchVids.size()), expectedDurationMs, cleanTitle, cleanArtist, exec);
+                ResolvedStream searchHit = probeMultipleVideoIdsParallel(freshSearchVids, Math.min(8, freshSearchVids.size()), expectedDurationMs, cleanTitle, cleanArtist, exec);
                 if (searchHit != null) {
                     if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, searchHit);
                     if (!qKey.isEmpty()) putCachedStream(qKey, searchHit);
@@ -1806,7 +1826,10 @@ public class MuchiAudioService extends Service {
                 new java.util.concurrent.ExecutorCompletionService<>(exec);
         List<java.util.concurrent.Future<ResolvedStream>> fbFutures = new ArrayList<>();
         final String cfVid = !vids.isEmpty() ? vids.get(0) : (primaryVid != null ? primaryVid.trim() : "");
-        fbFutures.add(fallbackRace.submit(() -> probeCloudflareBackendStatic(cfVid, candidatesCsv, cleanTitle, cleanArtist, expectedDurationMs)));
+        final String effectiveCandsCsv = (candidatesCsv != null && !candidatesCsv.trim().isEmpty())
+                ? candidatesCsv
+                : android.text.TextUtils.join(",", vids.subList(0, Math.min(6, vids.size())));
+        fbFutures.add(fallbackRace.submit(() -> probeCloudflareBackendStatic(cfVid, effectiveCandsCsv, cleanTitle, cleanArtist, expectedDurationMs)));
         for (int i = 0; i < Math.min(3, vids.size()); i++) {
             final String pVid = vids.get(i);
             fbFutures.add(fallbackRace.submit(() -> probePipedForVideoStatic(pVid, expectedDurationMs, cleanTitle, cleanArtist)));
@@ -2040,44 +2063,55 @@ public class MuchiAudioService extends Service {
         String safeCleanQ = cleanQ.replace("\\", "\\\\").replace("\"", "\\\"");
         String safeRawQ = (cleanQ + " official audio").replace("\\", "\\\\").replace("\"", "\\\"");
 
-        // 1. Primary: Standard YouTube WEB search ("<cleanQ> official audio")
+        // 1. Primary: Standard YouTube WEB search ("<cleanQ> official audio" + "<cleanQ> lyrics")
         //    Returns standard YouTube official audio/lyric/video IDs that ANDROID_VR can stream directly on-device
         //    (whereas WEB_REMIX - Topic IDs are often gated on ANDROID_VR).
-        HttpURLConnection con2 = null;
-        try {
-            con2 = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/search?prettyPrint=false").openConnection();
-            con2.setRequestMethod("POST");
-            con2.setConnectTimeout(2200);
-            con2.setReadTimeout(2600);
-            con2.setDoOutput(true);
-            con2.setRequestProperty("Content-Type", "application/json");
-            con2.setRequestProperty("Origin", "https://www.youtube.com");
-            con2.setRequestProperty("Referer", "https://www.youtube.com/");
-            con2.setRequestProperty("User-Agent", DEFAULT_UA);
-            String payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"" + safeRawQ + "\"}";
-            try (OutputStream os = con2.getOutputStream()) {
-                os.write(payload.getBytes(StandardCharsets.UTF_8));
-            }
-            if (con2.getResponseCode() == 200) {
-                String text = readStreamString(con2.getInputStream());
-                java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"videoRenderer\"\\s*:\\s*\\{\\s*\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"").matcher(text);
-                while (m.find() && out.size() < 6) {
-                    String vid = m.group(1);
-                    if (vid != null && !out.contains(vid)) out.add(vid);
+        String safeLyricQ = (cleanQ + " lyrics").replace("\\", "\\\\").replace("\"", "\\\"");
+        for (String webQuery : new String[] { safeRawQ, safeLyricQ }) {
+            HttpURLConnection con2 = null;
+            try {
+                con2 = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/search?prettyPrint=false").openConnection();
+                con2.setRequestMethod("POST");
+                con2.setConnectTimeout(2200);
+                con2.setReadTimeout(2600);
+                con2.setDoOutput(true);
+                con2.setRequestProperty("Content-Type", "application/json");
+                con2.setRequestProperty("Origin", "https://www.youtube.com");
+                con2.setRequestProperty("Referer", "https://www.youtube.com/");
+                con2.setRequestProperty("User-Agent", DEFAULT_UA);
+                String payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240815.00.00\",\"hl\":\"en\",\"gl\":\"US\"}},\"query\":\"" + webQuery + "\"}";
+                try (OutputStream os = con2.getOutputStream()) {
+                    os.write(payload.getBytes(StandardCharsets.UTF_8));
                 }
-                if (out.isEmpty()) {
-                    java.util.regex.Matcher mAny = java.util.regex.Pattern.compile("\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"").matcher(text);
-                    while (mAny.find() && out.size() < 5) {
-                        String vid = mAny.group(1);
-                        if (vid != null && !out.contains(vid)) out.add(vid);
+                if (con2.getResponseCode() == 200) {
+                    String text = readStreamString(con2.getInputStream());
+                    int addedForQ = 0;
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"videoRenderer\"\\s*:\\s*\\{\\s*\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"").matcher(text);
+                    while (m.find() && addedForQ < 4 && out.size() < 8) {
+                        String vid = m.group(1);
+                        if (vid != null && !out.contains(vid)) {
+                            out.add(vid);
+                            addedForQ++;
+                        }
+                    }
+                    if (addedForQ == 0) {
+                        java.util.regex.Matcher mAny = java.util.regex.Pattern.compile("\"videoId\"\\s*:\\s*\"([A-Za-z0-9_-]{11})\"").matcher(text);
+                        while (mAny.find() && addedForQ < 4 && out.size() < 8) {
+                            String vid = mAny.group(1);
+                            if (vid != null && !out.contains(vid)) {
+                                out.add(vid);
+                                addedForQ++;
+                            }
+                        }
                     }
                 }
+            } catch (Exception ignored) {
+            } finally {
+                if (con2 != null) con2.disconnect();
             }
-        } catch (Exception ignored) {
-        } finally {
-            if (con2 != null) con2.disconnect();
+            if (out.size() >= 6) break;
         }
-        if (out.size() >= 3) return out;
+        if (out.size() >= 4) return out;
 
         // 2a. Secondary: YouTube Music WEB_REMIX Songs-shelf search (params: EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D)
         HttpURLConnection con = null;

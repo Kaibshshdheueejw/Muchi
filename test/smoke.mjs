@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.5", APP_VERSION === "1.9.5" && appJs.includes('const APP_VERSION = "1.9.5"'));
+  ok("version: APP_VERSION is 1.9.6", APP_VERSION === "1.9.6" && appJs.includes('const APP_VERSION = "1.9.6"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -863,6 +863,55 @@ await (async () => {
     ok("android java: all 4 Java files have balanced braces, zero duplicate method signatures, and single load() in MuchiAudioPlugin",
       javaErrors.length === 0 && loadMatches.length === 1,
       javaErrors.join("; ")
+    );
+
+    const swiftFiles = [
+      ["AppDelegate.swift", readFileSync("ios/App/App/AppDelegate.swift", "utf8")],
+      ["SceneDelegate.swift", readFileSync("ios/App/App/SceneDelegate.swift", "utf8")],
+      ["MuchiBridgeViewController.swift", readFileSync("ios/App/App/MuchiBridgeViewController.swift", "utf8")],
+      ["MuchiAudioPlugin.swift", iosPlugin],
+      ["MuchiDownloadPlugin.swift", readFileSync("ios/App/App/MuchiDownloadPlugin.swift", "utf8")],
+    ];
+    let swiftErrors = [];
+    for (const [fname, raw] of swiftFiles) {
+      const stripped = raw.replace(
+        /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"/g,
+        (m) => (m.startsWith('"') ? '""' : "")
+      );
+      let depth = 0;
+      const scopeFuncs = new Map();
+      const lines = stripped.split("\n");
+      for (let idx = 0; idx < lines.length; idx++) {
+        const line = lines[idx];
+        const m = line.match(/^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|internal|fileprivate|open|override|static|class|final|mutating)\s+)*func\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)/);
+        if (m) {
+          const labels = m[2]
+            .split(",")
+            .map((p) => p.trim().split(":")[0].trim().split(/\s+/)[0] || "")
+            .join(",");
+          const isStatic = /\b(?:static|class)\s+func\b/.test(line) ? "static:" : "inst:";
+          const sig = `${depth}:${isStatic}${m[1]}(${labels})`;
+          if (scopeFuncs.has(sig)) {
+            swiftErrors.push(`${fname}:${idx + 1} duplicate func ${sig} (first at line ${scopeFuncs.get(sig)})`);
+          }
+          scopeFuncs.set(sig, idx + 1);
+        }
+        for (const ch of line) {
+          if (ch === "{") depth++;
+          else if (ch === "}") {
+            for (const k of scopeFuncs.keys()) {
+              if (k.startsWith(`${depth}:`)) scopeFuncs.delete(k);
+            }
+            depth--;
+          }
+        }
+      }
+      if (depth !== 0) swiftErrors.push(`${fname} unbalanced braces (depth=${depth})`);
+    }
+    const emitControlsMatches = iosPlugin.match(/func\s+emitControls\s*\(/g) || [];
+    ok("ios swift: all 5 Swift files have balanced braces, zero duplicate func declarations, and single emitControls() in MuchiAudioPlugin",
+      swiftErrors.length === 0 && emitControlsMatches.length === 1,
+      swiftErrors.join("; ")
     );
   }
   ok("player timer bar (1.7.4): dual-layer seek-wave-bg & seek-wave-fg paths, 250ms native+web progress ticks, URL duration parser, and non-sticky activeScrub",
