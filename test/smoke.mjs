@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.6", APP_VERSION === "1.9.6" && appJs.includes('const APP_VERSION = "1.9.6"'));
+  ok("version: APP_VERSION is 1.9.7", APP_VERSION === "1.9.7" && appJs.includes('const APP_VERSION = "1.9.7"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],

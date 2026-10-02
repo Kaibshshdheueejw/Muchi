@@ -814,7 +814,7 @@ public class MuchiAudioService extends Service {
         mirrorMode = false;
 
         long nowMs = System.currentTimeMillis();
-        boolean sameIdentity = url != null && (!url.equals("yt:") || !newTitle.isEmpty())
+        boolean sameIdentity = url != null && !url.equals("yt:")
                 && newTitle.equals(trackTitle)
                 && newArtist.equals(trackArtist)
                 && newVideoId.equals(currentVideoId)
