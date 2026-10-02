@@ -5,7 +5,7 @@
 // 1380–1393). Response shapes are unchanged.
 
 import { fetchJSON, codecMatch, tidyTitle, tidyArtist, isEnglishTrack } from "./util.js";
-import { walkCollect, walkCatalog } from "./parse.js";
+import { walkCollect, walkCatalog, isSongRow } from "./parse.js";
 import { regionCode, YT_SONGS_PARAMS, RADIO_HOSTS, pickPlaylistHit } from "./data.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
 
@@ -66,29 +66,93 @@ export async function youtubeWebSearch(query, gl, timeoutMs = 6500, extra = {}) 
   return { tracks: out, artists: bag.artists, playlists: bag.playlists };
 }
 
-export async function pipedSearch(query) {
-  const data = await fetchJSON(
-    `https://api.piped.private.coffee/search?q=${encodeURIComponent(query)}&filter=all`
-  );
-  const items = data.items || data || [];
+export async function youtubeAndroidSearch(query, gl, timeoutMs = 3000, extra = {}) {
+  const body = JSON.stringify({
+    context: {
+      client: {
+        clientName: "ANDROID_VR",
+        clientVersion: "1.61.48",
+        androidSdkVersion: 32,
+        osName: "Android",
+        osVersion: "12L",
+        deviceMake: "Oculus",
+        deviceModel: "Quest 3",
+        hl: "en",
+        gl: regionCode(gl),
+      },
+    },
+    query,
+  });
+  const data = await fetchJSON("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+      "X-YouTube-Client-Name": "28",
+      "X-YouTube-Client-Version": "1.61.48",
+    },
+    body,
+  }, timeoutMs);
+  const out = [];
+  walkCollect(data, out, new Set(), new Set(), searchWalkOpts(extra, false));
+  for (const r of out) {
+    if (r && typeof r === "object") r._fromWeb = true;
+  }
+  const bag = { artists: [], playlists: [], seenPl: new Set(), seenArt: new Set() };
+  walkCatalog(data, bag);
+  return { tracks: out, artists: bag.artists, playlists: bag.playlists };
+}
+
+const PIPED_SEARCH_BASES = [
+  "https://api.piped.private.coffee",
+  "https://pipedapi.ducks.party",
+];
+
+function mapPipedSearchItems(data) {
+  const items = (data && (data.items || data)) || [];
+  if (!Array.isArray(items)) return [];
   return items
-    .filter((it) => it.type === "stream" || it.url)
+    .filter((it) => it && (it.type === "stream" || it.url))
     .map((it) => {
-      const videoId = (it.url || "").split("v=")[1] || (it.url || "").replace("/watch?v=", "").split("&")[0];
-      if (!videoId) return null;
+      const rawUrl = String(it.url || "");
+      const videoId = (rawUrl.split("v=")[1] || rawUrl.replace("/watch?v=", "")).split("&")[0].trim();
+      if (!videoId || videoId.startsWith("/")) return null;
+      const rawArt = String(it.thumbnail || "");
+      const artwork = rawArt
+        ? rawArt.replace(/^https?:\/\/[^/]+\/vi\//i, "https://i.ytimg.com/vi/").split("?")[0]
+        : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
       return {
         id: `yt:${videoId}`,
         source: "youtube",
         videoId,
         title: it.title || "YouTube",
-        artist: it.uploaderName || it.uploader || "YouTube",
+        artist: String(it.uploaderName || it.uploader || "YouTube").replace(/\s*-\s*Topic$/i, "").trim() || "YouTube",
         album: "",
-        duration: it.duration || 0,
-        artwork: (it.thumbnail || "").replace("proxy.piped.private.coffee/vi/", "i.ytimg.com/vi/") ||
-          `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        duration: Number(it.duration) || 0,
+        artwork: artwork || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
       };
     })
     .filter(Boolean);
+}
+
+export async function pipedSearch(query, timeoutMs = 3200) {
+  const enc = encodeURIComponent(query);
+  const urls = [];
+  for (const base of PIPED_SEARCH_BASES) {
+    urls.push(`${base}/search?q=${enc}&filter=music_songs`);
+    urls.push(`${base}/search?q=${enc}&filter=all`);
+  }
+  const probe = async (u) => {
+    const data = await fetchJSON(u, {}, timeoutMs);
+    const mapped = mapPipedSearchItems(data);
+    if (!mapped.length) throw new Error("empty piped search");
+    return mapped;
+  };
+  try {
+    return await Promise.any(urls.map(probe));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -125,12 +189,14 @@ export async function searchYouTube(query, gl, fast) {
       }
     }
   };
+  const countValidSongs = () => out.filter(isSongRow).length;
   const errors = [];
   const extra = { limit: fast ? 24 : 60, musicOnly: true, loose: false };
   if (fast) {
     const fastJobs = [
-      youtubeMusicSearch(query, gl, 2100, { ...extra, params: YT_SONGS_PARAMS }),
-      youtubeWebSearch(query, gl, 2100, { limit: 24, musicOnly: true, loose: false }),
+      youtubeMusicSearch(query, gl, 2600, { ...extra, params: YT_SONGS_PARAMS }),
+      youtubeMusicSearch(query, gl, 2600, { limit: 16, musicOnly: true, loose: false }),
+      youtubeWebSearch(query, gl, 2600, { limit: 24, musicOnly: true, loose: false }),
     ];
     const settled = await Promise.allSettled(fastJobs);
     for (const s of settled) {
@@ -140,6 +206,7 @@ export async function searchYouTube(query, gl, fast) {
   } else {
     const jobs = [
       youtubeMusicSearch(query, gl, 3200, { ...extra, params: YT_SONGS_PARAMS }),
+      youtubeMusicSearch(query, gl, 2800, { limit: 24, musicOnly: true, loose: false }),
       youtubeWebSearch(query, gl, 3000, { limit: 35, musicOnly: true, loose: false }),
     ];
     const settled = await Promise.allSettled(jobs);
@@ -148,31 +215,36 @@ export async function searchYouTube(query, gl, fast) {
       else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
     }
   }
-  // If we have no songs or very few, try fallback query with a fast timeout
-  if (out.length < 5 && !fast) {
-    try {
-      const hasOfficial = /\bofficial\s+audio\b/i.test(query);
-      const fallbackQ = hasOfficial
-        ? query.replace(/\b(?:official\s+audio|official\s+video|official)\b/gi, "").replace(/\s*[\[(][^)\]]*[)\]]/g, "").replace(/\s+/g, " ").trim()
-        : `${query} official audio`;
-      const webRes = await youtubeWebSearch(fallbackQ || query, gl, 2500, { limit: 25, musicOnly: false, loose: true });
-      add(webRes);
-    } catch (e) {
-      errors.push(String(e.message || e));
+  // If we have no valid songs or very few, try fallback query + ANDROID_VR + Piped search
+  if (countValidSongs() < 5 && !fast) {
+    const hasOfficial = /\bofficial\s+audio\b/i.test(query);
+    const fallbackQ = hasOfficial
+      ? query.replace(/\b(?:official\s+audio|official\s+video|official)\b/gi, "").replace(/\s*[\[(][^)\]]*[)\]]/g, "").replace(/\s+/g, " ").trim()
+      : `${query} official audio`;
+    const fbSettled = await Promise.allSettled([
+      youtubeWebSearch(fallbackQ || query, gl, 2500, { limit: 25, musicOnly: false, loose: true }),
+      youtubeAndroidSearch(query, gl, 2500, { limit: 25, musicOnly: false, loose: true }),
+    ]);
+    for (const s of fbSettled) {
+      if (s.status === "fulfilled") add(s.value);
+      else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
     }
   }
-  if (!out.length && !fast) {
-    try {
-      add(await pipedSearch(query));
-    } catch (e) {
-      errors.push(String(e.message || e));
+  if (countValidSongs() === 0) {
+    const rescueSettled = await Promise.allSettled([
+      youtubeAndroidSearch(query, gl, fast ? 1800 : 2500, { limit: 24, musicOnly: false, loose: true }),
+      pipedSearch(query, fast ? 2000 : 3000),
+    ]);
+    for (const s of rescueSettled) {
+      if (s.status === "fulfilled") add(s.value);
+      else errors.push(String(s.reason && s.reason.message ? s.reason.message : s.reason));
     }
   }
   if (!out.length) throw new Error(errors.join(" | ") || "YouTube search failed");
   const qn = String(query || "").toLowerCase().trim();
   const cleanQn = qn.replace(/\b(?:official\s+audio|official\s+video|official\s+music\s+video|official|audio|video|lyrics?)\b/gi, "").replace(/\s+/g, " ").trim() || qn;
   const words = cleanQn.split(/\s+/).filter((w) => w.length > 1 && !/^(feat|ft|with|and|the)$/.test(w));
-  const wantCover = /\b(cover|karaoke|instrumental|tribute|remix|bootleg|flip|mashup|sped\s*up|slowed|reverb|nightcore|live)\b/i.test(qn);
+  const wantCover = /\b(cover|karaoke|instrumental|tribute|remix|bootleg|flip|mashup|sped\s*up|slowed|reverb|nightcore|live|lofi|lo-fi)\b/i.test(qn);
   const cjkRuns = cleanQn.match(/[\u3040-\u30ff\u3400-\u9fff]{2,}/g) || [];
   const cjkBigrams = [];
   for (const run of cjkRuns) {
@@ -180,19 +252,21 @@ export async function searchYouTube(query, gl, fast) {
       cjkBigrams.push(run.slice(i, i + 2));
     }
   }
+  const origIdx = new Map(out.map((t, i) => [t, i]));
   const score = (t) => {
     const title = String(t.title || "").toLowerCase();
     const artist = String(t.artist || "").toLowerCase();
     if (!cleanQn) return 0;
-    let s = 0;
+    let s = Math.max(0, 24 - (origIdx.get(t) || 0));
     if (title === cleanQn) s += 160;
     else if (`${title} ${artist}` === cleanQn) s += 180;
     else if (`${title} ${artist}`.includes(cleanQn)) s += 110;
     let titleMatches = 0;
     let artistMatches = 0;
     for (const w of words) {
-      const inTitle = title.includes(w);
-      const inArtist = artist.includes(w);
+      const wb = /^[a-z0-9]{1,3}$/i.test(w) ? new RegExp(`\\b${w}\\b`, "i") : null;
+      const inTitle = wb ? wb.test(title) : title.includes(w);
+      const inArtist = wb ? wb.test(artist) : artist.includes(w);
       if (inTitle) {
         s += 16;
         titleMatches++;
@@ -205,10 +279,10 @@ export async function searchYouTube(query, gl, fast) {
     if (titleMatches > 0 && artistMatches > 0) {
       s += 45; // Both song title and artist channel match the query
       if (t._fromWeb) s += 12; // Prefer WEB official audio/video IDs playable by both Web IFrame and Native ANDROID_VR
-    } else if (artistMatches === 0 && words.length >= 2) {
-      s -= 140; // Unrelated artist / cover / re-upload that does not match the queried artist
+    } else if (artistMatches === 0 && words.length >= 2 && titleMatches < words.length && title !== cleanQn) {
+      s -= 140; // Unrelated artist / cover / re-upload that does not match the queried artist words
     }
-    if (!wantCover && /\b(remix|bootleg|flip|mashup|cover|karaoke|instrumental|tribute|8d|sped\s*up|slowed|reverb|nightcore|parody|reaction|lullaby|8-bit|bardcore|medieval|symphony|orchestra)\b/i.test(`${title} ${artist}`)) {
+    if (!wantCover && /\b(remix|bootleg|flip|mashup|cover|karaoke|instrumental|tribute|8d|sped\s*up|slowed|reverb|nightcore|parody|reaction|lullaby|8-bit|bardcore|medieval|symphony|orchestra|lofi|lo-fi|chill\s+fruits)\b/i.test(`${title} ${artist}`)) {
       s -= 120;
     }
     for (const bg of cjkBigrams) {

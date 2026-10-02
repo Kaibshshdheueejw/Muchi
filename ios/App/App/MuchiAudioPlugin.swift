@@ -250,6 +250,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         if let spd = call.getDouble("speed"), spd >= 0.25 && spd <= 3.0 {
             prefSpeed = Float(spd)
         }
+        if let sp = call.getString("spatial"), !sp.isEmpty {
+            prefSpatial = sp
+        }
 
         loadSeq += 1
         let seq = loadSeq

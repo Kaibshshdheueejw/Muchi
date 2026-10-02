@@ -1077,10 +1077,26 @@ export async function handleSearch(env, url) {
 
     if (source === "youtube") {
       const yt = await searchYouTube(q, gl).catch(() => []);
-      const songs = strictSongs(Array.isArray(yt) ? yt : []);
+      let songs = strictSongs(Array.isArray(yt) ? yt : []);
+      let ytSynthesized = false;
+      if (!songs.length) {
+        const ap = await itunesSearch(q, { includeExtra: true, country: gl, limit: 50 }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+        const apSongs = strictSongs(ap.songs || []);
+        if (apSongs.length) {
+          songs = apSongs.map((t, idx) => ({
+            ...t,
+            id: t.videoId ? `yt:${t.videoId}` : `yt:cat:${String(t.trackId || t.id || idx).replace(/^(apple:|itunes:|deezer:|yt:)/, "")}`,
+            source: "youtube",
+            playQuery: t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`.trim(),
+            _youtubeSynthesized: true,
+          }));
+          ytSynthesized = true;
+        }
+      }
       result.youtube = songs;
-      result.artists = finalizeArtists(yt.artists || [], songs);
-      result.playlists = (yt.playlists || []).slice(0, 20);
+      if (ytSynthesized) result._youtubeSynthesized = true;
+      result.artists = finalizeArtists((yt && yt.artists) || [], songs);
+      result.playlists = ((yt && yt.playlists) || []).slice(0, 20);
       return result;
     }
 
@@ -1117,7 +1133,7 @@ export async function handleSearch(env, url) {
     const sharedItunesPromise = itunesSearch(q, { includeExtra: true, country: gl, limit: 75 }).catch(() => ({ songs: [], artists: [], playlists: [] }));
 
     const allTasks = [
-      ["youtube", fastWait(searchYouTube(q, gl, true).catch(() => []), 2600, [])],
+      ["youtube", fastWait(searchYouTube(q, gl, true).catch(() => []), 3200, [])],
       ["apple", fastWait(sharedItunesPromise, 3200, { songs: [], artists: [], playlists: [] })],
       ["deezer", fastWait(deezerSearch(q, { limit: 75, includeExtra: true, country: gl, standbyItunesPromise: sharedItunesPromise, skipYoutubeFallback: true }), 3200, { songs: [], artists: [], playlists: [] })],
       ["audius", fastWait(audiusSearch(q).catch(() => []), 2200, [])],
@@ -1183,6 +1199,17 @@ export async function handleSearch(env, url) {
     } else if (result.apple.some((t) => t && t._synthesized)) {
       result._appleSynthesized = true;
     }
+    if (!result.youtube.length && (result.apple.length || result.deezer.length)) {
+      const ytSeed = result.apple.length ? result.apple : result.deezer;
+      result.youtube = ytSeed.slice(0, 35).map((t, idx) => ({
+        ...t,
+        id: t.videoId ? `yt:${t.videoId}` : `yt:cat:${String(t.trackId || t.rawId || t.id || idx).replace(/^(apple:|itunes:|deezer:|yt:)/, "")}`,
+        source: "youtube",
+        playQuery: t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`.trim(),
+        _youtubeSynthesized: true,
+      }));
+      result._youtubeSynthesized = true;
+    }
     result.itunes = result.apple;
     result.audius = strictSongs(result.audius || []);
 
@@ -1199,9 +1226,18 @@ export async function handleSearch(env, url) {
 
   const cacheKey = `search:${source}:${q.toLowerCase()}:${gl}`;
   const data = refresh ? await runBuild() : await cached(cacheKey, 180000, runBuild);
+  const hasEmptyOrSynthYoutube =
+    Boolean(data && data._youtubeSynthesized) ||
+    ((source === "youtube" || source === "all") && (!data || !Array.isArray(data.youtube) || data.youtube.length === 0));
+  if (hasEmptyOrSynthYoutube) {
+    invalidateCached(cacheKey);
+  }
 
   const res = json(200, data);
-  res.headers.set("Cache-Control", "public, max-age=60, s-maxage=120, stale-while-revalidate=300");
+  res.headers.set(
+    "Cache-Control",
+    hasEmptyOrSynthYoutube ? "no-store" : "public, max-age=60, s-maxage=120, stale-while-revalidate=300"
+  );
   return res;
 }
 
@@ -1213,10 +1249,33 @@ export async function handleYoutubeSearch(url) {
   const cacheKey = `ytsearch:${fast ? "fast" : "full"}:${yq.toLowerCase()}:${gl}`;
   try {
     const tracks = await cached(cacheKey, 15 * 60 * 1000, () => searchYouTube(yq, gl, fast));
-    return json(200, { tracks: Array.isArray(tracks) ? tracks.slice(0, 80) : [] });
+    if (Array.isArray(tracks) && tracks.length > 0) {
+      return json(200, {
+        tracks: tracks.slice(0, 80),
+        artists: Array.isArray(tracks.artists) ? tracks.artists.slice(0, 24) : [],
+        playlists: Array.isArray(tracks.playlists) ? tracks.playlists.slice(0, 24) : [],
+      });
+    }
+    invalidateCached(cacheKey);
   } catch (e) {
-    return json(502, { tracks: [], error: String(e.message || e) });
+    invalidateCached(cacheKey);
   }
+  try {
+    const ap = await itunesSearch(yq, { includeExtra: false, country: gl, limit: 40 });
+    const songs = strictSongs((ap && ap.songs) || []).map((t, idx) => ({
+      ...t,
+      id: t.videoId ? `yt:${t.videoId}` : `yt:cat:${String(t.trackId || t.id || idx).replace(/^(apple:|itunes:|deezer:|yt:)/, "")}`,
+      source: "youtube",
+      playQuery: t.playQuery || `${t.title || ""} ${t.artist || ""} official audio`.trim(),
+      _youtubeSynthesized: true,
+    }));
+    if (songs.length) {
+      const r = json(200, { tracks: songs, _youtubeSynthesized: true });
+      r.headers.set("Cache-Control", "no-store");
+      return r;
+    }
+  } catch {}
+  return json(502, { tracks: [], error: "YouTube search failed" });
 }
 
 export async function handleYtPlaylist(url) {

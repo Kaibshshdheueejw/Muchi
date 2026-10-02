@@ -649,7 +649,6 @@ public class MuchiAudioService extends Service {
         player.addListener(new Player.Listener() {
             @Override
             public void onAudioSessionIdChanged(int audioSessionId) {
-                currentAudioSessionId = audioSessionId;
                 applyPlayerPrefsAndEffects();
             }
 
@@ -699,6 +698,9 @@ public class MuchiAudioService extends Service {
 
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
+                if (isPlaying) {
+                    applyPlayerPrefsAndEffects();
+                }
                 updateLocks(isPlaying || (player != null && player.getPlayWhenReady()));
                 ticker.post(() -> showNotification());
             }
@@ -982,9 +984,9 @@ public class MuchiAudioService extends Service {
         } else {
             player.setMediaItem(MediaItem.fromUri(streamUrl));
         }
-        applyPlayerPrefsAndEffects();
         player.prepare();
         player.play();
+        applyPlayerPrefsAndEffects();
 
         if (streamUrl != null && (streamUrl.startsWith("http://") || streamUrl.startsWith("https://"))) {
             final int expectedSeq = loadSeq;
@@ -1153,18 +1155,32 @@ public class MuchiAudioService extends Service {
                 return;
             }
 
-            if (loudnessEnhancer == null || currentAudioSessionId != sessionId) {
+            if (currentAudioSessionId != sessionId) {
                 releaseAudioEffects();
                 currentAudioSessionId = sessionId;
+            }
+            if (loudnessEnhancer == null) {
                 try {
                     loudnessEnhancer = new LoudnessEnhancer(sessionId);
                 } catch (Exception ignored) {}
+            }
+            if (equalizer == null) {
                 try {
-                    equalizer = new Equalizer(0, sessionId);
-                } catch (Exception ignored) {}
+                    equalizer = new Equalizer(100, sessionId);
+                } catch (Exception ignored) {
+                    try {
+                        equalizer = new Equalizer(0, sessionId);
+                    } catch (Exception ignored2) {}
+                }
+            }
+            if (bassBoost == null) {
                 try {
-                    bassBoost = new BassBoost(0, sessionId);
-                } catch (Exception ignored) {}
+                    bassBoost = new BassBoost(100, sessionId);
+                } catch (Exception ignored) {
+                    try {
+                        bassBoost = new BassBoost(0, sessionId);
+                    } catch (Exception ignored2) {}
+                }
             }
 
             // 1.8.5 Upgraded Native Phone Speaker Sound Stage DSP
@@ -1202,6 +1218,11 @@ public class MuchiAudioService extends Service {
                             else if (freqHz <= 1600) targetMb = -80;
                             else if (freqHz <= 4500) targetMb = 340;
                             else targetMb = 310;
+                            if (bands <= 5) {
+                                if (freqHz <= 75) targetMb = 560;
+                                else if (freqHz <= 280) targetMb = 220;
+                                else if (freqHz <= 1600) targetMb = -180;
+                            }
                         } else if ("bass".equals(mode)) {
                             if (freqHz <= 90) targetMb = 850;
                             else if (freqHz <= 200) targetMb = 420;
@@ -1231,6 +1252,7 @@ public class MuchiAudioService extends Service {
     }
 
     private void releaseAudioEffects() {
+        currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET;
         if (loudnessEnhancer != null) {
             try { loudnessEnhancer.release(); } catch (Exception ignored) {}
             loudnessEnhancer = null;

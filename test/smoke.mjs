@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.3", APP_VERSION === "1.9.3" && appJs.includes('const APP_VERSION = "1.9.3"'));
+  ok("version: APP_VERSION is 1.9.4", APP_VERSION === "1.9.4" && appJs.includes('const APP_VERSION = "1.9.4"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1892,8 +1892,18 @@ await (async () => {
     androidSvc.includes("else if (freqHz <= 650) targetMb = -320;") &&
     androidSvc.includes("else if (freqHz <= 1600) targetMb = -80;") &&
     androidSvc.includes("else if (freqHz <= 4500) targetMb = 340;") &&
+    androidSvc.includes("if (bands <= 5)") &&
+    androidSvc.includes("if (freqHz <= 75) targetMb = 560;") &&
+    androidSvc.includes("else if (freqHz <= 280) targetMb = 220;") &&
+    androidSvc.includes("else if (freqHz <= 1600) targetMb = -180;") &&
+    !androidSvc.includes("public void onAudioSessionIdChanged(int audioSessionId) {\n                currentAudioSessionId = audioSessionId;") &&
+    androidSvc.includes("if (currentAudioSessionId != sessionId)") &&
+    androidSvc.includes("equalizer = new Equalizer(100, sessionId);") &&
+    androidSvc.includes("bassBoost = new BassBoost(100, sessionId);") &&
+    androidSvc.includes("currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET;") &&
     iosPlug.includes("attachPhoneSpeakerDspIfAvailable") &&
-    iosPlug.includes("MTAudioProcessingTapCreate")
+    iosPlug.includes("MTAudioProcessingTapCreate") &&
+    iosPlug.includes('if let sp = call.getString("spatial"), !sp.isEmpty')
   );
   ok(
     "v1.8.5 native playback stability: no competing googlevideo disk-cache download during active playback, mid-song recovery at pos > 1.5s, qKey cache invalidation, and native duration verification",
