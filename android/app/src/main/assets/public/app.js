@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.4";
+  const APP_VERSION = "1.9.5";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -5035,6 +5035,12 @@
       fallbackArt ||
       "/cover-default.jpg"
     ).trim();
+    const artistPicture = String(
+      (t.artist && (t.artist.picture_xl || t.artist.picture_big || t.artist.picture_medium)) ||
+      t.artistPicture ||
+      ""
+    ).trim();
+    const artistId = String((t.artist && t.artist.id) || t.artistId || "").trim();
     const slug = `${title.toLowerCase().replace(/[^a-z0-9]/g, "")}_${artist.toLowerCase().replace(/[^a-z0-9]/g, "")}` || "track";
     const inferredVideoId = t.videoId || (/^yt:/i.test(String(t.id || "")) && /^[A-Za-z0-9_-]{11}$/.test(cleanId) ? cleanId : "");
     return {
@@ -5046,6 +5052,9 @@
       album,
       duration,
       artwork,
+      artistPicture,
+      artistId,
+      rank: Number(t.rank || 0),
       streamUrl: t.streamUrl || "",
       previewUrl: "",
       preview: "",
@@ -5107,7 +5116,28 @@
       return Array.isArray(arr) && arr.length > 0;
     };
 
-    // 1. Primary channel: First-party generic catalog proxy (bypasses all ad blockers & track blockers)
+    // 0. On Native App, fetch directly from api.deezer.com using the device's residential IP (zero Cloudflare Worker load)
+    if (IS_NATIVE) {
+      const ctrl0 = new AbortController();
+      const t0 = setTimeout(() => ctrl0.abort(), Math.min(ms, 3800));
+      try {
+        const r0 = await fetch(DZ_BASE + cleanPath, { signal: ctrl0.signal, headers: { Accept: "application/json" } });
+        if (r0.ok) {
+          const j0 = await r0.json();
+          if (hasValidPayload(j0)) return j0;
+        }
+      } catch {} finally {
+        clearTimeout(t0);
+      }
+    } else if (typeof document !== "undefined") {
+      // 0b. On Web browser, try direct client-side JSONP to api.deezer.com first (zero Cloudflare Worker load & immune to datacenter rate limits)
+      try {
+        const jp0 = await dzJsonp(cleanPath, Math.min(ms, 3500));
+        if (hasValidPayload(jp0)) return jp0;
+      } catch {}
+    }
+
+    // 1. Primary fallback channel: First-party generic catalog proxy (bypasses all ad blockers & track blockers)
     try {
       const catRes = await api(`/api/catalog/proxy?provider=deezer&path=${encodeURIComponent(cleanPath)}&${glq()}`, Math.min(ms, 8000));
       if (hasValidPayload(catRes)) {
@@ -5182,26 +5212,60 @@
 
     throw new Error("deezer search request failed across all channels");
   }
-  const dzFold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  const dzFold = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\$/g, "s")
+      .replace(/p!nk/g, "pink")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
 
+  const dzCatalogMemCache = new Map();
   async function deezerBrowserCatalog(name) {
     const want = dzFold(name);
     if (!want) return null;
-    const sj = await dzFetch(`/search/artist?q=${encodeURIComponent(String(name).slice(0, 80))}&limit=10`);
+    const cached = dzCatalogMemCache.get(want);
+    if (cached && Date.now() - cached.at < 300000) return cached.data;
+    const isOneEditAway = (x, y) => {
+      if (Math.abs(x.length - y.length) > 1) return false;
+      let i = 0, j = 0, edits = 0;
+      while (i < x.length && j < y.length) {
+        if (x[i] === y[j]) { i++; j++; continue; }
+        if (++edits > 1) return false;
+        if (x.length > y.length) i++;
+        else if (y.length > x.length) j++;
+        else { i++; j++; }
+      }
+      return edits + (x.length - i) + (y.length - j) <= 1;
+    };
+    const sj = await dzFetch(`/search/artist?q=${encodeURIComponent(String(name).slice(0, 80))}&limit=25`);
     const rows = (sj && sj.data) || [];
 
-    const exact = rows.filter((r) => dzFold(r.name) === want);
-    let a = exact.length
+    const exact = rows.filter((r) => r && (dzFold(r.name) === want || isOneEditAway(dzFold(r.name), want)));
+    const cands = rows.filter((r) => r && (dzFold(r.name).startsWith(want + " ") || dzFold(r.name) === "the " + want || dzFold(r.name).startsWith(want)));
+    const bestExact = exact.length
       ? exact.sort((x, y) => Number(y.nb_fan || 0) - Number(x.nb_fan || 0))[0]
       : null;
-    if (!a) {
-      const cands = rows.filter((r) => dzFold(r.name).startsWith(want));
-      if (cands.length) {
-        a = cands.sort((x, y) => (dzFold(x.name).length - dzFold(y.name).length) || (Number(y.nb_fan || 0) - Number(x.nb_fan || 0)))[0];
-      }
+    const bestPrefix = cands.length
+      ? cands.slice().sort((x, y) => Number(y.nb_fan || 0) - Number(x.nb_fan || 0))[0]
+      : null;
+    let a = bestExact;
+    if (
+      bestPrefix &&
+      (!a ||
+        (Number(bestPrefix.nb_fan || 0) >= 200000 &&
+          Number(bestPrefix.nb_fan || 0) > Number(a.nb_fan || 0) * 4))
+    ) {
+      a = bestPrefix;
+    }
+    if (!a && cands.length) {
+      a = cands.sort((x, y) => (Number(y.nb_fan || 0) - Number(x.nb_fan || 0)) || (dzFold(x.name).length - dzFold(y.name).length))[0];
     }
     if (!a || !a.id) return null;
-    const artist = { name: a.name || name, artwork: a.picture_medium || "" };
+    const artist = { name: a.name || name, artwork: a.picture_xl || a.picture_big || a.picture_medium || "" };
     const dzSong = (t, srcArt) => {
       if (!t || (!t.title && !t.trackName)) return null;
       return normalizeClientDeezerTrack(t, artist.name, srcArt || artist.artwork);
@@ -5246,10 +5310,14 @@
       pushAlbumRows(list);
       index += list.length;
     }
-    // 3) Newest 14 albums → full track lists in parallel chunks
+    // 3) Top 14 studio Albums/EPs first (before 1-track Singles) → full track lists in parallel chunks
     const all = [...top];
     const seen = new Set(all.map((t) => dzFold(t.title) + "|" + dzFold(t.artist)));
-    const expand = albums.slice(0, 14);
+    const prioritizedAlbums = albums.slice().sort((x, y) => {
+      const rankType = (rt) => (rt === "Album" ? 0 : rt === "EP" ? 1 : 2);
+      return rankType(x && x.recordType) - rankType(y && y.recordType);
+    });
+    const expand = prioritizedAlbums.slice(0, 7);
     for (let i = 0; i < expand.length; i += 7) {
       const chunk = expand.slice(i, i + 7);
       const res = await Promise.all(chunk.map((al) => dzFetch(`/album/${String(al.id).replace("deezer-album:", "")}`).catch(() => null)));
@@ -5266,7 +5334,12 @@
         }
       }
     }
-    return { artist, popular: top, songs: all, albums };
+    const result = { artist, popular: top, songs: all, albums };
+    if (all.length > 0) {
+      dzCatalogMemCache.set(want, { at: Date.now(), data: result });
+      dzCatalogMemCache.set(dzFold(artist.name), { at: Date.now(), data: result });
+    }
+    return result;
   }
 
   // ── iTunes Search (worldwide catalogue, first-party proxied, adblock-immune) ────
@@ -5311,8 +5384,8 @@
       country = u.searchParams.get("country") || country;
     } catch {}
 
-    // 0. On Native App (or when Worker edge IP is rate-limited by Apple), try direct residential IP fetch first
-    if (IS_NATIVE) {
+    // 0. Try direct residential IP fetch first on both Native App and Web (itunes.apple.com serves Access-Control-Allow-Origin: *, zero Cloudflare Worker load)
+    {
       const ctrl0 = new AbortController();
       const t0 = setTimeout(() => ctrl0.abort(), Math.min(ms, 3800));
       try {
@@ -5415,11 +5488,23 @@
       itFetch(`/search?term=${qEnc}&entity=song&limit=200&country=${country}`).catch(() => null),
       itFetch(`/search?term=${qEnc}&entity=album&limit=200&country=${country}`).catch(() => null),
     ]);
+    const isOneEditAway = (a, b) => {
+      if (Math.abs(a.length - b.length) > 1) return false;
+      let i = 0, j = 0, edits = 0;
+      while (i < a.length && j < b.length) {
+        if (a[i] === b[j]) { i++; j++; continue; }
+        if (++edits > 1) return false;
+        if (a.length > b.length) i++;
+        else if (b.length > a.length) j++;
+        else { i++; j++; }
+      }
+      return edits + (a.length - i) + (b.length - j) <= 1;
+    };
     const rows = (ssj && ssj.results) || [];
     const related = rows.filter((t) => {
       const na = dzFold(t.artistName || t.artist || "");
       if (!na) return false;
-      if (na === want) return true;
+      if (na === want || (want.length >= 4 && isOneEditAway(na, want))) return true;
       if (want.length >= 3 && (na.includes(want) || (na.length >= 3 && want.includes(na)))) return true;
       return false;
     });
@@ -6935,6 +7020,7 @@
       _resumeTrackId = null;
     }
     const gen = ++playGen;
+    playCurrentInFlight = true;
     t._playingViaAudio = false;
     if (t.streamUrl && isUnwantedRemixStreamUrl(t.streamUrl, t.source)) {
       t.streamUrl = "";
@@ -7066,12 +7152,17 @@
         try {
           if (useNativeAudioPipe && t.title) {
             // In Native App, MuchiAudioService / MuchiAudioPlugin resolves title + artist
-            // directly on-device via ANDROID_VR in ~350ms. Give JS cache/race at most 180ms
-            // and otherwise hand off immediately so there is zero multi-second tap delay.
-            await Promise.race([
-              resolveYouTubePlay(t),
-              new Promise((_, rej) => setTimeout(() => rej(new Error("native fast handoff")), 180)),
-            ]);
+            // directly on-device via ANDROID_VR in ~350ms. When in background tab, hand off
+            // immediately in 0ms without waiting on throttled WebView setTimeout timers;
+            // when in foreground, give JS cache/race at most 180ms.
+            if (document.hidden || nativeAppInBackground) {
+              resolveYouTubePlay(t).catch(() => {});
+            } else {
+              await Promise.race([
+                resolveYouTubePlay(t),
+                new Promise((_, rej) => setTimeout(() => rej(new Error("native fast handoff")), 180)),
+              ]);
+            }
           } else {
             await resolveYouTubePlay(t);
           }
@@ -7117,10 +7208,12 @@
       if (IS_NATIVE) {
         storeNativeAppAudioCache(t);
       }
-      if (!isNetworkOff && !t._fromNativeAppCache) {
-        setTimeout(() => {
+      if (!isNetworkOff) {
+        const postPlayWarm = () => {
           if (gen !== playGen) return;
-          loadQueueRecs(t);
+          if (!t._fromNativeAppCache) {
+            loadQueueRecs(t);
+          }
           const remainingUpcoming = Array.isArray(state.queue) ? (state.queue.length - 1 - state.index) : 0;
           if (remainingUpcoming <= 2 && t.source !== "radio") {
             fillRelatedQueue(t);
@@ -7128,7 +7221,12 @@
           if (state.index + 1 < state.queue.length) {
             warmTrack(state.queue[state.index + 1]);
           }
-        }, 120);
+        };
+        if (document.hidden || nativeAppInBackground) {
+          Promise.resolve().then(postPlayWarm);
+        } else {
+          setTimeout(postPlayWarm, 120);
+        }
       }
       failSkip = 0;
       state.playing = true;
@@ -7174,6 +7272,8 @@
         }
       } catch {}
       if (gen === playGen) skipFailed("Could not play this track");
+    } finally {
+      if (gen === playGen) playCurrentInFlight = false;
     }
     if (state.view === "now" && gen === playGen) render();
   }
@@ -7201,7 +7301,9 @@
     if (!resolvedStream) {
       try {
         const syncWarm = getSyncWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "");
-        const warm = syncWarm || await getWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 65, true);
+        const warm = syncWarm || ((document.hidden || nativeAppInBackground)
+          ? null
+          : await getWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 65, true));
         if (warm && warm.url && !warm.isPreview && !isOneMinuteCappedStreamUrl(warm.url) && (t.source === "audius" || (warm.source !== "soundcloud" && warm.source !== "audius" && !/sndcdn\.com|audius\.co/i.test(warm.url)))) {
           resolvedStream = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
           if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
@@ -7311,8 +7413,8 @@
         t.url = "";
       }
       url = t.streamUrl || t.url || "";
-      if (IS_NATIVE && nativePlayer() && t.videoId && !t._nativeOnDeviceTried && !url) {
-        url = `yt:${t.videoId}`;
+      if (IS_NATIVE && nativePlayer() && (t.videoId || t.title) && !t._nativeOnDeviceTried && !url) {
+        url = `yt:${t.videoId || ""}`;
         t._nativeOnDeviceTried = true;
       }
     }
@@ -7354,8 +7456,8 @@
       }
     }
     if (!url && !isNetworkOff) {
-      if (t.videoId && IS_NATIVE && nativePlayer()) {
-        url = `yt:${t.videoId}`;
+      if ((t.videoId || t.title) && IS_NATIVE && nativePlayer()) {
+        url = `yt:${t.videoId || ""}`;
         t._nativeOnDeviceTried = true;
       } else if (t.videoId) {
         try {
@@ -8203,8 +8305,6 @@
       pauseForSleep();
       return;
     }
-    // When screen is off and native service owns playback, skip redundant JS polling
-    if (document.hidden && npActive) return;
     if (npActive && !document.hidden) {
       const sinceLastSync = performance.now() - (npPosAt || 0);
       if (sinceLastSync > 900) {
@@ -8223,7 +8323,9 @@
     }
     const d = duration();
     const p = position();
-    tickCrossfade(d, p);
+    if (!document.hidden || !npActive) {
+      tickCrossfade(d, p);
+    }
     if (!document.hidden) {
       updateMediaPosition();
       msPosTick = (msPosTick || 0) + 1;
@@ -8238,7 +8340,9 @@
     }
 
     // Adaptive buffering health check
-    checkBufferResume();
+    if (!document.hidden || !npActive) {
+      checkBufferResume();
+    }
 
     // Proactive queue refill: replenish queue with related tracks when approaching end of queue
     if (state.playing && p > 8 && state.prefs.autoplay !== false && (state.queue.length - 1 - state.index <= 1)) {
@@ -8301,6 +8405,8 @@
       }
     }
 
+    // When screen is off and native service owns playback, skip redundant DOM/UI work after preloading next track
+    if (document.hidden && npActive) return;
     if (document.hidden) return;
     const seek = $("seek");
     const activeScrub = Boolean(isSeekingUi);
@@ -8548,6 +8654,7 @@
   }
 
   let nativeAppInBackground = false;
+  let playCurrentInFlight = false;
   function keepBackgroundPlay() {
     if (state.prefs.bgPlay === false || !wantPlay) return;
     const t = current();
@@ -8556,6 +8663,7 @@
       if (!npPlaying && Date.now() >= npCmdUntil) nativeResumePlayback();
       return;
     }
+    if (playCurrentInFlight) return;
     if (IS_NATIVE && nativePlayer() && (document.hidden || nativeAppInBackground) && t.source !== "radio") {
       const resumeSec = Math.max(0, Number(position()) || 0);
       try { if (state.yt && state.yt.pauseVideo) state.yt.pauseVideo(); } catch {}
@@ -11928,80 +12036,202 @@
     const q = dzFold(query || "");
     if (!q) return arts[0] || null;
 
-    // Disambiguate song queries (e.g. "Blinding Lights", "Shape of You") vs artist/mixed queries
+    const isRealArtistPortrait = (url) => /dzcdn\.net\/images\/artist|googleusercontent\.com|ggpht\.com/i.test(String(url || ""));
+    const stripTitleDec = (str) =>
+      String(str || "")
+        .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|official|audio|video|lyric|remaster|version|edit|mix|live|explicit|clean|from\s|motion\s+picture|soundtrack|ost\b|prod\.?)[^)\]]*[)\]]/gi, "")
+        .replace(/\s*[-–—]\s*(?:remaster(?:ed)?|single|radio\s*edit|version|live|from\s.*).*$/i, "")
+        .trim();
+    const isOneEditAway = (a, b) => {
+      if (Math.abs(a.length - b.length) > 1) return false;
+      let i = 0, j = 0, edits = 0;
+      while (i < a.length && j < b.length) {
+        if (a[i] === b[j]) { i++; j++; continue; }
+        if (++edits > 1) return false;
+        if (a.length > b.length) i++;
+        else if (b.length > a.length) j++;
+        else { i++; j++; }
+      }
+      return edits + (a.length - i) + (b.length - j) <= 1;
+    };
+
+    // 1. Disambiguate song queries (e.g. "Blinding Lights", "Peaches", "Starboy", "Sunflower") vs artist/mixed queries
     let titleMatchSongs = 0;
+    let artistMatchSongsInTop = 0;
     for (const list of providerLists) {
-      for (const t of (list || []).slice(0, 4)) {
+      for (const t of (list || []).slice(0, 5)) {
         if (!t) continue;
-        const tf = dzFold(t.title || "");
-        const pf = dzFold(String(t.artist || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b)\s*/i)[0]);
-        if (tf === q && pf && pf !== q) titleMatchSongs++;
+        const coreTf = dzFold(stripTitleDec(t.title || "") || t.title || "");
+        const pf = dzFold(String(t.artist || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b)\s*/i)[0].replace(/\s*-\s*Topic$/i, ""));
+        if (pf && (pf === q || pf === "the " + q || pf.startsWith(q + " "))) artistMatchSongsInTop++;
+        if ((coreTf === q || coreTf.startsWith(q + " ")) && pf && pf !== q) titleMatchSongs++;
       }
     }
-    const isSongQuery = titleMatchSongs >= 2;
+    const isSongQuery = titleMatchSongs >= 2 && (artistMatchSongsInTop < 2 || titleMatchSongs > artistMatchSongsInTop);
 
+    // 2. Score artists by song dominance across YouTube, Deezer, and iTunes
     const artistScores = new Map();
+    const artistTrackCounts = new Map();
     const artistSample = new Map();
     for (const list of providerLists) {
-      (list || []).slice(0, 6).forEach((t, idx) => {
+      (list || []).slice(0, 8).forEach((t, idx) => {
         if (!t || !t.artist) return;
-        const primary = String(t.artist).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b)\s*/i)[0].replace(/\s*-\s*Topic$/i, "").trim();
+        const rawArt = String(t.artist).replace(/\s*-\s*Topic$/i, "").trim();
+        const primary = rawArt.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b)\s*/i)[0].trim();
         const pf = dzFold(primary);
-        const tf = dzFold(t.title || "");
-        if (!pf || pf === "youtube" || pf === "various artists") return;
+        const coreTf = dzFold(stripTitleDec(t.title || "") || t.title || "");
+        if (!pf || pf === "youtube" || pf === "various artists" || pf === "unknown" || pf === "artist") return;
         if (CLIENT_JUNK_PERFORMER_RE && CLIENT_JUNK_PERFORMER_RE.test(primary)) return;
-        if (isSongQuery && pf === q) return; // Song query: skip cover bands named after the song title
-        const isTitleMatch = tf === q || (q.length >= 4 && q.includes(tf) && tf.length >= 4);
-        const rankBonus = idx === 0 ? 12 : idx === 1 ? 6 : idx === 2 ? 3 : 1;
-        const weight = rankBonus + (isTitleMatch ? 8 : 0) + (!isSongQuery && q.includes(pf) && pf.length >= 3 ? 8 : 0);
+        if (isSongQuery && (pf === q || pf.startsWith(q))) return; // Song query: skip cover/channel names matching the song title
+
+        const isTitleMatch = coreTf === q || coreTf.startsWith(q + " ") || (q.length >= 4 && q.includes(coreTf) && coreTf.length >= 3);
+        const isQuerySubmatch = !isSongQuery && pf.length >= 2 && (q === pf || q === "the " + pf || pf === "the " + q || q.includes(pf) || pf.startsWith(q + " ") || isOneEditAway(pf, q));
+        const rankBonus = idx === 0 ? 14 : idx === 1 ? 8 : idx === 2 ? 5 : idx < 5 ? 3 : 1;
+        const weight = rankBonus + (isTitleMatch ? 10 : 0) + (isQuerySubmatch ? 12 : 0);
+
         artistScores.set(pf, (artistScores.get(pf) || 0) + weight);
-        if (!artistSample.has(pf) || (t.artwork && t.artwork !== "/cover-default.jpg")) {
-          artistSample.set(pf, { name: primary, artwork: t.artwork || "/cover-default.jpg", source: t.source || "apple" });
+        artistTrackCounts.set(pf, (artistTrackCounts.get(pf) || 0) + 1);
+
+        const bestArt = t.artistPicture || t.artwork || "/cover-default.jpg";
+        const prevSample = artistSample.get(pf);
+        if (
+          !prevSample ||
+          (isRealArtistPortrait(bestArt) && !isRealArtistPortrait(prevSample.artwork)) ||
+          (prevSample.artwork === "/cover-default.jpg" && bestArt !== "/cover-default.jpg")
+        ) {
+          artistSample.set(pf, {
+            name: primary,
+            artwork: bestArt,
+            source: t.source || "apple",
+            artistId: t.artistId || "",
+          });
         }
       });
     }
 
-    let bestArtistFold = "";
-    let bestScore = 0;
-    for (const [pf, sc] of artistScores.entries()) {
-      if (sc > bestScore) {
-        bestScore = sc;
-        bestArtistFold = pf;
+    // 3. Build unified candidate map from s.artists + song-derived artists so real artist portraits & fan counts win
+    const rawQueryLower = String(query || "").trim().toLowerCase();
+    const candidates = new Map();
+    for (const a of arts) {
+      if (!a || !a.name) continue;
+      const af = dzFold(a.name);
+      if (!af || (isSongQuery && (af === q || af.startsWith(q)) && (artistTrackCounts.get(af) || 0) === 0)) continue;
+      const ex = candidates.get(af);
+      if (!ex) {
+        candidates.set(af, { ...a });
+      } else {
+        const aFans = Number(a.nb_fan) || 0;
+        const exFans = Number(ex.nb_fan) || 0;
+        const aExactCase = String(a.name).trim().toLowerCase() === rawQueryLower;
+        const exExactCase = String(ex.name).trim().toLowerCase() === rawQueryLower;
+        if (aFans > exFans * 2 || (aExactCase && !exExactCase && aFans >= exFans)) {
+          ex.name = a.name;
+          if (a.id) ex.id = a.id;
+          if (a.artwork && a.artwork !== "/cover-default.jpg") ex.artwork = a.artwork;
+        } else if (isRealArtistPortrait(a.artwork) && !isRealArtistPortrait(ex.artwork)) {
+          ex.artwork = a.artwork;
+        }
+        if (aFans > exFans) ex.nb_fan = a.nb_fan;
       }
     }
-
-    const exactArtist = arts.find((a) => a && dzFold(a.name) === q);
-    if (exactArtist && !isSongQuery) return exactArtist;
-
-    if (bestArtistFold && (bestScore >= 10 || isSongQuery)) {
-      const matchedInArts = arts.find((a) => a && dzFold(a.name) === bestArtistFold);
-      if (matchedInArts) return matchedInArts;
-      const sample = artistSample.get(bestArtistFold);
-      if (sample) {
-        const synthArtist = {
-          id: `artist:${sample.name}`,
+    for (const [pf, sample] of artistSample.entries()) {
+      const ex = candidates.get(pf);
+      if (!ex) {
+        candidates.set(pf, {
+          id: sample.artistId ? `artist:${sample.source}:${sample.artistId}` : `artist:${sample.name}`,
           kind: "artist",
           name: sample.name,
           artwork: sample.artwork || "/cover-default.jpg",
           source: sample.source || "apple",
           query: sample.name,
-        };
-        if (s && Array.isArray(s.artists) && !s.artists.some((a) => a && dzFold(a.name) === bestArtistFold)) {
-          s.artists.unshift(synthArtist);
-        }
-        return synthArtist;
+        });
+      } else if (
+        (isRealArtistPortrait(sample.artwork) && !isRealArtistPortrait(ex.artwork)) ||
+        ((!ex.artwork || ex.artwork === "/cover-default.jpg") && sample.artwork && sample.artwork !== "/cover-default.jpg")
+      ) {
+        ex.artwork = sample.artwork;
       }
     }
 
-    return exactArtist
-      || arts.find((a) => a && dzFold(a.name).startsWith(q))
-      || arts.find((a) => {
-        const n = dzFold(a && a.name);
-        if (!n || (isSongQuery && n === q)) return false;
-        return n.includes(q) || (n.length >= 4 && q.includes(n));
-      })
-      || arts[0]
-      || null;
+    // 4. Score all candidates combining song dominance, Deezer fan count, query match, and real artist portrait
+    const qWords = q.split(" ").filter((w) => w.length >= 2);
+    const exact1WordCand = !q.includes(" ") ? candidates.get(q) : null;
+    const exact1WordFans = exact1WordCand ? (Number(exact1WordCand.nb_fan) || 0) : 0;
+    let bestCand = null;
+    let bestTotal = -Infinity;
+
+    for (const [af, cand] of candidates.entries()) {
+      const songSc = artistScores.get(af) || 0;
+      const trackCnt = artistTrackCounts.get(af) || 0;
+      const fans = Number(cand.nb_fan) || 0;
+      const isSuperstarPrefix = Boolean(
+        !isSongQuery &&
+        !q.includes(" ") &&
+        (af.startsWith(q + " ") || af === "the " + q) &&
+        fans >= 1500000 &&
+        fans >= exact1WordFans * 3
+      );
+      const isExactDiacriticMatch = Boolean(
+        rawQueryLower !== q &&
+        String(cand.name || "").trim().toLowerCase() === rawQueryLower
+      );
+      const fanSc = (fans > 0 ? Math.log10(fans + 1) * 14 : 0) + (fans >= 3000000 ? 55 : fans >= 1000000 ? 32 : fans >= 500000 ? 14 : 0) + (isSuperstarPrefix ? 420 : 0) + (isExactDiacriticMatch ? 95 : 0);
+      const photoSc = isRealArtistPortrait(cand.artwork) ? 10 : 0;
+
+      let nameSc = 0;
+      if (!isSongQuery) {
+        if (af === q || af === "the " + q || q === "the " + af) {
+          nameSc = (trackCnt >= 2 || fans >= 50000) ? 75 : (trackCnt >= 1 || fans >= 5000) ? 45 : 15;
+        } else if (af.startsWith(q + " ")) {
+          nameSc = (trackCnt >= 2 || fans >= 50000) ? 72 : (trackCnt >= 1 || fans >= 10000) ? 52 : 25;
+        } else if (isOneEditAway(af, q)) {
+          nameSc = 68;
+        } else if (q.includes(af) && af.length >= 3) {
+          nameSc = 60;
+        } else if (af.startsWith(q) && q.length >= 3) {
+          nameSc = 45;
+        } else if (qWords.length > 1 && qWords.every((w) => af.includes(w) || qWords.some((qw) => isOneEditAway(qw, w)))) {
+          nameSc = 50;
+        } else if (af.includes(q) && q.length >= 3) {
+          nameSc = 35;
+        }
+      } else {
+        if (q.includes(af) && af !== q && af.length >= 3) {
+          nameSc = 45;
+        }
+      }
+
+      const total = songSc * 2.2 + fanSc + nameSc + photoSc;
+      if (total > bestTotal) {
+        bestTotal = total;
+        bestCand = cand;
+      }
+    }
+
+    if (bestCand) {
+      if (s && Array.isArray(s.artists)) {
+        const bestFold = dzFold(bestCand.name);
+        const existingIdx = s.artists.findIndex((a) => a && dzFold(a.name) === bestFold);
+        if (existingIdx >= 0) {
+          s.artists[existingIdx] = {
+            ...s.artists[existingIdx],
+            ...bestCand,
+            artwork: isRealArtistPortrait(bestCand.artwork)
+              ? bestCand.artwork
+              : (s.artists[existingIdx].artwork || bestCand.artwork),
+          };
+          if (existingIdx > 0) {
+            const [item] = s.artists.splice(existingIdx, 1);
+            s.artists.unshift(item);
+          }
+          return s.artists[0];
+        }
+        s.artists.unshift(bestCand);
+      }
+      return bestCand;
+    }
+
+    return arts[0] || null;
   }
 
   function renderArtistPage() {
@@ -12557,6 +12787,16 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.9.5",
+      title: "Muchi 1.9.5",
+      notes: [
+        "Calibrated Native Phone Speaker DSP on Android & iOS with pre-DSP headroom staging, 55 Hz 4th-order sub-bass excursion protection, and C2-continuous soft-knee limiting for 0% clipping and studio-clear vocals.",
+        "Hardened Native App background playback with zero-delay between-song transitions, background next-track preloading, autoplay queue refill, and uninterrupted CPU/Wi-Fi WakeLocks.",
+        "Fixed Artist profile resolution and Popular/All Songs discography across all 32 countries on both Web and Native App (including 1-edit typo tolerance).",
+        "Added clean background pause synchronization on headphone/Bluetooth disconnect so audio never unexpectedly resumes over the phone speaker.",
+      ],
+    },
     {
       ver: "1.9.4",
       title: "Muchi 1.9.4",
@@ -14657,10 +14897,17 @@
         else if (state.view === "library" && state.activePlaylist === "catalog") list = (state.catalogPlaylist && state.catalogPlaylist.tracks) || [];
         else if (state.view === "library" && typeof state.activePlaylist === "number") list = state.playlists[state.activePlaylist].tracks;
         else if (state.view === "settings") list = state.downloads;
-        else if (fromSearch && state.artistPage) list = [].concat(
-          (state.artistPage && state.artistPage.popular) || [],
-          (state.artistPage && state.artistPage.songs) || []
-        );
+        else if (fromSearch && state.artistPage) {
+          const seenArtistTrackIds = new Set();
+          list = [];
+          for (const tr of [].concat((state.artistPage && state.artistPage.popular) || [], (state.artistPage && state.artistPage.songs) || [])) {
+            if (!tr) continue;
+            const tid = tr.id || `${tr.title}|${tr.artist}`;
+            if (seenArtistTrackIds.has(tid)) continue;
+            seenArtistTrackIds.add(tid);
+            list.push(tr);
+          }
+        }
         else if (fromSearch && state.filter === "history") list = state.recents;
         else if (fromSearch && (state.filter === "songs" || state.filter === "all")) list = [].concat(
           (state.search && state.search.youtube) || [],
@@ -16067,11 +16314,35 @@
     paintNav();
     const q = artist.query || rawName;
     const targetFold = dzFold(rawName);
+    const isOneEditAway = (a, b) => {
+      if (Math.abs(a.length - b.length) > 1) return false;
+      let i = 0, j = 0, edits = 0;
+      while (i < a.length && j < b.length) {
+        if (a[i] === b[j]) { i++; j++; continue; }
+        if (++edits > 1) return false;
+        if (a.length > b.length) i++;
+        else if (b.length > a.length) j++;
+        else { i++; j++; }
+      }
+      return edits + (a.length - i) + (b.length - j) <= 1;
+    };
+    const isRealArtistPortrait = (url) => /dzcdn\.net\/images\/artist|googleusercontent\.com|ggpht\.com/i.test(String(url || ""));
+    const shouldUpgradeArtistArt = (incomingUrl) => {
+      if (!incomingUrl || incomingUrl === "/cover-default.jpg") return false;
+      const cur = state.artistPage && state.artistPage.artwork;
+      if (!cur || cur === "/cover-default.jpg") return true;
+      return isRealArtistPortrait(incomingUrl) && !isRealArtistPortrait(cur);
+    };
     const matchesRequestedArtist = (cand) => {
       const cf = dzFold(cand);
-      if (!cf || !targetFold) return false;
-      if (cf === targetFold) return true;
-      if (targetFold.length >= 3 && (cf.includes(targetFold) || (cf.length >= 3 && targetFold.includes(cf)))) return true;
+      const activeFold = dzFold((state.artistPage && state.artistPage.name) || rawName);
+      if (!cf || (!targetFold && !activeFold)) return false;
+      for (const tf of [targetFold, activeFold]) {
+        if (!tf) continue;
+        if (cf === tf || cf === "the " + tf || tf === "the " + cf) return true;
+        if (tf.length >= 4 && isOneEditAway(cf, tf)) return true;
+        if (tf.length >= 3 && (cf.includes(tf) || (cf.length >= 3 && tf.includes(cf)))) return true;
+      }
       return false;
     };
     const songs = [];
@@ -16131,7 +16402,15 @@
     dzPromise.then((dzFast) => {
       if (gen !== artistGen || !state.artistPage || !dzFast) return;
       if (dzFast.artist && dzFast.artist.name && matchesRequestedArtist(dzFast.artist.name)) state.artistPage.name = dzFast.artist.name;
-      if (dzFast.artist && dzFast.artist.artwork && (!state.artistPage.artwork || state.artistPage.artwork === "/cover-default.jpg")) state.artistPage.artwork = dzFast.artist.artwork;
+      if (
+        dzFast.artist &&
+        dzFast.artist.artwork &&
+        (!state.artistPage.artwork ||
+          state.artistPage.artwork === "/cover-default.jpg" ||
+          (/dzcdn\.net\/images\/artist/i.test(dzFast.artist.artwork) && !/dzcdn\.net\/images\/artist|googleusercontent\.com/i.test(state.artistPage.artwork)))
+      ) {
+        state.artistPage.artwork = dzFast.artist.artwork;
+      }
       const dzPop = (dzFast.popular || []).filter((t) => t && matchesRequestedArtist(t.artist));
       addSongs(dzPop);
       addSongs((dzFast.songs || []).filter((t) => t && matchesRequestedArtist(t.artist)));
@@ -16147,7 +16426,7 @@
       data = await api(`/api/artist?q=${encodeURIComponent(q)}&id=${encodeURIComponent(appleId)}&${glq()}`, 12000);
     } catch {}
     if (data && data.name && matchesRequestedArtist(data.name)) state.artistPage.name = data.name;
-    if (data && data.artwork && !state.artistPage.artwork) state.artistPage.artwork = data.artwork;
+    if (data && data.artwork && shouldUpgradeArtistArt(data.artwork)) state.artistPage.artwork = data.artwork;
     addSongs((data && data.songs) || []);
     addAlbums((data && data.albums) || []);
     popular = (data && Array.isArray(data.popular) && data.popular.length ? data.popular : songs).slice(0, 20);
@@ -16164,8 +16443,8 @@
       if (gen !== artistGen || !state.artistPage) return;
       if (dz && dz.artist && dz.artist.name && matchesRequestedArtist(dz.artist.name)) state.artistPage.name = dz.artist.name;
       else if (it && it.artist && it.artist.name && matchesRequestedArtist(it.artist.name)) state.artistPage.name = it.artist.name;
-      if (it && it.artist && it.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = it.artist.artwork;
-      else if (dz && dz.artist && dz.artist.artwork && !state.artistPage.artwork) state.artistPage.artwork = dz.artist.artwork;
+      if (dz && dz.artist && dz.artist.artwork && shouldUpgradeArtistArt(dz.artist.artwork)) state.artistPage.artwork = dz.artist.artwork;
+      else if (it && it.artist && it.artist.artwork && shouldUpgradeArtistArt(it.artist.artwork)) state.artistPage.artwork = it.artist.artwork;
 
       // Rebuild songs & popular in deterministic hit order:
       // 1. Deezer official Top Tracks + iTunes top tracks interleaved
@@ -16182,8 +16461,8 @@
         if (i < itTopList.length) addSongs([itTopList[i]]);
       }
       addSongs(prevSongs.filter((t) => !/\b(acoustic|live|remix|karaoke|instrumental)\b/i.test(t && t.title || "")));
-      addSongs(dz && dz.songs);
-      addSongs(it && it.songs);
+      addSongs(((dz && dz.songs) || []).filter((t) => t && matchesRequestedArtist(t.artist)));
+      addSongs(((it && it.songs) || []).filter((t) => t && matchesRequestedArtist(t.artist)));
       addSongs(prevSongs);
       addSongs(sr && sr.songs);
       addAlbums(dz && dz.albums);
@@ -16301,13 +16580,26 @@
     }
     if (!targetArtistFold) targetArtistFold = intent.artistFold;
     if (!targetArtistFold && tracks.length > 0) {
-      for (const r of tracks.slice(0, 10)) {
-        if (!r || !r.artist) continue;
-        const prim = String(r.artist).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
-        const pf = dzFold(prim);
-        if (pf && pf.length >= 3 && want.includes(pf)) {
-          targetArtistFold = pf;
-          break;
+      const top0 = tracks[0];
+      const top0CoreTitle = dzFold(String(top0 && top0.title || "").replace(/\s*[\[(].*$/, ""));
+      const top0Prim = String(top0 && top0.artist || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+      const top0Pf = dzFold(top0Prim);
+      const artistMatchInTop8 = tracks.slice(0, 8).filter((r) => {
+        const p = dzFold(String(r && r.artist || "").split(/\s*(?:\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*/i)[0]);
+        return p && (p === want || p === "the " + want);
+      }).length;
+      if (top0CoreTitle === want && top0Pf && top0Pf !== want && artistMatchInTop8 < 2) {
+        targetArtistFold = top0Pf;
+      } else {
+        for (const r of tracks.slice(0, 10)) {
+          if (!r || !r.artist) continue;
+          const fullAf = dzFold(r.artist);
+          const prim = String(r.artist).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+          const pf = dzFold(prim);
+          if (pf && pf.length >= 3 && (want === fullAf || (want.includes(pf) && (!r.artist.includes("&") || want.includes(fullAf))))) {
+            targetArtistFold = pf;
+            break;
+          }
         }
       }
       if (!targetArtistFold && tracks[0] && tracks[0].artist) {
@@ -16315,11 +16607,15 @@
       }
     }
 
+    const artistTrackCountInRaw = targetArtistFold
+      ? tracks.filter((r) => r && r.artist && artistMatches(r.artist, targetArtistFold)).length
+      : 0;
     const targetSongFold = intent.songFold || (() => {
       if (!targetArtistFold) return want;
       const artToks = new Set(targetArtistFold.split(" ").filter(Boolean));
       const rem = want.split(" ").filter((w) => !artToks.has(w) && w !== "by").join(" ").trim();
-      return rem || want;
+      if (rem) return rem;
+      return artistTrackCountInRaw >= 2 ? "" : want;
     })();
 
     const stripDec = (s) =>
@@ -16330,7 +16626,8 @@
 
     const queryWantsRemix = /\b(remix|live|acoustic|slowed|sped\s*up)\b/i.test(intent.raw);
     const scored = [];
-    for (const t of tracks) {
+    for (let rawIdx = 0; rawIdx < tracks.length; rawIdx++) {
+      const t = tracks[rawIdx];
       if (!t || !t.title || !looksLikeSong(t)) continue;
       if (!intent.wantsInstrumental) {
         if (CLIENT_UNRELATED_INSTRUMENTAL_RE.test(t.title) || CLIENT_UNRELATED_INSTRUMENTAL_RE.test(t.album || "")) continue;
@@ -16348,8 +16645,7 @@
       const matchesArtist = Boolean(
         targetArtistFold &&
         (artistMatches(t.artist, targetArtistFold) ||
-         artistMatches(t.title, targetArtistFold) ||
-         (intent.artistFold && (artistMatches(t.artist, intent.artistFold) || artistMatches(t.title, intent.artistFold))))
+         (intent.artistFold && artistMatches(t.artist, intent.artistFold)))
       );
       const matchesTitleExact = Boolean(targetSongFold && (coreTitleFold === targetSongFold || titleFold === targetSongFold));
       const matchesTitlePrefix = Boolean(
@@ -16385,6 +16681,9 @@
         if (coreTitleFold.includes(tok)) score += 28;
         if (combined.includes(tok)) score += 24;
       }
+      if (rawIdx < 20) {
+        score += Math.max(0, 20 - rawIdx) * 4;
+      }
       if (isRemix && !queryWantsRemix) score -= 180;
       scored.push({ track: t, canonKey, bucket, score, isRemix });
     }
@@ -16407,6 +16706,12 @@
     const titleSongs = uniq.filter((c) => c.bucket === "exact_title");
     const relSongs = uniq.filter((c) => c.bucket === "related");
 
+    const isArtistQueryIntent = Boolean(
+      targetArtistFold &&
+      artistSongs.length >= 2 &&
+      (targetArtistFold === want || targetArtistFold === "the " + want || targetArtistFold.startsWith(want + " "))
+    );
+
     const out = [];
     const pushOut = (item) => {
       if (!item || out.length >= maxCount) return;
@@ -16419,11 +16724,11 @@
     } else {
       for (const ex of exactSongs.slice(0, 2)) pushOut(ex);
     }
-    if (!exactSongs.length && titleSongs.length) {
+    if (!exactSongs.length && !isArtistQueryIntent && titleSongs.length) {
       for (const et of titleSongs.slice(0, 3)) pushOut(et);
     }
     const remExact = nonRemixExact.length > 0 ? [...nonRemixExact.slice(2), ...remixExact] : exactSongs.slice(2);
-    let ai = 0, ti = exactSongs.length ? 0 : 3, ri = 0, exi = 0;
+    let ai = 0, ti = (exactSongs.length || isArtistQueryIntent) ? 0 : 3, ri = 0, exi = 0;
     while (out.length < maxCount && (ai < artistSongs.length || ti < titleSongs.length || ri < relSongs.length || exi < remExact.length)) {
       if (ai < artistSongs.length) pushOut(artistSongs[ai++]);
       if (ai < artistSongs.length) pushOut(artistSongs[ai++]);
@@ -16779,6 +17084,7 @@
     const tasks = [];
     const mergeUniqueArtists = (incoming) => {
       if (!Array.isArray(incoming) || !incoming.length) return;
+      const isRealPortrait = (url) => /dzcdn\.net\/images\/artist|googleusercontent\.com|ggpht\.com/i.test(String(url || ""));
       const list = state.search.artists || [];
       const seen = new Set(list.map((a) => dzFold(a && a.name)));
       for (const a of incoming) {
@@ -16789,26 +17095,27 @@
           list.push(a);
         } else {
           const ex = list.find((x) => dzFold(x && x.name) === k);
-          if (ex && (!ex.artwork || ex.artwork === "/cover-default.jpg") && a.artwork && a.artwork !== "/cover-default.jpg") {
-            ex.artwork = a.artwork;
+          if (ex) {
+            const aFans = Number(a.nb_fan) || 0;
+            const exFans = Number(ex.nb_fan) || 0;
+            if (aFans > exFans * 2 && a.name) {
+              ex.name = a.name;
+              if (a.id) ex.id = a.id;
+              if (a.artwork && a.artwork !== "/cover-default.jpg") ex.artwork = a.artwork;
+            } else if (
+              ((!ex.artwork || ex.artwork === "/cover-default.jpg") && a.artwork && a.artwork !== "/cover-default.jpg") ||
+              (isRealPortrait(a.artwork) && !isRealPortrait(ex.artwork))
+            ) {
+              ex.artwork = a.artwork;
+            }
+            if (aFans > exFans) {
+              ex.nb_fan = a.nb_fan;
+            }
           }
         }
       }
-      const wantQ = dzFold(qStr);
-      if (wantQ && list.length > 1) {
-        list.sort((a, b) => {
-          const na = dzFold(a && a.name);
-          const nb = dzFold(b && b.name);
-          const exA = na === wantQ ? 1 : 0;
-          const exB = nb === wantQ ? 1 : 0;
-          if (exA !== exB) return exB - exA;
-          const prA = na.startsWith(wantQ) ? 1 : 0;
-          const prB = nb.startsWith(wantQ) ? 1 : 0;
-          if (prA !== prB) return prB - prA;
-          return 0;
-        });
-      }
       state.search.artists = list;
+      pickTopArtist(state.search, qStr);
     };
     const mergeUniquePlaylists = (incoming) => {
       if (!Array.isArray(incoming) || !incoming.length) return;
@@ -16901,6 +17208,20 @@
       tasks.push(
         (async () => {
           try {
+            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(qStr)}&limit=80`, 5000);
+            const rows = (dzRes && (dzRes.data || dzRes.results || dzRes.deezer)) || [];
+            if (Array.isArray(rows) && rows.length && state.search && state.search.query === qStr && state.query === qStr) {
+              const songs = rows.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
+              if (songs.length) {
+                state.search.deezer = rankAndCurateProviderSongs(songs, qStr, 75);
+                delete state.search._deezerSynthesized;
+                pickTopArtist(state.search, qStr);
+                updated = true;
+                return;
+              }
+            }
+          } catch {}
+          try {
             const dzData = await api(`/api/search?q=${encodeURIComponent(qStr)}&source=deezer&refresh=1&${glq()}`, 5500);
             if (dzData && Array.isArray(dzData.deezer) && dzData.deezer.length && state.search && state.search.query === qStr && state.query === qStr) {
               const songs = dzData.deezer.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
@@ -16909,19 +17230,6 @@
                 delete state.search._deezerSynthesized;
                 mergeUniqueArtists(dzData.artists);
                 mergeUniquePlaylists(dzData.playlists);
-                updated = true;
-                return;
-              }
-            }
-          } catch {}
-          try {
-            const dzRes = await dzFetch(`/search?q=${encodeURIComponent(qStr)}&limit=80`, 5000);
-            const rows = (dzRes && (dzRes.data || dzRes.results || dzRes.deezer)) || [];
-            if (Array.isArray(rows) && rows.length && state.search && state.search.query === qStr && state.query === qStr) {
-              const songs = rows.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t));
-              if (songs.length) {
-                state.search.deezer = rankAndCurateProviderSongs(songs, qStr, 75);
-                delete state.search._deezerSynthesized;
                 updated = true;
               }
             }
@@ -17010,26 +17318,47 @@
     }
 
     // Fast on-device instant preview (~250ms, zero Cloudflare load): surface artist profile
-    // and top iTunes songs immediately while /api/search is still in flight.
+    // with real Deezer portrait + fan count and top songs immediately while /api/search is in flight.
     if (IS_NATIVE) {
       const itCountryFast = String((state.prefs && state.prefs.country) || "US");
-      fetch(`${ITUNES_BASE}/search?term=${encodeURIComponent(qTrim)}&media=music&entity=song&limit=25&country=${encodeURIComponent(itCountryFast)}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((j) => {
-          if (!j || !Array.isArray(j.results) || !j.results.length) return;
+      Promise.allSettled([
+        fetch(`${ITUNES_BASE}/search?term=${encodeURIComponent(qTrim)}&media=music&entity=song&limit=25&country=${encodeURIComponent(itCountryFast)}`).then((r) => (r.ok ? r.json() : null)),
+        fetch(`${DZ_BASE}/search?q=${encodeURIComponent(qTrim)}&limit=25`).then((r) => (r.ok ? r.json() : null)),
+        fetch(`${DZ_BASE}/search/artist?q=${encodeURIComponent(qTrim)}&limit=25`).then((r) => (r.ok ? r.json() : null)),
+      ])
+        .then(([itSettled, dzTrSettled, dzArtSettled]) => {
           if (state.query !== qTrim || (state.search && !state.search._isInstant)) return;
-          const fastSongs = rankAndCurateProviderSongs(j.results.map(normalizeItunesItem).filter((t) => t && looksLikeSong(t)), qTrim, 25);
-          if (!fastSongs.length) return;
+          const itJ = itSettled.status === "fulfilled" ? itSettled.value : null;
+          const dzTrJ = dzTrSettled.status === "fulfilled" ? dzTrSettled.value : null;
+          const dzArtJ = dzArtSettled.status === "fulfilled" ? dzArtSettled.value : null;
+          const fastItSongs = (itJ && Array.isArray(itJ.results))
+            ? rankAndCurateProviderSongs(itJ.results.map(normalizeItunesItem).filter((t) => t && looksLikeSong(t)), qTrim, 25)
+            : [];
+          const fastDzSongs = (dzTrJ && Array.isArray(dzTrJ.data))
+            ? rankAndCurateProviderSongs(dzTrJ.data.map((t) => normalizeClientDeezerTrack(t)).filter((t) => t && looksLikeSong(t)), qTrim, 25)
+            : [];
+          const fastArtists = (dzArtJ && Array.isArray(dzArtJ.data))
+            ? dzArtJ.data.map((a) => ({
+                id: `artist:deezer:${a.id}`,
+                kind: "artist",
+                name: a.name || "",
+                nb_fan: Number(a.nb_fan || 0),
+                artwork: a.picture_xl || a.picture_big || a.picture_medium || "/cover-default.jpg",
+                source: "deezer",
+                query: a.name || "",
+              })).filter((a) => a.name)
+            : [];
+          if (!fastItSongs.length && !fastDzSongs.length && !fastArtists.length) return;
           const instantObj = {
             query: qTrim,
             youtube: [],
-            apple: fastSongs,
-            itunes: fastSongs,
-            deezer: fastSongs.map((t) => normalizeClientDeezerTrack(t)).filter(Boolean),
-            _deezerSynthesized: true,
+            apple: fastItSongs,
+            itunes: fastItSongs,
+            deezer: fastDzSongs.length ? fastDzSongs : fastItSongs.map((t) => normalizeClientDeezerTrack(t)).filter(Boolean),
+            _deezerSynthesized: !fastDzSongs.length,
             audius: [],
             radio: [],
-            artists: [],
+            artists: fastArtists,
             playlists: [],
             offline: localMatches,
             _isInstant: true,
@@ -18640,6 +18969,7 @@
         state.query = "";
         if (state.view === "search") {
           state.search = null;
+          state.artistPage = null;
           render();
         }
         return;
@@ -18647,7 +18977,7 @@
       searchLiveTimer = setTimeout(() => {
         const curInp = $("searchInput");
         const curVal = curInp ? curInp.value.trim() : val;
-        if (state.view === "search" && curVal.length >= 2 && curVal !== state.query) {
+        if (state.view === "search" && curVal.length >= 2 && (curVal !== state.query || state.artistPage)) {
           runSearch(curVal);
         }
       }, 350);

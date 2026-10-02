@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.4", APP_VERSION === "1.9.4" && appJs.includes('const APP_VERSION = "1.9.4"'));
+  ok("version: APP_VERSION is 1.9.5", APP_VERSION === "1.9.5" && appJs.includes('const APP_VERSION = "1.9.5"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -2192,6 +2192,18 @@ await (async () => {
           iosSceneDelSrc.includes("MuchiAudioPlugin.sharedInstance?.stopOnAppClose()") &&
           appJs.includes('/api/youtube/search?q=${encodeURIComponent(qTrim)}&fast=1') &&
           appJs.includes("const topPool = [...((data.youtube || []).slice(0, 1)), ...((data.apple || []).slice(0, 1))];")
+      );
+
+      ok(
+        "v1.9.5 native phone speaker DSP calibration & background playback continuity: 0% clipping headroom, 7-stage biquad EQ, C2 soft-knee limiter, playCurrentInFlight guard, background preload/refill, and iOS emitControls wake",
+        androidSvc.includes("float dspHeadroom = \"off\".equals(mode) ? 1.0f : (\"phone\".equals(mode) ? 0.62f : 0.72f);") &&
+          iosPlugin.includes("let preTrim: Float = 0.82") &&
+          iosPlugin.includes("let ceiling: Float = 0.965") &&
+          iosPlugin.includes("private func emitControls(_ message: String, positionMs: Int = 0)") &&
+          appJs.includes("let playCurrentInFlight = false;") &&
+          appJs.includes("if (playCurrentInFlight) return;") &&
+          appJs.indexOf("NP.preload({") < appJs.indexOf("if (document.hidden && npActive) return;") &&
+          androidSvc.includes("emitControls(\"pause\", Math.max(0L, player.getCurrentPosition()));")
       );
     } finally {
       globalThis.fetch = realFetch;

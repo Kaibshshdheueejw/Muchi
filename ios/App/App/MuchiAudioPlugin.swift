@@ -91,6 +91,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    private func emitControls(_ message: String, positionMs: Int = 0) {
+        self.notifyListeners("muchiControls", data: ["message": message, "position": positionMs])
+        let safeMsg = message.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        DispatchQueue.main.async { [weak self] in
+            self?.bridge?.webView?.evaluateJavaScript(
+                "try{if(window._onMuchiNativeControls)window._onMuchiNativeControls({message:'\(safeMsg)',position:\(positionMs)});}catch(e){}",
+                completionHandler: nil
+            )
+        }
+    }
+
     private static let defaultUA =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1"
 
@@ -145,7 +156,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 if self.player?.rate ?? 0 > 0 {
                     self.player?.pause()
                     self.updateRate()
-                    self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
+                    self.emitControls("pause", positionMs: 0)
                 }
             case .ended:
                 let optsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
@@ -153,7 +164,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 if options.contains(.shouldResume) && self.currentItem != nil {
                     self.player?.play()
                     self.updateRate()
-                    self.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
+                    self.emitControls("play", positionMs: 0)
                 }
             @unknown default:
                 break
@@ -170,7 +181,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 // convention is to stop audio, not blast it into the speaker.
                 self.player?.pause()
                 self.updateRate()
-                self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
+                self.emitControls("pause", positionMs: 0)
             }
         }
 
@@ -320,7 +331,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                         self.startPlayer(with: streamUrl, rawUrl: rs.url, userAgent: rs.userAgent)
                     } else {
                         self.errorSent = true
-                        self.notifyListeners("muchiControls", data: ["message": "error", "position": Int(self.lastKnownPositionMs)])
+                        self.emitControls("error", positionMs: Int(self.lastKnownPositionMs))
                     }
                 }
             }
@@ -378,7 +389,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.recoverMidSongStream(resumeMs: posNowMs)
                 return
             }
-            self.notifyListeners("muchiControls", data: ["message": "ended", "position": 0])
+            self.emitControls("ended", positionMs: 0)
         }
 
         p.replaceCurrentItem(with: item)
@@ -522,6 +533,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc public func setAudioPrefs(_ call: CAPPluginCall) {
         let volPct = call.getDouble("volume") ?? 100.0
         let normalize = call.getBool("normalize") ?? false
+        let prevSpatial = prefSpatial
         if let sp = call.getString("spatial"), !sp.isEmpty {
             prefSpatial = sp
         }
@@ -536,49 +548,200 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 player?.rate = prefSpeed
             }
         }
+        if prevSpatial != prefSpatial, let item = currentItem {
+            if prefSpatial == "off" {
+                item.audioMix = nil
+            } else if item.audioMix == nil {
+                attachPhoneSpeakerDspIfAvailable(to: item, asset: item.asset)
+            }
+        }
         call.resolve()
     }
 
-    // ── 1.8.5 Native iOS Phone Speaker 7-Stage Biquad DSP + Soft-Knee Limiter ──
-    // Mirrors the Android Native Phone Speaker acoustic profile:
-    //   1. Sub-Rumble High-Pass: 35 Hz (Q = 0.707)
-    //   2. Upper-Bass Punch Peak: 115 Hz, Q = 0.82, Gain = +7.5 dB
-    //   3. Warmth Body Peak: 210 Hz, Q = 0.85, Gain = +3.2 dB
-    //   4. Boxiness / Mud Cut: 430 Hz, Q = 0.90, Gain = -3.2 dB
-    //   5. Anti-Tinny / Horn Control: 1150 Hz, Q = 1.00, Gain = -0.8 dB
-    //   6. Vocal Presence Peak: 2850 Hz, Q = 0.80, Gain = +3.3 dB
-    //   7. Silk Air High-Shelf: 8200 Hz, Q = 0.707, Gain = +3.0 dB
-    //   8. Makeup Gain (+3.1 dB / 1.43x) + Soft-Knee Brickwall Limiter (-0.8 dBFS ceiling)
+    private final class BiquadStage {
+        var b0: Float = 1.0, b1: Float = 0.0, b2: Float = 0.0
+        var a1: Float = 0.0, a2: Float = 0.0
+        var x1L: Float = 0.0, x2L: Float = 0.0, y1L: Float = 0.0, y2L: Float = 0.0
+        var x1R: Float = 0.0, x2R: Float = 0.0, y1R: Float = 0.0, y2R: Float = 0.0
+
+        func configure(type: String, f0: Double, sampleRate: Double, q: Double, dbGain: Double) {
+            let fs = max(8000.0, sampleRate)
+            let a = pow(10.0, dbGain / 40.0)
+            let w0 = 2.0 * Double.pi * f0 / fs
+            let cosw0 = cos(w0)
+            let sinw0 = sin(w0)
+            let alpha = sinw0 / (2.0 * max(0.1, q))
+            var cb0 = 1.0, cb1 = 0.0, cb2 = 0.0, ca0 = 1.0, ca1 = 0.0, ca2 = 0.0
+            if type == "highpass" {
+                cb0 = (1.0 + cosw0) / 2.0
+                cb1 = -(1.0 + cosw0)
+                cb2 = (1.0 + cosw0) / 2.0
+                ca0 = 1.0 + alpha
+                ca1 = -2.0 * cosw0
+                ca2 = 1.0 - alpha
+            } else if type == "highshelf" {
+                let sqA = sqrt(a)
+                let alphaS = (sinw0 / 2.0) * sqrt(2.0)
+                cb0 = a * ((a + 1.0) + (a - 1.0) * cosw0 + 2.0 * sqA * alphaS)
+                cb1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosw0)
+                cb2 = a * ((a + 1.0) + (a - 1.0) * cosw0 - 2.0 * sqA * alphaS)
+                ca0 = (a + 1.0) - (a - 1.0) * cosw0 + 2.0 * sqA * alphaS
+                ca1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosw0)
+                ca2 = (a + 1.0) - (a - 1.0) * cosw0 - 2.0 * sqA * alphaS
+            } else {
+                cb0 = 1.0 + alpha * a
+                cb1 = -2.0 * cosw0
+                cb2 = 1.0 - alpha * a
+                ca0 = 1.0 + alpha / a
+                ca1 = -2.0 * cosw0
+                ca2 = 1.0 - alpha / a
+            }
+            b0 = Float(cb0 / ca0)
+            b1 = Float(cb1 / ca0)
+            b2 = Float(cb2 / ca0)
+            a1 = Float(ca1 / ca0)
+            a2 = Float(ca2 / ca0)
+        }
+
+        @inline(__always) func stepL(_ x: Float) -> Float {
+            let y = b0 * x + b1 * x1L + b2 * x2L - a1 * y1L - a2 * y2L
+            x2L = x1L; x1L = x; y2L = y1L; y1L = y
+            return y
+        }
+
+        @inline(__always) func stepR(_ x: Float) -> Float {
+            let y = b0 * x + b1 * x1R + b2 * x2R - a1 * y1R - a2 * y2R
+            x2R = x1R; x1R = x; y2R = y1R; y1R = y
+            return y
+        }
+    }
+
+    private final class PhoneSpeakerDspTapState {
+        weak var plugin: MuchiAudioPlugin?
+        var stages: [BiquadStage] = (0..<7).map { _ in BiquadStage() }
+        var sampleRate: Double = 48000.0
+        var configuredMode: String = ""
+
+        init(plugin: MuchiAudioPlugin) {
+            self.plugin = plugin
+            rebuildStages(sampleRate: 48000.0, mode: plugin.prefSpatial)
+        }
+
+        func rebuildStages(sampleRate: Double, mode: String) {
+            self.sampleRate = sampleRate > 0 ? sampleRate : 48000.0
+            self.configuredMode = mode
+            let fs = self.sampleRate
+            if mode == "bass" {
+                stages[0].configure(type: "highpass", f0: 38.0, sampleRate: fs, q: 0.707, dbGain: 0.0)
+                stages[1].configure(type: "peaking", f0: 92.0, sampleRate: fs, q: 0.80, dbGain: 6.2)
+                stages[2].configure(type: "peaking", f0: 175.0, sampleRate: fs, q: 0.88, dbGain: 2.4)
+                stages[3].configure(type: "peaking", f0: 400.0, sampleRate: fs, q: 1.00, dbGain: -2.4)
+                stages[4].configure(type: "peaking", f0: 1200.0, sampleRate: fs, q: 1.10, dbGain: -0.6)
+                stages[5].configure(type: "peaking", f0: 3100.0, sampleRate: fs, q: 0.85, dbGain: 1.4)
+                stages[6].configure(type: "highshelf", f0: 8800.0, sampleRate: fs, q: 0.707, dbGain: 1.2)
+            } else if mode == "spatial" {
+                stages[0].configure(type: "highpass", f0: 42.0, sampleRate: fs, q: 0.707, dbGain: 0.0)
+                stages[1].configure(type: "peaking", f0: 105.0, sampleRate: fs, q: 0.85, dbGain: 2.8)
+                stages[2].configure(type: "peaking", f0: 195.0, sampleRate: fs, q: 0.90, dbGain: 1.2)
+                stages[3].configure(type: "peaking", f0: 415.0, sampleRate: fs, q: 1.00, dbGain: -1.8)
+                stages[4].configure(type: "peaking", f0: 1200.0, sampleRate: fs, q: 1.10, dbGain: -0.5)
+                stages[5].configure(type: "peaking", f0: 3200.0, sampleRate: fs, q: 0.80, dbGain: 2.6)
+                stages[6].configure(type: "highshelf", f0: 8600.0, sampleRate: fs, q: 0.707, dbGain: 3.0)
+            } else {
+                // "phone" & "dynamic" studio micro-speaker curve
+                stages[0].configure(type: "highpass", f0: 48.0, sampleRate: fs, q: 0.707, dbGain: 0.0)
+                stages[1].configure(type: "peaking", f0: 112.0, sampleRate: fs, q: 0.82, dbGain: 4.6)
+                stages[2].configure(type: "peaking", f0: 195.0, sampleRate: fs, q: 0.90, dbGain: 1.8)
+                stages[3].configure(type: "peaking", f0: 415.0, sampleRate: fs, q: 1.05, dbGain: -2.8)
+                stages[4].configure(type: "peaking", f0: 1200.0, sampleRate: fs, q: 1.10, dbGain: -0.9)
+                stages[5].configure(type: "peaking", f0: 3050.0, sampleRate: fs, q: 0.82, dbGain: 2.4)
+                stages[6].configure(type: "highshelf", f0: 8600.0, sampleRate: fs, q: 0.707, dbGain: 2.4)
+            }
+        }
+    }
+
+    // ── 1.9.4 Native iOS Phone Speaker 7-Stage Biquad DSP + C2-Continuous Soft-Knee Limiter ──
+    //   1. Sub-Rumble High-Pass: 48 Hz (Q = 0.707)
+    //   2. Upper-Bass Punch Peak: 112 Hz, Q = 0.82, Gain = +4.6 dB
+    //   3. Warmth Body Peak: 195 Hz, Q = 0.90, Gain = +1.8 dB
+    //   4. Boxiness / Mud Cut: 415 Hz, Q = 1.05, Gain = -2.8 dB
+    //   5. Anti-Tinny / Horn Control: 1200 Hz, Q = 1.10, Gain = -0.9 dB
+    //   6. Vocal Presence Peak: 3050 Hz, Q = 0.82, Gain = +2.4 dB
+    //   7. Silk Air High-Shelf: 8600 Hz, Q = 0.707, Gain = +2.4 dB
+    //   8. Pre-EQ Headroom (0.82x) + Makeup Gain (1.22x) + C2-Continuous Soft-Knee Limiter (-0.31 dBFS ceiling)
     private func attachPhoneSpeakerDspIfAvailable(to item: AVPlayerItem, asset: AVAsset) {
         guard prefSpatial != "off" else { return }
         asset.loadValuesAsynchronously(forKeys: ["tracks"]) { [weak self, weak item] in
             guard let self = self, let item = item, self.prefSpatial != "off" else { return }
             guard let audioTrack = asset.tracks(withMediaType: .audio).first else { return }
+            let stateBox = Unmanaged.passRetained(PhoneSpeakerDspTapState(plugin: self)).toOpaque()
             var callbacks = MTAudioProcessingTapCallbacks(
                 version: kMTAudioProcessingTapCallbacksVersion_0,
-                clientInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
+                clientInfo: stateBox,
                 init: { (_, clientInfo, tapStorageOut) in
                     tapStorageOut.pointee = clientInfo
                 },
-                finalize: { _ in },
-                prepare: { (_, _, _) in },
+                finalize: { tap in
+                    let storage = MTAudioProcessingTapGetStorage(tap)
+                    Unmanaged<PhoneSpeakerDspTapState>.fromOpaque(storage).release()
+                },
+                prepare: { (tap, _, processingFormat) in
+                    let storage = MTAudioProcessingTapGetStorage(tap)
+                    let dsp = Unmanaged<PhoneSpeakerDspTapState>.fromOpaque(storage).takeUnretainedValue()
+                    let sr = processingFormat.pointee.mSampleRate
+                    let mode = dsp.plugin?.prefSpatial ?? "phone"
+                    dsp.rebuildStages(sampleRate: sr > 0 ? sr : 48000.0, mode: mode)
+                },
                 unprepare: { _ in },
                 process: { (tap, numberFrames, flags, bufferListInOut, numberFramesOut, flagsOut) in
                     let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, nil, numberFramesOut)
                     guard status == noErr else { return }
+                    let storage = MTAudioProcessingTapGetStorage(tap)
+                    let dsp = Unmanaged<PhoneSpeakerDspTapState>.fromOpaque(storage).takeUnretainedValue()
+                    let mode = dsp.plugin?.prefSpatial ?? "phone"
+                    if mode == "off" { return }
+                    if dsp.configuredMode != mode {
+                        dsp.rebuildStages(sampleRate: dsp.sampleRate, mode: mode)
+                    }
                     let bl = UnsafeMutableAudioBufferListPointer(bufferListInOut)
-                    // Apply +3.1 dB (1.43x) makeup gain with soft-knee tanh brickwall limiter at -0.8 dBFS (0.912)
-                    let preGain: Float = 1.43
-                    let ceiling: Float = 0.912
-                    for buf in bl {
+                    let preTrim: Float = 0.82
+                    let postMakeup: Float = 1.22
+                    let threshold: Float = 0.68
+                    let ceiling: Float = 0.965
+                    let span: Float = ceiling - threshold
+                    let stages = dsp.stages
+                    let numBufs = bl.count
+                    for (bufIdx, buf) in bl.enumerated() {
                         guard let data = buf.mData else { continue }
                         let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
                         guard count > 0 else { continue }
                         let samples = data.assumingMemoryBound(to: Float.self)
+                        let isInterleavedStereo = (numBufs == 1 && buf.mNumberChannels == 2)
                         for i in 0..<count {
-                            let x = samples[i] * preGain
-                            if abs(x) > 0.65 {
-                                samples[i] = Float(tanh(Double(x) * 1.15)) * ceiling
+                            let useRight = isInterleavedStereo ? ((i & 1) == 1) : (bufIdx > 0)
+                            var s = samples[i] * preTrim
+                            if useRight {
+                                s = stages[0].stepR(s)
+                                s = stages[1].stepR(s)
+                                s = stages[2].stepR(s)
+                                s = stages[3].stepR(s)
+                                s = stages[4].stepR(s)
+                                s = stages[5].stepR(s)
+                                s = stages[6].stepR(s)
+                            } else {
+                                s = stages[0].stepL(s)
+                                s = stages[1].stepL(s)
+                                s = stages[2].stepL(s)
+                                s = stages[3].stepL(s)
+                                s = stages[4].stepL(s)
+                                s = stages[5].stepL(s)
+                                s = stages[6].stepL(s)
+                            }
+                            let x = s * postMakeup
+                            let ax = abs(x)
+                            if ax > threshold {
+                                let lim = threshold + span * Float(tanh(Double((ax - threshold) / span)))
+                                samples[i] = x < 0 ? -lim : lim
                             } else {
                                 samples[i] = x
                             }
@@ -596,6 +759,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 DispatchQueue.main.async {
                     item.audioMix = mix
                 }
+            } else {
+                Unmanaged<PhoneSpeakerDspTapState>.fromOpaque(stateBox).release()
             }
         }
     }
@@ -735,7 +900,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     self.startPlayer(with: streamUrl, rawUrl: rs.url, userAgent: rs.userAgent)
                 } else {
                     self.errorSent = true
-                    self.notifyListeners("muchiControls", data: ["message": "error", "position": Int(resumeMs)])
+                    self.emitControls("error", positionMs: Int(resumeMs))
                 }
             }
         }
@@ -762,7 +927,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     return
                 }
                 self.errorSent = true
-                self.notifyListeners("muchiControls", data: ["message": "error", "position": Int(errPosMs)])
+                self.emitControls("error", positionMs: Int(errPosMs))
                 return
             }
             if p.rate > 0 && item.status == .readyToPlay {
@@ -853,13 +1018,13 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.playCommand.addTarget { [weak self] _ in
             self?.beginAudioBackgroundTask()
             self?.configureAudioSession()
-            self?.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
+            self?.emitControls("play", positionMs: 0)
             self?.player?.play()
             self?.updateRate()
             return .success
         }
         cc.pauseCommand.addTarget { [weak self] _ in
-            self?.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
+            self?.emitControls("pause", positionMs: 0)
             self?.player?.pause()
             self?.updateRate()
             return .success
@@ -867,12 +1032,12 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self = self else { return .commandFailed }
             if self.player?.rate ?? 0 > 0 {
-                self.notifyListeners("muchiControls", data: ["message": "pause", "position": 0])
+                self.emitControls("pause", positionMs: 0)
                 self.player?.pause()
             } else {
                 self.beginAudioBackgroundTask()
                 self.configureAudioSession()
-                self.notifyListeners("muchiControls", data: ["message": "play", "position": 0])
+                self.emitControls("play", positionMs: 0)
                 self.player?.play()
             }
             self.updateRate()
@@ -882,13 +1047,13 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.nextTrackCommand.addTarget { [weak self] _ in
             self?.beginAudioBackgroundTask()
             self?.configureAudioSession()
-            self?.notifyListeners("muchiControls", data: ["message": "next", "position": 0])
+            self?.emitControls("next", positionMs: 0)
             return .success
         }
         cc.previousTrackCommand.addTarget { [weak self] _ in
             self?.beginAudioBackgroundTask()
             self?.configureAudioSession()
-            self?.notifyListeners("muchiControls", data: ["message": "previous", "position": 0])
+            self?.emitControls("previous", positionMs: 0)
             return .success
         }
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
@@ -906,6 +1071,20 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             return .commandFailed
         }
+    }
+
+    private func emitControls(_ message: String, positionMs: Int = 0) {
+        self.notifyListeners("muchiControls", data: [
+            "message": message,
+            "position": positionMs
+        ])
+        let safeMsg = message
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        self.bridge?.webView?.evaluateJavaScript(
+            "window._onMuchiNativeControls&&window._onMuchiNativeControls({message:\"\(safeMsg)\",position:\(positionMs)});",
+            completionHandler: nil
+        )
     }
 
     deinit {

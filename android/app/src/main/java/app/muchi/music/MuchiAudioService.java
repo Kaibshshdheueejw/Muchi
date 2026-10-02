@@ -202,7 +202,7 @@ public class MuchiAudioService extends Service {
         return l != null ? l : staticListener;
     }
 
-    // 1.5.5 / 1.8.5 Sound Stage hardware DSP effects attached to ExoPlayer's audio session
+    // 1.5.5 / 1.8.5 / 1.9.4 Sound Stage hardware DSP effects attached to ExoPlayer's audio session
     private int currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET;
     private LoudnessEnhancer loudnessEnhancer;
     private Equalizer equalizer;
@@ -700,8 +700,12 @@ public class MuchiAudioService extends Service {
             public void onIsPlayingChanged(boolean isPlaying) {
                 if (isPlaying) {
                     applyPlayerPrefsAndEffects();
+                } else if (player != null && !resolvingOnDevice && !player.getPlayWhenReady()
+                        && player.getPlaybackState() == Player.STATE_READY) {
+                    lastReportedPlaying = false;
+                    emitControls("pause", Math.max(0L, player.getCurrentPosition()));
                 }
-                updateLocks(isPlaying || (player != null && player.getPlayWhenReady()));
+                updateLocks(isPlaying || resolvingOnDevice || (player != null && player.getPlayWhenReady()));
                 ticker.post(() -> showNotification());
             }
         });
@@ -1128,11 +1132,17 @@ public class MuchiAudioService extends Service {
 
     private void applyPlayerPrefsAndEffects() {
         if (player == null) return;
+        String mode = prefSpatial != null ? prefSpatial : "phone";
+        if ("wide".equals(mode) || "motion".equals(mode)) mode = "spatial";
+
         try {
-            // 1.5.5 / 1.6.6 volumeFor(volumePct, normalize) math: normalizeGain = 0.86 when on, 1.0 when off
+            // 1.5.5 / 1.6.6 / 1.9.4 volumeFor(volumePct, normalize) + Pre-DSP Headroom Staging:
+            // Apply 0.62f (-4.15 dB) pre-effect stream headroom when hardware DSP is active
+            // so the Equalizer + BassBoost + LoudnessEnhancer cascade never clips past 0 dBFS.
             float normGain = prefNormalize ? 0.86f : 1.0f;
+            float dspHeadroom = "off".equals(mode) ? 1.0f : ("phone".equals(mode) ? 0.62f : 0.72f);
             float clampedVol = Math.max(0f, Math.min(100f, prefVolume)) / 100f;
-            float targetVol = Math.min(1.0f, clampedVol * normGain);
+            float targetVol = Math.min(1.0f, clampedVol * normGain * dspHeadroom);
             player.setVolume(targetVol);
         } catch (Exception ignored) {}
 
@@ -1143,9 +1153,6 @@ public class MuchiAudioService extends Service {
 
         int sessionId = player.getAudioSessionId();
         if (sessionId == C.AUDIO_SESSION_ID_UNSET || sessionId <= 0) return;
-
-        String mode = prefSpatial != null ? prefSpatial : "phone";
-        if ("wide".equals(mode) || "motion".equals(mode)) mode = "spatial";
 
         try {
             if ("off".equals(mode)) {
@@ -1183,17 +1190,19 @@ public class MuchiAudioService extends Service {
                 }
             }
 
-            // 1.8.5 Upgraded Native Phone Speaker Sound Stage DSP
+            // 1.8.5 / 1.9.4 Upgraded Native Phone Speaker Sound Stage DSP
             // (Controlled LoudnessEnhancer + Tight Upper-Bass Exciter + 6-Zone Acoustic Equalizer)
             if (loudnessEnhancer != null) {
                 int gainMb = "phone".equals(mode) ? 310 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;
-                loudnessEnhancer.setTargetGain(gainMb);
+                int calibratedGainMb = "phone".equals(mode) ? Math.min(gainMb, 110) : Math.min(gainMb, 100);
+                loudnessEnhancer.setTargetGain(calibratedGainMb);
                 loudnessEnhancer.setEnabled(true);
             }
 
             if (bassBoost != null && bassBoost.getStrengthSupported()) {
                 short strength = (short) ("phone".equals(mode) ? 580 : "bass".equals(mode) ? 850 : "spatial".equals(mode) ? 320 : 480);
-                bassBoost.setStrength(strength);
+                short calibratedStrength = (short) ("phone".equals(mode) ? Math.min(strength, (short) 200) : Math.min(strength, (short) 360));
+                bassBoost.setStrength(calibratedStrength);
                 bassBoost.setEnabled(true);
             }
 
@@ -1223,12 +1232,23 @@ public class MuchiAudioService extends Service {
                                 else if (freqHz <= 280) targetMb = 220;
                                 else if (freqHz <= 1600) targetMb = -180;
                             }
+                            // 1.9.4 Anti-Clipping & Vocal-Clarity Calibration for 5-band and 10-band Android EQs:
+                            // Prevent 60Hz sub-bass triple-stacking with BassBoost, avoid 230Hz mud buildup,
+                            // and preserve 910Hz vocal body while keeping 3.6kHz presence & 14kHz air crisp.
+                            if (freqHz <= 75) targetMb = -120;
+                            else if (freqHz <= 160) targetMb = 460;
+                            else if (freqHz <= 280) targetMb = (bands <= 5) ? 140 : 180;
+                            else if (freqHz <= 650) targetMb = -280;
+                            else if (freqHz <= 1600) targetMb = (bands <= 5) ? -40 : -90;
+                            else if (freqHz <= 4500) targetMb = 240;
+                            else targetMb = 240;
                         } else if ("bass".equals(mode)) {
                             if (freqHz <= 90) targetMb = 850;
                             else if (freqHz <= 200) targetMb = 420;
                             else if (freqHz <= 600) targetMb = -220;
                             else if (freqHz <= 4000) targetMb = 120;
                             else targetMb = -80;
+                            targetMb = (targetMb * 60) / 100;
                         } else if ("spatial".equals(mode)) {
                             if (freqHz <= 120) targetMb = 240;
                             else if (freqHz <= 600) targetMb = -140;
@@ -1239,6 +1259,7 @@ public class MuchiAudioService extends Service {
                             else if (freqHz <= 600) targetMb = -180;
                             else if (freqHz <= 4000) targetMb = 310;
                             else targetMb = 240;
+                            targetMb = (targetMb * 65) / 100;
                         }
                         short clamped = (short) Math.max(minL, Math.min(maxL, targetMb));
                         equalizer.setBandLevel(b, clamped);
@@ -2539,7 +2560,7 @@ public class MuchiAudioService extends Service {
         if (mirrorMode) return mirrorPlaying;
         if (resolvingOnDevice) return true;
         if (player != null) {
-            return player.isPlaying() || (player.getPlayWhenReady() && player.getPlaybackState() == Player.STATE_BUFFERING);
+            return player.isPlaying() || (player.getPlayWhenReady() && player.getPlaybackState() != Player.STATE_ENDED);
         }
         return true;
     }

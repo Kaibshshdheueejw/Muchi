@@ -672,7 +672,9 @@ function parseItunesSearchIntent(rawQuery) {
       .toLowerCase()
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-z0-9\u0900-\u0D7F\u0E00-\u0E7F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0600-\u06FF\s]/g, " ")
+      .replace(/\$/g, "s")
+      .replace(/p!nk/g, "pink")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
       .replace(/\s+/g, " ")
       .trim();
 
@@ -842,8 +844,8 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
 
   const stripDecorations = (title) =>
     String(title || "")
-      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|official|audio|video|lyric|remaster|version|edit|mix|live|explicit|clean|from\s)[^)\]]*[)\]]/gi, "")
-      .replace(/\s*[-–—]\s*(?:remaster(?:ed)?|single|radio\s*edit|version|live|from\s.*).*$/i, "")
+      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|official|audio|video|lyric|remaster|version|edit|mix|live|explicit|clean|from\s|spider-man|motion\s+picture|soundtrack|ost\b|prod\.?)[^)\]]*[)\]]/gi, "")
+      .replace(/\s*[-–—]\s*(?:remaster(?:ed)?|single|radio\s*edit|version|live|from\s.*|spider-man.*).*$/i, "")
       .trim();
 
   // Detect target artist: first check songs that match the searched song title + artist hint!
@@ -888,7 +890,12 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
       }
       if (!intent.hasExplicitSplit && !detectedArtistName) {
         const af = foldArtist(a.artistName);
-        if (af && (wantQ === af || wantQ.includes(af) || af.includes(wantQ))) {
+        const top0Song = rawSongRows[0];
+        const top0Title = top0Song ? foldArtist(stripDecorations(top0Song.trackName || "") || top0Song.trackName || "") : "";
+        const top0Prim = top0Song ? foldArtist(String(top0Song.artistName || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0]) : "";
+        const top0IsOtherArtistSong = Boolean(top0Title === wantQ && top0Prim && top0Prim !== wantQ && top0Prim !== af);
+        const hasSongsInTop10 = rawSongRows.slice(0, 10).some((r) => r && artistMatchesHint(r.artistName, af));
+        if (af && !top0IsOtherArtistSong && hasSongsInTop10 && (wantQ === af || wantQ.includes(af) || af.includes(wantQ))) {
           detectedArtistName = a.artistName;
           if (a.artistId) detectedArtistId = String(a.artistId);
           if (a.primaryGenreName && !detectedGenre) detectedGenre = String(a.primaryGenreName);
@@ -919,26 +926,32 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
   }
 
   if (!detectedArtistName && rawSongRows.length > 0) {
-    for (const r of rawSongRows.slice(0, 12)) {
-      if (!r || !r.artistName) continue;
-      if (ITUNES_UNRELATED_INSTRUMENTAL_RE.test(r.trackName || "") || ITUNES_JUNK_PERFORMER_RE.test(r.artistName)) continue;
-      const primCredit = String(r.artistName).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
-      const pf = foldArtist(primCredit);
-      if (pf && pf.length >= 3 && wantQ.includes(pf)) {
-        detectedArtistName = primCredit;
-        if (r.artistId) detectedArtistId = String(r.artistId);
-        if (r.primaryGenreName && !detectedGenre) detectedGenre = String(r.primaryGenreName);
-        break;
-      }
-      const featCred = extractFeaturedArtist(r.trackName || "");
-      if (featCred) {
-        const fc = featCred.split(/\s*(?:,|&)\s*/)[0].trim();
-        const ff = foldArtist(fc);
-        const ffToks = ff.split(" ").filter((w) => w.length >= 4);
-        if (ff && (wantQ.includes(ff) || (ffToks.length > 0 && ffToks.some((tk) => wantQ.includes(tk))))) {
-          detectedArtistName = fc;
+    const top0 = rawSongRows[0];
+    const top0CoreTitle = top0 ? foldArtist(stripDecorations(top0.trackName || "") || top0.trackName || "") : "";
+    const top0Prim = top0 ? foldArtist(String(top0.artistName || "").split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0]) : "";
+    const isTop0SongMatchByOtherArtist = Boolean(top0CoreTitle === wantQ && top0Prim && top0Prim !== wantQ);
+    if (!isTop0SongMatchByOtherArtist) {
+      for (const r of rawSongRows.slice(0, 12)) {
+        if (!r || !r.artistName) continue;
+        if (ITUNES_UNRELATED_INSTRUMENTAL_RE.test(r.trackName || "") || ITUNES_JUNK_PERFORMER_RE.test(r.artistName)) continue;
+        const primCredit = String(r.artistName).split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bwith\b)\s*/i)[0].trim();
+        const pf = foldArtist(primCredit);
+        if (pf && pf.length >= 3 && wantQ.includes(pf)) {
+          detectedArtistName = primCredit;
+          if (r.artistId) detectedArtistId = String(r.artistId);
           if (r.primaryGenreName && !detectedGenre) detectedGenre = String(r.primaryGenreName);
           break;
+        }
+        const featCred = extractFeaturedArtist(r.trackName || "");
+        if (featCred) {
+          const fc = featCred.split(/\s*(?:,|&)\s*/)[0].trim();
+          const ff = foldArtist(fc);
+          const ffToks = ff.split(" ").filter((w) => w.length >= 4);
+          if (ff && (wantQ.includes(ff) || (ffToks.length > 0 && ffToks.some((tk) => wantQ.includes(tk))))) {
+            detectedArtistName = fc;
+            if (r.primaryGenreName && !detectedGenre) detectedGenre = String(r.primaryGenreName);
+            break;
+          }
         }
       }
     }
@@ -1021,18 +1034,23 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
   }
 
   const targetArtistFold = foldArtist(detectedArtistName || intent.artistHint || "");
+  const artistTrackCountInRaw = targetArtistFold
+    ? rawSongRows.filter((r) => r && r.artistName && artistMatchesHint(r.artistName, targetArtistFold)).length
+    : 0;
   const targetSongFold = intent.songFold || (() => {
     if (!targetArtistFold) return wantQ;
     const artToks = new Set(targetArtistFold.split(" ").filter(Boolean));
     const rem = wantQ.split(" ").filter((w) => !artToks.has(w) && w !== "by").join(" ").trim();
-    return rem || wantQ;
+    if (rem) return rem;
+    return artistTrackCountInRaw >= 2 ? "" : wantQ;
   })();
 
   const seenTrackIds = new Set();
   const seenCanonKey = new Set();
   const scoredCandidates = [];
 
-  for (const t of rawSongRows) {
+  for (let rawIdx = 0; rawIdx < rawSongRows.length; rawIdx++) {
+    const t = rawSongRows[rawIdx];
     if (!t || !t.trackId || t.wrapperType === "artist" || t.wrapperType === "collection") continue;
     if (seenTrackIds.has(t.trackId)) continue;
     seenTrackIds.add(t.trackId);
@@ -1136,6 +1154,9 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
     if (detectedGenre && genreName && foldArtist(genreName) === foldArtist(detectedGenre)) {
       score += 35;
     }
+    if (rawIdx < 20) {
+      score += Math.max(0, 20 - rawIdx) * 4;
+    }
     const queryWantsRemix = /\b(remix|live|acoustic|slowed|sped\s*up)\b/i.test(cleanQ);
     if (isRemixOrLive && !queryWantsRemix) {
       score -= 180;
@@ -1178,6 +1199,12 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
   const exactTitleSongs = uniqueCandidates.filter((c) => c.bucket === "exact_title");
   const relatedSongs = uniqueCandidates.filter((c) => c.bucket === "related");
 
+  const isArtistQueryIntent = Boolean(
+    targetArtistFold &&
+    targetArtistSongs.length >= 2 &&
+    (targetArtistFold === wantQ || targetArtistFold === "the " + wantQ || targetArtistFold.startsWith(wantQ + " "))
+  );
+
   const pushOrdered = (item) => {
     if (!item || songs.length >= maxSongs) return;
     if (!songs.some((x) => x.id === item.track.id)) {
@@ -1190,12 +1217,12 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
     if (exactSongs[1] && !exactSongs[1].isRemixOrLive) {
       pushOrdered(exactSongs[1]);
     }
-  } else if (exactTitleSongs.length > 0) {
+  } else if (!isArtistQueryIntent && exactTitleSongs.length > 0) {
     for (const et of exactTitleSongs.slice(0, 2)) pushOrdered(et);
   }
 
   let ai = 0;
-  let ti = exactSongs.length === 0 ? 2 : 0;
+  let ti = exactSongs.length === 0 && !isArtistQueryIntent ? 2 : 0;
   let ri = 0;
   let exRest = exactSongs.length > 1 && !exactSongs[1].isRemixOrLive ? 2 : 1;
   while (songs.length < maxSongs && (ai < targetArtistSongs.length || ti < exactTitleSongs.length || ri < relatedSongs.length || exRest < exactSongs.length)) {

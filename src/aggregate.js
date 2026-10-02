@@ -971,78 +971,134 @@ export async function handleSearch(env, url) {
   const source = (url.searchParams.get("source") || "all").toLowerCase();
   const refresh = url.searchParams.get("refresh") === "1";
 
-  const fold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  const fold = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\$/g, "s")
+      .replace(/p!nk/g, "pink")
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   const wantQ = fold(q);
 
   const finalizeArtists = (artistsList, songsPool) => {
     const out = [];
     const seen = new Set();
+    const isRealArtistPhoto = (url) => /dzcdn\.net\/images\/artist|googleusercontent\.com|ggpht\.com/i.test(String(url || ""));
+    const isNumericArtistId = (id) => /^artist:(?:deezer|apple):\d+$/i.test(String(id || ""));
+
     const upsert = (a) => {
       if (!a || !a.name) return;
       const cleanName = String(a.name).replace(/\s*[|–—-]\s*topic$/i, "").trim();
       const k = fold(cleanName);
       if (!k || k === "youtube" || k === "various artists" || k === "unknown" || k === "artist") return;
+      const artUrl = a.artwork || "/cover-default.jpg";
+      const fans = Number(a.nb_fan || a.fans) || 0;
       if (!seen.has(k)) {
         seen.add(k);
         out.push({
           id: a.id || `artist:${a.source || "youtube"}:${cleanName}`,
           kind: "artist",
           name: cleanName,
-          artwork: a.artwork || "/cover-default.jpg",
+          artwork: artUrl,
           source: a.source || "youtube",
           query: a.query || cleanName,
+          nb_fan: fans || undefined,
         });
       } else {
         const ex = out.find((x) => fold(x.name) === k);
-        if (ex && (!ex.artwork || ex.artwork === "/cover-default.jpg") && a.artwork && a.artwork !== "/cover-default.jpg") {
-          ex.artwork = a.artwork;
-        }
-        if (ex && ex.source === "audius" && a.source && a.source !== "audius") {
-          ex.source = a.source;
-          if (a.id) ex.id = a.id;
+        if (ex) {
+          if (cleanName.toLowerCase() === q.toLowerCase() && ex.name.toLowerCase() !== q.toLowerCase()) {
+            ex.name = cleanName;
+          }
+          if (
+            (isRealArtistPhoto(artUrl) && !isRealArtistPhoto(ex.artwork)) ||
+            ((!ex.artwork || ex.artwork === "/cover-default.jpg") && artUrl !== "/cover-default.jpg")
+          ) {
+            ex.artwork = artUrl;
+          }
+          if (fans > (Number(ex.nb_fan) || 0)) {
+            ex.nb_fan = fans;
+          }
+          if (isNumericArtistId(a.id) && !isNumericArtistId(ex.id)) {
+            ex.id = a.id;
+            ex.source = a.source || ex.source;
+          } else if (ex.source === "audius" && a.source && a.source !== "audius") {
+            ex.source = a.source;
+            if (a.id) ex.id = a.id;
+          }
         }
       }
     };
 
     for (const a of artistsList || []) upsert(a);
 
+    const songFreq = new Map();
     // Derive artists from matched songs so even if dedicated artist endpoints
     // time out or rate-limit on the Worker edge, any artist with songs in
     // Apple / Deezer / YouTube / Audius is always surfaced in result.artists.
-    for (const t of songsPool || []) {
-      if (!t || !t.artist) continue;
+    (songsPool || []).forEach((t, idx) => {
+      if (!t || !t.artist) return;
       const rawArt = String(t.artist).replace(/\s*[|–—-]\s*topic$/i, "").trim();
-      if (!rawArt) continue;
+      if (!rawArt) return;
       const artParts = rawArt.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bx\b|\swith\s)\s*/i).map((s) => s.trim()).filter(Boolean);
-      const candidates = [rawArt, ...artParts];
-      for (const cand of candidates) {
+      const primFold = fold(artParts[0] || rawArt);
+      if (primFold) {
+        const weight = idx < 5 ? 3 : idx < 15 ? 2 : 1;
+        songFreq.set(primFold, (songFreq.get(primFold) || 0) + weight);
+      }
+      const candidates = [artParts[0] || rawArt, ...artParts.slice(1)];
+      for (let ci = 0; ci < candidates.length; ci++) {
+        const cand = candidates[ci];
         const cf = fold(cand);
         if (!cf || cf.length < 2) continue;
-        if (cf === wantQ || cf.startsWith(wantQ) || (wantQ.length >= 3 && (cf.includes(wantQ) || wantQ.includes(cf))) || out.length < 12) {
+        const useArt = (ci === 0 && t.artistPicture) ? t.artistPicture : (t.artwork || "/cover-default.jpg");
+        const useId = (ci === 0 && t.artistId)
+          ? `artist:${t.source || "deezer"}:${t.artistId}`
+          : `artist:${t.source || "youtube"}:${cand}`;
+        if (cf === wantQ || cf === "the " + wantQ || cf.startsWith(wantQ) || (wantQ.length >= 3 && (cf.includes(wantQ) || wantQ.includes(cf))) || idx < 15 || out.length < 16) {
           upsert({
-            id: `artist:${t.source || "youtube"}:${cand}`,
+            id: useId,
             kind: "artist",
             name: cand,
-            artwork: t.artwork || "/cover-default.jpg",
+            artwork: useArt,
             source: t.source || "youtube",
             query: cand,
           });
         }
       }
-    }
+    });
 
     if (out.length > 1 && wantQ) {
       const qWords = wantQ.split(/\s+/).filter((w) => w.length >= 2);
       const scoreArtist = (a) => {
         const na = fold(a.name);
-        const srcBonus = (a.source === "apple" || a.source === "deezer") ? 2 : (a.source === "youtube" ? 1 : 0);
-        if (na === wantQ) return 100 + srcBonus;
-        if (na.startsWith(wantQ)) return 80 + srcBonus;
-        if (wantQ.startsWith(na) && na.length >= 3) return 70 + srcBonus;
-        if (na.includes(wantQ)) return 60 + srcBonus;
-        if (qWords.length > 1 && qWords.every((w) => na.includes(w))) return 50 + srcBonus;
-        if (qWords.some((w) => na.includes(w))) return 25 + srcBonus;
-        return srcBonus;
+        const srcBonus = (a.source === "apple" || a.source === "deezer") ? 3 : (a.source === "youtube" ? 2 : 0);
+        const photoBonus = isRealArtistPhoto(a.artwork) ? 8 : 0;
+        const sWeight = (songFreq.get(na) || 0) * 6;
+        const fans = Number(a.nb_fan) || 0;
+        const fanBonus = (fans > 0 ? Math.log10(fans + 1) * 18 : 0) + (fans >= 3000000 ? 55 : fans >= 1000000 ? 35 : fans >= 500000 ? 18 : 0);
+        let matchPts = 0;
+        if (na === wantQ) {
+          matchPts = (sWeight >= 12 || fans >= 50000) ? 98 : (sWeight > 0 || fans >= 10000) ? 75 : 35;
+        } else if (na === "the " + wantQ) {
+          matchPts = (sWeight > 0 || fans >= 10000) ? 105 : 65;
+        } else if (na.startsWith(wantQ + " ")) {
+          matchPts = (sWeight >= 12 || fans >= 50000) ? 102 : 75;
+        } else if (na.startsWith(wantQ)) {
+          matchPts = 70;
+        } else if (wantQ.startsWith(na) && na.length >= 3) {
+          matchPts = 65;
+        } else if (na.includes(wantQ)) {
+          matchPts = 55;
+        } else if (qWords.length > 1 && qWords.every((w) => na.includes(w))) {
+          matchPts = 50;
+        } else if (qWords.some((w) => na.includes(w))) {
+          matchPts = 25;
+        }
+        return matchPts + sWeight + fanBonus + photoBonus + srcBonus;
       };
       out.sort((a, b) => {
         const diff = scoreArtist(b) - scoreArtist(a);
@@ -1050,7 +1106,7 @@ export async function handleSearch(env, url) {
         return fold(a.name).length - fold(b.name).length;
       });
     }
-    return out.slice(0, 20);
+    return out.slice(0, 24);
   };
 
   const runBuild = async () => {
@@ -1610,13 +1666,39 @@ export async function handleArtist(url) {
       let artistName = name || q;
       let artwork = "";
       let albums = [];
-      const foldName = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+      const foldName = (s) =>
+        String(s || "")
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/\$/g, "s")
+          .replace(/p!nk/g, "pink")
+          .replace(/[^\p{L}\p{N}\s]/gu, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      const isOneEditAway = (a, b) => {
+        if (Math.abs(a.length - b.length) > 1) return false;
+        let i = 0, j = 0, edits = 0;
+        while (i < a.length && j < b.length) {
+          if (a[i] === b[j]) { i++; j++; continue; }
+          if (++edits > 1) return false;
+          if (a.length > b.length) i++;
+          else if (b.length > a.length) j++;
+          else { i++; j++; }
+        }
+        return edits + (a.length - i) + (b.length - j) <= 1;
+      };
       const targetFold = foldName(artistName);
+      let resolvedArtistFold = targetFold;
       const matchesTargetArtist = (cand) => {
         const cf = foldName(cand);
-        if (!cf || !targetFold) return false;
-        if (cf === targetFold) return true;
-        if (targetFold.length >= 3 && (cf.includes(targetFold) || targetFold.includes(cf))) return true;
+        if (!cf || (!targetFold && !resolvedArtistFold)) return false;
+        for (const tf of [targetFold, resolvedArtistFold]) {
+          if (!tf) continue;
+          if (cf === tf || cf === "the " + tf || tf === "the " + cf) return true;
+          if (tf.length >= 4 && isOneEditAway(cf, tf)) return true;
+          if (tf.length >= 3 && (cf.includes(tf) || tf.includes(cf))) return true;
+        }
         return false;
       };
       // ── Three sources IN PARALLEL (was serial — that's what made the
@@ -1681,8 +1763,8 @@ export async function handleArtist(url) {
         if (!songs.length && (q || name)) {
           try {
             const pack = await itunesSearch(q || name);
-            const matchedArt = (pack.artists || []).find((a) => foldName(a.name) === targetFold)
-              || (pack.artists || []).find((a) => matchesTargetArtist(a.name));
+            const matchedArt = (pack.artists || []).find((a) => matchesTargetArtist(a.name))
+              || (pack.artists || []).find((a) => foldName(a.name) === targetFold);
             if (!art && matchedArt) art = matchedArt.artwork;
             if (!nm && matchedArt) nm = matchedArt.name;
             songs = (pack.songs || []).filter((t) => matchesTargetArtist(t.artist));
@@ -1728,7 +1810,9 @@ export async function handleArtist(url) {
       };
       const dzValid = dz && (!dz.artist.name || matchesTargetArtist(dz.artist.name));
       if (dzValid) {
-        if (!artwork && dz.artist.artwork) artwork = dz.artist.artwork;
+        if (dz.artist.artwork && (!artwork || !/dzcdn\.net\/images\/artist|googleusercontent\.com/i.test(artwork))) {
+          artwork = dz.artist.artwork;
+        }
         if (dz.artist.name && matchesTargetArtist(dz.artist.name)) artistName = dz.artist.name;
         const seenAlb = new Set(albums.map((al) => String(al.title || "").toLowerCase()));
         for (const al of dz.albums) {
@@ -1762,7 +1846,7 @@ export async function handleArtist(url) {
         artwork,
         popular: songs.slice(0, 20),
         songs: songs.slice(0, 500),
-        albums: albums.slice(0, 120),
+        albums: albums.slice(0, 300),
         tracks: songs.slice(0, 16),
         latest: songs[0] || null,
       };

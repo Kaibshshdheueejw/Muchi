@@ -57,6 +57,10 @@ const fold = (s) =>
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\$/g, "s")
+    .replace(/p!nk/g, "pink")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
     .trim();
 
 /**
@@ -140,12 +144,20 @@ export function normalizeDeezerTrack(t, fallbackArtist = "", fallbackArt = "") {
       t.artwork ||
       fallbackArt
     ) || "/cover-default.jpg";
+  const artistId = clean((t.artist && t.artist.id) || t.artistId || "");
+  const artistPicture = clean(
+    (t.artist && (t.artist.picture_xl || t.artist.picture_big || t.artist.picture_medium)) ||
+    t.artistPicture ||
+    ""
+  );
   return {
     id,
     rawId: rawId || id.replace(/^deezer:/, ""),
     source: "deezer",
     title,
     artist: artistName,
+    artistId,
+    artistPicture,
     album: albumTitle,
     duration,
     artwork,
@@ -171,22 +183,52 @@ export async function deezerArtist(name) {
   if (cachedArt) return cachedArt;
 
   const q = encodeURIComponent(raw);
+  const isOneEditAway = (a, b) => {
+    if (Math.abs(a.length - b.length) > 1) return false;
+    let i = 0, j = 0, edits = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) { i++; j++; continue; }
+      if (++edits > 1) return false;
+      if (a.length > b.length) i++;
+      else if (b.length > a.length) j++;
+      else { i++; j++; }
+    }
+    return edits + (a.length - i) + (b.length - j) <= 1;
+  };
   try {
-    const j = await dzFetch(`/search/artist?q=${q}&limit=15`, 7000);
-    const rows = (j && Array.isArray(j.data) ? j.data : []) || [];
-    const exact = rows.filter((r) => r && fold(r.name) === want);
-    let pick = exact.length
+    const j = await dzFetch(`/search/artist?q=${q}&limit=25`, 7000);
+    let rows = (j && Array.isArray(j.data) ? j.data : []) || [];
+    const maxFansInRows = rows.reduce((m, r) => Math.max(m, Number(r && r.nb_fan) || 0), 0);
+    if (maxFansInRows < 5000 && want.includes(" ")) {
+      const lastWord = want.split(" ").pop();
+      if (lastWord && lastWord.length >= 4) {
+        const j2 = await dzFetch(`/search/artist?q=${encodeURIComponent(lastWord)}&limit=25`, 4500).catch(() => null);
+        if (j2 && Array.isArray(j2.data)) rows = [...rows, ...j2.data];
+      }
+    }
+    const exact = rows.filter((r) => r && (fold(r.name) === want || isOneEditAway(fold(r.name), want)));
+    const cands = rows.filter((r) => r && (fold(r.name).startsWith(want + " ") || fold(r.name) === "the " + want || fold(r.name).startsWith(want)));
+    const bestExact = exact.length
       ? exact.sort((a, b) => (Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0))[0]
       : null;
-    if (!pick) {
-      const cands = rows.filter((r) => r && fold(r.name).startsWith(want));
-      if (cands.length) {
-        pick = cands.sort(
-          (a, b) =>
-            fold(a.name).length - fold(b.name).length ||
-            (Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0)
-        )[0];
-      }
+    const bestPrefix = cands.length
+      ? cands.slice().sort((a, b) => (Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0))[0]
+      : null;
+    let pick = bestExact;
+    if (
+      bestPrefix &&
+      (!pick ||
+        ((Number(bestPrefix.nb_fan) || 0) >= 200000 &&
+          (Number(bestPrefix.nb_fan) || 0) > (Number(pick.nb_fan) || 0) * 4))
+    ) {
+      pick = bestPrefix;
+    }
+    if (!pick && cands.length) {
+      pick = cands.sort(
+        (a, b) =>
+          (Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0) ||
+          fold(a.name).length - fold(b.name).length
+      )[0];
     }
     if (!pick) {
       const inc = rows.filter((r) => r && (fold(r.name).includes(want) || (want.length >= 3 && want.includes(fold(r.name)))));
@@ -399,7 +441,11 @@ export async function deezerCatalog(name, { maxAlbums = 300, maxTrackAlbums = 16
   ]);
 
   const songs = [...topSongs];
-  const expandIds = albums.slice(0, maxTrackAlbums).map((al) => al.id.replace("deezer-album:", ""));
+  const prioritizedAlbums = albums.slice().sort((a, b) => {
+    const rankType = (rt) => (rt === "Album" ? 0 : rt === "EP" ? 1 : 2);
+    return rankType(a && a.recordType) - rankType(b && b.recordType);
+  });
+  const expandIds = prioritizedAlbums.slice(0, maxTrackAlbums).map((al) => al.id.replace("deezer-album:", ""));
   for (let i = 0; i < expandIds.length; i += concurrency) {
     const chunk = expandIds.slice(i, i + concurrency);
     const results = await Promise.all(
@@ -522,12 +568,13 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
     return "";
   };
 
-  const pushArtist = (id, name, artwork) => {
+  const pushArtist = (id, name, artwork, nbFan = 0) => {
     const cleanName = clean(name);
     if (!cleanName || (!intent.wantsInstrumental && DZ_JUNK_PERFORMER_RE.test(cleanName))) return;
     const k = fold(cleanName);
     if (!k || k === "unknown artist" || k === "various artists") return;
     const artUrl = clean(artwork) || "/cover-default.jpg";
+    const isRealPhoto = /dzcdn\.net\/images\/artist/i.test(artUrl);
     if (!seenArt.has(k)) {
       seenArt.add(k);
       artists.push({
@@ -537,11 +584,21 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
         artwork: artUrl,
         source: "deezer",
         query: cleanName,
+        nb_fan: Number(nbFan) || 0,
       });
     } else {
       const ex = artists.find((x) => fold(x.name) === k);
-      if (ex && (!ex.artwork || ex.artwork === "/cover-default.jpg") && artUrl !== "/cover-default.jpg") {
-        ex.artwork = artUrl;
+      if (ex) {
+        const exIsReal = /dzcdn\.net\/images\/artist/i.test(ex.artwork || "");
+        if ((isRealPhoto && !exIsReal) || ((!ex.artwork || ex.artwork === "/cover-default.jpg") && artUrl !== "/cover-default.jpg")) {
+          ex.artwork = artUrl;
+        }
+        if ((Number(nbFan) || 0) > (Number(ex.nb_fan) || 0)) {
+          ex.nb_fan = Number(nbFan) || 0;
+        }
+        if (id && /^\d+$/.test(String(id)) && !/^artist:deezer:\d+$/.test(ex.id || "")) {
+          ex.id = `artist:deezer:${id}`;
+        }
       }
     }
   };
@@ -672,9 +729,19 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
 
   // Stage 1b: Optional extra artist & album endpoints + artist top tracks & artist radio
   if (includeExtra && trackRows.length > 0) {
+    const top0TitlePre = trackRows[0] && fold(String(trackRows[0].title || "").replace(/\s*[\[(].*$/, ""));
+    const top0ArtPre = trackRows[0] && trackRows[0].artist && fold(trackRows[0].artist.name);
+    const isTop0SongByDifferentArtist = Boolean(
+      top0TitlePre === want && top0ArtPre && !top0ArtPre.startsWith(want)
+    );
+    if (!detectedArtistName && isTop0SongByDifferentArtist && trackRows[0].artist && trackRows[0].artist.name) {
+      detectedArtistName = clean(trackRows[0].artist.name);
+      if (trackRows[0].artist.id) detectedArtistId = String(trackRows[0].artist.id);
+    }
+
     const artistQueryEnc = encodeURIComponent(detectedArtistName || intent.artistHint || intent.cleanQuery || q);
     const [artistsR, albumsR] = await Promise.allSettled([
-      dzFetch(`/search/artist?q=${artistQueryEnc}&limit=12`, 2400),
+      dzFetch(`/search/artist?q=${artistQueryEnc}&limit=25`, 2400),
       dzFetch(`/search/album?q=${encClean}&limit=12`, 2400),
     ]);
 
@@ -684,14 +751,43 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
       rawArtists.sort((a, b) => {
         const na = fold(a.name);
         const nb = fold(b.name);
-        const aExact = (targetArtLookupFold && artistMatchesHint(a.name, targetArtLookupFold)) ? 3 : na === want ? 2 : na.startsWith(want) ? 1 : 0;
-        const bExact = (targetArtLookupFold && artistMatchesHint(b.name, targetArtLookupFold)) ? 3 : nb === want ? 2 : nb.startsWith(want) ? 1 : 0;
-        if (bExact !== aExact) return bExact - aExact;
-        return (Number(b.nb_fan) || 0) - (Number(a.nb_fan) || 0);
+        const fa = Number(a.nb_fan) || 0;
+        const fb = Number(b.nb_fan) || 0;
+        const tier = (n, fans, rawNameStr) => {
+          if (targetArtLookupFold && artistMatchesHint(rawNameStr, targetArtLookupFold)) return 3;
+          if (n === want && fans >= 50000) return 2;
+          if ((n === "the " + want || n.startsWith(want + " ")) && fans >= 50000) return 2;
+          if (n === want || n.startsWith(want)) return 1;
+          return 0;
+        };
+        const aTier = tier(na, fa, a.name);
+        const bTier = tier(nb, fb, b.name);
+        if (bTier !== aTier) return bTier - aTier;
+        if (na === want && nb !== want && fa * 4 >= fb) return -1;
+        if (nb === want && na !== want && fb * 4 >= fa) return 1;
+        return fb - fa;
       });
+      if (
+        rawArtists[0] &&
+        !isTop0SongByDifferentArtist &&
+        !intent.hasExplicitSplit &&
+        (fold(rawArtists[0].name).startsWith(want + " ") || fold(rawArtists[0].name) === "the " + want) &&
+        (Number(rawArtists[0].nb_fan) || 0) >= 2000000
+      ) {
+        detectedArtistId = String(rawArtists[0].id);
+        detectedArtistName = clean(rawArtists[0].name);
+      }
       for (const a of rawArtists) {
-        pushArtist(a.id, a.name, a.picture_big || a.picture_medium);
-        if (!detectedArtistId && ((targetArtLookupFold && artistMatchesHint(a.name, targetArtLookupFold)) || want.includes(fold(a.name)) || fold(a.name).includes(want))) {
+        pushArtist(a.id, a.name, a.picture_big || a.picture_medium, a.nb_fan || 0);
+        const top0Title = trackRows[0] && fold(String(trackRows[0].title || "").replace(/\s*[\[(].*$/, ""));
+        const top0Art = trackRows[0] && trackRows[0].artist && fold(trackRows[0].artist.name);
+        const top0IsDifferentArtistSong = Boolean(top0Title === want && top0Art && top0Art !== want && top0Art !== fold(a.name));
+        const hasTracksInTop10 = trackRows.slice(0, 10).some((tr) => tr && tr.artist && fold(tr.artist.name) === fold(a.name));
+        if (
+          !detectedArtistId &&
+          (!top0IsDifferentArtistSong || hasTracksInTop10 || (Number(a.nb_fan) || 0) >= 500000) &&
+          ((targetArtLookupFold && artistMatchesHint(a.name, targetArtLookupFold)) || want.includes(fold(a.name)) || fold(a.name).includes(want))
+        ) {
           detectedArtistId = String(a.id);
           if (!detectedArtistName) detectedArtistName = clean(a.name);
         }
@@ -742,22 +838,27 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
   // Score and sequence Deezer tracks with Spotify-style intelligence
   const stripDecorations = (title) =>
     String(title || "")
-      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|official|audio|video|lyric|remaster|version|edit|mix|live|explicit|clean|from\s)[^)\]]*[)\]]/gi, "")
-      .replace(/\s*[-–—]\s*(?:remaster(?:ed)?|single|radio\s*edit|version|live|from\s.*).*$/i, "")
+      .replace(/\s*[\[(][^)\]]*(?:feat\.?|ft\.?|featuring|with|official|audio|video|lyric|remaster|version|edit|mix|live|explicit|clean|from\s|spider-man|motion\s+picture|soundtrack|ost\b|prod\.?)[^)\]]*[)\]]/gi, "")
+      .replace(/\s*[-–—]\s*(?:remaster(?:ed)?|single|radio\s*edit|version|live|from\s.*|spider-man.*).*$/i, "")
       .trim();
 
   const targetArtistFold = fold(detectedArtistName || intent.artistHint || "");
+  const artistTrackCountInRaw = targetArtistFold
+    ? trackRows.filter((r) => r && r.artist && artistMatchesHint(r.artist.name, targetArtistFold)).length
+    : 0;
   const targetSongFold = intent.songFold || (() => {
     if (!targetArtistFold) return want;
     const artToks = new Set(targetArtistFold.split(" ").filter(Boolean));
     const rem = want.split(" ").filter((w) => !artToks.has(w) && w !== "by").join(" ").trim();
-    return rem || want;
+    if (rem) return rem;
+    return artistTrackCountInRaw >= 2 ? "" : want;
   })();
 
   const seenCanonKey = new Set();
   const scoredCandidates = [];
 
-  for (const rawTrack of trackRows) {
+  for (let rawIdx = 0; rawIdx < trackRows.length; rawIdx++) {
+    const rawTrack = trackRows[rawIdx];
     const s = normalizeDeezerTrack(rawTrack);
     if (!s) continue;
     const durSec = Number(s.duration) || 0;
@@ -796,12 +897,15 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
       (matchesTargetTitleExact || matchesTargetTitlePrefix) &&
       artistMatchesHint(s.artist, exactSongCoArtistFold)
     );
+    const featInTitle = Boolean(
+      targetArtistFold && extractFeaturedArtistMatchingHint(s.title, s.artist, targetArtistFold)
+    );
     const matchesTargetArtist = Boolean(
       matchesCoArtistOnExact ||
+      featInTitle ||
       (targetArtistFold &&
       (artistMatchesHint(s.artist, targetArtistFold) ||
-       artistMatchesHint(s.title, targetArtistFold) ||
-       (intent.artistFold && (artistMatchesHint(s.artist, intent.artistFold) || artistMatchesHint(s.title, intent.artistFold)))))
+       (intent.artistFold && artistMatchesHint(s.artist, intent.artistFold))))
     );
 
     if (matchesTargetTitleExact && matchesTargetArtist) {
@@ -838,10 +942,13 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
       if (combinedText.includes(tok)) score += 24;
     }
 
-    // Factor in Deezer popularity rank subtly so biggest hits surface first within each bucket
+    // Factor in Deezer popularity rank & upstream position so #0/#1 hits surface first
     const rankNum = Number(rawTrack && rawTrack.rank) || 0;
     if (rankNum > 0) {
-      score += Math.min(45, Math.round(rankNum / 25000));
+      score += Math.min(60, Math.round(rankNum / 20000));
+    }
+    if (rawIdx < 20) {
+      score += Math.max(0, 20 - rawIdx) * 4;
     }
 
     const queryWantsRemix = /\b(remix|live|acoustic|slowed|sped\s*up)\b/i.test(q);
@@ -869,6 +976,12 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
   const exactTitleSongs = uniqueCandidates.filter((c) => c.bucket === "exact_title");
   const relatedSongs = uniqueCandidates.filter((c) => c.bucket === "related");
 
+  const isArtistQueryIntent = Boolean(
+    targetArtistFold &&
+    targetArtistSongs.length >= 2 &&
+    (targetArtistFold === want || targetArtistFold === "the " + want || targetArtistFold.startsWith(want + " "))
+  );
+
   const pushOrdered = (item) => {
     if (!item || songs.length >= maxSongs) return;
     if (!songs.some((x) => x.id === item.track.id)) {
@@ -883,13 +996,13 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
   } else {
     for (const ex of exactSongs.slice(0, 2)) pushOrdered(ex);
   }
-  if (exactSongs.length === 0 && exactTitleSongs.length > 0) {
+  if (exactSongs.length === 0 && !isArtistQueryIntent && exactTitleSongs.length > 0) {
     for (const et of exactTitleSongs.slice(0, 3)) pushOrdered(et);
   }
 
   const remainingExact = nonRemixExact.length > 0 ? [...nonRemixExact.slice(2), ...remixExact] : exactSongs.slice(2);
   let ai = 0;
-  let ti = exactSongs.length === 0 ? 3 : 0;
+  let ti = exactSongs.length === 0 && !isArtistQueryIntent ? 3 : 0;
   let ri = 0;
   let exRest = 0;
   while (songs.length < maxSongs && (ai < targetArtistSongs.length || ti < exactTitleSongs.length || ri < relatedSongs.length || exRest < remainingExact.length)) {
