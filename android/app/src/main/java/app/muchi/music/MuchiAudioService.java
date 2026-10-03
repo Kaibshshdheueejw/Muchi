@@ -580,6 +580,11 @@ public class MuchiAudioService extends Service {
     @Override
     public boolean onUnbind(Intent intent) {
         listener = null;
+        if ((player != null && (player.isPlaying() || player.getPlayWhenReady())) || (mirrorMode && mirrorPlaying) || resolvingOnDevice) {
+            startInForeground();
+            showNotification();
+            updateLocks(true);
+        }
         return true;
     }
 
@@ -1210,18 +1215,18 @@ public class MuchiAudioService extends Service {
                 }
             }
 
-            // 1.8.5 / 1.9.4 Upgraded Native Phone Speaker Sound Stage DSP
-            // (Controlled LoudnessEnhancer + Tight Upper-Bass Exciter + 6-Zone Acoustic Equalizer)
+            // 1.9.8 Upgraded Native Phone Speaker Sound Stage DSP
+            // (Super-Bass Acoustic Tuning + Kick Exciter + Anti-Clip Clarity Equalizer)
             if (loudnessEnhancer != null) {
                 int gainMb = "phone".equals(mode) ? 310 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;
-                int calibratedGainMb = "phone".equals(mode) ? Math.min(gainMb, 110) : Math.min(gainMb, 100);
+                int calibratedGainMb = "phone".equals(mode) ? Math.min(gainMb, 180) : Math.min(gainMb, 140);
                 loudnessEnhancer.setTargetGain(calibratedGainMb);
                 loudnessEnhancer.setEnabled(true);
             }
 
             if (bassBoost != null && bassBoost.getStrengthSupported()) {
                 short strength = (short) ("phone".equals(mode) ? 580 : "bass".equals(mode) ? 850 : "spatial".equals(mode) ? 320 : 480);
-                short calibratedStrength = (short) ("phone".equals(mode) ? Math.min(strength, (short) 200) : Math.min(strength, (short) 360));
+                short calibratedStrength = (short) ("phone".equals(mode) ? Math.min(strength, (short) 480) : Math.min(strength, (short) 650));
                 bassBoost.setStrength(calibratedStrength);
                 bassBoost.setEnabled(true);
             }
@@ -1252,23 +1257,24 @@ public class MuchiAudioService extends Service {
                                 else if (freqHz <= 280) targetMb = 220;
                                 else if (freqHz <= 1600) targetMb = -180;
                             }
-                            // 1.9.4 Anti-Clipping & Vocal-Clarity Calibration for 5-band and 10-band Android EQs:
-                            // Prevent 60Hz sub-bass triple-stacking with BassBoost, avoid 230Hz mud buildup,
-                            // and preserve 910Hz vocal body while keeping 3.6kHz presence & 14kHz air crisp.
-                            if (freqHz <= 75) targetMb = -120;
-                            else if (freqHz <= 160) targetMb = 460;
-                            else if (freqHz <= 280) targetMb = (bands <= 5) ? 140 : 180;
+                            // 1.9.8 Super-Bass Phone Speaker Acoustic Calibration:
+                            // Deep punch concentrated in 75-160Hz (+6.8 dB), warm lower-mid fullness in 160-280Hz (+2.4 dB),
+                            // controlled boxiness cut at 280-650Hz (-2.8 dB), articulate vocal presence at 1600-4500Hz (+3.2 dB),
+                            // and crystal silk air >4500Hz (+3.1 dB).
+                            if (freqHz <= 75) targetMb = 180;
+                            else if (freqHz <= 160) targetMb = 680;
+                            else if (freqHz <= 280) targetMb = (bands <= 5) ? 200 : 240;
                             else if (freqHz <= 650) targetMb = -280;
-                            else if (freqHz <= 1600) targetMb = (bands <= 5) ? -40 : -90;
-                            else if (freqHz <= 4500) targetMb = 240;
-                            else targetMb = 240;
+                            else if (freqHz <= 1600) targetMb = (bands <= 5) ? -20 : -60;
+                            else if (freqHz <= 4500) targetMb = 320;
+                            else targetMb = 310;
                         } else if ("bass".equals(mode)) {
-                            if (freqHz <= 90) targetMb = 850;
-                            else if (freqHz <= 200) targetMb = 420;
-                            else if (freqHz <= 600) targetMb = -220;
-                            else if (freqHz <= 4000) targetMb = 120;
-                            else targetMb = -80;
-                            targetMb = (targetMb * 60) / 100;
+                            if (freqHz <= 90) targetMb = 920;
+                            else if (freqHz <= 200) targetMb = 580;
+                            else if (freqHz <= 600) targetMb = -180;
+                            else if (freqHz <= 4000) targetMb = 260;
+                            else targetMb = 240;
+                            targetMb = (targetMb * 75) / 100;
                         } else if ("spatial".equals(mode)) {
                             if (freqHz <= 120) targetMb = 240;
                             else if (freqHz <= 600) targetMb = -140;
@@ -1775,15 +1781,39 @@ public class MuchiAudioService extends Service {
             searchFuture = exec.submit(() -> searchInnertubeVideoIdsStatic(searchQ));
         }
 
+        // Parallelize Cloudflare edge stream probing immediately alongside candidate probing
+        java.util.concurrent.Future<ResolvedStream> earlyCfFuture = null;
+        if (!cleanTitle.isEmpty() || (primaryVid != null && !primaryVid.trim().isEmpty())) {
+            final String earlyVid = (primaryVid != null && !primaryVid.trim().isEmpty()) ? primaryVid.trim() : (!vids.isEmpty() ? vids.get(0) : "");
+            final String earlyCands = (candidatesCsv != null && !candidatesCsv.trim().isEmpty())
+                    ? candidatesCsv
+                    : android.text.TextUtils.join(",", vids.subList(0, Math.min(6, vids.size())));
+            earlyCfFuture = exec.submit(() -> probeCloudflareBackendStatic(earlyVid, earlyCands, cleanTitle, cleanArtist, expectedDurationMs));
+        }
+
         // Probe available candidate videoIds in parallel (up to 5 concurrently)
         if (!vids.isEmpty()) {
             ResolvedStream directHit = probeMultipleVideoIdsParallel(vids, Math.min(5, vids.size()), expectedDurationMs, cleanTitle, cleanArtist, exec);
             if (directHit != null) {
                 if (searchFuture != null) searchFuture.cancel(true);
+                if (earlyCfFuture != null) earlyCfFuture.cancel(true);
                 if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, directHit);
                 if (!qKey.isEmpty()) putCachedStream(qKey, directHit);
                 return directHit;
             }
+        }
+
+        // Check if parallel Cloudflare probe finished before waiting on long search
+        if (earlyCfFuture != null) {
+            try {
+                ResolvedStream cfEarly = earlyCfFuture.get(160, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (cfEarly != null && cfEarly.url != null && !cfEarly.url.isEmpty()) {
+                    if (searchFuture != null) searchFuture.cancel(true);
+                    if (primaryVid != null && !primaryVid.trim().isEmpty()) putCachedStream(primaryVid, cfEarly);
+                    if (!qKey.isEmpty()) putCachedStream(qKey, cfEarly);
+                    return cfEarly;
+                }
+            } catch (Exception ignored) {}
         }
 
         // Check results from concurrent YouTube search and probe top candidates in parallel
@@ -2583,9 +2613,17 @@ public class MuchiAudioService extends Service {
                 | PlaybackStateCompat.ACTION_SKIP_TO_NEXT
                 | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
                 | PlaybackStateCompat.ACTION_SEEK_TO;
+        int state;
+        if (resolvingOnDevice || (player != null && player.getPlaybackState() == Player.STATE_BUFFERING)) {
+            state = PlaybackStateCompat.STATE_BUFFERING;
+        } else if (playing) {
+            state = PlaybackStateCompat.STATE_PLAYING;
+        } else {
+            state = PlaybackStateCompat.STATE_PAUSED;
+        }
         session.setPlaybackState(new PlaybackStateCompat.Builder()
                 .setActions(actions)
-                .setState(playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
+                .setState(state,
                         Math.max(0L, positionMs), prefSpeed > 0 ? prefSpeed : 1f)
                 .build());
     }

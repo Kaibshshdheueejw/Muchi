@@ -32,9 +32,13 @@ export async function readSession(request, env) {
     if (m) token = decodeURIComponent(m[1]);
   }
   if (!token) return null;
-  const sid = sidFromToken(token, env.MUCHI_SESSION_SECRET);
+  const sid = sidFromToken(token, env.MUCHI_SESSION_SECRET) || token;
   if (!sid) return null;
-  return getSession(env, sid);
+  let session = await getSession(env, sid);
+  if (!session && sid !== token) {
+    session = await getSession(env, token);
+  }
+  return session;
 }
 
 export function sessionCookie(sid, secret) {
@@ -617,14 +621,28 @@ export async function handleUserLibrary(request, env) {
         onboarded: false,
       };
 
+      const normalizeTrack = (t) => {
+        if (!t || typeof t !== "object") return null;
+        const rawKey = t.id || (t.videoId ? `yt:${t.videoId}` : (t.trackId ? `audius:${t.trackId}` : (t.title ? `${t.title}-${t.artist || ""}` : "")));
+        const k = String(rawKey || "").trim();
+        if (!k) return null;
+        return {
+          ...t,
+          id: t.id || k,
+        };
+      };
+
       const likedMap = new Map();
+      // Put body.liked first so the latest order and newly added likes are preserved at the top
+      for (const t of (body.liked || [])) {
+        const nt = normalizeTrack(t);
+        if (nt && !likedMap.has(nt.id)) likedMap.set(nt.id, nt);
+      }
       if (!body.replaceLiked) {
         for (const t of (existing.liked || [])) {
-          if (t && t.id) likedMap.set(t.id, t);
+          const nt = normalizeTrack(t);
+          if (nt && !likedMap.has(nt.id)) likedMap.set(nt.id, nt);
         }
-      }
-      for (const t of (body.liked || [])) {
-        if (t && t.id) likedMap.set(t.id, t);
       }
 
       const plMap = new Map();

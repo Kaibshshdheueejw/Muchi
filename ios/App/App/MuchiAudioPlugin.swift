@@ -190,6 +190,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
 
+        center.addObserver(forName: UIApplication.willResignActiveNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if self.currentItem != nil || (self.player?.rate ?? 0) > 0 {
+                self.configureAudioSession()
+                if (self.player?.rate ?? 0) == 0 {
+                    self.beginAudioBackgroundTask()
+                }
+            }
+        }
+
         center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                            object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
@@ -675,14 +686,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 stages[5].configure(type: "peaking", f0: 3200.0, sampleRate: fs, q: 0.80, dbGain: 2.6)
                 stages[6].configure(type: "highshelf", f0: 8600.0, sampleRate: fs, q: 0.707, dbGain: 3.0)
             } else {
-                // "phone" & "dynamic" studio micro-speaker curve
-                stages[0].configure(type: "highpass", f0: 48.0, sampleRate: fs, q: 0.707, dbGain: 0.0)
-                stages[1].configure(type: "peaking", f0: 112.0, sampleRate: fs, q: 0.82, dbGain: 4.6)
-                stages[2].configure(type: "peaking", f0: 195.0, sampleRate: fs, q: 0.90, dbGain: 1.8)
+                // 1.9.8 Super-Bass Phone Speaker Acoustic Calibration:
+                // Dual punch & body (98Hz & 180Hz) + mud scoop (415Hz) + vocal clarity (3000Hz) + silk air (8800Hz)
+                stages[0].configure(type: "highpass", f0: 44.0, sampleRate: fs, q: 0.707, dbGain: 0.0)
+                stages[1].configure(type: "peaking", f0: 98.0, sampleRate: fs, q: 0.82, dbGain: 6.4)
+                stages[2].configure(type: "peaking", f0: 180.0, sampleRate: fs, q: 0.88, dbGain: 2.4)
                 stages[3].configure(type: "peaking", f0: 415.0, sampleRate: fs, q: 1.05, dbGain: -2.8)
                 stages[4].configure(type: "peaking", f0: 1200.0, sampleRate: fs, q: 1.10, dbGain: -0.9)
-                stages[5].configure(type: "peaking", f0: 3050.0, sampleRate: fs, q: 0.82, dbGain: 2.4)
-                stages[6].configure(type: "highshelf", f0: 8600.0, sampleRate: fs, q: 0.707, dbGain: 2.4)
+                stages[5].configure(type: "peaking", f0: 3000.0, sampleRate: fs, q: 0.82, dbGain: 2.8)
+                stages[6].configure(type: "highshelf", f0: 8800.0, sampleRate: fs, q: 0.707, dbGain: 3.0)
             }
         }
     }
@@ -1494,6 +1506,19 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Parallelize Cloudflare edge stream probing immediately alongside candidate probing
+        var earlyCfHit: ResolvedStream?
+        let cfSem = DispatchSemaphore(value: 0)
+        let earlyCfVid = vids.first ?? primary
+        let earlyCands = !candidates.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? candidates
+            : Array(vids.prefix(6)).joined(separator: ",")
+        DispatchQueue.global(qos: .userInitiated).async {
+            earlyCfHit = probeCloudflareBackend(videoId: earlyCfVid, candidates: earlyCands, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs)
+            cfSem.signal()
+        }
+
         var searchedVids: [String] = []
         let searchSem = DispatchSemaphore(value: 0)
         let startConcurrentSearch = !cleanTitle.isEmpty
@@ -1510,6 +1535,13 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 if !qKey.isEmpty { putCachedStream(qKey, rs) }
                 return rs
             }
+        }
+        // Check if parallel Cloudflare probe finished before waiting on long search
+        if cfSem.wait(timeout: .now() + 0.16) == .success, let cfHit = earlyCfHit {
+            if !earlyCfVid.isEmpty { putCachedStream(earlyCfVid, cfHit) }
+            if !primary.isEmpty { putCachedStream(primary, cfHit) }
+            if !qKey.isEmpty { putCachedStream(qKey, cfHit) }
+            return cfHit
         }
         if !cleanTitle.isEmpty {
             if startConcurrentSearch {

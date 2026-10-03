@@ -389,7 +389,7 @@
             android:name=".MuchiAudioService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback"
-            android:stopWithTask="false" />
+            android:stopWithTask="true" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

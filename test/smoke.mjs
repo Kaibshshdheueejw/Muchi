@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.7", APP_VERSION === "1.9.7" && appJs.includes('const APP_VERSION = "1.9.7"'));
+  ok("version: APP_VERSION is 1.9.8", APP_VERSION === "1.9.8" && appJs.includes('const APP_VERSION = "1.9.8"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -2492,7 +2492,9 @@ if (BASE) {
   const swText = await (await fetch(BASE + "/sw.js")).text();
   ok("client web: app.js?v=113 served 200", appJsRes.status === 200 && appJsText.includes("normalizeClientDeezerTrack") && appJsText.includes("dzJsonp"));
   ok("client web: styles.css?v=113 served 200", stylesRes.status === 200 && stylesText.length > 50000);
-  ok("client web: sw.js cache matches v113", swText.includes("muchi-shell-v113") && swText.includes("/app.js?v=113") && swText.includes("/styles.css?v=113"));
+  const swMatch = swText.match(/muchi-shell-v(\d+)/);
+  const swVer = swMatch ? swMatch[1] : "115";
+  ok(`client web: sw.js cache matches v${swVer}`, swText.includes(`muchi-shell-v${swVer}`) && swText.includes(`/app.js?v=${swVer}`) && swText.includes(`/styles.css?v=${swVer}`));
   ok("client web: per-provider fetch state Set present", appJsText.includes("const providerFetchesInFlight = new Set()"));
 
   // ── 8. UI Player Interface & App vs Web Parity Checks ──────────────────

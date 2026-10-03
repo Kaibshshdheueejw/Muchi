@@ -25,6 +25,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {
-        MuchiAudioPlugin.sharedInstance?.stopOnAppClose()
+        // Do not stop audio if the app is simply moving to or staying in the background.
+        // Stop audio only if the session is discarded/terminating.
+        if UIApplication.shared.applicationState != .background {
+            MuchiAudioPlugin.sharedInstance?.stopOnAppClose()
+        }
     }
 }

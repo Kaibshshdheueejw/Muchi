@@ -135,7 +135,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.7";
+  const APP_VERSION = "1.9.8";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1147,15 +1147,37 @@
 
   let syncLibraryTimeout = null;
   let _pendingReplaceFollowing = false;
+  let _pendingReplaceLiked = false;
+  let _hasPendingLibraryPush = false;
+  let lastLibrarySyncTime = 0;
+
   function scheduleUserLibraryPush(opts) {
     if (opts && opts.replaceFollowing) _pendingReplaceFollowing = true;
+    if (opts && opts.replaceLiked) _pendingReplaceLiked = true;
+    _hasPendingLibraryPush = true;
     if (!state.auth || !state.auth.signedIn) return;
     clearTimeout(syncLibraryTimeout);
     syncLibraryTimeout = setTimeout(() => {
-      const rep = _pendingReplaceFollowing;
+      _hasPendingLibraryPush = false;
+      const repF = _pendingReplaceFollowing;
+      const repL = _pendingReplaceLiked;
       _pendingReplaceFollowing = false;
-      pushUserLibrary({ replaceFollowing: rep });
-    }, 1200);
+      _pendingReplaceLiked = false;
+      pushUserLibrary({ replaceFollowing: repF, replaceLiked: repL });
+    }, 600);
+  }
+
+  function flushUserLibraryPush() {
+    if (syncLibraryTimeout) {
+      clearTimeout(syncLibraryTimeout);
+      syncLibraryTimeout = null;
+      _hasPendingLibraryPush = false;
+      const repF = _pendingReplaceFollowing;
+      const repL = _pendingReplaceLiked;
+      _pendingReplaceFollowing = false;
+      _pendingReplaceLiked = false;
+      pushUserLibrary({ replaceFollowing: repF, replaceLiked: repL });
+    }
   }
 
   async function pushUserLibrary(opts) {
@@ -1166,10 +1188,18 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          liked: (state.liked || []).slice(0, 1500),
+          liked: (state.liked || []).map((t) => {
+            if (!t) return null;
+            if (!t.id) {
+              const k = trackKey(t) || (t.videoId ? `yt:${t.videoId}` : (t.trackId ? `audius:${t.trackId}` : `${t.title || ""}-${t.artist || ""}`.trim()));
+              return { ...t, id: k };
+            }
+            return t;
+          }).filter(Boolean).slice(0, 1500),
           playlists: (state.playlists || []).slice(0, 150),
           following: dedupeFollowingList(state.following).slice(0, 400),
           recents: (state.recents || []).slice(0, 100),
+          replaceLiked: Boolean(opts && opts.replaceLiked),
           replaceFollowing: Boolean(opts && opts.replaceFollowing),
           onboarded: onboardedFlag,
           taste: {
@@ -1194,6 +1224,7 @@
     try {
       const res = await api("/api/user/library", 10000);
       if (res && res.library) {
+        lastLibrarySyncTime = Date.now();
         const remote = res.library;
         let modified = false;
         let restoredAny = false;
@@ -1219,20 +1250,49 @@
         );
 
         // 1. Liked songs merge
-        if (Array.isArray(remote.liked) && remote.liked.length > 0) {
-          const likedMap = new Map();
+        if (Array.isArray(remote.liked)) {
+          const remoteKeySet = new Set();
+          const remoteList = [];
           for (const t of remote.liked) {
-            if (t && t.id) likedMap.set(t.id, t);
+            if (!t) continue;
+            const k = trackKey(t) || t.id;
+            if (k && !remoteKeySet.has(k)) {
+              remoteKeySet.add(k);
+              remoteList.push(t.id ? t : { ...t, id: k });
+            }
           }
-          for (const t of state.liked) {
-            if (t && t.id && !likedMap.has(t.id)) {
-              likedMap.set(t.id, t);
+
+          if (forcePull || state.liked.length === 0) {
+            if (remoteList.length > 0 || state.liked.length > 0) {
+              state.liked = remoteList;
+              save("aura.liked", state.liked);
+              restoredAny = true;
+            }
+          } else {
+            // Find local-only likes (liked offline or while waiting to push)
+            const localOnly = [];
+            for (const t of state.liked) {
+              if (!t) continue;
+              const k = trackKey(t) || t.id;
+              if (k && !remoteKeySet.has(k)) {
+                localOnly.push(t.id ? t : { ...t, id: k });
+              }
+            }
+
+            // Union preserving recency: local-only at the top, then remote
+            const merged = [...localOnly, ...remoteList];
+            const hasChanged = merged.length !== state.liked.length ||
+              merged.some((t, i) => (trackKey(t) || t.id) !== (trackKey(state.liked[i]) || state.liked[i].id));
+
+            if (hasChanged) {
+              state.liked = merged;
+              save("aura.liked", state.liked);
+              restoredAny = true;
+            }
+            if (localOnly.length > 0) {
               modified = true;
             }
           }
-          state.liked = Array.from(likedMap.values());
-          save("aura.liked", state.liked);
-          restoredAny = true;
         } else if (state.liked.length > 0) {
           modified = true;
         }
@@ -1826,11 +1886,15 @@
 
   function toggleLike(track) {
     if (!track) return;
+    if (!track.id) {
+      const k = trackKey(track) || (track.videoId ? `yt:${track.videoId}` : (track.trackId ? `audius:${track.trackId}` : `tr:${encodeURIComponent((track.title || "") + "-" + (track.artist || ""))}`));
+      track.id = k;
+    }
     const was = isLiked(track);
     if (was) state.liked = state.liked.filter((t) => trackKey(t) !== trackKey(track));
     else state.liked.unshift(track);
     save("aura.liked", state.liked);
-    scheduleUserLibraryPush();
+    scheduleUserLibraryPush({ replaceLiked: true });
     const btn = $("likeBtn");
     if (btn) {
       btn.classList.toggle("pop", !was);
@@ -1854,6 +1918,9 @@
     state.activePlaylist = "liked";
     closeOverlays();
     softRender();
+    if (state.auth && state.auth.signedIn && Date.now() - lastLibrarySyncTime > 8000) {
+      syncUserLibrary();
+    }
   }
 
   function sheetItem(id, icon, label) {
@@ -4053,6 +4120,15 @@
         presence.type = "peaking"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;
         const air = fxAdd(ctx.createBiquadFilter());
         air.type = "highshelf"; air.frequency.value = 8500; air.gain.value = 2.6;
+
+        // 1.9.8 Super-Bass Phone Speaker Acoustic Calibration:
+        // Dual-resonant kick punch (92Hz & 118Hz) + vocal presence + silky air
+        bass.frequency.value = 92; bass.gain.value = 11.2;
+        sub.frequency.value = 64; sub.gain.value = 6.2;
+        body.frequency.value = 118; body.gain.value = 4.8;
+        presence.frequency.value = 2850; presence.gain.value = 3.2;
+        air.frequency.value = 9200; air.gain.value = 3.4;
+
         hpf.connect(bass);
         bass.connect(sub);
         sub.connect(body);
@@ -4073,6 +4149,11 @@
           const x = (i * 2) / hn - 1;
           hc[i] = Math.tanh(3.1 * x) * 0.52 + x * Math.abs(x) * 0.48;
         }
+        // 1.9.8 Super-Bass Psychoacoustic Harmonic Exciter
+        for (let i = 0; i < hn; i++) {
+          const x = (i * 2) / hn - 1;
+          hc[i] = Math.tanh(4.2 * x) * 0.65 + x * Math.abs(x) * 0.35;
+        }
         harm.curve = hc;
         harm.oversample = "2x";
         const hpH = fxAdd(ctx.createBiquadFilter());
@@ -4081,6 +4162,7 @@
         lpH.type = "lowpass"; lpH.frequency.value = 340; lpH.Q.value = 0.7;
         const wet = fxAdd(ctx.createGain());
         wet.gain.value = 0.72;
+        wet.gain.value = 0.92;
         hpf.connect(bp);
         bp.connect(harm);
         harm.connect(hpH);
@@ -4102,6 +4184,12 @@
         lim.release.value = 0.08;
         const out = fxAdd(ctx.createGain());
         out.gain.value = 1.55;
+        // 1.9.8 Super-Bass Dynamics & Limiting
+        punch.threshold.value = -18;
+        punch.ratio.value = 4.0;
+        lim.threshold.value = -0.6;
+        out.gain.value = 1.60;
+
         mix.connect(punch);
         punch.connect(lim);
         lim.connect(out);
@@ -4126,6 +4214,11 @@
         scoop.gain.value = -2.2;
         presence.gain.value = 1.2;
         air.gain.value = -0.8;
+        // 1.9.8 Super-Bass Profile
+        bass.frequency.value = 82; bass.gain.value = 11.5;
+        sub.gain.value = 6.5;
+        presence.gain.value = 2.8;
+        air.gain.value = 2.8;
       } else if (mode === "spatial") {
         bass.frequency.value = 90; bass.gain.value = 2.4;
         sub.gain.value = 1.2;
@@ -4159,6 +4252,9 @@
         comp.ratio.value = 2.6;
         comp.attack.value = 0.012;
         comp.release.value = 0.22;
+        // 1.9.8 Super-Bass Dynamics
+        comp.threshold.value = -17;
+        comp.ratio.value = 3.2;
       } else {
         comp.threshold.value = -14;
         comp.knee.value = 16;
@@ -4170,6 +4266,7 @@
 
       const out = fxAdd(ctx.createGain());
       out.gain.value = mode === "bass" ? 1.28 : mode === "dynamic" ? 1.22 : 1.18;
+      if (mode === "bass") out.gain.value = 1.34;
 
       if (mode === "spatial") {
         const lis = ctx.listener;
@@ -4557,6 +4654,8 @@
     const canDl = !!t && t.source !== "radio" && !!(t.videoId || t.trackId || t.source === "youtube" || t.source === "apple" || t.source === "itunes" || t.source === "deezer" || saved);
     const canFollow = !!(t && t.source !== "radio");
     const followingNow = !!(canFollow && isFollowing(t));
+    const hasOfflineLyr = !!(t && hasOfflineSyncedLyrics(t));
+    const canLyrics = !!t && t.source !== "radio";
     const ytChip = ytConnected() && t && t.videoId
       ? `<div class="po-row"><div><strong>YouTube</strong><p>Add the current song to your account.</p></div>
           <div class="po-yt-actions">
@@ -4579,6 +4678,25 @@
               ? `<button type="button" class="chip-btn" id="poDl">${saved ? "✓ Saved" : "Download"}</button>`
               : ""}
           </div>
+          ${canLyrics ? `
+          <div class="po-row">
+            <div><strong>Offline synced lyrics</strong><p>${
+              hasOfflineLyr
+                ? "Time-synced lyrics saved on this device for offline playback."
+                : "Save time-synced lyrics so they scroll without internet."
+            }</p></div>
+            <div class="po-yt-actions">
+              <button type="button" class="chip-btn" id="poSaveLyrics">
+                <span class="material-symbols-outlined">subtitles</span>
+                ${hasOfflineLyr ? "Update lyrics" : "Offline sync lyrics"}
+              </button>
+              ${hasOfflineLyr ? `
+              <button type="button" class="chip-btn" id="poExportLrc" title="Export .lrc file">
+                <span class="material-symbols-outlined">description</span>
+                .LRC
+              </button>` : ""}
+            </div>
+          </div>` : ""}
           ${t && t.source !== "radio" ? `
           <div class="po-row">
             <div><strong>Playlist &amp; Artist</strong><p>${escapeHTML(artistName(t) || t.artist || "Artist")}</p></div>
@@ -4601,6 +4719,10 @@
     $("poSleep").addEventListener("click", () => { hideModal(); openSleepTimerSheet(); });
     const poDl = $("poDl");
     if (poDl) poDl.addEventListener("click", () => { hideModal(); downloadTrack(t); });
+    const poSaveLyrics = $("poSaveLyrics");
+    if (poSaveLyrics) poSaveLyrics.addEventListener("click", () => { hideModal(); saveSyncedLyricsForTrackInteractive(t); });
+    const poExportLrc = $("poExportLrc");
+    if (poExportLrc) poExportLrc.addEventListener("click", () => { hideModal(); exportTrackLrc(t); });
     const poAddPl = $("poAddPl");
     if (poAddPl) poAddPl.addEventListener("click", () => { hideModal(); addToPlaylist(t); });
     const poFollow = $("poFollow");
@@ -7159,6 +7281,9 @@
         t.source !== "audius" && t.source !== "radio";
       if (needsResolve) {
         renderBufferState(true);
+        if (t.title) {
+          getWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 3000, true).catch(() => {});
+        }
         try {
           if (useNativeAudioPipe && t.title) {
             // In Native App, MuchiAudioService / MuchiAudioPlugin resolves title + artist
@@ -9570,6 +9695,9 @@
       toast("Sign-in didn't stick — your server may have restarted. Please try again.");
     }
     if (state.auth && state.auth.signedIn) {
+      if (_hasPendingLibraryPush) {
+        flushUserLibraryPush();
+      }
       syncUserLibrary();
       if (state.auth.youtube && state.auth.youtube.connected) {
         loadYtLiked(true);
@@ -14724,19 +14852,17 @@
             ${t.source !== "radio" ? `
             <button class="icon-btn ${saved ? "on" : ""}" id="nowDlBtn" type="button" title="${saved ? "Saved offline with synced lyrics" : "Download song & synced lyrics"}">
               <span class="material-symbols-outlined">${saved ? "download_done" : "download"}</span>
-            </button>
-            <button class="icon-btn ${hasOfflineSyncedLyrics(t) ? "on" : ""}" id="nowSaveLyrBtn" type="button" title="${hasOfflineSyncedLyrics(t) ? "Synced lyrics saved offline (tap to export .lrc)" : "Save synced lyrics offline"}">
-              <span class="material-symbols-outlined">subtitles</span>
-            </button>
+            </button>` : ""}
+            ${t.source !== "radio" ? `
             <button class="icon-btn ${followingNow ? "on" : ""}" id="nowFollowBtn" type="button" title="${followingNow ? "Following artist" : "Follow artist"}">
-              <span class="material-symbols-outlined">${followingNow ? "how_to_reg" : "person_add"}</span>
+              <span class="material-symbols-outlined">${followingNow ? "person_check" : "person_add"}</span>
             </button>` : ""}
             ${canVideo ? `
             <button class="icon-btn ${state.showVideo ? "on" : ""}" id="nowVideoBtn" type="button" title="Watch video">
               <span class="material-symbols-outlined">smart_display</span>
             </button>` : ""}
             <button class="icon-btn" id="nowOptsBtn" type="button" title="Player options">
-              <span class="material-symbols-outlined">tune</span>
+              <span class="material-symbols-outlined">more_vert</span>
             </button>
           </div>
         </div>
@@ -15087,16 +15213,11 @@
         if (cur) downloadTrack(cur);
       });
     }
-    const nowSaveLyrBtn = viewEl.querySelector("#nowSaveLyrBtn");
-    if (nowSaveLyrBtn) {
-      nowSaveLyrBtn.addEventListener("click", () => {
-        const cur = current();
-        if (!cur) return;
-        if (hasOfflineSyncedLyrics(cur)) {
-          exportTrackLrc(cur);
-        } else {
-          saveSyncedLyricsForTrackInteractive(cur);
-        }
+    const nowVideoBtn = viewEl.querySelector("#nowVideoBtn");
+    if (nowVideoBtn) {
+      nowVideoBtn.addEventListener("click", () => {
+        if ($("videoBtn")) $("videoBtn").click();
+        render();
       });
     }
     const nowFollowBtn = viewEl.querySelector("#nowFollowBtn");
@@ -15109,16 +15230,11 @@
         }
       });
     }
-    const nowVideoBtn = viewEl.querySelector("#nowVideoBtn");
-    if (nowVideoBtn) {
-      nowVideoBtn.addEventListener("click", () => {
-        if ($("videoBtn")) $("videoBtn").click();
-        render();
-      });
-    }
     const nowOptsBtn = viewEl.querySelector("#nowOptsBtn");
     if (nowOptsBtn) {
-      nowOptsBtn.addEventListener("click", () => openPlayerOptions());
+      nowOptsBtn.addEventListener("click", () => {
+        openPlayerOptions();
+      });
     }
     viewEl.querySelectorAll("[data-ytpl]").forEach((el) => {
       el.addEventListener("click", () => openCatalogPlaylist({
@@ -16090,6 +16206,9 @@
     showEl($("scrim"), !!state.showQueue || (sideEl && sideEl.classList.contains("open")));
     render();
     syncPlayerVisibility();
+    if (state.view === "library" && state.auth && state.auth.signedIn && Date.now() - lastLibrarySyncTime > 10000) {
+      syncUserLibrary();
+    }
     if (IS_NATIVE || document.documentElement.getAttribute("data-native") === "1") {
       clearTimeout(paintNav._popT);
       if (state.view === "settings") {
@@ -19757,24 +19876,53 @@
     if (document.hidden) {
       if (waveRaf) { cancelAnimationFrame(waveRaf); waveRaf = 0; }
       if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
+      flushUserLibraryPush();
     } else if (document.visibilityState === "visible") {
       updateWakeLock();
       updateProgress();
       if (state.view === "now") restartWaveLoop();
+      if (state.auth && state.auth.signedIn && Date.now() - lastLibrarySyncTime > 10000) {
+        syncUserLibrary();
+      }
     }
     keepBackgroundPlay();
   });
-  window.addEventListener("pageshow", () => keepBackgroundPlay());
-  document.addEventListener("resume", () => keepBackgroundPlay());
+  window.addEventListener("pageshow", () => {
+    keepBackgroundPlay();
+    if (state.auth && state.auth.signedIn && Date.now() - lastLibrarySyncTime > 10000) {
+      syncUserLibrary();
+    }
+  });
+  document.addEventListener("resume", () => {
+    keepBackgroundPlay();
+    if (state.auth && state.auth.signedIn && Date.now() - lastLibrarySyncTime > 10000) {
+      syncUserLibrary();
+    }
+  });
   document.addEventListener("freeze", () => {
+    flushUserLibraryPush();
     if (wantPlay) updateMediaSession();
   });
-  // Persist the last listening session when the app is closed / backgrounded
-  // (native shells fire `pause`/`stop`; web fires pagehide + visibilitychange).
-  window.addEventListener("pagehide", () => savePlayerSession());
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") savePlayerSession();
+  // Persist the last listening session & flush library push when app is closed / backgrounded
+  window.addEventListener("pagehide", () => {
+    flushUserLibraryPush();
+    savePlayerSession();
   });
+  window.addEventListener("beforeunload", () => {
+    flushUserLibraryPush();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      flushUserLibraryPush();
+      savePlayerSession();
+    }
+  });
+  // Auto-sync library in background when app is active & signed in
+  setInterval(() => {
+    if (!document.hidden && state.auth && state.auth.signedIn && Date.now() - lastLibrarySyncTime > 35000) {
+      syncUserLibrary();
+    }
+  }, 35000);
   // Resume the last listening session: put the last song (and its queue) back
   // in the docked player so reopening the app "shows the player of the last
   // song" ready to resume. We restore the track + position but do NOT
