@@ -25,6 +25,15 @@
   // scoped to html[data-native="1"] so browser layout is never affected.
   if (IS_NATIVE) document.documentElement.setAttribute("data-native", "1");
 
+  function isNativeApp() {
+    return Boolean(
+      IS_NATIVE ||
+      (typeof document !== "undefined" && document.documentElement && document.documentElement.getAttribute("data-native") === "1") ||
+      (typeof window !== "undefined" && window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) ||
+      (typeof window !== "undefined" && (window.__MUCHI_NATIVE_PREVIEW__ || window.location && window.location.search && window.location.search.includes("native=1")))
+    );
+  }
+
   // Optional API base, injected by the server via window.MUCHI_API_BASE
   // (server.js reads MUCHI_API_BASE env). Empty = same-origin (default deploy).
   const API_BASE = String(window.MUCHI_API_BASE || "").trim().replace(/\/+$/, "");
@@ -135,7 +144,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.9.8";
+  const APP_VERSION = "1.9.9";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -1121,6 +1130,69 @@
     return out;
   }
 
+  function normalizeFollowFold(s) {
+    return String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\$/g, "s")
+      .replace(/[^a-z0-9]/g, "")
+      .trim();
+  }
+
+  function recordUnfollowTombstone(nameOrKey, extraName) {
+    try {
+      const list = asArray(load("aura.unfollowed", []));
+      const set = new Set(list.map((x) => String(x).toLowerCase().trim()));
+      const add = (v) => {
+        if (!v) return;
+        const s = String(v).trim().toLowerCase();
+        if (s) set.add(s);
+        const clean = s.replace(/^(name:|audius:)/i, "").trim();
+        if (clean) set.add(clean);
+        const fold = normalizeFollowFold(clean);
+        if (fold) set.add(fold);
+      };
+      add(nameOrKey);
+      if (extraName) add(extraName);
+      save("aura.unfollowed", Array.from(set).slice(-300));
+      save("aura.followingLocalAt", Date.now());
+    } catch {}
+  }
+
+  function clearUnfollowTombstone(nameOrKey, extraName) {
+    try {
+      const list = asArray(load("aura.unfollowed", []));
+      if (!list.length) return;
+      const remove = new Set();
+      const mark = (v) => {
+        if (!v) return;
+        const s = String(v).trim().toLowerCase();
+        if (s) remove.add(s);
+        const clean = s.replace(/^(name:|audius:)/i, "").trim();
+        if (clean) remove.add(clean);
+        const fold = normalizeFollowFold(clean);
+        if (fold) remove.add(fold);
+      };
+      mark(nameOrKey);
+      if (extraName) mark(extraName);
+      save("aura.unfollowed", list.filter((x) => !remove.has(String(x).toLowerCase().trim())));
+      save("aura.followingLocalAt", Date.now());
+    } catch {}
+  }
+
+  function isUnfollowedTombstone(f) {
+    if (!f) return false;
+    const list = asArray(load("aura.unfollowed", []));
+    if (!list.length) return false;
+    const set = new Set(list.map((x) => String(x).toLowerCase().trim()));
+    const fk = String(f.key || "").toLowerCase().trim();
+    const fn = String(f.name || "").toLowerCase().trim();
+    const fnClean = fn.replace(/^(name:|audius:)/i, "").trim();
+    const fnFold = normalizeFollowFold(fnClean);
+    return set.has(fk) || set.has(fn) || set.has(fnClean) || (Boolean(fnFold) && set.has(fnFold));
+  }
+
   function hydrateLibrary() {
     state.liked = asArray(load("aura.liked", state.liked));
     state.recents = asArray(load("aura.recents", state.recents));
@@ -1214,6 +1286,13 @@
           },
         }),
       });
+      if (res && (res.ok || res.syncedAt)) {
+        const sAt = Number(res.syncedAt || Date.now());
+        save("aura.followingSyncedAt", sAt);
+        if (opts && opts.replaceFollowing) {
+          save("aura.unfollowed", []);
+        }
+      }
     } catch {}
   }
 
@@ -1318,17 +1397,43 @@
           modified = true;
         }
 
-        // 3. Following merge (normalized keys)
-        if (Array.isArray(remote.following) && remote.following.length > 0) {
-          const mergedFollowing = dedupeFollowingList([...remote.following, ...state.following]);
-          if (mergedFollowing.length > dedupeFollowingList(remote.following).length) {
-            modified = true;
+        // 3. Following sync & cross-device reconciliation (seamlessly syncs follows/unfollows across Web & Phone)
+        if (Array.isArray(remote.following)) {
+          const remoteNormalized = dedupeFollowingList(remote.following);
+          const remoteSyncedAt = Number(res.syncedAt || (remote && remote.updated_at) || 0);
+          const lastSyncedAt = Number(load("aura.followingSyncedAt", 0));
+          const lastLocalAt = Number(load("aura.followingLocalAt", 0));
+          const hasLocalUnpushed = _hasPendingLibraryPush || _pendingReplaceFollowing || (lastLocalAt > 0 && lastLocalAt > lastSyncedAt);
+
+          if (forcePull || !lastSyncedAt || !hasLocalUnpushed) {
+            // Cloud is authoritative: apply remote following cleanly and purge matching tombstones
+            const targetFollowing = remoteNormalized.filter((f) => !isUnfollowedTombstone(f));
+            state.following = targetFollowing;
+            save("aura.following", state.following);
+            save("aura.followingSyncedAt", remoteSyncedAt || Date.now());
+            save("aura.unfollowed", []);
+            restoredAny = true;
+          } else {
+            // Local device has offline/unpushed actions: reconcile without resurrecting unfollowed artists
+            const filteredRemote = remoteNormalized.filter((f) => !isUnfollowedTombstone(f));
+            const remoteKeys = new Set(filteredRemote.map((f) => String(f.key || f.name).toLowerCase().trim()));
+            const localNewAdditions = (state.following || []).filter((f) => {
+              if (!f || isUnfollowedTombstone(f)) return false;
+              const k = String(f.key || f.name).toLowerCase().trim();
+              if (remoteKeys.has(k)) return false;
+              return (f.followedAt && f.followedAt > lastSyncedAt) || (lastLocalAt > lastSyncedAt);
+            });
+            const merged = dedupeFollowingList([...localNewAdditions, ...filteredRemote]);
+            state.following = merged;
+            save("aura.following", state.following);
+            save("aura.followingSyncedAt", remoteSyncedAt || Date.now());
+            if (localNewAdditions.length > 0) {
+              modified = true;
+            } else {
+              save("aura.unfollowed", []);
+            }
+            restoredAny = true;
           }
-          state.following = mergedFollowing;
-          save("aura.following", state.following);
-          restoredAny = true;
-        } else if (state.following.length > 0) {
-          modified = true;
         }
 
         // 4. Recents merge
@@ -1354,7 +1459,24 @@
           state.prefs.tasteMoods = mergeArr(remoteTaste.tasteMoods, state.prefs.tasteMoods);
           state.prefs.tasteEras = mergeArr(remoteTaste.tasteEras, state.prefs.tasteEras);
           state.prefs.tasteStyles = mergeArr(remoteTaste.tasteStyles, state.prefs.tasteStyles);
-          state.prefs.tasteArtists = mergeArr(remoteTaste.tasteArtists, state.prefs.tasteArtists);
+
+          if (Array.isArray(remoteTaste.tasteArtists)) {
+            const lastSyncedAt = Number(load("aura.followingSyncedAt", 0));
+            const lastLocalAt = Number(load("aura.followingLocalAt", 0));
+            const hasLocalTaste = lastLocalAt > 0 && lastLocalAt > lastSyncedAt;
+            if (forcePull || !lastSyncedAt || !hasLocalTaste) {
+              state.prefs.tasteArtists = remoteTaste.tasteArtists.filter((a) => !isUnfollowedTombstone({ name: a, key: a }));
+            } else {
+              const rSet = new Set(remoteTaste.tasteArtists.map((a) => String(a).toLowerCase().trim()));
+              const lAdd = (state.prefs.tasteArtists || []).filter((a) => {
+                const k = String(a).toLowerCase().trim();
+                return !rSet.has(k) && !isUnfollowedTombstone({ name: a, key: a });
+              });
+              state.prefs.tasteArtists = [...new Set([...remoteTaste.tasteArtists.filter((a) => !isUnfollowedTombstone({ name: a, key: a })), ...lAdd])];
+            }
+            savePrefs();
+          }
+
           if (remoteTaste.country && !state.prefs.countryChosen) {
             state.prefs.country = remoteTaste.country;
             if (remoteTaste.countryChosen) state.prefs.countryChosen = true;
@@ -1892,9 +2014,13 @@
     }
     const was = isLiked(track);
     if (was) state.liked = state.liked.filter((t) => trackKey(t) !== trackKey(track));
-    else state.liked.unshift(track);
+    else {
+      state.liked.unshift(track);
+      if (typeof recordSessionAffinity === "function") recordSessionAffinity(track);
+    }
     save("aura.liked", state.liked);
     scheduleUserLibraryPush({ replaceLiked: true });
+    if (typeof reRankUpcomingQueue === "function") reRankUpcomingQueue();
     const btn = $("likeBtn");
     if (btn) {
       btn.classList.toggle("pop", !was);
@@ -2038,13 +2164,17 @@
     if (state.view === "library") render();
   }
 
-  // Session-level anti-repeat & shuffle tracking so the queue and recommendations
-  // never play the same song twice in a row or repeat songs too often.
+  // Session-level anti-repeat, skip/replay learning & adaptive queue tracking
   const _sessionPlayedKeys = [];
   const _sessionPlayedSet = new Set();
   const _sessionAutoQueuedKeys = [];
   const _sessionAutoQueuedSet = new Set();
   const _shuffleVisitedKeys = new Set();
+  const _sessionSkips = new Map();
+  const _sessionAffinities = new Map();
+  const _sessionReplays = new Map();
+  const _sessionArtistStreak = { artist: "", count: 0 };
+  let _trackStartedAt = 0;
 
   function normalizeKeyText(s) {
     return String(s || "")
@@ -2245,6 +2375,7 @@
       });
       savePrefs();
     }
+    recordUnfollowTombstone(keyOrName, extraName);
     saveFollowing({ replaceFollowing: true });
     return removedName || raw.replace(/^(name:|audius:)/i, "");
   }
@@ -2261,6 +2392,8 @@
       const unfollowed = unfollowArtistByKeyOrName(key || name, track.origName || "");
       toast(`Unfollowed ${unfollowed || name}`, true, "success");
     } else {
+      clearUnfollowTombstone(key, name);
+      save("aura.followingLocalAt", Date.now());
       state.following.unshift({
         key,
         name,
@@ -2276,6 +2409,7 @@
         Notification.requestPermission().catch(() => {});
       }
     }
+    if (typeof reRankUpcomingQueue === "function") reRankUpcomingQueue();
     renderChrome();
     if (state.view === "library" || state.view === "settings" || state.artistPage) render();
   }
@@ -3010,10 +3144,13 @@
       toast("Already playing this song");
       return;
     }
+    track._userQueued = true;
+    track._userPinned = true;
     const rest = state.queue.filter((t, i) => i !== state.index && !isSameSongClient(t, track));
     state.queue = [cur, track, ...rest].filter(Boolean);
     state.index = 0;
     renderQueue();
+    syncNativeNextTrack();
     toast("Queued to play next", true, "success");
   }
   function addToQueue(track) {
@@ -3026,8 +3163,11 @@
       toast("Already in queue");
       return;
     }
+    track._userQueued = true;
+    track._userPinned = true;
     state.queue.push(track);
     renderQueue();
+    syncNativeNextTrack();
     toast("Added to queue", true, "success");
   }
   function removeQueued(i) {
@@ -3035,19 +3175,25 @@
     state.queue.splice(i, 1);
     if (i < state.index) state.index -= 1;
     renderQueue();
+    syncNativeNextTrack();
   }
   function clearUpcoming() {
     const cur = current();
-    if (!cur) { state.queue = []; state.index = -1; renderQueue(); return; }
+    if (!cur) { state.queue = []; state.index = -1; renderQueue(); syncNativeNextTrack(); return; }
     state.queue = [cur];
     state.index = 0;
     renderQueue();
+    syncNativeNextTrack();
     toast("Upcoming cleared", true, "success");
   }
   function moveQueue(from, to) {
     if (from === to || from < 0 || to < 0 || from >= state.queue.length || to >= state.queue.length) return;
     const curId = current() && current().id;
     const [row] = state.queue.splice(from, 1);
+    if (row) {
+      row._userPinned = true;
+      row._userQueued = true;
+    }
     state.queue.splice(to, 0, row);
     if (curId) {
       const ni = state.queue.findIndex((t) => t.id === curId);
@@ -6025,23 +6171,170 @@
     return 0;
   }
 
-  // Sequences candidate songs like a human-made Spotify playlist:
-  // 1) Phase 1 (first ~35%): close similarity (same language/subCulture, vibe, genre, mood, tempo, style, related/peer artists)
-  // 2) Phase 2 (middle ~40%): core vibe & style continuation across varied artists in the same language/culture
-  // 3) Phase 3 (final ~25%): gradual exploration into compatible genres/moods within compatible culture
-  // Strictly prevents duplicate songs, recently played repeats, cross-language jarring jumps, and back-to-back same artist.
+  const _sessionRecentVibes = [];
+  function recordTrackVibe(t) {
+    if (!t) return;
+    const v = inferTrackVibeClient(t);
+    const art = canonicalPrimaryArtistClient(t);
+    _sessionRecentVibes.unshift({
+      artist: art,
+      genre: v.genre,
+      cluster: v.cluster,
+      mood: v.mood,
+      tempo: v.tempo,
+      langCulture: v.langCulture,
+      subCulture: v.subCulture,
+      style: v.style,
+      time: Date.now(),
+    });
+    if (_sessionRecentVibes.length > 12) _sessionRecentVibes.pop();
+  }
+
+  function isArtistBingeClient(artNorm) {
+    if (!artNorm) return false;
+    if (_sessionArtistStreak.artist === artNorm && _sessionArtistStreak.count >= 2) return true;
+    const recentMatches = (state.recents || []).slice(0, 8).filter(
+      (r) => canonicalPrimaryArtistClient(r) === artNorm
+    ).length;
+    return recentMatches >= 3;
+  }
+
+  function scoreTrackPopularityAndFreshness(t) {
+    if (!t) return 0;
+    let score = 0;
+    if (t.rank && Number(t.rank) > 400000) {
+      score += Math.min(10, Math.floor(Number(t.rank) / 100000));
+    }
+    if (t.popularity && Number(t.popularity) > 35) {
+      score += Math.min(10, Math.floor(Number(t.popularity) / 10));
+    }
+    const views = Number(t.viewCount || t.views || t.streamCount || t.playCount || 0);
+    if (views > 1000000) score += 8;
+    else if (views > 100000) score += 4;
+    else if (views > 10000) score += 2;
+    const rawY = String(t.year || t.releaseDate || "");
+    const year = Number(rawY.slice(0, 4));
+    if (year >= 2022 && year <= 2026) score += 4;
+    return score;
+  }
+
+  function recordSessionSkip(t) {
+    if (!t) return;
+    const a = canonicalPrimaryArtistClient(t);
+    const k = canonicalSongKey(t);
+    const tv = inferTrackVibeClient(t);
+    if (k) _sessionSkips.set(k, (_sessionSkips.get(k) || 0) + 1);
+    if (a) _sessionSkips.set(a, (_sessionSkips.get(a) || 0) + 1);
+    if (tv && tv.mood) _sessionSkips.set(`mood:${tv.mood}`, (_sessionSkips.get(`mood:${tv.mood}`) || 0) + 1);
+    if (tv && tv.genre) _sessionSkips.set(`genre:${tv.genre}`, (_sessionSkips.get(`genre:${tv.genre}`) || 0) + 1);
+    if (tv && tv.subCulture) _sessionSkips.set(`sub:${tv.subCulture}`, (_sessionSkips.get(`sub:${tv.subCulture}`) || 0) + 1);
+  }
+
+  function recordSessionAffinity(t) {
+    if (!t) return;
+    const a = canonicalPrimaryArtistClient(t);
+    const k = canonicalSongKey(t);
+    const tv = inferTrackVibeClient(t);
+    if (k) _sessionAffinities.set(k, (_sessionAffinities.get(k) || 0) + 1);
+    if (a) _sessionAffinities.set(a, (_sessionAffinities.get(a) || 0) + 1);
+    if (tv && tv.mood) _sessionAffinities.set(`mood:${tv.mood}`, (_sessionAffinities.get(`mood:${tv.mood}`) || 0) + 1);
+    if (tv && tv.genre) _sessionAffinities.set(`genre:${tv.genre}`, (_sessionAffinities.get(`genre:${tv.genre}`) || 0) + 1);
+    if (tv && tv.subCulture) _sessionAffinities.set(`sub:${tv.subCulture}`, (_sessionAffinities.get(`sub:${tv.subCulture}`) || 0) + 1);
+  }
+
+  function recordSessionReplay(t) {
+    if (!t) return;
+    const a = canonicalPrimaryArtistClient(t);
+    const k = canonicalSongKey(t);
+    if (k) _sessionReplays.set(k, (_sessionReplays.get(k) || 0) + 1);
+    if (a) _sessionReplays.set(a, (_sessionReplays.get(a) || 0) + 1);
+    recordSessionAffinity(t);
+  }
+
+  function updateArtistStreak(t) {
+    if (!t) return;
+    const a = canonicalPrimaryArtistClient(t);
+    if (!a) return;
+    if (a === _sessionArtistStreak.artist) {
+      _sessionArtistStreak.count += 1;
+    } else {
+      _sessionArtistStreak.artist = a;
+      _sessionArtistStreak.count = 1;
+    }
+  }
+
+  function isInstrumentalOrFillerTrack(t) {
+    if (!t || !t.title) return false;
+    const title = String(t.title || "").toLowerCase();
+    const artist = String(t.artist || "").toLowerCase();
+    const fillerRegex = /\b(instrumental|karaoke|backing track|minus one|piano cover|guitar cover|synth cover|soundtrack|sound effect|sfx|lofi beat|chillhop beat|sleep music|meditation|white noise|rain sounds|8d audio|bass boosted|ringtone|slowed\s*\+\s*reverb|earrape|nightcore|parody)\b/i;
+    return fillerRegex.test(title) || fillerRegex.test(artist);
+  }
+
+  function isSeedTrackVocal(seed) {
+    if (!seed) return true;
+    if (isInstrumentalOrFillerTrack(seed)) return false;
+    const sv = inferTrackVibeClient(seed);
+    if (sv && (sv.genre === "ambient" || sv.genre === "lofi" || sv.mood === "focus")) {
+      return !/\b(song|feat|ft\.|vocal)\b/i.test(seed.title || "");
+    }
+    return true;
+  }
+
+  function timeOfDayContext() {
+    const hr = new Date().getHours();
+    if (hr >= 23 || hr < 5) return "late_night";
+    if (hr >= 5 && hr < 11) return "morning";
+    if (hr >= 11 && hr < 18) return "daytime";
+    return "evening";
+  }
+
+  // Sequences candidate songs like a Spotify-level intelligent curator:
+  // - Evaluates 13 dynamic music ranking dimensions in real time
+  // - Starts with closely related songs matching language, culture, vibe, and energy
+  // - Adapts to artist binge / focus sessions by intelligently including more of that artist
+  // - Respects language & regional musical culture strictly (never jarring cross-language leaps)
+  // - Avoids unrelated instrumental filler when listener is enjoying vocal music
+  // - Avoids consecutive songs from same artist unless in artist binge mode
+  // - Avoids repetitive genre/mood patterns using rolling session vibe history
+  // - Factors in user's liked songs, followed artists, skips, replays, and listening history
+  // - Balances familiar favorites (~35%) with intelligent discovery (~65%)
+  // - Prefers real, authentic, popular songs over obscure uploads
   function scoreAndSequenceSpotifyStyle(seedTrack, candidates, opts = {}) {
     const max = opts.max || 20;
     const maxPerArtist = opts.maxPerArtist || 2;
     const seedVibe = seedTrack ? inferTrackVibeClient(seedTrack) : (opts.vibe || { genre: "pop", cluster: "pop", mood: "upbeat", tempo: "mid", style: "modern", langCulture: "western", subCulture: "english_pop", peerArtists: [] });
     const seedArtist = seedTrack ? canonicalPrimaryArtistClient(seedTrack) : "";
     const seedKey = seedTrack ? canonicalSongKey(seedTrack) : "";
+    const seedIsVocal = isSeedTrackVocal(seedTrack);
     const countryCode = String((state.prefs && state.prefs.country) || "US").toUpperCase();
     const prefGenres = Array.isArray(state.prefs && state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
     const allowIndian =
       countryCode === "IN" || countryCode === "PK" || countryCode === "BD" ||
       seedVibe.cluster === "desi" || seedVibe.langCulture === "south_asian" ||
       prefGenres.some((g) => /bollywood|punjabi|tamil|telugu|indie_in/i.test(g));
+
+    const isArtistBinge = isArtistBingeClient(seedArtist);
+    const tod = timeOfDayContext();
+
+    // Check rolling session vibes to prevent monotonous mood/genre fatigue
+    const recentVibes = _sessionRecentVibes.slice(0, 4);
+    let moodFatigue = null;
+    let genreFatigue = null;
+    let tempoFatigue = null;
+    if (recentVibes.length >= 3) {
+      const mCounts = {};
+      const gCounts = {};
+      const tCounts = {};
+      for (const rv of recentVibes) {
+        if (rv.mood) mCounts[rv.mood] = (mCounts[rv.mood] || 0) + 1;
+        if (rv.genre) gCounts[rv.genre] = (gCounts[rv.genre] || 0) + 1;
+        if (rv.tempo) tCounts[rv.tempo] = (tCounts[rv.tempo] || 0) + 1;
+      }
+      moodFatigue = Object.keys(mCounts).find((m) => mCounts[m] >= 3) || null;
+      genreFatigue = Object.keys(gCounts).find((g) => gCounts[g] >= 3) || null;
+      tempoFatigue = Object.keys(tCounts).find((tp) => tCounts[tp] >= 3) || null;
+    }
 
     const taste = tasteProfile();
     const favArtistSet = new Set([
@@ -6069,8 +6362,8 @@
       if (ex.videoId) excludeIds.add(String(ex.videoId));
     }
 
-    const recentPlayKeys = new Set(_sessionPlayedKeys.slice(0, 25));
-    const recentAutoKeys = new Set(_sessionAutoQueuedKeys.slice(0, 35));
+    const recentPlayKeys = new Set(_sessionPlayedKeys.slice(0, 35));
+    const recentAutoKeys = new Set(_sessionAutoQueuedKeys.slice(0, 45));
 
     const seenKeys = new Set();
     const seenIds = new Set();
@@ -6102,34 +6395,52 @@
       const isSameArtist = Boolean(seedArtist && artistNorm && (artistNorm === seedArtist || artistNorm.includes(seedArtist) || seedArtist.includes(artistNorm)));
       const isRelArtist = Boolean(!isSameArtist && artistNorm && relatedArtistSet.has(artistNorm));
       const isFavArtist = Boolean(artistNorm && favArtistSet.has(artistNorm));
+      const isLiked = Boolean(state.liked && state.liked.some((l) => isSameSongClient(l, t)));
       const isSameLang = (tv.langCulture || "western") === (seedVibe.langCulture || "western");
       const isSameSubCulture = Boolean(seedVibe.subCulture && tv.subCulture === seedVibe.subCulture);
+      const candIsInstrumental = isInstrumentalOrFillerTrack(t);
 
-      // Language & musical culture alignment (critical for avoiding jarring cross-language jumps)
+      // 1. Language & Regional Musical Culture Alignment (Highest Priority)
       if (isSameSubCulture) {
-        score += 38;
+        score += 44;
       } else if (isSameLang) {
-        score += 24;
+        score += 28;
       } else if ((seedVibe.langCulture || "western") !== "western") {
         if (seedVibe.isCrossCulturalBridge && (tv.genre === seedVibe.genre || tv.cluster === seedVibe.cluster)) {
-          score -= 8;
+          score -= 10;
         } else {
-          score -= 85;
+          score -= 90;
         }
       } else {
-        score -= 48;
+        score -= 52;
       }
 
+      // 2. Vocal vs Instrumental Integrity
+      if (seedIsVocal && candIsInstrumental) {
+        score -= 85;
+      } else if (!seedIsVocal && candIsInstrumental) {
+        score += 28;
+      } else if (!seedIsVocal && !candIsInstrumental) {
+        score -= 20;
+      }
+
+      // 3. Artist Relationships & Binge Context
       if (isRelArtist) {
-        score += 36;
+        score += 38;
         tier = 1;
       } else if (isSameArtist) {
-        score += 32;
+        score += isArtistBinge ? 40 : 30;
         tier = 1;
       } else if (isFavArtist && isSameLang) {
-        score += 14;
+        score += 22;
       }
 
+      // 4. Album Continuity
+      if (seedTrack && seedTrack.album && t.album && String(seedTrack.album).trim().toLowerCase() === String(t.album).trim().toLowerCase()) {
+        score += 16;
+      }
+
+      // 5. Genre & Vibe Cluster Flow
       if (tv.genre === seedVibe.genre && isSameLang) {
         score += 28;
         if (tier > 1 && (isRelArtist || isSameSubCulture || tv.mood === seedVibe.mood)) tier = 1;
@@ -6140,25 +6451,79 @@
         score += 12;
         tier = 3;
       } else {
-        score -= 16;
+        score -= 20;
         tier = 3;
       }
 
-      if (tv.mood === seedVibe.mood) score += 16;
-      else if (areMoodsCompatibleClient(seedVibe.mood, tv.mood)) score += 9;
-      else score -= 5;
+      // 6. Mood & Energy Harmony with Anti-Fatigue Intelligence
+      if (moodFatigue && tv.mood === moodFatigue) {
+        score -= 18; // listener had 3+ same moods in a row, provide fresh lift
+      } else if (tv.mood === seedVibe.mood) {
+        score += 18;
+      } else if (areMoodsCompatibleClient(seedVibe.mood, tv.mood)) {
+        score += 12;
+      } else {
+        score -= 12;
+      }
 
-      const tempoFit = areTemposSmoothClient(seedVibe.tempo, tv.tempo);
-      if (tempoFit === 2) score += 12;
-      else if (tempoFit === 1) score += 6;
-      else score -= 6;
+      // 7. Tempo Flow with Anti-Stagnation
+      if (tempoFatigue && tv.tempo === tempoFatigue && tempoFatigue === "slow") {
+        if (tv.tempo === "mid") score += 14;
+      } else {
+        const tempoFit = areTemposSmoothClient(seedVibe.tempo, tv.tempo);
+        if (tempoFit === 2) score += 15;
+        else if (tempoFit === 1) score += 6;
+        else score -= 12;
+      }
 
-      if (tv.style === seedVibe.style) score += 10;
+      // 8. Style Fit
+      if (tv.style === seedVibe.style) score += 12;
 
-      if (recentPlayKeys.has(key)) score -= 45;
-      else if (recentAutoKeys.has(key)) score -= 22;
+      // 9. User Liked Song Boost
+      if (isLiked) {
+        score += 26;
+      }
 
-      score += Math.max(0, 10 - Math.floor(i / 5));
+      // 10. Session Skip / Replay / Affinity Learning
+      const artistSkips = _sessionSkips.get(artistNorm) || 0;
+      const songSkips = _sessionSkips.get(key) || 0;
+      const moodSkips = _sessionSkips.get(`mood:${tv.mood}`) || 0;
+      const genreSkips = _sessionSkips.get(`genre:${tv.genre}`) || 0;
+      const subSkips = _sessionSkips.get(`sub:${tv.subCulture}`) || 0;
+      if (songSkips > 0) score -= (55 + songSkips * 25);
+      if (artistSkips > 0) score -= Math.min(65, artistSkips * 22);
+      if (moodSkips > 0) score -= Math.min(25, moodSkips * 10);
+      if (genreSkips > 0) score -= Math.min(25, genreSkips * 10);
+      if (subSkips > 0) score -= Math.min(30, subSkips * 12);
+
+      const artistAffinity = _sessionAffinities.get(artistNorm) || 0;
+      const songReplays = _sessionReplays.get(key) || 0;
+      const moodAffinity = _sessionAffinities.get(`mood:${tv.mood}`) || 0;
+      const subAffinity = _sessionAffinities.get(`sub:${tv.subCulture}`) || 0;
+      if (songReplays > 0 && !recentPlayKeys.has(key)) score += 28;
+      if (artistAffinity > 0) score += Math.min(32, artistAffinity * 10);
+      if (moodAffinity > 0) score += Math.min(20, moodAffinity * 6);
+      if (subAffinity > 0) score += Math.min(20, subAffinity * 6);
+
+      // 11. Popularity & Freshness Boost (prefer real songs over filler)
+      score += scoreTrackPopularityAndFreshness(t);
+
+      // 12. Time of Day Context
+      if (tod === "late_night") {
+        if (tv.mood === "chill" || tv.mood === "melancholic" || tv.style === "acoustic") score += 8;
+        if (tv.mood === "hype" || tv.tempo === "fast") score -= 8;
+      } else if (tod === "morning") {
+        if (tv.mood === "upbeat" || tv.mood === "chill" || tv.style === "acoustic") score += 6;
+        if (tv.mood === "dark") score -= 6;
+      } else if (tod === "evening") {
+        if (tv.mood === "romantic" || tv.cluster === "rnb" || tv.cluster === "pop") score += 5;
+      }
+
+      // 13. Anti-repeat penalties
+      if (recentPlayKeys.has(key)) score -= 55;
+      else if (recentAutoKeys.has(key)) score -= 25;
+
+      const isFamiliar = Boolean(isLiked || isFavArtist || artistAffinity > 0 || songReplays > 0);
 
       scored.push({
         track: t,
@@ -6168,15 +6533,16 @@
         isRelArtist,
         isSameLang,
         isSameSubCulture,
+        isFamiliar,
         vibe: tv,
         tier,
         score,
       });
     }
 
-    // If we have enough same-language/culture tracks (>= 5), filter out jarring cross-language tracks
+    // Filter jarring cross-language tracks if we have enough coherent tracks
     const sameLangList = scored.filter((c) => c.isSameLang || (seedVibe.isCrossCulturalBridge && c.score >= 25));
-    const activePool = sameLangList.length >= 5 ? sameLangList : scored;
+    const activePool = sameLangList.length >= 4 ? sameLangList : scored;
     activePool.sort((a, b) => b.score - a.score);
 
     const sequenced = [];
@@ -6190,11 +6556,13 @@
     const remaining = activePool.slice();
     let prevVibe = seedVibe;
     let prevArtist = seedArtist;
+    let familiarCount = 0;
+    const maxArtistCap = isArtistBinge ? Math.min(4, maxPerArtist + 2) : maxPerArtist;
 
     while (sequenced.length < max && remaining.length > 0) {
       const slot = sequenced.length;
       const progress = max > 1 ? slot / (max - 1) : 0;
-      const targetTier = progress < 0.35 ? 1 : progress < 0.75 ? 2 : 3;
+      const targetTier = progress < 0.28 ? 1 : progress < 0.68 ? 2 : 3;
 
       let bestIdx = -1;
       let bestSlotScore = -Infinity;
@@ -6202,11 +6570,11 @@
       for (let i = 0; i < remaining.length; i++) {
         const cand = remaining[i];
         const aCount = artistCounts.get(cand.artistNorm) || 0;
-        const capForArtist = (seedArtist && cand.artistNorm === seedArtist) ? Math.min(2, maxPerArtist) : maxPerArtist;
-        if (aCount >= capForArtist && remaining.length > 4) continue;
-        if (cand.artistNorm && cand.artistNorm === prevArtist) continue;
+        const capForArtist = (seedArtist && cand.artistNorm === seedArtist) ? maxArtistCap : maxPerArtist;
+        if (aCount >= capForArtist && remaining.length > 3) continue;
+        if (cand.artistNorm && cand.artistNorm === prevArtist && !isArtistBinge) continue;
         const lastIdx = artistLastSlot.get(cand.artistNorm);
-        if (lastIdx !== undefined && slot - lastIdx < 3) continue;
+        if (lastIdx !== undefined && slot - lastIdx < (isArtistBinge ? 2 : 3)) continue;
 
         let slotScore = cand.score;
         const tierDiff = Math.abs(cand.tier - targetTier);
@@ -6214,24 +6582,39 @@
         else if (tierDiff === 1) slotScore += 6;
         else slotScore -= 8;
 
-        // Immediately after the seed song (slot 0), prefer a similar peer artist in the same subCulture
-        // rather than repeating the seed artist right away; bring the seed artist back around slot 2-4
+        // Slot 0 (immediate next track): Prefer a related peer in the same subCulture over an immediate repeat of the current artist
         if (cand.isSameArtist) {
-          if (slot === 0) slotScore -= 28;
-          else if (slot >= 2 && slot <= 4 && aCount <= 1) slotScore += 16;
+          if (slot === 0 && !isArtistBinge) {
+            slotScore -= 35;
+          } else if (isArtistBinge) {
+            if (slot === 1 || slot === 3) slotScore += 26;
+            else if (slot >= 5 && aCount <= 2) slotScore += 16;
+          } else if (slot >= 2 && slot <= 4 && aCount <= 1) {
+            slotScore += 16;
+          }
         } else if (cand.isRelArtist && slot <= 3) {
-          slotScore += 14;
+          slotScore += 20;
+        }
+
+        // Curator pacing: balance familiar (~35%) with intelligent discovery (~65%)
+        const familiarRatio = slot > 0 ? (familiarCount / slot) : 0;
+        if (cand.isFamiliar) {
+          if (familiarRatio < 0.35 && slot >= 2) slotScore += 16;
+          else if (familiarRatio > 0.45) slotScore -= 12;
+        } else {
+          if (familiarRatio >= 0.35) slotScore += 10;
         }
 
         const tFit = areTemposSmoothClient(prevVibe.tempo, cand.vibe.tempo);
-        if (tFit === 2) slotScore += 10;
-        else if (tFit === 1) slotScore += 5;
-        else slotScore -= 8;
+        if (tFit === 2) slotScore += 14;
+        else if (tFit === 1) slotScore += 6;
+        else slotScore -= 12;
 
         if (cand.vibe.mood === prevVibe.mood) slotScore += 8;
-        else if (areMoodsCompatibleClient(prevVibe.mood, cand.vibe.mood)) slotScore += 4;
+        else if (areMoodsCompatibleClient(prevVibe.mood, cand.vibe.mood)) slotScore += 6;
+        else slotScore -= 8;
 
-        if (aCount === 0) slotScore += 9;
+        if (aCount === 0) slotScore += 10;
 
         if (slotScore > bestSlotScore) {
           bestSlotScore = slotScore;
@@ -6241,16 +6624,17 @@
 
       if (bestIdx < 0) {
         bestIdx = remaining.findIndex(
-          (c) => c.artistNorm !== prevArtist && (artistCounts.get(c.artistNorm) || 0) < maxPerArtist + 1
+          (c) => (c.artistNorm !== prevArtist || isArtistBinge) && (artistCounts.get(c.artistNorm) || 0) < maxArtistCap + 1
         );
       }
       if (bestIdx < 0) {
-        bestIdx = remaining.findIndex((c) => c.artistNorm !== prevArtist);
+        bestIdx = remaining.findIndex((c) => c.artistNorm !== prevArtist || isArtistBinge);
       }
       if (bestIdx < 0) bestIdx = 0;
 
       const [picked] = remaining.splice(bestIdx, 1);
       sequenced.push(picked.track);
+      if (picked.isFamiliar) familiarCount += 1;
       artistCounts.set(picked.artistNorm, (artistCounts.get(picked.artistNorm) || 0) + 1);
       artistLastSlot.set(picked.artistNorm, slot);
       prevArtist = picked.artistNorm;
@@ -6258,6 +6642,100 @@
     }
 
     return sequenced;
+  }
+
+  function isAdaptiveQueueTrack(t) {
+    if (!t) return false;
+    if (t._userPinned || t._userQueued) return false;
+    if (t._autoQueued) return true;
+    const k = canonicalSongKey(t);
+    return Boolean(k && _sessionAutoQueuedSet.has(k));
+  }
+
+  // Continuously and dynamically re-ranks upcoming songs in the queue based on
+  // the current listening context, session learning, and skips/replays, while
+  // preserving user-pinned and user-queued items in their intended positions.
+  function reRankUpcomingQueue() {
+    const cur = current();
+    if (!cur || cur.source === "radio") return;
+    if (!Array.isArray(state.queue) || state.index < 0) return;
+    const upcomingStart = state.index + 1;
+    if (upcomingStart >= state.queue.length) return;
+
+    const upcoming = state.queue.slice(upcomingStart);
+    if (upcoming.length <= 1) return;
+
+    // If queue is a fixed manual playlist/album without auto-queued songs, preserve existing order
+    const hasAdaptiveTracks = upcoming.some(isAdaptiveQueueTrack);
+    if (!hasAdaptiveTracks) return;
+
+    // If listener is playing an album, preserve the natural album track order
+    if (cur.album && upcoming.length > 2) {
+      const curAlbum = String(cur.album).trim().toLowerCase();
+      const sameAlbumCount = upcoming.filter((t) => t && t.album && String(t.album).trim().toLowerCase() === curAlbum).length;
+      if (sameAlbumCount >= Math.min(3, Math.ceil(upcoming.length * 0.75))) {
+        return;
+      }
+    }
+
+    const pinnedWithSlots = [];
+    const dynamicTracks = [];
+    for (let i = 0; i < upcoming.length; i++) {
+      const t = upcoming[i];
+      if (!t) continue;
+      if (isAdaptiveQueueTrack(t)) {
+        dynamicTracks.push(t);
+      } else {
+        pinnedWithSlots.push({ track: t, slot: i });
+      }
+    }
+
+    if (dynamicTracks.length > 1) {
+      const cleanDynamic = [];
+      const seen = new Set();
+      const curKey = canonicalSongKey(cur);
+      if (curKey) seen.add(curKey);
+      for (const t of dynamicTracks) {
+        const k = canonicalSongKey(t);
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        cleanDynamic.push(t);
+      }
+
+      const reSequenced = scoreAndSequenceSpotifyStyle(cur, cleanDynamic, {
+        max: cleanDynamic.length,
+        maxPerArtist: 2,
+        relatedArtists: cur._relatedArtists,
+        excludeTracks: [cur, ...(state.recents || []).slice(0, 10)],
+      });
+
+      // Interleave pinned items at their intended relative slots
+      const merged = [];
+      const pinnedMap = new Map();
+      for (const p of pinnedWithSlots) pinnedMap.set(p.slot, p.track);
+      let dynIdx = 0;
+      const totalLen = pinnedWithSlots.length + reSequenced.length;
+      for (let s = 0; s < totalLen; s++) {
+        if (pinnedMap.has(s)) {
+          merged.push(pinnedMap.get(s));
+        } else if (dynIdx < reSequenced.length) {
+          merged.push(reSequenced[dynIdx++]);
+        }
+      }
+      for (const p of pinnedWithSlots) {
+        if (!merged.includes(p.track)) merged.push(p.track);
+      }
+      while (dynIdx < reSequenced.length) {
+        merged.push(reSequenced[dynIdx++]);
+      }
+
+      state.queue.splice(upcomingStart, state.queue.length - upcomingStart, ...merged);
+    }
+
+    syncNativeNextTrack();
+    if (state.showQueue) {
+      renderQueue();
+    }
   }
 
   function localRelatedTracks(t, max = 24) {
@@ -6489,9 +6967,13 @@
         });
         if (validRecs.length >= 4) {
           const toAdd = validRecs.slice(0, 10);
-          for (const f of toAdd) recordSessionAutoQueued(f);
+          for (const f of toAdd) {
+            f._autoQueued = true;
+            recordSessionAutoQueued(f);
+          }
           state.queueRecs = state.queueRecs.filter((r) => !toAdd.some((a) => isSameSongClient(a, r)));
           state.queue = state.queue.concat(toAdd);
+          reRankUpcomingQueue();
           renderQueue();
           renderChrome();
           if (state.queueRecs.length < 4) loadQueueRecs(true);
@@ -6519,8 +7001,12 @@
 
       extra = extra.filter((t) => t && !isSameSongClient(t, targetSeed) && !(state.queue || []).some((q) => isSameSongClient(q, t)));
       if (!extra.length) return false;
-      for (const f of extra) recordSessionAutoQueued(f);
+      for (const f of extra) {
+        f._autoQueued = true;
+        recordSessionAutoQueued(f);
+      }
       state.queue = state.queue.concat(extra);
+      reRankUpcomingQueue();
       renderQueue();
       renderChrome();
       return true;
@@ -7188,6 +7674,10 @@
       if ($("durTime")) $("durTime").textContent = t.source === "radio" ? "LIVE" : fmt(t.duration || 0);
     }
     pushRecent(t);
+    _trackStartedAt = Date.now();
+    updateArtistStreak(t);
+    recordTrackVibe(t);
+    reRankUpcomingQueue();
     // Avoid rebuilding the entire Home DOM on phones right as playback starts
     if (!cheapPhone() && !IS_NATIVE) paintHomeSoon();
     renderChrome();
@@ -7285,22 +7775,7 @@
           getWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 3000, true).catch(() => {});
         }
         try {
-          if (useNativeAudioPipe && t.title) {
-            // In Native App, MuchiAudioService / MuchiAudioPlugin resolves title + artist
-            // directly on-device via ANDROID_VR in ~350ms. When in background tab, hand off
-            // immediately in 0ms without waiting on throttled WebView setTimeout timers;
-            // when in foreground, give JS cache/race at most 180ms.
-            if (document.hidden || nativeAppInBackground) {
-              resolveYouTubePlay(t).catch(() => {});
-            } else {
-              await Promise.race([
-                resolveYouTubePlay(t),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("native fast handoff")), 180)),
-              ]);
-            }
-          } else {
-            await resolveYouTubePlay(t);
-          }
+          await resolveYouTubePlay(t);
         } catch (resErr) {
           if (!useNativeAudioPipe || !t.title) throw resErr;
         } finally {
@@ -7325,7 +7800,15 @@
           try {
             if (!t.videoId) await resolveYouTubePlay(t);
             if (gen !== playGen) return;
-            await playYouTube(t, reset);
+            if (IS_NATIVE && !state.showVideo) {
+              const okFallback = await playFallbackAudioForTrack(t);
+              if (!okFallback) {
+                t._playingViaAudio = true;
+                await playAudio(t);
+              }
+            } else {
+              await playYouTube(t, reset);
+            }
           } catch (ytErr) {
             if (gen !== playGen) return;
             const okFallback = await playFallbackAudioForTrack(t);
@@ -7356,6 +7839,7 @@
           if (state.index + 1 < state.queue.length) {
             warmTrack(state.queue[state.index + 1]);
           }
+          syncNativeNextTrack();
         };
         if (document.hidden || nativeAppInBackground) {
           Promise.resolve().then(postPlayWarm);
@@ -7372,6 +7856,7 @@
       startTimer();
       renderChrome();
       updateProgress();
+      syncNativeNextTrack();
     } catch (err) {
       if (err && (err.name === "AbortError" || String(err.message || "").includes("interrupted"))) {
         return;
@@ -7436,9 +7921,7 @@
     if (!resolvedStream) {
       try {
         const syncWarm = getSyncWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "");
-        const warm = syncWarm || ((document.hidden || nativeAppInBackground)
-          ? null
-          : await getWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 65, true));
+        const warm = syncWarm || await getWarmStream(t.videoId || "", t.title || "", artistName(t) || t.artist || "", t._ytCandidates || [], 3000, true);
         if (warm && warm.url && !warm.isPreview && !isOneMinuteCappedStreamUrl(warm.url) && (t.source === "audius" || (warm.source !== "soundcloud" && warm.source !== "audius" && !/sndcdn\.com|audius\.co/i.test(warm.url)))) {
           resolvedStream = warm.url.startsWith("/") ? API_BASE + warm.url : warm.url;
           if (warm.videoId && !t.videoId) t.videoId = warm.videoId;
@@ -7555,17 +8038,16 @@
     }
 
     if (!url && t.source === "audius" && t.trackId) {
-      if (IS_NATIVE && nativePlayer()) {
+      try {
+        const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`, 4000);
+        if (data && data.url) {
+          url = data.url;
+          t.streamUrl = url;
+        }
+      } catch {}
+      if (!url) {
         url = `https://discoveryprovider.audius.co/v1/tracks/${encodeURIComponent(t.trackId)}/stream?app_name=MUCHI`;
         t.streamUrl = url;
-      } else if (IS_NATIVE) {
-        try {
-          const data = await api(`/api/audius/stream/${encodeURIComponent(t.trackId)}`, 5000);
-          if (data && data.url) {
-            url = data.url;
-            t.streamUrl = url;
-          }
-        } catch {}
       }
       if (!url) {
         url = `${API_BASE}/api/audius/file/${encodeURIComponent(t.trackId)}`;
@@ -8070,6 +8552,7 @@
     showEl($("scrim"), open || ($("sidebar") && $("sidebar").classList.contains("open")));
     if (open) {
       navPush();
+      reRankUpcomingQueue();
       renderQueue();
       loadQueueRecs();
     } else {
@@ -8186,6 +8669,27 @@
     if (state.repeat === "one" && !force) return playCurrent(true);
 
     const cur = current();
+    if (cur && cur.source !== "radio") {
+      const listenedSec = _trackStartedAt > 0 ? (Date.now() - _trackStartedAt) / 1000 : 0;
+      const curDur = Number(cur.duration) || 180;
+      let posSec = 0;
+      try { posSec = position() || 0; } catch {}
+      const actualTime = Math.max(listenedSec, posSec);
+      const ratio = actualTime / curDur;
+
+      if (force === true) {
+        // Explicit skip by user
+        if (actualTime < 30 || ratio < 0.35) {
+          recordSessionSkip(cur);
+        } else if (actualTime >= 45 || ratio >= 0.65) {
+          recordSessionAffinity(cur);
+        }
+      } else {
+        // Natural end of track
+        recordSessionAffinity(cur);
+      }
+    }
+
     const curArtist = cur ? canonicalPrimaryArtistClient(cur) : "";
     const curVibe = cur ? inferTrackVibeClient(cur) : null;
 
@@ -8280,7 +8784,12 @@
     hapticFeedback("light");
     const pos = position();
     if (pos > 3) return seekTo(0);
-    state.index = (state.index - 1 + state.queue.length) % state.queue.length;
+    const targetIdx = (state.index - 1 + state.queue.length) % state.queue.length;
+    const targetTrack = state.queue[targetIdx];
+    if (targetTrack && targetTrack.source !== "radio") {
+      recordSessionReplay(targetTrack);
+    }
+    state.index = targetIdx;
     playCurrent(true);
   }
 
@@ -8556,6 +9065,16 @@
     }
     if ($("durTime")) {
       $("durTime").textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
+    }
+    if (!npIsSeeking) {
+      const npCur = $("npCurTime");
+      if (npCur) npCur.textContent = fmt(p);
+      const npDur = $("npDurTime");
+      if (npDur) npDur.textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
+      const npSeek = $("npSeek");
+      if (npSeek) {
+        npSeek.value = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+      }
     }
     if (seek) {
       const tv = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
@@ -9044,6 +9563,113 @@
     NP.seekTo({ position: Math.round(npPos * 1000) }).catch(() => {});
     return true;
   }
+
+  function syncNativeNextTrack() {
+    if (!IS_NATIVE) return;
+    const NP = nativePlayer();
+    if (!NP || typeof NP.setNextTrack !== "function") return;
+    if (!state.queue || !state.queue.length) {
+      NP.setNextTrack({ url: "", videoId: "", title: "", artist: "" }).catch(() => {});
+      return;
+    }
+    let nextIdx = -1;
+    if (state.shuffle && state.queue.length > 1) {
+      const cur = current();
+      for (let i = 0; i < state.queue.length; i++) {
+        const cand = state.queue[i];
+        if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+        if (!_shuffleVisitedKeys.has(canonicalSongKey(cand))) {
+          nextIdx = i;
+          break;
+        }
+      }
+      if (nextIdx === -1) {
+        for (let i = 0; i < state.queue.length; i++) {
+          if (i !== state.index) { nextIdx = i; break; }
+        }
+      }
+    } else if (state.index + 1 < state.queue.length) {
+      nextIdx = state.index + 1;
+    } else if (state.repeat === "all" && state.queue.length > 0) {
+      nextIdx = 0;
+    }
+
+    if (nextIdx === -1 || !state.queue[nextIdx]) {
+      NP.setNextTrack({ url: "", videoId: "", title: "", artist: "" }).catch(() => {});
+      return;
+    }
+
+    const nt = state.queue[nextIdx];
+    warmTrack(nt);
+
+    const cands = Array.isArray(nt._ytCandidates) ? nt._ytCandidates.slice(0, 5).join(",") : "";
+    let nextUrl = (nt.streamUrl && !nt._isPreviewStream) ? (nt.streamUrl.startsWith("/") ? API_BASE + nt.streamUrl : nt.streamUrl) : "";
+    if (!nextUrl && nt.source === "audius" && nt.trackId) {
+      nextUrl = `https://discoveryprovider.audius.co/v1/tracks/${encodeURIComponent(nt.trackId)}/stream?app_name=MUCHI`;
+    }
+    if (!nextUrl && (nt.videoId || nt.title)) {
+      nextUrl = `yt:${nt.videoId || ""}`;
+    }
+
+    NP.setNextTrack({
+      url: String(nextUrl || ""),
+      videoId: String(nt.videoId || ""),
+      candidates: cands,
+      title: String(nt.title || "Muchi"),
+      artist: String(artistName(nt) || nt.artist || ""),
+      artwork: String(absArt(nt) || ""),
+      duration: Math.round((Number(nt.duration) || 0) * 1000),
+    }).catch(() => {});
+  }
+
+  function handleNativeAutoAdvance() {
+    if (!state.queue || !state.queue.length) return;
+    if (state.repeat === "one") {
+      renderChrome();
+      syncNativeNextTrack();
+      return;
+    }
+    const cur = current();
+    if (state.shuffle && state.queue.length > 1) {
+      let nextIdx = -1;
+      for (let i = 0; i < state.queue.length; i++) {
+        const cand = state.queue[i];
+        if (!cand || i === state.index || (cur && isSameSongClient(cand, cur))) continue;
+        if (!_shuffleVisitedKeys.has(canonicalSongKey(cand))) {
+          nextIdx = i;
+          break;
+        }
+      }
+      if (nextIdx !== -1) {
+        state.index = nextIdx;
+        _shuffleVisitedKeys.add(canonicalSongKey(state.queue[nextIdx]));
+      }
+    } else if (state.index + 1 < state.queue.length) {
+      state.index += 1;
+    } else if (state.repeat === "all") {
+      state.index = 0;
+    }
+    const newCur = current();
+    if (newCur) {
+      newCur._playingViaAudio = true;
+      loadLyrics(newCur);
+    }
+    npActive = true;
+    npPlaying = true;
+    npSeenPlaying = true;
+    npPos = 0;
+    npPosAt = performance.now();
+    state.playing = true;
+    setWantPlay(true);
+    showEl($("eqBars"), true);
+    if (!state.timer) startTimer();
+    updateMediaSession();
+    renderChrome();
+    updateProgress();
+    if (state.view === "now") render();
+    syncNativeNextTrack();
+  }
+
   // (v1.5.4) The legacy MusicControls fallback paths (nativeSyncMediaControls
   // / nativeTickControls) are gone: that plugin's own killer service
   // (stopWithTask) and its second MediaSession were what made playback die on
@@ -9105,6 +9731,8 @@
       renderChrome();
     } else if (msg === "music-controls-next" || msg === "next") {
       next(true);
+    } else if (msg === "auto-advance") {
+      handleNativeAutoAdvance();
     } else if (msg === "music-controls-previous" || msg === "previous" || msg === "prev") {
       prev();
     } else if (msg === "music-controls-toggle-play-pause") {
@@ -9242,6 +9870,11 @@
       } catch {}
       try {
         App.addListener("backButton", () => {
+          const npModal = $("nativePlayerModal");
+          if (npModal && !npModal.hidden && npModal.classList.contains("open")) {
+            closeNativePlayer();
+            return;
+          }
           const modal = $("modal");
           if (modal && modal.classList.contains("show")) { hideModal(); return; }
           if (state.showQueue) { setQueueOpen(false); return; }
@@ -9440,6 +10073,11 @@
     state.ytLiked = null;
     state.ytPlaylists = null;
     state.ytOpen = null;
+    try {
+      localStorage.removeItem("aura.followingSyncedAt");
+      localStorage.removeItem("aura.followingLocalAt");
+      localStorage.removeItem("aura.unfollowed");
+    } catch {}
     toast("Signed out of Google");
     if (state.view === "settings" || state.view === "library") render();
   }
@@ -10632,6 +11270,13 @@
     root.setProperty("--song-glow", `hsl(${h} 80% 50% / ${light ? 0.18 : 0.38})`);
     root.setProperty("--md-sys-color-primary", light ? `hsl(${h} 48% 36%)` : `hsl(${h} 72% 72%)`);
     root.setProperty("--md-sys-color-on-primary", light ? `#fff` : `hsl(${h} 35% 12%)`);
+
+    const npCard = $("npCard");
+    if (npCard) {
+      npCard.style.setProperty("--song-primary", light ? `hsl(${h} 48% 36%)` : `hsl(${h} 72% 72%)`);
+      npCard.style.setProperty("--song-container", light ? `hsl(${h} 28% 92%)` : `hsl(${h} 22% 14%)`);
+      npCard.style.setProperty("--song-glow", `hsl(${h} 80% 50% / ${light ? 0.22 : 0.45})`);
+    }
   }
 
   function hueFromText(s) {
@@ -10660,8 +11305,10 @@
     themedId = id;
     applySongTheme(hueFromText(t ? `${t.title}|${t.artist}` : "aura"));
     const wash = $("playerWash");
+    const npWash = $("npWash");
     if (!t) {
       if (wash) wash.style.backgroundImage = "";
+      if (npWash) npWash.style.backgroundImage = "";
       return;
     }
     const raw = artUrl(t);
@@ -10669,6 +11316,7 @@
     // load artwork directly from the browser instead.
     const src = raw.startsWith("http") ? (API_BASE ? raw : `/api/img?url=${encodeURIComponent(raw)}`) : raw;
     if (wash) wash.style.backgroundImage = isBatterySaver() ? "" : `url("${src}")`;
+    if (npWash) npWash.style.backgroundImage = isBatterySaver() ? "" : `url("${src}")`;
     if (isBatterySaver()) return;
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -10736,6 +11384,213 @@
       }
     }
   }
+
+  let npIsSeeking = false;
+  function syncNativePlayerUI() {
+    const modal = $("nativePlayerModal");
+    if (!modal) return;
+    const t = current();
+
+    // 1. Cover Art
+    const npCover = $("npCoverArt");
+    const artSrc = t ? artUrl(t) : "/cover-default.jpg";
+    if (npCover && npCover.getAttribute("src") !== artSrc) {
+      npCover.setAttribute("src", artSrc);
+      npCover.classList.remove("art-swap");
+      void npCover.offsetWidth;
+      npCover.classList.add("art-swap");
+    }
+
+    // 2. Titles & marquee
+    const npTitle = $("npTrackTitle");
+    if (npTitle) {
+      syncMarqueeTitleEl(npTitle, t ? t.title : "Nothing playing", Boolean(t && t.title));
+    }
+    const npArtist = $("npTrackArtist");
+    if (npArtist) {
+      npArtist.textContent = t ? (artistName(t) || t.artist || "Unknown artist") : "Pick a song to begin";
+    }
+
+    // 3. Header meta
+    const kicker = $("npHeaderKicker");
+    const headerTitle = $("npHeaderTitle");
+    if (kicker && headerTitle) {
+      if (state.activePlaylist && state.activePlaylist.title) {
+        kicker.textContent = "PLAYING FROM PLAYLIST";
+        headerTitle.textContent = state.activePlaylist.title;
+      } else if (t && t.album) {
+        kicker.textContent = "PLAYING FROM ALBUM";
+        headerTitle.textContent = t.album;
+      } else if (t && (artistName(t) || t.artist)) {
+        kicker.textContent = "PLAYING FROM ARTIST";
+        headerTitle.textContent = artistName(t) || t.artist;
+      } else {
+        kicker.textContent = "PLAYING FROM";
+        headerTitle.textContent = "Muchi Music";
+      }
+    }
+
+    // 4. Like button
+    const npLike = $("npLikeBtn");
+    if (npLike) {
+      const liked = !!(t && isLiked(t));
+      npLike.classList.toggle("on", liked);
+      npLike.title = liked ? "Liked" : "Like";
+      npLike.setAttribute("aria-pressed", liked ? "true" : "false");
+    }
+
+    // 5. Controls
+    const npPlayIco = $("npPlayIcon");
+    if (npPlayIco) {
+      swapPlayGlyph(npPlayIco, state.playing ? "pause" : "play_arrow");
+    }
+    const npPlay = $("npPlayBtn");
+    if (npPlay) {
+      npPlay.classList.toggle("live", !!state.playing);
+    }
+    const npShuffle = $("npShuffleBtn");
+    if (npShuffle) {
+      npShuffle.classList.toggle("on", !!state.shuffle);
+    }
+    const npRepeat = $("npRepeatBtn");
+    if (npRepeat) {
+      npRepeat.classList.toggle("on", state.repeat !== "off");
+      const repIco = npRepeat.querySelector(".material-symbols-outlined");
+      if (repIco) repIco.textContent = state.repeat === "one" ? "repeat_one" : "repeat";
+    }
+
+    // 6. Time and scrubber
+    const d = duration();
+    const p = position();
+    if (!npIsSeeking) {
+      const curEl = $("npCurTime");
+      if (curEl) curEl.textContent = fmt(p);
+      const durEl = $("npDurTime");
+      if (durEl) durEl.textContent = t && t.source === "radio" ? "LIVE" : fmt(d);
+      const seekEl = $("npSeek");
+      if (seekEl) {
+        seekEl.value = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+      }
+    }
+
+    // 7. Volume
+    const volEl = $("npVolume");
+    if (volEl && document.activeElement !== volEl) {
+      volEl.value = state.volume;
+    }
+    const npDev = $("npDeviceLabel");
+    if (npDev) {
+      npDev.textContent = isNativeApp() ? "Phone Speaker DSP" : "Audio DSP";
+    }
+  }
+
+  function openNativePlayer() {
+    const modal = $("nativePlayerModal");
+    if (!modal) return;
+    const t = current();
+    if (!t) {
+      toast("Play a song first");
+      return;
+    }
+
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      modal.classList.add("open");
+      document.body.classList.add("native-player-open");
+    });
+
+    syncNativePlayerUI();
+
+    try {
+      const s = history.state || {};
+      if (!s.nativePlayer) {
+        history.pushState(Object.assign({}, s, { muchi: true, nativePlayer: true }), "");
+      }
+    } catch {}
+
+    if (typeof nativeHapticFeedback === "function") {
+      nativeHapticFeedback("light");
+    }
+  }
+
+  function closeNativePlayer() {
+    const modal = $("nativePlayerModal");
+    if (!modal || modal.hidden) return;
+
+    modal.classList.remove("open");
+    document.body.classList.remove("native-player-open");
+
+    setTimeout(() => {
+      if (!modal.classList.contains("open")) {
+        modal.hidden = true;
+      }
+    }, 340);
+
+    try {
+      if (history.state && history.state.nativePlayer) {
+        history.back();
+      }
+    } catch {}
+
+    if (typeof nativeHapticFeedback === "function") {
+      nativeHapticFeedback("light");
+    }
+  }
+
+  function setupNativePlayerGestures() {
+    const card = $("npCard");
+    const modal = $("nativePlayerModal");
+    if (!card || !modal) return;
+
+    let startY = 0;
+    let currentY = 0;
+    let isDragging = false;
+    let startTime = 0;
+
+    card.addEventListener("touchstart", (e) => {
+      if (card.scrollTop > 5) return;
+      const touch = e.touches[0];
+      startY = touch.clientY;
+      currentY = startY;
+      startTime = Date.now();
+      isDragging = false;
+    }, { passive: true });
+
+    card.addEventListener("touchmove", (e) => {
+      if (!startY) return;
+      const touch = e.touches[0];
+      const dy = touch.clientY - startY;
+      if (dy > 0 && card.scrollTop <= 0) {
+        isDragging = true;
+        currentY = touch.clientY;
+        card.style.transition = "none";
+        card.style.transform = `translateY(${dy}px)`;
+      }
+    }, { passive: true });
+
+    const finishDrag = () => {
+      if (!isDragging) { startY = 0; return; }
+      isDragging = false;
+      const dy = currentY - startY;
+      const dt = Math.max(1, Date.now() - startTime);
+      const velocity = dy / dt;
+
+      card.style.transition = "transform 340ms cubic-bezier(0.32, 0.72, 0, 1)";
+      if (dy > 100 || velocity > 0.45) {
+        closeNativePlayer();
+        setTimeout(() => { card.style.transform = ""; }, 360);
+      } else {
+        card.style.transform = "translateY(0)";
+      }
+      startY = 0;
+    };
+
+    card.addEventListener("touchend", finishDrag, { passive: true });
+    card.addEventListener("touchcancel", finishDrag, { passive: true });
+  }
+
+  window.openNativePlayer = openNativePlayer;
+  window.closeNativePlayer = closeNativePlayer;
 
   function renderChrome() {
     const t = current();
@@ -10819,6 +11674,7 @@
     updateWakeLock();
     document.querySelectorAll("[data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
     syncPlayerVisibility();
+    syncNativePlayerUI();
   }
 
   function renderQueue() {
@@ -11219,7 +12075,7 @@
     const heading = shelfKey
       ? `<button type="button" class="section-title" data-open-shelf="${escapeAttr(String(shelfKey))}">${title}</button>`
       : `<h2>${title}</h2>`;
-    const skelCards = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel" style="height:175px;border-radius:var(--md-shape-lg);background:var(--md-surface-variant);opacity:0.35;"></div></div>`).join("");
+    const skelCards = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel"></div></div>`).join("");
     return `<div class="section"><div class="section-head">${heading}${open}</div><div class="row">${rows.length ? rows.map(cardHTML).join("") : skelCards}</div></div>`;
   }
 
@@ -11244,7 +12100,7 @@
   function playlistSection(title, playlists, group) {
     const rows = playlists || [];
     if (!rows.length) {
-      const skelPls = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel" style="height:190px;border-radius:var(--md-shape-lg);background:var(--md-surface-variant);opacity:0.35;"></div></div>`).join("");
+      const skelPls = [...Array(6)].map(() => `<div class="card-wrap"><div class="card skel"></div></div>`).join("");
       return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${group === "country" ? 17 : 12}</span></div><div class="row">${skelPls}</div></div>`;
     }
     return `<div class="section"><div class="section-head"><h2>${title}</h2><span>${rows.length}</span></div><div class="row">${rows.map((p, i) => plCardHTML(p, group, i)).join("")}</div></div>`;
@@ -12931,6 +13787,15 @@
      It now shows a lightweight in-app modal listing what changed in the
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
+    {
+      ver: "1.9.9",
+      title: "Muchi 1.9.9",
+      notes: [
+        "Spotify-level intelligent adaptive Queue with real-time session affinity learning, seamless tempo and mood flow, and dynamic upcoming re-ranking.",
+        "Premium native UI refinement: tactile press feedback, interactive search bar tap animation with glowing focus states, and eliminated blurry/saturated blue overlays.",
+        "Smooth homepage loading pipeline: stabilized shelf hydration, anchored card heights, and fluid entrance animations eliminating initial startup flickering.",
+      ],
+    },
     {
       ver: "1.9.6",
       title: "Muchi 1.9.6",
@@ -14910,7 +15775,41 @@
     viewEl.classList.add("view-in");
   }
 
+  function bindSearchWrapInteractions(root) {
+    const parent = root || document;
+    parent.querySelectorAll(".search-wrap").forEach((wrap) => {
+      if (!wrap || wrap._boundInteraction) return;
+      wrap._boundInteraction = true;
+      wrap.addEventListener("pointerdown", () => {
+        wrap.classList.add("is-pressed");
+        if (typeof hapticFeedback === "function") hapticFeedback("light");
+      });
+      const endPress = () => wrap.classList.remove("is-pressed");
+      wrap.addEventListener("pointerup", endPress);
+      wrap.addEventListener("pointercancel", endPress);
+      wrap.addEventListener("pointerleave", endPress);
+      wrap.addEventListener("click", (e) => {
+        const inp = wrap.querySelector("input");
+        if (inp && e.target !== inp) {
+          inp.focus();
+        }
+      });
+      const wrapInp = wrap.querySelector("input");
+      if (wrapInp) {
+        wrapInp.addEventListener("focus", () => {
+          wrap.classList.add("is-focused");
+          if (typeof hapticFeedback === "function") hapticFeedback("light");
+        });
+        wrapInp.addEventListener("blur", () => {
+          wrap.classList.remove("is-focused");
+        });
+      }
+    });
+  }
+
   function bindView() {
+    bindSearchWrapInteractions(viewEl);
+    bindSearchWrapInteractions(document);
     viewEl.querySelectorAll("[data-more]").forEach((el) => {
       el.addEventListener("click", (ev) => {
         ev.preventDefault();
@@ -15564,7 +16463,13 @@
     const openAppIconFromAppearance = viewEl.querySelector("#openAppIconFromAppearance");
     if (openAppIconFromAppearance) openAppIconFromAppearance.addEventListener("click", () => { rememberScroll(); state.settingsPage = "appicon"; navPush(); paintNav(false); });
     const openFollowing = viewEl.querySelector("#openFollowing");
-    if (openFollowing) openFollowing.addEventListener("click", () => { rememberScroll(); state.settingsPage = "following"; navPush(); paintNav(false); });
+    if (openFollowing) openFollowing.addEventListener("click", () => {
+      rememberScroll();
+      state.settingsPage = "following";
+      navPush();
+      paintNav(false);
+      if (state.auth && state.auth.signedIn && Date.now() - lastLibrarySyncTime > 4000) syncUserLibrary();
+    });
     const openOffline = viewEl.querySelector("#openOffline");
     if (openOffline) openOffline.addEventListener("click", () => { rememberScroll(); state.settingsPage = "offline"; navPush(); paintNav(false); });
     const openData = viewEl.querySelector("#openData");
@@ -15638,6 +16543,8 @@
           lastId: data && data.latest && data.latest.id ? data.latest.id : "",
           followedAt: Date.now(),
         });
+        clearUnfollowTombstone(key, cleanName);
+        save("aura.followingLocalAt", Date.now());
         saveFollowing();
         toast(`Following ${cleanName}! You'll be notified on new releases.`, true, "success");
         if (state.prefs.notifyFollows && "Notification" in window && Notification.permission === "default") {
@@ -15656,6 +16563,8 @@
             lastId: "",
             followedAt: Date.now(),
           });
+          clearUnfollowTombstone(key, q);
+          save("aura.followingLocalAt", Date.now());
           saveFollowing();
           toast(`Following ${q}! You'll be notified on new releases.`, true, "success");
           render();
@@ -18510,14 +19419,12 @@
       // whether the live API is answering.
       state.apiStatus = "connecting";
     }
-    render();
-    // Seed the Home shell immediately and start filling empty shelves in
-    // PARALLEL with the full /api/home call. This is what makes the preview
-    // feel alive: rows appear within seconds even when the aggregate endpoint
-    // is slow (Worker cold start, provider latency) — no long dead skeleton
-    // and no permanently empty rows.
+    // Seed the Home shell immediately if not already restored from cache, and start
+    // filling empty shelves in parallel with the full /api/home call.
     if (!state.home || state.home.country !== targetCountry) {
       state.home = seedHome();
+      if (state.view === "home") render();
+    } else if (state.view === "home" && (!viewEl || !viewEl.children || !viewEl.children.length)) {
       render();
     }
     hydrateShelves();
@@ -18631,13 +19538,13 @@
   }
 
   let homePaintT = 0;
-  function paintHomeSoon() {
+  function paintHomeSoon(delay = 240) {
     if (state.view !== "home" || document.hidden) return;
     clearTimeout(homePaintT);
     homePaintT = setTimeout(() => {
       if (state.view === "home" && !document.hidden) render();
       persistHomeCache();
-    }, 160);
+    }, delay);
   }
 
   async function hydrateShelves() {
@@ -18652,6 +19559,7 @@
           tracks: [],
         }));
     h.shelves = rows;
+    let anyFilled = false;
     await Promise.all(rows.map(async (s) => {
       if (s.tracks && s.tracks.length) return;
       const q = shelfQueryForCountryClient(s.id, countryCode, s.query || (FALLBACK_SHELVES.find((d) => d.id === s.id) || {}).query);
@@ -18673,9 +19581,11 @@
             if (!cur.title && data.title) cur.title = data.title;
           }
         }
-        paintHomeSoon();
+        anyFilled = true;
+        paintHomeSoon(300);
       } catch {}
     }));
+    if (anyFilled) paintHomeSoon(60);
     const cur = state.home || h;
     const localEmpty = !(cur.youtubeLocal && cur.youtubeLocal.length) && !(cur.youtubeIndia && cur.youtubeIndia.length);
     if (localEmpty) {
@@ -19095,6 +20005,7 @@
         showEl($("scrim"), open || state.showQueue);
       };
     }
+    bindSearchWrapInteractions(document);
     let searchLiveTimer = null;
     $("searchInput").addEventListener("input", (e) => {
       const raw = e.target.value || "";
@@ -19131,6 +20042,11 @@
       }
     });
     window.addEventListener("popstate", (e) => {
+      const npModal = $("nativePlayerModal");
+      if (npModal && !npModal.hidden && npModal.classList.contains("open")) {
+        closeNativePlayer();
+        return;
+      }
       if (e.state && e.state.muchi) {
         applyNav(e.state);
         return;
@@ -19141,6 +20057,12 @@
     });
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
+        const npModal = $("nativePlayerModal");
+        if (npModal && !npModal.hidden && npModal.classList.contains("open")) {
+          closeNativePlayer();
+          e.preventDefault();
+          return;
+        }
         requestBack();
         e.preventDefault();
       }
@@ -19319,6 +20241,10 @@
     };
     $("openNow").onclick = () => {
       if (!current()) { toast("Play a song first"); return; }
+      if (isNativeApp()) {
+        openNativePlayer();
+        return;
+      }
       if (state.view === "now") return;
       setView("now");
     };
@@ -19659,8 +20585,142 @@
         const btn = e.target.closest("button");
         if (btn) bump(btn);
         showPlayerChrome();
+        if (isNativeApp()) {
+          const actionBtn = e.target.closest("#playBtn, #prevBtn, #nextBtn, #likeBtn, #dlBtn, #repeatBtn, #shuffleBtn, #volume, input");
+          if (!actionBtn && current()) {
+            openNativePlayer();
+          }
+        }
       });
     }
+    if ($("trackTitle")) {
+      $("trackTitle").addEventListener("click", (e) => {
+        if (isNativeApp() && current()) {
+          e.stopPropagation();
+          openNativePlayer();
+        }
+      });
+    }
+    function initNativePlayerEvents() {
+      const modal = $("nativePlayerModal");
+      if (!modal || modal._inited) return;
+      modal._inited = true;
+
+      if ($("npCloseBtn")) {
+        $("npCloseBtn").onclick = (e) => {
+          e.stopPropagation();
+          closeNativePlayer();
+        };
+      }
+      if ($("npPlayBtn")) {
+        $("npPlayBtn").onclick = (e) => {
+          e.stopPropagation();
+          togglePlay();
+          bump($("npPlayBtn"));
+        };
+      }
+      if ($("npPrevBtn")) {
+        $("npPrevBtn").onclick = (e) => {
+          e.stopPropagation();
+          prev();
+          bump($("npPrevBtn"));
+        };
+      }
+      if ($("npNextBtn")) {
+        $("npNextBtn").onclick = (e) => {
+          e.stopPropagation();
+          next(true);
+          bump($("npNextBtn"));
+        };
+      }
+      if ($("npLikeBtn")) {
+        $("npLikeBtn").onclick = (e) => {
+          e.stopPropagation();
+          const t = current();
+          if (t) {
+            toggleLike(t);
+            bump($("npLikeBtn"));
+            syncNativePlayerUI();
+          }
+        };
+      }
+      if ($("npShuffleBtn")) {
+        $("npShuffleBtn").onclick = (e) => {
+          e.stopPropagation();
+          toggleShuffle();
+          bump($("npShuffleBtn"));
+          syncNativePlayerUI();
+        };
+      }
+      if ($("npRepeatBtn")) {
+        $("npRepeatBtn").onclick = (e) => {
+          e.stopPropagation();
+          toggleRepeat();
+          bump($("npRepeatBtn"));
+          syncNativePlayerUI();
+        };
+      }
+      if ($("npOptionsBtn")) {
+        $("npOptionsBtn").onclick = (e) => {
+          e.stopPropagation();
+          if (current()) openPlayerOptions();
+        };
+      }
+      if ($("npLyricsBtn")) {
+        $("npLyricsBtn").onclick = (e) => {
+          e.stopPropagation();
+          closeNativePlayer();
+          setView("now");
+        };
+      }
+      if ($("npQueueBtn")) {
+        $("npQueueBtn").onclick = (e) => {
+          e.stopPropagation();
+          closeNativePlayer();
+          setQueueOpen(true);
+        };
+      }
+      if ($("npDeviceBtn")) {
+        $("npDeviceBtn").onclick = (e) => {
+          e.stopPropagation();
+          showModal({
+            title: "Audio DSP Engine",
+            body: "<p><b>Phone Speaker DSP</b> is actively optimizing acoustic dynamics, low-end presence, and speaker biquad equalization for your mobile device.</p>",
+            ok: "Got it"
+          });
+        };
+      }
+      const npVol = $("npVolume");
+      if (npVol) {
+        npVol.addEventListener("input", (e) => {
+          setVolume(Number(e.target.value));
+        });
+      }
+
+      const npSeekEl = $("npSeek");
+      if (npSeekEl) {
+        npSeekEl.addEventListener("input", (e) => {
+          npIsSeeking = true;
+          const v = Number(e.target.value);
+          const d = duration();
+          if (d > 0 && isFinite(d)) {
+            const previewSec = (v / 1000) * d;
+            if ($("npCurTime")) $("npCurTime").textContent = fmt(previewSec);
+          }
+        });
+        npSeekEl.addEventListener("change", (e) => {
+          const v = Number(e.target.value);
+          const d = duration();
+          if (d > 0 && isFinite(d)) {
+            seekTo((v / 1000) * d);
+          }
+          setTimeout(() => { npIsSeeking = false; }, 120);
+        });
+      }
+
+      setupNativePlayerGestures();
+    }
+    initNativePlayerEvents();
     function showPlayerChrome() {
       if (bar) bar.classList.remove("away");
     }
@@ -20224,6 +21284,7 @@
             });
           }
         }
+        save("aura.followingLocalAt", Date.now());
         saveFollowing({ replaceFollowing: true });
       }
       savePrefs();

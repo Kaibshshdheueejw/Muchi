@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.8", APP_VERSION === "1.9.8" && appJs.includes('const APP_VERSION = "1.9.8"'));
+  ok("version: APP_VERSION is 1.9.9", APP_VERSION === "1.9.9" && appJs.includes('const APP_VERSION = "1.9.9"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1057,6 +1057,39 @@ await (async () => {
       iosAppJs === appJs &&
       appJs.includes("function normalizeKeyText(") &&
       androidAppJs.includes("function personalizeForYouCardTracks(")
+    );
+
+    // ── Spotify-level Adaptive Queue Intelligence Validations ──────────────
+    ok("adaptive queue: scoreAndSequenceSpotifyStyle & reRankUpcomingQueue defined",
+      appJs.includes("function scoreAndSequenceSpotifyStyle(") &&
+      appJs.includes("function reRankUpcomingQueue()") &&
+      appJs.includes("function isAdaptiveQueueTrack(") &&
+      appJs.includes("function recordTrackVibe(") &&
+      appJs.includes("function isArtistBingeClient(") &&
+      appJs.includes("function scoreTrackPopularityAndFreshness(")
+    );
+    ok("adaptive queue: 13 ranking dimensions and session learning implemented",
+      appJs.includes("Language & Regional Musical Culture Alignment") &&
+      appJs.includes("Vocal vs Instrumental Integrity") &&
+      appJs.includes("Artist Relationships & Binge Context") &&
+      appJs.includes("Album Continuity") &&
+      appJs.includes("Genre & Vibe Cluster Flow") &&
+      appJs.includes("Mood & Energy Harmony with Anti-Fatigue") &&
+      appJs.includes("Tempo Flow with Anti-Stagnation") &&
+      appJs.includes("Session Skip / Replay / Affinity Learning") &&
+      appJs.includes("Popularity & Freshness Boost") &&
+      appJs.includes("Curator pacing: balance familiar (~35%) with intelligent discovery (~65%)") &&
+      appJs.includes("_sessionRecentVibes") &&
+      appJs.includes("recordSessionSkip(cur)") &&
+      appJs.includes("recordSessionAffinity(cur)") &&
+      appJs.includes("recordSessionReplay(targetTrack)")
+    );
+    ok("adaptive queue: user-pinned tracks preserved and auto-queued songs re-ranked",
+      appJs.includes("track._userQueued = true;") &&
+      appJs.includes("track._userPinned = true;") &&
+      appJs.includes("f._autoQueued = true;") &&
+      appJs.includes("pinnedMap.set(p.slot, p.track);") &&
+      appJs.includes("hasAdaptiveTracks")
     );
   }
   const poMatch = appJs.match(/function openPlayerOptions\(\)\s*\{([\s\S]*?)window\.handleImgErr/);

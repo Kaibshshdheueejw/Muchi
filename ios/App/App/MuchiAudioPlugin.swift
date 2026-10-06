@@ -29,6 +29,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "play", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "preload", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNextTrack", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "pause", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "resume", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
@@ -40,6 +41,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setAppIcon", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getAppIcon", returnType: CAPPluginReturnPromise)
     ]
+
+    private struct NextTrackInfo {
+        let url: String
+        let videoId: String
+        let candidates: String
+        let title: String
+        let artist: String
+        let artwork: String
+        let durationMs: Double
+    }
+    private var queuedNextTrack: NextTrackInfo?
 
     private var player: AVPlayer?
     private var currentItem: AVPlayerItem?
@@ -229,6 +241,27 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve()
     }
 
+    @objc public func setNextTrack(_ call: CAPPluginCall) {
+        let url = call.getString("url") ?? ""
+        let videoId = call.getString("videoId") ?? ""
+        let title = call.getString("title") ?? ""
+        let artist = call.getString("artist") ?? ""
+        let artwork = call.getString("artwork") ?? ""
+        let candidates = call.getString("candidates") ?? ""
+        let duration = call.getDouble("duration") ?? 0
+        if url.isEmpty && videoId.isEmpty && title.isEmpty {
+            queuedNextTrack = nil
+        } else {
+            queuedNextTrack = NextTrackInfo(url: url, videoId: videoId, candidates: candidates, title: title, artist: artist, artwork: artwork, durationMs: duration)
+            if !videoId.isEmpty {
+                Self.preloadStream(videoId: videoId, candidates: candidates, title: title, artist: artist)
+            } else if !title.isEmpty {
+                Self.preloadStream(videoId: "", candidates: candidates, title: title, artist: artist)
+            }
+        }
+        call.resolve()
+    }
+
     @objc public func play(_ call: CAPPluginCall) {
         var url = call.getString("url") ?? ""
         var videoId = call.getString("videoId") ?? ""
@@ -246,28 +279,6 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("MuchiAudio: missing url")
             return
         }
-        configureAudioSession()
-        beginAudioBackgroundTask()
-
-        let title = call.getString("title") ?? "Muchi"
-        let artist = call.getString("artist") ?? ""
-        let artwork = call.getString("artwork") ?? ""
-        let candidates = call.getString("candidates") ?? ""
-
-        currentVideoId = videoId
-        currentCandidates = candidates
-        currentTitle = title
-        currentArtist = artist
-
-        var durMs = call.getDouble("duration") ?? 0
-        if durMs <= 0 {
-            durMs = Self.extractDurationMsFromUrl(url)
-        }
-        fallbackDurationMs = max(0, durMs)
-        let startPosMs = max(0, call.getDouble("position") ?? 0)
-        pendingSeekMs = startPosMs
-        pendingSeekSetAt = startPosMs > 0 ? CFAbsoluteTimeGetCurrent() : 0
-        lastKnownPositionMs = startPosMs
 
         let volPct = call.getDouble("volume") ?? 100.0
         let normalize = call.getBool("normalize") ?? false
@@ -280,6 +291,37 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         if let sp = call.getString("spatial"), !sp.isEmpty {
             prefSpatial = sp
         }
+
+        playTrackDirect(
+            url: url,
+            videoId: videoId,
+            candidates: call.getString("candidates") ?? "",
+            title: call.getString("title") ?? "Muchi",
+            artist: call.getString("artist") ?? "",
+            artwork: call.getString("artwork") ?? "",
+            durationMs: call.getDouble("duration") ?? 0,
+            startPosMs: max(0, call.getDouble("position") ?? 0)
+        )
+        call.resolve()
+    }
+
+    private func playTrackDirect(url: String, videoId: String, candidates: String, title: String, artist: String, artwork: String, durationMs: Double, startPosMs: Double) {
+        configureAudioSession()
+        beginAudioBackgroundTask()
+
+        currentVideoId = videoId
+        currentCandidates = candidates
+        currentTitle = title
+        currentArtist = artist
+
+        var durMs = durationMs
+        if durMs <= 0 {
+            durMs = Self.extractDurationMsFromUrl(url)
+        }
+        fallbackDurationMs = max(0, durMs)
+        pendingSeekMs = startPosMs
+        pendingSeekSetAt = startPosMs > 0 ? CFAbsoluteTimeGetCurrent() : 0
+        lastKnownPositionMs = startPosMs
 
         loadSeq += 1
         let seq = loadSeq
@@ -310,7 +352,6 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     triedOnDeviceResolve = false
                     currentUrl = cachedFileUrl.absoluteString
                     startPlayer(with: cachedFileUrl, rawUrl: cachedFileUrl.absoluteString, userAgent: "")
-                    call.resolve()
                     return
                 } else {
                     Self.evictCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist)
@@ -336,7 +377,6 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     fallbackDurationMs = hit.durationMs
                 }
                 startPlayer(with: hitUrl, rawUrl: hit.url, userAgent: hit.userAgent)
-                call.resolve()
                 return
             }
             triedOnDeviceResolve = true
@@ -370,18 +410,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     }
                 }
             }
-            call.resolve()
             return
         }
 
         guard let streamUrl = URL(string: url) else {
-            call.reject("MuchiAudio: invalid url")
             return
         }
         resolvingOnDevice = false
         triedOnDeviceResolve = false
         startPlayer(with: streamUrl, rawUrl: url, userAgent: Self.userAgentForStreamUrl(url))
-        call.resolve()
     }
 
     private func startPlayer(with streamUrl: URL, rawUrl: String, userAgent: String) {
@@ -416,6 +453,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         ) { [weak self] _ in
             guard let self = self else { return }
             self.beginAudioBackgroundTask()
+            self.configureAudioSession()
             let cur = self.player?.currentTime()
             let curMs = (cur != nil && cur!.isNumeric && cur!.seconds.isFinite && cur!.seconds > 0) ? (cur!.seconds * 1000.0) : 0
             let posNowMs = max(self.lastKnownPositionMs, curMs)
@@ -424,7 +462,22 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.recoverMidSongStream(resumeMs: posNowMs)
                 return
             }
-            self.emitControls("ended", positionMs: 0)
+            if let next = self.queuedNextTrack {
+                self.queuedNextTrack = nil
+                self.emitControls("auto-advance", positionMs: 0)
+                self.playTrackDirect(
+                    url: next.url,
+                    videoId: next.videoId,
+                    candidates: next.candidates,
+                    title: next.title,
+                    artist: next.artist,
+                    artwork: next.artwork,
+                    durationMs: next.durationMs,
+                    startPosMs: 0
+                )
+            } else {
+                self.emitControls("ended", positionMs: 0)
+            }
         }
 
         p.replaceCurrentItem(with: item)
@@ -1089,9 +1142,25 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         // Web layer owns the queue — only echo the intent, don't advance locally.
         cc.nextTrackCommand.addTarget { [weak self] _ in
-            self?.beginAudioBackgroundTask()
-            self?.configureAudioSession()
-            self?.emitControls("next", positionMs: 0)
+            guard let self = self else { return .commandFailed }
+            self.beginAudioBackgroundTask()
+            self.configureAudioSession()
+            if let next = self.queuedNextTrack {
+                self.queuedNextTrack = nil
+                self.emitControls("auto-advance", positionMs: 0)
+                self.playTrackDirect(
+                    url: next.url,
+                    videoId: next.videoId,
+                    candidates: next.candidates,
+                    title: next.title,
+                    artist: next.artist,
+                    artwork: next.artwork,
+                    durationMs: next.durationMs,
+                    startPosMs: 0
+                )
+            } else {
+                self.emitControls("next", positionMs: 0)
+            }
             return .success
         }
         cc.previousTrackCommand.addTarget { [weak self] _ in

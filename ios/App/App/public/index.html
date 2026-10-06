@@ -245,6 +245,91 @@
       </button>
     </nav>
 
+    <!-- Expanded Native Music Player Modal (Matching screenshot UI) -->
+    <div id="nativePlayerModal" class="native-player-modal" hidden aria-label="Now Playing">
+      <div class="np-wash" id="npWash"></div>
+      <div class="np-card" id="npCard">
+        <div class="np-drag-handle" aria-hidden="true"></div>
+        <header class="np-header">
+          <button type="button" class="icon-btn np-close-btn" id="npCloseBtn" title="Close player">
+            <span class="material-symbols-outlined">expand_more</span>
+          </button>
+          <div class="np-header-meta">
+            <span class="np-kicker" id="npHeaderKicker">PLAYING FROM</span>
+            <strong class="np-header-title" id="npHeaderTitle">Muchi Music</strong>
+          </div>
+          <button type="button" class="icon-btn" id="npOptionsBtn" title="More options">
+            <span class="material-symbols-outlined">more_vert</span>
+          </button>
+        </header>
+
+        <div class="np-art-wrap">
+          <img id="npCoverArt" src="/cover-default.jpg" alt="" onerror="if(window.handleImgErr)handleImgErr(this);else this.src='/cover-default.jpg'" />
+        </div>
+
+        <div class="np-info-row">
+          <div class="np-info-meta">
+            <strong id="npTrackTitle" class="np-track-title">Nothing playing</strong>
+            <p id="npTrackArtist" class="np-track-artist">Pick a song to begin</p>
+          </div>
+          <button type="button" class="icon-btn like-btn np-like-btn" id="npLikeBtn" title="Like">
+            <svg id="npLikeHeart" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="np-seek-wrap">
+          <div class="np-seek-bar-box">
+            <input id="npSeek" type="range" min="0" max="1000" value="0" aria-label="Seek track" />
+          </div>
+          <div class="np-time-row">
+            <span id="npCurTime">0:00</span>
+            <span id="npDurTime">0:00</span>
+          </div>
+        </div>
+
+        <div class="np-controls-row">
+          <button type="button" class="icon-btn np-ctrl-btn" id="npShuffleBtn" title="Shuffle">
+            <span class="material-symbols-outlined">shuffle</span>
+          </button>
+          <button type="button" class="icon-btn np-ctrl-btn" id="npPrevBtn" title="Previous">
+            <span class="material-symbols-outlined">skip_previous</span>
+          </button>
+          <button type="button" class="np-play-fab" id="npPlayBtn" title="Play">
+            <span class="material-symbols-outlined filled" id="npPlayIcon">play_arrow</span>
+          </button>
+          <button type="button" class="icon-btn np-ctrl-btn" id="npNextBtn" title="Next">
+            <span class="material-symbols-outlined">skip_next</span>
+          </button>
+          <button type="button" class="icon-btn np-ctrl-btn" id="npRepeatBtn" title="Repeat">
+            <span class="material-symbols-outlined">repeat</span>
+          </button>
+        </div>
+
+        <div class="np-volume-row">
+          <span class="material-symbols-outlined np-vol-icon">volume_down</span>
+          <input id="npVolume" type="range" min="0" max="100" value="85" aria-label="Volume" />
+          <span class="material-symbols-outlined np-vol-icon">volume_up</span>
+        </div>
+
+        <footer class="np-footer">
+          <button type="button" class="np-device-pill" id="npDeviceBtn" title="Audio Output">
+            <span class="material-symbols-outlined">speaker</span>
+            <span id="npDeviceLabel">Phone Speaker DSP</span>
+          </button>
+          <div class="np-footer-actions">
+            <button type="button" class="icon-btn" id="npLyricsBtn" title="Lyrics">
+              <span class="material-symbols-outlined">lyrics</span>
+            </button>
+            <button type="button" class="icon-btn" id="npQueueBtn" title="Queue">
+              <span class="material-symbols-outlined">queue_music</span>
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
     <div id="ytWrap" class="yt-wrap" hidden>
       <div class="yt-head">
         <span>YouTube · official player</span>
@@ -281,6 +366,6 @@
 
     <script src="https://www.youtube.com/iframe_api"></script>
     <script src="/meta.js?v=1"></script>
-    <script src="/app.js?v=115"></script>
+    <script src="/app.js?v=119"></script>
   </body>
 </html>

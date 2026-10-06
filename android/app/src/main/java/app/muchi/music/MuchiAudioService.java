@@ -80,6 +80,7 @@ public class MuchiAudioService extends Service {
     public static final String ACTION_RESUME = "app.muchi.music.action.RESUME";
     public static final String ACTION_SESSION = "app.muchi.music.action.SESSION";
     public static final String ACTION_PREFS = "app.muchi.music.action.PREFS";
+    public static final String ACTION_NEXT_TRACK = "app.muchi.music.action.NEXT_TRACK";
     public static final String ACTION_STOP = "app.muchi.music.action.STOP";
     /** Notification transport buttons (v1.5.4): these arrive as getService
      *  PendingIntents from the media notification itself. */
@@ -121,6 +122,7 @@ public class MuchiAudioService extends Service {
         public void playIntent(Intent i) { ticker.post(() -> handlePlayIntent(i)); }
         public void sessionIntent(Intent i) { ticker.post(() -> handleSessionIntent(i)); }
         public void prefsIntent(Intent i) { ticker.post(() -> handlePrefsIntent(i)); }
+        public void nextTrackIntent(Intent i) { ticker.post(() -> handleNextTrackIntent(i)); }
         public void pausePlayback() {
             ticker.post(() -> {
                 if (mirrorMode) {
@@ -242,6 +244,30 @@ public class MuchiAudioService extends Service {
     private boolean mirrorPlaying = false;
     private long mirrorPositionMs = 0L;
     private long mirrorDurationMs = 0L;
+
+    // Spotify-like gapless background auto-advance pipeline: holds the pre-queued
+    // next track in native memory so playback never stops when the screen is locked
+    // or WebView is suspended in Doze mode.
+    private static class NextTrackInfo {
+        final String url;
+        final String videoId;
+        final String candidates;
+        final String title;
+        final String artist;
+        final String artwork;
+        final long durationMs;
+
+        NextTrackInfo(String url, String videoId, String candidates, String title, String artist, String artwork, long durationMs) {
+            this.url = url != null ? url : "";
+            this.videoId = videoId != null ? videoId : "";
+            this.candidates = candidates != null ? candidates : "";
+            this.title = title != null && !title.isEmpty() ? title : "Muchi";
+            this.artist = artist != null ? artist : "";
+            this.artwork = artwork != null ? artwork : "";
+            this.durationMs = Math.max(0L, durationMs);
+        }
+    }
+    private volatile NextTrackInfo queuedNextTrack = null;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -419,6 +445,8 @@ public class MuchiAudioService extends Service {
             handleSessionIntent(intent);
         } else if (ACTION_PREFS.equals(action)) {
             handlePrefsIntent(intent);
+        } else if (ACTION_NEXT_TRACK.equals(action)) {
+            handleNextTrackIntent(intent);
         } else if (ACTION_TOGGLE.equals(action)) {
             if (mirrorMode) {
                 mirrorPlaying = !mirrorPlaying;
@@ -436,8 +464,14 @@ public class MuchiAudioService extends Service {
                 }
             }
         } else if (ACTION_NEXT.equals(action)) {
-            // The queue lives in the web layer; echo, don't decide.
-            emitControls("next", 0L);
+            if (queuedNextTrack != null) {
+                NextTrackInfo next = queuedNextTrack;
+                queuedNextTrack = null;
+                emitControls("auto-advance", 0L);
+                loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L);
+            } else {
+                emitControls("next", 0L);
+            }
         } else if (ACTION_PREV.equals(action)) {
             emitControls("previous", 0L);
         } else if (intent == null && ((player != null && (player.isPlaying() || player.getPlayWhenReady())) || (mirrorMode && mirrorPlaying) || resolvingOnDevice)) {
@@ -572,6 +606,27 @@ public class MuchiAudioService extends Service {
         }
     }
 
+    private void handleNextTrackIntent(Intent intent) {
+        if (intent == null) return;
+        String url = intent.getStringExtra(EXTRA_URL);
+        String videoId = intent.getStringExtra(EXTRA_VIDEO_ID);
+        String title = intent.getStringExtra(EXTRA_TITLE);
+        String artist = intent.getStringExtra(EXTRA_ARTIST);
+        String artwork = intent.getStringExtra(EXTRA_ARTWORK);
+        String candidates = intent.getStringExtra(EXTRA_CANDIDATES);
+        long durationMs = intent.getLongExtra(EXTRA_DURATION_MS, 0L);
+        if ((url == null || url.isEmpty()) && (videoId == null || videoId.isEmpty()) && (title == null || title.isEmpty())) {
+            queuedNextTrack = null;
+            return;
+        }
+        queuedNextTrack = new NextTrackInfo(url, videoId, candidates, title, artist, artwork, durationMs);
+        if (videoId != null && !videoId.isEmpty()) {
+            preloadStream(videoId, candidates != null ? candidates : "", title != null ? title : "", artist != null ? artist : "");
+        } else if (title != null && !title.isEmpty()) {
+            preloadStream("", candidates != null ? candidates : "", title, artist != null ? artist : "");
+        }
+    }
+
     @Override
     public IBinder onBind(Intent intent) {
         return binder;
@@ -676,7 +731,14 @@ public class MuchiAudioService extends Service {
                         return;
                     }
                     endedNotified = true;
-                    emitControls("ended", 0L);
+                    if (queuedNextTrack != null) {
+                        NextTrackInfo next = queuedNextTrack;
+                        queuedNextTrack = null;
+                        emitControls("auto-advance", 0L);
+                        loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L);
+                    } else {
+                        emitControls("ended", 0L);
+                    }
                 }
             }
 
@@ -752,7 +814,14 @@ public class MuchiAudioService extends Service {
 
             @Override
             public void onSkipToNext() {
-                emitControls("next", 0L);
+                if (queuedNextTrack != null) {
+                    NextTrackInfo next = queuedNextTrack;
+                    queuedNextTrack = null;
+                    emitControls("auto-advance", 0L);
+                    loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L);
+                } else {
+                    emitControls("next", 0L);
+                }
             }
 
             @Override

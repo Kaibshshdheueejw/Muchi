@@ -277,6 +277,30 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
     }
 
     @PluginMethod
+    public void setNextTrack(PluginCall call) {
+        String url = call.getString("url", "");
+        String videoId = call.getString("videoId", "");
+        String title = call.getString("title", "");
+        String artist = call.getString("artist", "");
+        String artwork = call.getString("artwork", "");
+        String candidates = call.getString("candidates", "");
+        long duration = readLong(call, "duration", 0L);
+        Intent i = new Intent(getContext(), MuchiAudioService.class);
+        i.setAction(MuchiAudioService.ACTION_NEXT_TRACK);
+        i.putExtra(MuchiAudioService.EXTRA_URL, url);
+        i.putExtra(MuchiAudioService.EXTRA_VIDEO_ID, videoId);
+        i.putExtra(MuchiAudioService.EXTRA_TITLE, title);
+        i.putExtra(MuchiAudioService.EXTRA_ARTIST, artist);
+        i.putExtra(MuchiAudioService.EXTRA_ARTWORK, artwork);
+        i.putExtra(MuchiAudioService.EXTRA_CANDIDATES, candidates);
+        i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, duration);
+        ensureService(() -> {
+            if (service != null) service.nextTrackIntent(i);
+        });
+        call.resolve();
+    }
+
+    @PluginMethod
     public void syncSession(PluginCall call) {
         Intent i = new Intent(getContext(), MuchiAudioService.class);
         i.setAction(MuchiAudioService.ACTION_SESSION);
