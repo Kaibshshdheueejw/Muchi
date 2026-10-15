@@ -139,6 +139,9 @@ public class MuchiDownloadPlugin extends Plugin {
         final String mime = call.getString("mime", "");
         final String videoId = call.getString("videoId", "");
         final String candidates = call.getString("candidates", "");
+        final int trackNumber = call.getInt("trackNumber", 0);
+        final int year = call.getInt("year", 0);
+        final String albumArtist = call.getString("albumArtist", "");
 
         if (url.isEmpty() && videoId.isEmpty() && title.isEmpty()) {
             call.reject("MuchiDownload: missing url");
@@ -158,7 +161,7 @@ public class MuchiDownloadPlugin extends Plugin {
         calls.put(id, call);
         final Future<?> f = io.submit(() -> {
             try {
-                DownloadOutcome out = downloadFile(finalId, url, videoId, candidates, filename, title, artist, album, genre, mime);
+                DownloadOutcome out = downloadFile(finalId, url, videoId, candidates, filename, title, artist, album, genre, mime, trackNumber, year, albumArtist);
                 uris.put(finalId, out.uri.toString());
                 JSObject done = new JSObject();
                 done.put("id", finalId);
@@ -583,7 +586,7 @@ public class MuchiDownloadPlugin extends Plugin {
 
     private DownloadOutcome downloadFile(String id, String url, String videoId, String candidates,
                                          String filename, String title, String artist, String album,
-                                         String genre, String mime) throws IOException {
+                                         String genre, String mime, int trackNumber, int year, String albumArtist) throws IOException {
         String vid = videoId != null ? videoId.trim() : "";
         if (vid.isEmpty() && id != null && id.startsWith("yt:")) {
             vid = id.substring(3).trim();
@@ -630,7 +633,7 @@ public class MuchiDownloadPlugin extends Plugin {
         // (< 1 MB ceiling for IOS/ANDROID googlevideo streams) with fallback to proxy URL.
         if (targetUrl.contains("googlevideo.com")) {
             try {
-                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime, trackNumber, year, albumArtist);
             } catch (IOException directErr) {
                 if (url != null && !url.isEmpty() && !url.startsWith("yt:") && !url.equals(targetUrl)) {
                     targetUrl = url;
@@ -652,7 +655,7 @@ public class MuchiDownloadPlugin extends Plugin {
             int code = con.getResponseCode();
             if (code == 403 || code >= 500) {
                 con.disconnect();
-                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime, trackNumber, year, albumArtist);
             }
             if (code >= 400) throw new IOException("download failed (" + code + ")");
             String muchiSrc = con.getHeaderField("X-Muchi-Source");
@@ -675,10 +678,10 @@ public class MuchiDownloadPlugin extends Plugin {
                 }
             }
             try {
-                return writeToMediaStore(id, con, total, filename, title, artist, album, genre, contentType != null ? contentType : resolvedMime);
+                return writeToMediaStore(id, con, total, filename, title, artist, album, genre, contentType != null ? contentType : resolvedMime, trackNumber, year, albumArtist);
             } catch (IOException streamErr) {
                 con.disconnect();
-                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime);
+                return downloadChunkedToMediaStore(id, targetUrl, userAgent, filename, title, artist, album, genre, resolvedMime, trackNumber, year, albumArtist);
             }
         } finally {
             con.disconnect();
@@ -687,7 +690,8 @@ public class MuchiDownloadPlugin extends Plugin {
 
     private DownloadOutcome downloadChunkedToMediaStore(String id, String targetUrl, String userAgent,
                                                         String filename, String title, String artist,
-                                                        String album, String genre, String fallbackMime) throws IOException {
+                                                        String album, String genre, String fallbackMime,
+                                                        int trackNumber, int year, String albumArtist) throws IOException {
         long clen = -1L;
         String clenStr = extractQueryParam(targetUrl, "clen");
         if (!clenStr.isEmpty()) {
@@ -818,12 +822,13 @@ public class MuchiDownloadPlugin extends Plugin {
             throw new IOException("Downloaded audio file is incomplete (" + got + "/" + clen + " bytes)");
         }
 
-        publishFileToMediaStore(plainFile, safeName, realMime, title, artist, album);
+        publishFileToMediaStore(plainFile, safeName, realMime, title, artist, album, genre, year, trackNumber, albumArtist);
         return new DownloadOutcome(Uri.fromFile(plainFile), plainFile.length(), realMime);
     }
 
     private void publishFileToMediaStore(File plainFile, String safeName, String mimeType,
-                                         String title, String artist, String album) {
+                                         String title, String artist, String album,
+                                         String genre, int year, int trackNumber, String albumArtist) {
         if (Build.VERSION.SDK_INT >= 29) {
             try {
                 ContentResolver resolver = getContext().getContentResolver();
@@ -833,6 +838,10 @@ public class MuchiDownloadPlugin extends Plugin {
                 values.put(MediaStore.Audio.Media.TITLE, title.isEmpty() ? stripExt(safeName) : title);
                 if (!artist.isEmpty()) values.put(MediaStore.Audio.Media.ARTIST, artist);
                 if (!album.isEmpty()) values.put(MediaStore.Audio.Media.ALBUM, album);
+                if (trackNumber > 0) values.put(MediaStore.Audio.Media.TRACK, trackNumber);
+                if (year > 0) values.put(MediaStore.Audio.Media.YEAR, year);
+                if (genre != null && !genre.isEmpty()) values.put("genre", genre);
+                if (albumArtist != null && !albumArtist.isEmpty()) values.put("album_artist", albumArtist);
                 values.put(MediaStore.Audio.Media.IS_MUSIC, 1);
                 values.put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Muchi");
                 values.put(MediaStore.Audio.Media.BUCKET_DISPLAY_NAME, "Muchi");
@@ -861,7 +870,8 @@ public class MuchiDownloadPlugin extends Plugin {
 
     private DownloadOutcome writeToMediaStore(String id, HttpURLConnection con, long total,
                                               String filename, String title, String artist, String album,
-                                              String genre, String contentType) throws IOException {
+                                              String genre, String contentType,
+                                              int trackNumber, int year, String albumArtist) throws IOException {
         String realMime = contentType == null || contentType.isEmpty() ? "audio/mp4" : contentType.split(";")[0].trim();
         String ext = extensionFor(realMime);
         String safeName = filename;
@@ -910,7 +920,7 @@ public class MuchiDownloadPlugin extends Plugin {
             throw new IOException("Downloaded audio file is incomplete (" + got + "/" + total + " bytes)");
         }
 
-        publishFileToMediaStore(plainFile, safeName, mimeType, title, artist, album);
+        publishFileToMediaStore(plainFile, safeName, mimeType, title, artist, album, genre, year, trackNumber, albumArtist);
         return new DownloadOutcome(Uri.fromFile(plainFile), plainFile.length(), mimeType);
     }
 

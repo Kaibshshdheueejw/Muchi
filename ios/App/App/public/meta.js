@@ -70,7 +70,21 @@
     if (meta.title) frames.push(textFrame("TIT2", meta.title));
     if (meta.artist) frames.push(textFrame("TPE1", meta.artist));
     if (meta.album) frames.push(textFrame("TALB", meta.album));
+    if (meta.albumArtist) frames.push(textFrame("TPE2", meta.albumArtist));
     if (meta.genre) frames.push(textFrame("TCON", meta.genre));
+    if (meta.trackNumber) {
+      var trkStr = String(meta.trackNumber) + (meta.trackTotal ? ("/" + String(meta.trackTotal)) : "");
+      frames.push(textFrame("TRCK", trkStr));
+    }
+    if (meta.discNumber) {
+      var discStr = String(meta.discNumber) + (meta.discTotal ? ("/" + String(meta.discTotal)) : "");
+      frames.push(textFrame("TPOS", discStr));
+    }
+    var fullDate = String(meta.releaseDate || meta.year || "").trim();
+    var y4 = String(meta.year || (fullDate ? fullDate.slice(0, 4) : "")).trim();
+    if (y4 && /^\d{4}$/.test(y4)) frames.push(textFrame("TYER", y4));
+    if (fullDate) frames.push(textFrame("TDRC", fullDate));
+    if (meta.isrc) frames.push(textFrame("TSRC", String(meta.isrc).trim()));
     if (meta.lyrics) frames.push(usltFrame(meta.lyrics));
     if (meta.picture && meta.picture.data && meta.picture.data.length) frames.push(apicFrame(meta.picture.mime, meta.picture.data));
     var bodyLen = 0, i; for (i = 0; i < frames.length; i++) bodyLen += frames[i].length;
@@ -85,7 +99,7 @@
   }
   function readId3v2(bytes) {
     if (bytes.length < 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null;
-    var total = findId3v2Size(bytes), out = { container: "mp3", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null };
+    var total = findId3v2Size(bytes), out = { container: "mp3", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null, trackNumber: "", trackTotal: "", discNumber: "", discTotal: "", albumArtist: "", year: "", releaseDate: "", isrc: "" };
     var o = 10, end = Math.min(bytes.length, total);
     while (o + 10 <= end) {
       var id = latinstr(u8slice(bytes, o, o + 4));
@@ -93,13 +107,34 @@
       var dataStart = o + 10, dataEnd = dataStart + size;
       if (dataEnd > bytes.length) break;
       var data = u8slice(bytes, dataStart, dataEnd);
-      if (id === "TIT2" || id === "TPE1" || id === "TALB" || id === "TCON") {
+      if (id === "TIT2" || id === "TPE1" || id === "TALB" || id === "TCON" || id === "TPE2" || id === "TRCK" || id === "TPOS" || id === "TYER" || id === "TDRC" || id === "TSRC") {
         var text = "";
         var raw = u8slice(data, 1);
         if (data[0] === 3) text = utf8str(raw);
         else if (data[0] === 1) text = utf16lestr(raw);
         else text = latinstr(raw);
-        if (id === "TIT2") out.title = text; else if (id === "TPE1") out.artist = text; else if (id === "TALB") out.album = text; else out.genre = text;
+        if (id === "TIT2") out.title = text;
+        else if (id === "TPE1") out.artist = text;
+        else if (id === "TALB") out.album = text;
+        else if (id === "TCON") out.genre = text;
+        else if (id === "TPE2") out.albumArtist = text;
+        else if (id === "TRCK") {
+          var trkParts = text.split("/");
+          out.trackNumber = trkParts[0];
+          if (trkParts[1]) out.trackTotal = trkParts[1];
+        } else if (id === "TPOS") {
+          var dParts = text.split("/");
+          out.discNumber = dParts[0];
+          if (dParts[1]) out.discTotal = dParts[1];
+        } else if (id === "TYER") {
+          out.year = text;
+          if (!out.releaseDate) out.releaseDate = text;
+        } else if (id === "TDRC") {
+          out.releaseDate = text;
+          if (!out.year && /^\d{4}/.test(text)) out.year = text.slice(0, 4);
+        } else if (id === "TSRC") {
+          out.isrc = text;
+        }
       } else if (id === "USLT" && data.length > 4) {
         var enc = data[0];
         var pU = 4;
@@ -155,14 +190,35 @@
     else { payload = utf8(value); }
     return box("data", concat(new Uint8Array(u32be(typeCode)), new Uint8Array(u32be(0)), payload));
   }
+  function ilstTrknItem(num, total) {
+    var p = new Uint8Array(8);
+    var n = Number(num) || 0, t = Number(total) || 0;
+    p[0] = 0; p[1] = 0;
+    p[2] = (n >> 8) & 255; p[3] = n & 255;
+    p[4] = (t >> 8) & 255; p[5] = t & 255;
+    p[6] = 0; p[7] = 0;
+    return box("data", concat(new Uint8Array(u32be(0)), new Uint8Array(u32be(0)), p));
+  }
+  function ilstDiskItem(num, total) {
+    var p = new Uint8Array(6);
+    var n = Number(num) || 0, t = Number(total) || 0;
+    p[0] = 0; p[1] = 0;
+    p[2] = (n >> 8) & 255; p[3] = n & 255;
+    p[4] = (t >> 8) & 255; p[5] = t & 255;
+    return box("data", concat(new Uint8Array(u32be(0)), new Uint8Array(u32be(0)), p));
+  }
   var COPY = "\u00a9";
   function buildIlst(m) {
     var items = [];
     if (m.title) items.push(box(COPY + "nam", ilstDataItem(m.title)));
     if (m.artist) items.push(box(COPY + "ART", ilstDataItem(m.artist)));
+    if (m.albumArtist) items.push(box("aART", ilstDataItem(m.albumArtist)));
     if (m.album) items.push(box(COPY + "alb", ilstDataItem(m.album)));
     if (m.genre) items.push(box(COPY + "gen", ilstDataItem(m.genre)));
     if (m.lyrics) items.push(box(COPY + "lyr", ilstDataItem(m.lyrics)));
+    if (m.releaseDate || m.year) items.push(box(COPY + "day", ilstDataItem(String(m.releaseDate || m.year))));
+    if (m.trackNumber) items.push(box("trkn", ilstTrknItem(m.trackNumber, m.trackTotal)));
+    if (m.discNumber) items.push(box("disk", ilstDiskItem(m.discNumber, m.discTotal)));
     if (m.picture && m.picture.data && metaPicOk(m.picture)) items.push(box("covr", ilstDataItem(m.picture.data, /png/i.test(m.picture.mime || "") ? "png" : "jpeg")));
     return box("ilst", concat.apply(null, items));
   }
@@ -279,7 +335,7 @@
     if (!moov) return { container: "unknown", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null };
     var inner = parseBoxes(bytes, moov.payloadStart, moov.payloadEnd), udta = null;
     for (i = 0; i < inner.length; i++) if (inner[i].type === "udta") { udta = inner[i]; break; }
-    var out = { container: "mp4", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null };
+    var out = { container: "mp4", title: "", artist: "", album: "", genre: "", lyrics: "", picture: null, trackNumber: "", trackTotal: "", discNumber: "", discTotal: "", albumArtist: "", year: "", releaseDate: "", isrc: "" };
     if (!udta) return out;
     var udtai = parseBoxes(bytes, udta.payloadStart, udta.payloadEnd), meta = null;
     for (i = 0; i < udtai.length; i++) if (udtai[i].type === "meta") { meta = udtai[i]; break; }
@@ -296,9 +352,34 @@
       var value = u8slice(bytes, dataBox.payloadStart + 8, dataBox.payloadEnd);
       if (items[i].type === COPY + "nam") out.title = utf8str(value);
       else if (items[i].type === COPY + "ART") out.artist = utf8str(value);
+      else if (items[i].type === "aART") out.albumArtist = utf8str(value);
       else if (items[i].type === COPY + "alb") out.album = utf8str(value);
       else if (items[i].type === COPY + "gen") out.genre = utf8str(value);
       else if (items[i].type === COPY + "lyr") out.lyrics = utf8str(value);
+      else if (items[i].type === COPY + "day") {
+        out.releaseDate = utf8str(value);
+        if (/^\d{4}/.test(out.releaseDate)) out.year = out.releaseDate.slice(0, 4);
+      }
+      else if (items[i].type === "trkn") {
+        if (value.length >= 4) {
+          var tn = ((value[2] << 8) | value[3]) >>> 0;
+          if (tn > 0) out.trackNumber = String(tn);
+        }
+        if (value.length >= 6) {
+          var tt = ((value[4] << 8) | value[5]) >>> 0;
+          if (tt > 0) out.trackTotal = String(tt);
+        }
+      }
+      else if (items[i].type === "disk") {
+        if (value.length >= 4) {
+          var dn = ((value[2] << 8) | value[3]) >>> 0;
+          if (dn > 0) out.discNumber = String(dn);
+        }
+        if (value.length >= 6) {
+          var dt = ((value[4] << 8) | value[5]) >>> 0;
+          if (dt > 0) out.discTotal = String(dt);
+        }
+      }
       else if (items[i].type === "covr") out.picture = { mime: tCode === 0x0e ? "image/png" : "image/jpeg", data: value };
     }
     return out;

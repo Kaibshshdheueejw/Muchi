@@ -2,6 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      window.addEventListener("error", function (e) {
+        if (!e) return;
+        if (e.message === "Script error." || e.message === "Script error" || (e.filename && !e.filename.includes(location.host) && !e.filename.startsWith("/"))) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          return true;
+        }
+      }, true);
+      window.addEventListener("unhandledrejection", function (e) {
+        if (!e) return;
+        const msg = e.reason && (e.reason.message || String(e.reason));
+        if (msg && (msg.includes("Script error") || msg.includes("ResizeObserver loop") || msg.includes("AbortError"))) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      });
+      window.onerror = function (msg, url, line, col, error) {
+        if (msg === "Script error." || msg === "Script error" || (url && !url.includes(location.host) && !url.startsWith("/"))) {
+          return true;
+        }
+      };
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
     <meta name="google-site-verification" content="K3tyeWx1iy8F1NaPmGRwbM1AQiwsztVv5Dgq49nnv8c" />
     <meta name="application-name" content="Muchi" />
@@ -159,14 +182,18 @@
         <div class="meta">
           <div class="title-row">
             <strong id="trackTitle">Nothing playing</strong>
-            <button id="likeBtn" class="icon-btn like-btn" title="Like" aria-pressed="false">
-              <svg id="likeHeart" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
-              </svg>
-            </button>
           </div>
           <button type="button" id="trackArtist" class="artist-link">Pick a song to begin</button>
         </div>
+        <button id="likeBtn" class="icon-btn like-btn apple-watch-like" title="Like" aria-pressed="false">
+          <span class="apple-charge-ripple" aria-hidden="true"></span>
+          <span class="apple-watch-lottie-box" id="likeLottieBox" aria-hidden="true"></span>
+          <svg id="likeHeart" class="apple-charge-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="apple-charge-track" cx="12" cy="12" r="10" fill="none" />
+            <circle class="apple-charge-ring" cx="12" cy="12" r="10" fill="none" />
+            <path class="apple-charge-icon" d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
+          </svg>
+        </button>
       </div>
 
       <div class="controls">
@@ -263,20 +290,32 @@
           </button>
         </header>
 
-        <div class="np-art-wrap">
-          <img id="npCoverArt" src="/cover-default.jpg" alt="" onerror="if(window.handleImgErr)handleImgErr(this);else this.src='/cover-default.jpg'" />
+        <div class="np-art-wrap" id="npArtWrap">
+          <img id="npCoverArt" src="/cover-default.jpg" alt="" onerror="if(window.handleNpCoverErr)handleNpCoverErr(this);else if(window.handleImgErr)handleImgErr(this);else this.src='/cover-default.jpg'" />
         </div>
 
         <div class="np-info-row">
           <div class="np-info-meta">
             <strong id="npTrackTitle" class="np-track-title">Nothing playing</strong>
-            <p id="npTrackArtist" class="np-track-artist">Pick a song to begin</p>
+            <button type="button" id="npTrackArtist" class="np-track-artist artist-link">Pick a song to begin</button>
           </div>
-          <button type="button" class="icon-btn like-btn np-like-btn" id="npLikeBtn" title="Like">
-            <svg id="npLikeHeart" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
-            </svg>
-          </button>
+          <div class="np-info-actions">
+            <button type="button" class="icon-btn np-action-btn" id="npLyricsBtn" title="Lyrics" aria-label="Lyrics">
+              <span class="material-symbols-outlined">lyrics</span>
+            </button>
+            <button type="button" class="icon-btn np-action-btn" id="npQueueBtn" title="Queue" aria-label="Queue">
+              <span class="material-symbols-outlined">queue_music</span>
+            </button>
+            <button type="button" class="icon-btn like-btn np-like-btn apple-watch-like" id="npLikeBtn" title="Like">
+              <span class="apple-charge-ripple" aria-hidden="true"></span>
+              <span class="apple-watch-lottie-box" id="npLikeLottieBox" aria-hidden="true"></span>
+              <svg id="npLikeHeart" class="apple-charge-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <circle class="apple-charge-track" cx="12" cy="12" r="10" fill="none" />
+                <circle class="apple-charge-ring" cx="12" cy="12" r="10" fill="none" />
+                <path class="apple-charge-icon" d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div class="np-seek-wrap">
@@ -307,26 +346,75 @@
           </button>
         </div>
 
-        <div class="np-volume-row">
-          <span class="material-symbols-outlined np-vol-icon">volume_down</span>
-          <input id="npVolume" type="range" min="0" max="100" value="85" aria-label="Volume" />
-          <span class="material-symbols-outlined np-vol-icon">volume_up</span>
-        </div>
-
         <footer class="np-footer">
           <button type="button" class="np-device-pill" id="npDeviceBtn" title="Audio Output">
             <span class="material-symbols-outlined">speaker</span>
             <span id="npDeviceLabel">Phone Speaker DSP</span>
           </button>
-          <div class="np-footer-actions">
-            <button type="button" class="icon-btn" id="npLyricsBtn" title="Lyrics">
+          <button type="button" class="np-detail-pill" id="npDetailBtn" title="Song details & similar artists">
+            <span class="material-symbols-outlined">info</span>
+            <span>Details</span>
+          </button>
+        </footer>
+
+        <!-- In-Player Animated Overlays -->
+        <div id="npLyricsOverlay" class="np-sub-overlay" hidden>
+          <div class="np-sub-head">
+            <div class="np-sub-title-row">
               <span class="material-symbols-outlined">lyrics</span>
-            </button>
-            <button type="button" class="icon-btn" id="npQueueBtn" title="Queue">
-              <span class="material-symbols-outlined">queue_music</span>
+              <strong>Lyrics</strong>
+            </div>
+            <button type="button" class="icon-btn" id="npCloseLyrics" title="Close lyrics">
+              <span class="material-symbols-outlined">close</span>
             </button>
           </div>
-        </footer>
+          <div id="npLyricsBody" class="np-sub-body ly-scroll">
+            <p class="np-empty-state">No lyrics loaded yet.</p>
+          </div>
+        </div>
+
+        <div id="npQueueOverlay" class="np-sub-overlay" hidden>
+          <div class="np-sub-head">
+            <div class="np-sub-title-row">
+              <span class="material-symbols-outlined">queue_music</span>
+              <strong>Up Next</strong>
+            </div>
+            <button type="button" class="icon-btn" id="npCloseQueue" title="Close queue">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div id="npQueueBody" class="np-sub-body">
+            <div class="np-empty-state">Queue is empty</div>
+          </div>
+        </div>
+
+        <div id="npDetailOverlay" class="np-sub-overlay" hidden>
+          <div class="np-sub-head">
+            <div class="np-sub-title-row">
+              <span class="material-symbols-outlined">info</span>
+              <strong>Track Details</strong>
+            </div>
+            <button type="button" class="icon-btn" id="npCloseDetail" title="Close details">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div id="npDetailBody" class="np-sub-body">
+            <div class="np-empty-state">Loading details…</div>
+          </div>
+        </div>
+
+        <div id="npOptionsOverlay" class="np-sub-overlay" hidden>
+          <div class="np-sub-head">
+            <div class="np-sub-title-row">
+              <span class="material-symbols-outlined">more_vert</span>
+              <strong>Song Options</strong>
+            </div>
+            <button type="button" class="icon-btn" id="npCloseOptions" title="Close options">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div id="npOptionsBody" class="np-sub-body np-options-list"></div>
+        </div>
       </div>
     </div>
 
@@ -364,8 +452,10 @@
     </div>
     <div id="toast" class="toast" hidden></div>
 
-    <script src="https://www.youtube.com/iframe_api"></script>
+    <script src="https://www.youtube.com/iframe_api" async onerror="console.warn('YouTube iframe API failed to load')"></script>
     <script src="/meta.js?v=1"></script>
+    <script src="/lottie.min.js"></script>
+    <script src="/apple-watch-lottie-data.js"></script>
     <script src="/app.js?v=119"></script>
   </body>
 </html>

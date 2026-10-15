@@ -29,6 +29,7 @@ import {
   handleLyrics, handleYtStream, handleItunesSearch, handleDeezerProxy,
 } from "./aggregate.js";
 import { handleStream, handleImg, handleAudiusStream, handleAudiusFile, handleDownload } from "./stream.js";
+import { handleSpotifyResolve } from "./spotify.js";
 import { maybeSweep } from "./db.js";
 import { handleAdmin } from "./admin.js";
 import { handleWebhook } from "./webhook.js";
@@ -206,6 +207,7 @@ async function handleApi(request, env, url) {
   if (p === "/api/youtube/search") return handleYoutubeSearch(url);
   if (p === "/api/yt/playlist") return handleYtPlaylist(url);
   if (p === "/api/yt/stream") return handleYtStream(url);
+  if (p === "/api/spotify/resolve" || p === "/api/spotify") return handleSpotifyResolve(url);
   if (p === "/api/artist") return handleArtist(url);
   if (p === "/api/radio") return handleRadio(url);
   if (p.startsWith("/api/radio/click/")) return handleRadioClick(url);

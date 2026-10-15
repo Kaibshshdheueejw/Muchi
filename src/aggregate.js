@@ -7,7 +7,11 @@
 //     (user-generated keys are NOT KV-cached — KV free allows 1k writes/day)
 // Response shapes are byte-identical to server.js.
 
-import { json, cached, kvCached, invalidateCached, fetchJSON, isEnglishTrack } from "./util.js";
+import {
+  json, cached, kvCached, invalidateCached, fetchJSON, isEnglishTrack,
+  normalizeIsrc, extractIsrcFromText, generateTargetedQueryVariations,
+  rankTracksByVersionIntent, computeRecordingDedupeKey
+} from "./util.js";
 import {
   searchYouTube, youtubeMusicSearch, youtubePlaylistTracks, youtubeAudioStream,
   itunesSearch, appleRssMostPlayed,
@@ -1113,8 +1117,19 @@ export async function handleSearch(env, url) {
     const result = { query: q, youtube: [], audius: [], radio: [], apple: [], itunes: [], deezer: [], artists: [], playlists: [] };
 
     if (source === "apple" || source === "itunes") {
-      const ap = await itunesSearch(q, { includeExtra: true, country: gl, limit: 75 }).catch(() => ({ songs: [], artists: [], playlists: [] }));
-      const songs = strictSongs(ap.songs || []);
+      let ap = await itunesSearch(q, { includeExtra: true, country: gl, limit: 75 }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      let songs = strictSongs(ap.songs || []);
+      if (!songs.length) {
+        const vars = generateTargetedQueryVariations(q);
+        if (vars.length > 0) {
+          const expAp = await itunesSearch(vars[0], { includeExtra: true, country: gl, limit: 50 }).catch(() => null);
+          if (expAp && Array.isArray(expAp.songs) && expAp.songs.length) {
+            ap = expAp;
+            songs = strictSongs(expAp.songs);
+          }
+        }
+      }
+      songs = rankTracksByVersionIntent(songs, q);
       result.apple = songs;
       result.itunes = songs;
       result.artists = finalizeArtists(ap.artists || [], songs);
@@ -1123,8 +1138,19 @@ export async function handleSearch(env, url) {
     }
 
     if (source === "deezer") {
-      const dz = await deezerSearch(q, { limit: 75, includeExtra: true, country: gl }).catch(() => ({ songs: [], artists: [], playlists: [] }));
-      const songs = strictSongs(dz.songs || []);
+      let dz = await deezerSearch(q, { limit: 75, includeExtra: true, country: gl }).catch(() => ({ songs: [], artists: [], playlists: [] }));
+      let songs = strictSongs(dz.songs || []);
+      if (!songs.length) {
+        const vars = generateTargetedQueryVariations(q);
+        if (vars.length > 0) {
+          const expDz = await deezerSearch(vars[0], { limit: 50, includeExtra: true, country: gl, skipYoutubeFallback: true }).catch(() => null);
+          if (expDz && Array.isArray(expDz.songs) && expDz.songs.length) {
+            dz = expDz;
+            songs = strictSongs(expDz.songs);
+          }
+        }
+      }
+      songs = rankTracksByVersionIntent(songs, q);
       result.deezer = songs;
       result.artists = finalizeArtists(dz.artists || [], songs);
       result.playlists = (dz.playlists || []).slice(0, 20);
@@ -1149,6 +1175,7 @@ export async function handleSearch(env, url) {
           ytSynthesized = true;
         }
       }
+      songs = rankTracksByVersionIntent(songs, q);
       result.youtube = songs;
       if (ytSynthesized) result._youtubeSynthesized = true;
       result.artists = finalizeArtists((yt && yt.artists) || [], songs);
@@ -1234,14 +1261,39 @@ export async function handleSearch(env, url) {
       });
     }
     delete result.audiusUsers;
-    // STRICT "songs only": search shows single songs — no playlist videos,
-    // Topic re-uploads, 2-hour mixes or non-music.
-    if (Array.isArray(yt)) result.youtube = strictSongs(yt);
-    result.apple = strictSongs(result.apple);
-    result.deezer = strictSongs(result.deezer);
+
+    // Targeted query expansion: If catalog providers found no songs on initial query,
+    // try high-value query variations within a strict bounded timeout (1200ms)
+    // without stalling or altering existing YouTube results.
+    if ((!result.apple || result.apple.length === 0) && (!result.deezer || result.deezer.length === 0)) {
+      const vars = generateTargetedQueryVariations(q);
+      if (vars.length > 0) {
+        const expQ = vars[0];
+        const expTasks = [
+          itunesSearch(expQ, { includeExtra: true, country: gl, limit: 50 }).catch(() => null),
+          deezerSearch(expQ, { limit: 50, includeExtra: true, country: gl, skipYoutubeFallback: true }).catch(() => null),
+        ];
+        const [expAp, expDz] = await fastWait(Promise.all(expTasks), 1200, [null, null]);
+        if (expAp && Array.isArray(expAp.songs) && expAp.songs.length) {
+          result.apple = expAp.songs;
+          if (Array.isArray(expAp.artists)) expAp.artists.forEach((a) => rawArtists.push(a));
+          if (Array.isArray(expAp.playlists)) expAp.playlists.forEach(pushP);
+        }
+        if (expDz && Array.isArray(expDz.songs) && expDz.songs.length) {
+          result.deezer = expDz.songs;
+          if (Array.isArray(expDz.artists)) expDz.artists.forEach((a) => rawArtists.push(a));
+          if (Array.isArray(expDz.playlists)) expDz.playlists.forEach(pushP);
+        }
+      }
+    }
+
+    // STRICT "songs only": deduplicate conservatively across providers while keeping distinct alternate recordings
+    if (Array.isArray(yt)) result.youtube = rankTracksByVersionIntent(strictSongs(yt), q);
+    result.apple = rankTracksByVersionIntent(strictSongs(result.apple), q);
+    result.deezer = rankTracksByVersionIntent(strictSongs(result.deezer), q);
     if (!result.deezer.length && (result.apple.length || (result.youtube && result.youtube.length))) {
       const seed = result.apple.length ? result.apple : result.youtube;
-      result.deezer = strictSongs(seed.map((t) => normalizeDeezerTrack(t)).filter(Boolean));
+      result.deezer = rankTracksByVersionIntent(strictSongs(seed.map((t) => normalizeDeezerTrack(t)).filter(Boolean)), q);
       result._deezerSynthesized = true;
     }
     if (!result.apple.length && result.deezer.length) {
@@ -1267,7 +1319,7 @@ export async function handleSearch(env, url) {
       result._youtubeSynthesized = true;
     }
     result.itunes = result.apple;
-    result.audius = strictSongs(result.audius || []);
+    result.audius = rankTracksByVersionIntent(strictSongs(result.audius || []), q);
 
     const allMatchedSongs = [
       ...(result.apple || []),
@@ -1363,6 +1415,8 @@ export async function handleYtStream(url) {
   const id = (url.searchParams.get("v") || url.searchParams.get("id") || url.searchParams.get("videoId") || "").trim();
   const title = (url.searchParams.get("title") || "").trim();
   const artist = (url.searchParams.get("artist") || "").trim();
+  const rawIsrc = (url.searchParams.get("isrc") || "").trim();
+  const validIsrc = normalizeIsrc(rawIsrc);
   const refresh = url.searchParams.get("refresh") === "1";
   const allowPreview = url.searchParams.get("allowPreview") === "1";
   const fast = url.searchParams.get("fast") === "1";
@@ -1376,6 +1430,7 @@ export async function handleYtStream(url) {
     (vid ? `&v=${encodeURIComponent(vid)}` : "") +
     (title ? `&title=${encodeURIComponent(title)}` : "") +
     (artist ? `&artist=${encodeURIComponent(artist)}` : "") +
+    (validIsrc ? `&isrc=${encodeURIComponent(validIsrc)}` : "") +
     (allowPreview ? "&allowPreview=1" : "&allowPreview=0");
 
   const coreTitle = title
@@ -1387,7 +1442,7 @@ export async function handleYtStream(url) {
     .split(/\s*(?:,|&|\/)\s*/)[0]
     .trim() || artist;
   const searchQuery = `${coreTitle} ${coreArtist}`.trim() || `${title} ${artist}`.trim();
-  const fullCacheKey = `${id || "_"}|${searchQuery.toLowerCase()}`;
+  const fullCacheKey = `${id || "_"}|${(validIsrc || searchQuery).toLowerCase()}`;
 
   if (!refresh) {
     const hit = resolvedStreamCache.get(fullCacheKey) || (id ? resolvedStreamCache.get(`vid:${id}`) : null);
@@ -1433,6 +1488,13 @@ export async function handleYtStream(url) {
     const gotD = String(s.videoShortDesc || "").toLowerCase();
     if (title && !wantIsRemix && UNWANTED_REMIX_VIDEO_RE.test(`${gotT} ${gotA}`)) {
       return false;
+    }
+    // Reject conflicting ISRC explicitly stated in candidate description (never match wrong recording/remix)
+    if (validIsrc && s.videoShortDesc) {
+      const candIsrc = extractIsrcFromText(s.videoShortDesc);
+      if (candIsrc && candIsrc !== validIsrc) {
+        return false;
+      }
     }
     const combinedMeta = `${gotT} ${gotA} ${gotD}`.replace(/[^a-z0-9]+/g, " ").trim();
     if (artistTokens.length > 0 && !/^(youtube|unknown|various artists|artist|muchi)$/i.test(artist.trim())) {
@@ -1595,6 +1657,35 @@ export async function handleYtStream(url) {
 
   const ytAltPromise = (async () => {
     await Promise.resolve();
+    // 1. ISRC-first candidate search: if a valid ISRC is provided, search YouTube by ISRC first
+    if (validIsrc && candidateIds.length < 3) {
+      try {
+        const isrcHits = await searchYouTube(validIsrc, "US", true);
+        if (Array.isArray(isrcHits)) {
+          for (const item of isrcHits) {
+            const vid = item && item.videoId ? String(item.videoId).trim() : "";
+            const dur = Number(item && item.duration) || 0;
+            if (!vid || vid === id || candidateIds.includes(vid)) continue;
+            // Skip shorts / 30s clips when looking for a full song
+            if (dur > 0 && dur < 45) continue;
+            const itemText = `${item.title || ""} ${item.artist || ""}`;
+            if (title && !wantIsRemix && UNWANTED_REMIX_VIDEO_RE.test(itemText)) continue;
+
+            // Never trust ISRC search alone: every candidate must pass artist and title verification
+            const itemTitleLower = String(item.title || "").toLowerCase();
+            const itemArtistLower = String(item.artist || "").toLowerCase();
+            const titleMatches = wantCore && (itemTitleLower.includes(wantCore) || (wantTitle && itemTitleLower.includes(wantTitle)));
+            const artistMatches = artistTokens.length === 0 || artistTokens.some((tok) => itemArtistLower.includes(tok) || itemTitleLower.includes(tok));
+            if (titleMatches && artistMatches) {
+              candidateIds.unshift(vid);
+              if (candidateIds.length >= 5) break;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // 2. Safe fallback: search by title + artist query if ISRC yielded fewer than 3 candidates
     if (searchQuery && candidateIds.length < 3) {
       try {
         const [audioHits, lyricHits] = await Promise.allSettled([

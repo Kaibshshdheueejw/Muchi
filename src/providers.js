@@ -1162,6 +1162,14 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
       score -= 180;
     }
 
+    const isExplicit = typeof t.isExplicit === "boolean"
+      ? t.isExplicit
+      : (String(t.trackExplicitness || "").toLowerCase() === "explicit"
+        ? true
+        : (String(t.trackExplicitness || "").toLowerCase() === "notexplicit" || String(t.trackExplicitness || "").toLowerCase() === "cleaned"
+          ? false
+          : undefined));
+
     const songObj = {
       id: `apple:${t.trackId}`,
       source: "apple",
@@ -1181,6 +1189,13 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
       collectionName: rawAlbum,
       trackTimeMillis: t.trackTimeMillis || 0,
       artworkUrl100: t.artworkUrl100 || "",
+      ...(typeof isExplicit === "boolean" ? { isExplicit } : {}),
+      ...(t.trackNumber ? { trackNumber: Number(t.trackNumber) || t.trackNumber } : {}),
+      ...(t.trackCount ? { trackTotal: Number(t.trackCount) || t.trackCount } : {}),
+      ...(t.discNumber ? { discNumber: Number(t.discNumber) || t.discNumber } : {}),
+      ...(t.discCount ? { discTotal: Number(t.discCount) || t.discCount } : {}),
+      ...(t.collectionArtistName ? { albumArtist: String(t.collectionArtistName).trim() } : {}),
+      ...(t.isrc ? { isrc: String(t.isrc).trim() } : {}),
     };
 
     scoredCandidates.push({ track: songObj, canonKey, bucket, score, isRemixOrLive });
@@ -1241,6 +1256,13 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
       for (const t of (fb && fb.results) || []) {
         if (!t.trackId || !t.trackName) continue;
         const art400 = String(t.artworkUrl100 || "").replace("100x100bb", "400x400bb") || "/cover-default.jpg";
+        const isExp = typeof t.isExplicit === "boolean"
+          ? t.isExplicit
+          : (String(t.trackExplicitness || "").toLowerCase() === "explicit"
+            ? true
+            : (String(t.trackExplicitness || "").toLowerCase() === "notexplicit" || String(t.trackExplicitness || "").toLowerCase() === "cleaned"
+              ? false
+              : undefined));
         songs.push({
           id: `apple:${t.trackId}`,
           source: "apple",
@@ -1260,6 +1282,13 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
           collectionName: t.collectionName || "",
           trackTimeMillis: t.trackTimeMillis || 0,
           artworkUrl100: t.artworkUrl100 || "",
+          ...(typeof isExp === "boolean" ? { isExplicit: isExp } : {}),
+          ...(t.trackNumber ? { trackNumber: Number(t.trackNumber) || t.trackNumber } : {}),
+          ...(t.trackCount ? { trackTotal: Number(t.trackCount) || t.trackCount } : {}),
+          ...(t.discNumber ? { discNumber: Number(t.discNumber) || t.discNumber } : {}),
+          ...(t.discCount ? { discTotal: Number(t.discCount) || t.discCount } : {}),
+          ...(t.collectionArtistName ? { albumArtist: String(t.collectionArtistName).trim() } : {}),
+          ...(t.isrc ? { isrc: String(t.isrc).trim() } : {}),
         });
         if (t.artistName) {
           upsertArtist(t.artistName, t.artistId || t.artistName, art400);
@@ -1277,6 +1306,13 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
         const cName = (d.album && d.album.title) || "";
         const artUrl = (d.album && (d.album.cover_big || d.album.cover_medium)) || (d.artist && d.artist.picture_big) || "/cover-default.jpg";
         const durSec = Number(d.duration) || 0;
+        const isExpDz = typeof d.isExplicit === "boolean"
+          ? d.isExplicit
+          : (d.explicit_lyrics === true || d.explicit_content_lyrics === 1
+            ? true
+            : ((d.explicit_lyrics === false && (d.explicit_content_lyrics === 0 || d.explicit_content_lyrics === 2 || d.explicit_content_lyrics === 3))
+              ? false
+              : undefined));
         songs.push({
           id: `apple:${d.id}`,
           source: "apple",
@@ -1286,7 +1322,8 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
           duration: durSec,
           artwork: artUrl,
           genre: "",
-          year: "",
+          year: d.release_date ? String(d.release_date).slice(0, 4) : "",
+          releaseDate: d.release_date || "",
           previewUrl: "",
           playQuery: `${d.title} ${aName} official audio`.trim(),
           trackId: d.id,
@@ -1296,6 +1333,11 @@ async function _itunesSearchImpl(cleanQ, q, maxSongs, cacheKey, { includeExtra =
           trackTimeMillis: durSec * 1000,
           artworkUrl100: artUrl,
           _synthesized: true,
+          ...(typeof isExpDz === "boolean" ? { isExplicit: isExpDz } : {}),
+          ...(d.track_position ? { trackNumber: Number(d.track_position) || d.track_position } : {}),
+          ...(d.disk_number ? { discNumber: Number(d.disk_number) || d.disk_number } : {}),
+          ...((d.album && d.album.artist && (d.album.artist.name || d.album.artist)) ? { albumArtist: String(d.album.artist.name || d.album.artist).trim() } : {}),
+          ...(d.isrc ? { isrc: String(d.isrc).trim() } : {}),
         });
         upsertArtist(aName, (d.artist && d.artist.id) || aName, (d.artist && (d.artist.picture_big || d.artist.picture_medium)) || artUrl, "deezer");
         if (d.album && d.album.id && cName && !seenAlb.has(String(d.album.id))) {

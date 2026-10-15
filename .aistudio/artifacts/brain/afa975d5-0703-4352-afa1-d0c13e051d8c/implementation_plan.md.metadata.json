@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for Native Stream Probe ISRC Passthrough (Item B from Section 6). Covers why it is necessary, benefits, safest non-breaking implementation across Android (MuchiAudioPlugin.java, MuchiAudioService.java) and iOS (MuchiAudioPlugin.swift), end-to-end background test verification, and architectural review of Item C (offline export and search synonyms).",
+  "updatedAt": "2026-10-13T21:07:23.687940909Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

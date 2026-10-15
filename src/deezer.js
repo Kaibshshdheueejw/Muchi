@@ -150,7 +150,25 @@ export function normalizeDeezerTrack(t, fallbackArtist = "", fallbackArt = "") {
     t.artistPicture ||
     ""
   );
-  return {
+
+  const isExplicit = typeof t.isExplicit === "boolean"
+    ? t.isExplicit
+    : (t.explicit_lyrics === true || t.explicit_content_lyrics === 1 || String(t.trackExplicitness || "").toLowerCase() === "explicit"
+      ? true
+      : ((t.explicit_lyrics === false && (t.explicit_content_lyrics === 0 || t.explicit_content_lyrics === 2 || t.explicit_content_lyrics === 3)) ||
+         String(t.trackExplicitness || "").toLowerCase() === "notexplicit" ||
+         String(t.trackExplicitness || "").toLowerCase() === "cleaned"
+        ? false
+        : undefined));
+
+  const trackNumber = t.track_position || t.trackNumber || t.track_no || t.track || undefined;
+  const discNumber = t.disk_number || t.discNumber || t.disc_no || t.disc || undefined;
+  const albumArtist = clean((t.album && (t.album.artist && (t.album.artist.name || t.album.artist))) || t.collectionArtistName || t.albumArtist || "");
+  const isrc = clean(t.isrc || t.ISRC || "");
+  const releaseDate = clean(t.release_date || t.releaseDate || "");
+  const year = clean(t.year || (releaseDate ? releaseDate.slice(0, 4) : ""));
+
+  const res = {
     id,
     rawId: rawId || id.replace(/^deezer:/, ""),
     source: "deezer",
@@ -166,6 +184,14 @@ export function normalizeDeezerTrack(t, fallbackArtist = "", fallbackArt = "") {
     playQuery: clean(t.playQuery) || `${title} ${artistName} official audio`.trim(),
     videoId: t.videoId || "",
   };
+  if (typeof isExplicit === "boolean") res.isExplicit = isExplicit;
+  if (trackNumber) res.trackNumber = Number(trackNumber) || trackNumber;
+  if (discNumber) res.discNumber = Number(discNumber) || discNumber;
+  if (albumArtist) res.albumArtist = albumArtist;
+  if (isrc) res.isrc = isrc;
+  if (releaseDate) res.releaseDate = releaseDate;
+  if (year) res.year = year;
+  return res;
 }
 
 /**
@@ -1038,6 +1064,14 @@ export async function deezerSearch(query, { limit = 75, includeExtra = true, cou
           duration: t.duration || Math.round(Number(t.trackTimeMillis || 0) / 1000),
           preview: "",
           playQuery: t.playQuery,
+          isExplicit: t.isExplicit,
+          trackExplicitness: t.trackExplicitness,
+          track_position: t.trackNumber,
+          disk_number: t.discNumber,
+          albumArtist: t.albumArtist || t.collectionArtistName,
+          isrc: t.isrc,
+          release_date: t.releaseDate,
+          year: t.year,
         });
         if (songs.length >= maxSongs) break;
       }

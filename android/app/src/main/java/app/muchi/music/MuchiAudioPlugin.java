@@ -201,6 +201,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_URL, url);
         i.putExtra(MuchiAudioService.EXTRA_VIDEO_ID, videoId);
         i.putExtra(MuchiAudioService.EXTRA_CANDIDATES, call.getString("candidates", ""));
+        i.putExtra(MuchiAudioService.EXTRA_ISRC, call.getString("isrc", ""));
         if (url.startsWith("content://")) {
             try {
                 i.setData(android.net.Uri.parse(url));
@@ -272,7 +273,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         String candidates = call.getString("candidates", "");
         String title = call.getString("title", "");
         String artist = call.getString("artist", "");
-        MuchiAudioService.preloadStream(videoId, candidates, title, artist);
+        String isrc = call.getString("isrc", "");
+        MuchiAudioService.preloadStream(videoId, candidates, title, artist, isrc);
         call.resolve();
     }
 
@@ -284,6 +286,7 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         String artist = call.getString("artist", "");
         String artwork = call.getString("artwork", "");
         String candidates = call.getString("candidates", "");
+        String isrc = call.getString("isrc", "");
         long duration = readLong(call, "duration", 0L);
         Intent i = new Intent(getContext(), MuchiAudioService.class);
         i.setAction(MuchiAudioService.ACTION_NEXT_TRACK);
@@ -293,7 +296,9 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_ARTIST, artist);
         i.putExtra(MuchiAudioService.EXTRA_ARTWORK, artwork);
         i.putExtra(MuchiAudioService.EXTRA_CANDIDATES, candidates);
+        i.putExtra(MuchiAudioService.EXTRA_ISRC, isrc);
         i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, duration);
+        startService(i);
         ensureService(() -> {
             if (service != null) service.nextTrackIntent(i);
         });

@@ -219,3 +219,224 @@ export function isEnglishTrack(t) {
   if (!t) return false;
   return !detectsNonEnglish(`${t.title || ""} ${t.artist || ""} ${t.album || ""}`);
 }
+
+/**
+ * Normalizes and validates an International Standard Recording Code (ISRC).
+ * Standard format: 2 country letters + 3 alphanumeric registrant + 2-digit year + 5-digit designation (12 alphanumeric chars).
+ * Strips dashes, hyphens, and whitespace, forces uppercase.
+ * Returns the 12-character normalized string if valid, or null if invalid or missing.
+ */
+export function normalizeIsrc(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const clean = raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (/^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(clean)) {
+    return clean;
+  }
+  return null;
+}
+
+/**
+ * Extracts an explicit ISRC code from description or free text if explicitly labeled
+ * (e.g. "ISRC: USUM72412345" or "ISRC US-UM7-24-12345").
+ * Returns the normalized 12-char ISRC, or null if not explicitly present.
+ */
+export function extractIsrcFromText(text) {
+  if (!text || typeof text !== "string") return null;
+  const m = text.match(/\b(?:ISRC|isrc)[:\s#-]*([A-Za-z]{2}[-\s]?[A-Za-z0-9]{3}[-\s]?\d{2}[-\s]?\d{5})\b/);
+  if (m && m[1]) {
+    return normalizeIsrc(m[1]);
+  }
+  return null;
+}
+
+/**
+ * Detects the version type of a track from its title and artist.
+ * Possible types:
+ * - 'live'
+ * - 'remix'
+ * - 'acoustic'
+ * - 'instrumental'
+ * - 'cover'
+ * - 'karaoke'
+ * - 'speed_up'
+ * - 'slowed'
+ * - 'radio_edit'
+ * - 'studio' (default canonical)
+ */
+export function detectVersionType(title, artist = "") {
+  const t = String(title || "");
+  const a = String(artist || "");
+  const blob = `${t} ${a}`.toLowerCase();
+
+  if (/\b(sped\s*up|speed\s*up|nightcore)\b/i.test(blob)) return "speed_up";
+  if (/\b(slowed(?:\s*\+?\s*reverb)?|reverb)\b/i.test(blob)) return "slowed";
+  if (/\b(karaoke|sing-along|sing\s*along)\b/i.test(blob)) return "karaoke";
+  if (/\b(instrumental|backing\s*track|piano\s*version|orchestral\s*version|string\s*version)\b/i.test(blob)) return "instrumental";
+  if (/\b(cover|tribute\s*to|originally\s*by|performed\s*by)\b/i.test(blob)) return "cover";
+  if (/\b(acoustic(?:\s*version)?|unplugged|stripped(?:\s*version)?)\b/i.test(blob)) return "acoustic";
+  if (/\b(live(?:\s+at|\s+from|\s+in|\s+version|\s+session)?|in\s+concert|mtv\s+unplugged)\b/i.test(blob)) return "live";
+  if (/\b(remix|rmx|vip\s*mix|vip\s*edit|club\s*mix|extended\s*mix|extended\s*version|dub\s*mix)\b/i.test(blob)) return "remix";
+  if (/\b(radio\s*edit|single\s*version|album\s*version|original\s*mix)\b/i.test(blob)) return "radio_edit";
+
+  return "studio";
+}
+
+/**
+ * Detects if the user query explicitly requested a specific recording version.
+ * Returns: { requestedVersion: 'live' | 'remix' | 'acoustic' | 'instrumental' | 'cover' | 'speed_up' | 'slowed' | null, cleanQuery: string }
+ */
+export function detectQueryIntent(query) {
+  const raw = String(query || "").trim();
+  const lower = raw.toLowerCase();
+  let requestedVersion = null;
+
+  if (/\b(sped\s*up|speed\s*up|nightcore)\b/i.test(lower)) {
+    requestedVersion = "speed_up";
+  } else if (/\b(slowed(?:\s*\+?\s*reverb)?|reverb)\b/i.test(lower)) {
+    requestedVersion = "slowed";
+  } else if (/\b(karaoke)\b/i.test(lower)) {
+    requestedVersion = "karaoke";
+  } else if (/\b(instrumental|backing\s*track)\b/i.test(lower)) {
+    requestedVersion = "instrumental";
+  } else if (/\b(cover|tribute)\b/i.test(lower)) {
+    requestedVersion = "cover";
+  } else if (/\b(acoustic|unplugged|stripped)\b/i.test(lower)) {
+    requestedVersion = "acoustic";
+  } else if (/\b(live(?:\s+at|\s+from|\s+version)?|in\s+concert)\b/i.test(lower)) {
+    requestedVersion = "live";
+  } else if (/\b(remix|rmx|club\s*mix|vip)\b/i.test(lower)) {
+    requestedVersion = "remix";
+  }
+
+  let cleanQuery = raw;
+  if (requestedVersion) {
+    cleanQuery = raw
+      .replace(/\b(sped\s*up|speed\s*up|nightcore|slowed(?:\s*\+?\s*reverb)?|reverb|karaoke|instrumental|backing\s*track|cover|tribute|acoustic|unplugged|stripped|live(?:\s+at|\s+from|\s+version)?|in\s+concert|remix|rmx|club\s*mix|vip)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleanQuery) cleanQuery = raw;
+  }
+
+  return { requestedVersion, cleanQuery };
+}
+
+/**
+ * Generates at most 2 targeted query variations for expanding catalog coverage
+ * when initial results are scarce.
+ */
+export function generateTargetedQueryVariations(query) {
+  const raw = String(query || "").trim();
+  if (!raw || raw.length < 3) return [];
+
+  const variations = [];
+  const addVar = (v) => {
+    const s = String(v || "").trim();
+    if (s && s.toLowerCase() !== raw.toLowerCase() && !variations.some((x) => x.toLowerCase() === s.toLowerCase())) {
+      if (variations.length < 2) variations.push(s);
+    }
+  };
+
+  // 1. Strip feat / ft / featuring and guest artists
+  if (/\b(?:feat\.?|ft\.?|featuring|with)\b/i.test(raw)) {
+    const noFeat = raw
+      .replace(/\s*[\[(]?(?:feat\.?|ft\.?|featuring|with)\s+[^)\]]+[)\]]?/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    addVar(noFeat);
+  }
+
+  // 2. Strip smart quotes and standard apostrophes / punctuation
+  if (/['"’“”.,;!?\-_]/.test(raw)) {
+    const noPunct = raw
+      .replace(/['"’“”]/g, "")
+      .replace(/[-–—_]/g, " ")
+      .replace(/[.,;!?]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    addVar(noPunct);
+  }
+
+  // 3. Artist - Title swap or title-only if formatted with dash
+  if (variations.length < 2 && / - /.test(raw)) {
+    const parts = raw.split(" - ").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 2) {
+      addVar(`${parts[1]} ${parts[0]}`);
+    }
+  }
+
+  return variations;
+}
+
+/**
+ * Computes a conservative recording deduplication key for a track.
+ *
+ * Tier 1 (ISRC): If valid normalized ISRC is present, key is `isrc:${isrc}`.
+ *
+ * Tier 2 (Conservative metadata + duration bucket):
+ * If no ISRC, requires:
+ * - Normalized core title (stripping noisy decorations like [Official Video])
+ * - Normalized primary artist
+ * - Version type ('studio', 'live', 'remix', etc.)
+ * - Duration rounded to 3-second bucket.
+ * If duration is missing (0), duration bucket is 'nodur_${id}' so tracks without duration never merge with arbitrary tracks!
+ */
+export function computeRecordingDedupeKey(track) {
+  if (!track) return `null_${Math.random()}`;
+
+  const isrc = normalizeIsrc(track.isrc);
+  if (isrc) {
+    return `isrc:${isrc}`;
+  }
+
+  const title = String(track.title || "")
+    .toLowerCase()
+    .replace(/\s*[\[(][^)\]]*(?:official|audio|video|lyrics?|visualizer|hd|4k)[^)\]]*[)\]]/gi, "")
+    .replace(/[^a-z0-9]/g, "");
+
+  const artist = String(track.artist || "")
+    .toLowerCase()
+    .split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*/i)[0]
+    .replace(/[^a-z0-9]/g, "");
+
+  const versionType = detectVersionType(track.title, track.artist);
+  const dur = Number(track.duration) || 0;
+
+  const durBucket = dur > 0 ? `d${Math.round(dur / 3) * 3}` : `id_${track.id || track.videoId || Math.random()}`;
+
+  return `meta:${artist}:${title}:${versionType}:${durBucket}`;
+}
+
+/**
+ * Ranks tracks according to user version intent:
+ * - If query explicitly asked for an alternative (e.g. 'live', 'remix'), prioritize that version.
+ * - If query did not ask for an alternative, rank official studio recordings higher,
+ *   while retaining alternatives in the list.
+ */
+export function rankTracksByVersionIntent(tracks, query) {
+  if (!Array.isArray(tracks) || tracks.length <= 1) return tracks || [];
+  const intent = detectQueryIntent(query);
+
+  const scored = tracks.map((t, idx) => {
+    const vType = detectVersionType(t.title, t.artist);
+    let boost = 0;
+
+    if (intent.requestedVersion) {
+      if (vType === intent.requestedVersion) boost += 500;
+      else if (vType === "studio") boost += 100;
+      else boost -= 100;
+    } else {
+      if (vType === "studio" || vType === "radio_edit") boost += 300;
+      else if (vType === "live") boost += 50;
+      else if (vType === "acoustic") boost += 40;
+      else if (vType === "remix") boost -= 50;
+      else if (vType === "cover" || vType === "karaoke" || vType === "speed_up" || vType === "slowed") boost -= 200;
+    }
+
+    return { track: t, score: boost - idx, origIdx: idx };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((s) => s.track);
+}
+
+

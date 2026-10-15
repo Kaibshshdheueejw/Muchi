@@ -2,6 +2,8 @@
 // (lines 114–683). These walk innerTube JSON and must keep identical
 // output shapes (id/source/videoId/title/artist/album/duration/artwork).
 
+import { computeRecordingDedupeKey } from "./util.js";
+
 export function ytThumb(thumbs) {
   if (!thumbs) return "";
   return (thumbs.high && thumbs.high.url) || (thumbs.medium && thumbs.medium.url) || (thumbs.default && thumbs.default.url) || "";
@@ -194,15 +196,26 @@ export function isSongRow(t) {
   return true;
 }
 
-// Filter + dedupe (title|artist) across providers.
+// Filter + dedupe recordings conservatively across providers.
+// Retains distinct alternate versions (live, acoustic, remix, cover) and distinct recordings,
+// while merging identical duplicates and enriching missing metadata (ISRC, album, duration).
 export function strictSongs(list) {
   const out = [];
-  const seen = new Set();
+  const seenMap = new Map();
   for (const t of list || []) {
     if (!isSongRow(t)) continue;
-    const k = `${String(t.title || "").toLowerCase()}|${String(t.artist || "").toLowerCase()}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
+    const k = computeRecordingDedupeKey(t);
+    if (seenMap.has(k)) {
+      const existing = seenMap.get(k);
+      if (!existing.isrc && t.isrc) existing.isrc = t.isrc;
+      if (!existing.album && t.album) existing.album = t.album;
+      if (!existing.duration && t.duration) existing.duration = t.duration;
+      if ((!existing.artwork || existing.artwork === "/cover-default.jpg") && t.artwork && t.artwork !== "/cover-default.jpg") {
+        existing.artwork = t.artwork;
+      }
+      continue;
+    }
+    seenMap.set(k, t);
     out.push(t);
   }
   return out;

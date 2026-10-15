@@ -91,6 +91,7 @@ public class MuchiAudioService extends Service {
     public static final String EXTRA_URL = "url";
     public static final String EXTRA_VIDEO_ID = "videoId";
     public static final String EXTRA_CANDIDATES = "candidates";
+    public static final String EXTRA_ISRC = "isrc";
     public static final String EXTRA_TITLE = "title";
     public static final String EXTRA_ARTIST = "artist";
     public static final String EXTRA_ARTWORK = "artwork";
@@ -219,6 +220,7 @@ public class MuchiAudioService extends Service {
     private String trackTitle = "Muchi";
     private String trackArtist = "";
     private String trackArtworkUrl = "";
+    private String trackIsrc = "";
     private Bitmap artworkBitmap;
     private String currentUrl;
     private String currentRequestedUrl;
@@ -256,8 +258,13 @@ public class MuchiAudioService extends Service {
         final String artist;
         final String artwork;
         final long durationMs;
+        final String isrc;
 
         NextTrackInfo(String url, String videoId, String candidates, String title, String artist, String artwork, long durationMs) {
+            this(url, videoId, candidates, title, artist, artwork, durationMs, "");
+        }
+
+        NextTrackInfo(String url, String videoId, String candidates, String title, String artist, String artwork, long durationMs, String isrc) {
             this.url = url != null ? url : "";
             this.videoId = videoId != null ? videoId : "";
             this.candidates = candidates != null ? candidates : "";
@@ -265,6 +272,7 @@ public class MuchiAudioService extends Service {
             this.artist = artist != null ? artist : "";
             this.artwork = artwork != null ? artwork : "";
             this.durationMs = Math.max(0L, durationMs);
+            this.isrc = isrc != null ? isrc.trim() : "";
         }
     }
     private volatile NextTrackInfo queuedNextTrack = null;
@@ -468,7 +476,7 @@ public class MuchiAudioService extends Service {
                 NextTrackInfo next = queuedNextTrack;
                 queuedNextTrack = null;
                 emitControls("auto-advance", 0L);
-                loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L);
+                loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L, next.isrc);
             } else {
                 emitControls("next", 0L);
             }
@@ -523,11 +531,13 @@ public class MuchiAudioService extends Service {
         String artist = intent.getStringExtra(EXTRA_ARTIST);
         String artwork = intent.getStringExtra(EXTRA_ARTWORK);
         String candidates = intent.getStringExtra(EXTRA_CANDIDATES);
+        String isrc = intent.getStringExtra(EXTRA_ISRC);
         long durationMs = intent.getLongExtra(EXTRA_DURATION_MS, 0L);
         long startPosMs = Math.max(0L, intent.getLongExtra(EXTRA_POSITION_MS, 0L));
 
         trackTitle = title != null && !title.isEmpty() ? title : "Muchi";
         trackArtist = artist != null ? artist : "";
+        trackIsrc = isrc != null ? isrc.trim() : "";
         currentDurationMs = Math.max(0L, durationMs);
         mirrorMode = false;
 
@@ -542,7 +552,7 @@ public class MuchiAudioService extends Service {
         showNotification();
         updateLocks(true);
 
-        loadTrack(url, videoId, candidates != null ? candidates : "", trackTitle, trackArtist, artwork, currentDurationMs, startPosMs);
+        loadTrack(url, videoId, candidates != null ? candidates : "", trackTitle, trackArtist, artwork, currentDurationMs, startPosMs, trackIsrc);
     }
 
     /** Mirror mode: keeps the Foreground Media Notification & WakeLock active
@@ -614,16 +624,17 @@ public class MuchiAudioService extends Service {
         String artist = intent.getStringExtra(EXTRA_ARTIST);
         String artwork = intent.getStringExtra(EXTRA_ARTWORK);
         String candidates = intent.getStringExtra(EXTRA_CANDIDATES);
+        String isrc = intent.getStringExtra(EXTRA_ISRC);
         long durationMs = intent.getLongExtra(EXTRA_DURATION_MS, 0L);
         if ((url == null || url.isEmpty()) && (videoId == null || videoId.isEmpty()) && (title == null || title.isEmpty())) {
             queuedNextTrack = null;
             return;
         }
-        queuedNextTrack = new NextTrackInfo(url, videoId, candidates, title, artist, artwork, durationMs);
+        queuedNextTrack = new NextTrackInfo(url, videoId, candidates, title, artist, artwork, durationMs, isrc);
         if (videoId != null && !videoId.isEmpty()) {
-            preloadStream(videoId, candidates != null ? candidates : "", title != null ? title : "", artist != null ? artist : "");
+            preloadStream(videoId, candidates != null ? candidates : "", title != null ? title : "", artist != null ? artist : "", isrc != null ? isrc : "");
         } else if (title != null && !title.isEmpty()) {
-            preloadStream("", candidates != null ? candidates : "", title, artist != null ? artist : "");
+            preloadStream("", candidates != null ? candidates : "", title, artist != null ? artist : "", isrc != null ? isrc : "");
         }
     }
 
@@ -686,11 +697,13 @@ public class MuchiAudioService extends Service {
         DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(this, httpFactory);
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                        30000,
-                        240000,
+                        20000,
+                        180000,
                         200,
-                        600
+                        500
                 )
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .setBackBuffer(15000, true)
                 .build();
         ExoPlayer.Builder builder = new ExoPlayer.Builder(this)
                 .setLoadControl(loadControl)
@@ -735,7 +748,7 @@ public class MuchiAudioService extends Service {
                         NextTrackInfo next = queuedNextTrack;
                         queuedNextTrack = null;
                         emitControls("auto-advance", 0L);
-                        loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L);
+                        loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L, next.isrc);
                     } else {
                         emitControls("ended", 0L);
                     }
@@ -818,7 +831,7 @@ public class MuchiAudioService extends Service {
                     NextTrackInfo next = queuedNextTrack;
                     queuedNextTrack = null;
                     emitControls("auto-advance", 0L);
-                    loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L);
+                    loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L, next.isrc);
                 } else {
                     emitControls("next", 0L);
                 }
@@ -875,6 +888,11 @@ public class MuchiAudioService extends Service {
 
     private synchronized void loadTrack(String url, String videoId, String candidates,
                                         String title, String artist, String artwork, long durationMs, long startPosMs) {
+        loadTrack(url, videoId, candidates, title, artist, artwork, durationMs, startPosMs, "");
+    }
+
+    private synchronized void loadTrack(String url, String videoId, String candidates,
+                                        String title, String artist, String artwork, long durationMs, long startPosMs, String isrc) {
         String newTitle = title != null && !title.isEmpty() ? title : "Muchi";
         String newArtist = artist != null ? artist : "";
         String newVideoId;
@@ -919,6 +937,7 @@ public class MuchiAudioService extends Service {
         lastLoadTrackAtMs = nowMs;
         trackTitle = newTitle;
         trackArtist = newArtist;
+        trackIsrc = isrc != null ? isrc.trim() : "";
         currentVideoId = newVideoId;
         currentCandidates = candidates != null ? candidates : "";
         currentDurationMs = Math.max(0L, durationMs);
@@ -1023,8 +1042,9 @@ public class MuchiAudioService extends Service {
             final String cands = currentCandidates;
             final String tTitle = trackTitle;
             final String tArtist = trackArtist;
+            final String tIsrc = trackIsrc;
             resolveExecutor.execute(() -> {
-                ResolvedStream rs = resolveYoutubeStreamOnDevice(vid, cands, tTitle, tArtist);
+                ResolvedStream rs = resolveYoutubeStreamOnDevice(vid, cands, tTitle, tArtist, tIsrc);
                 ticker.post(() -> {
                     if (seq != loadSeq) return;
                     resolvingOnDevice = false;
@@ -1130,8 +1150,9 @@ public class MuchiAudioService extends Service {
         final String cands = currentCandidates;
         final String tTitle = trackTitle;
         final String tArtist = trackArtist;
+        final String tIsrc = trackIsrc;
         resolveExecutor.execute(() -> {
-            ResolvedStream rs = resolveYoutubeStreamOnDevice(vid, cands, tTitle, tArtist);
+            ResolvedStream rs = resolveYoutubeStreamOnDevice(vid, cands, tTitle, tArtist, tIsrc);
             ticker.post(() -> {
                 if (seq != loadSeq) return;
                 resolvingOnDevice = false;
@@ -1658,13 +1679,17 @@ public class MuchiAudioService extends Service {
     }
 
     public static void preloadStream(String primaryVid, String candidatesCsv, String title, String artist) {
+        preloadStream(primaryVid, candidatesCsv, title, artist, "");
+    }
+
+    public static void preloadStream(String primaryVid, String candidatesCsv, String title, String artist, String isrc) {
         if ((primaryVid == null || primaryVid.trim().isEmpty()) && (title == null || title.trim().isEmpty())) return;
         if (primaryVid != null && !primaryVid.trim().isEmpty() && getCachedStream(primaryVid) != null) return;
         String qKey = queryCacheKey(title, artist);
         if (!qKey.isEmpty() && getCachedStream(qKey) != null) return;
         sharedResolvePool.execute(() -> {
             try {
-                resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, sharedResolvePool);
+                resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, 0L, null, isrc, sharedResolvePool);
             } catch (Exception ignored) {}
         });
     }
@@ -1791,16 +1816,33 @@ public class MuchiAudioService extends Service {
         return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, sharedResolvePool);
     }
 
+    public static ResolvedStream resolveStreamForDownload(String primaryVid, String candidatesCsv, String title, String artist, String isrc) {
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, 0L, null, isrc, sharedResolvePool);
+    }
+
     private ResolvedStream resolveYoutubeStreamOnDevice(String primaryVid, String candidatesCsv, String title, String artist) {
-        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, currentDurationMs, failedVideoIds, sharedResolvePool);
+        return resolveYoutubeStreamOnDevice(primaryVid, candidatesCsv, title, artist, "");
+    }
+
+    private ResolvedStream resolveYoutubeStreamOnDevice(String primaryVid, String candidatesCsv, String title, String artist, String isrc) {
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, currentDurationMs, failedVideoIds, isrc, sharedResolvePool);
     }
 
     private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist, ExecutorService pool) {
-        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, 0L, null, pool);
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, 0L, null, "", pool);
+    }
+
+    private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist, String isrc, ExecutorService pool) {
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, 0L, null, isrc, pool);
     }
 
     private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist,
                                                              long expectedDurationMs, Set<String> excludedVids, ExecutorService pool) {
+        return resolveYoutubeStreamStatic(primaryVid, candidatesCsv, title, artist, expectedDurationMs, excludedVids, "", pool);
+    }
+
+    private static ResolvedStream resolveYoutubeStreamStatic(String primaryVid, String candidatesCsv, String title, String artist,
+                                                             long expectedDurationMs, Set<String> excludedVids, String isrc, ExecutorService pool) {
         String qKey = queryCacheKey(title, artist);
         boolean hasExclusions = excludedVids != null && !excludedVids.isEmpty();
         if (primaryVid != null && !primaryVid.trim().isEmpty() && (!hasExclusions || !excludedVids.contains(primaryVid.trim()))) {
@@ -1840,6 +1882,7 @@ public class MuchiAudioService extends Service {
         final ExecutorService exec = sharedResolvePool;
         final String cleanTitle = title != null ? title.trim() : "";
         final String cleanArtist = artist != null ? artist.trim() : "";
+        final String cleanIsrc = isrc != null ? isrc.trim() : "";
 
         // Always kick off a fast standard YouTube WEB search concurrently when we have a song title
         // so if primaryVid is empty (iTunes/Deezer) or a gated VEVO/Topic video, playable official
@@ -1857,7 +1900,7 @@ public class MuchiAudioService extends Service {
             final String earlyCands = (candidatesCsv != null && !candidatesCsv.trim().isEmpty())
                     ? candidatesCsv
                     : android.text.TextUtils.join(",", vids.subList(0, Math.min(6, vids.size())));
-            earlyCfFuture = exec.submit(() -> probeCloudflareBackendStatic(earlyVid, earlyCands, cleanTitle, cleanArtist, expectedDurationMs));
+            earlyCfFuture = exec.submit(() -> probeCloudflareBackendStatic(earlyVid, earlyCands, cleanTitle, cleanArtist, expectedDurationMs, cleanIsrc));
         }
 
         // Probe available candidate videoIds in parallel (up to 5 concurrently)
@@ -1928,7 +1971,7 @@ public class MuchiAudioService extends Service {
         final String effectiveCandsCsv = (candidatesCsv != null && !candidatesCsv.trim().isEmpty())
                 ? candidatesCsv
                 : android.text.TextUtils.join(",", vids.subList(0, Math.min(6, vids.size())));
-        fbFutures.add(fallbackRace.submit(() -> probeCloudflareBackendStatic(cfVid, effectiveCandsCsv, cleanTitle, cleanArtist, expectedDurationMs)));
+        fbFutures.add(fallbackRace.submit(() -> probeCloudflareBackendStatic(cfVid, effectiveCandsCsv, cleanTitle, cleanArtist, expectedDurationMs, cleanIsrc)));
         for (int i = 0; i < Math.min(3, vids.size()); i++) {
             final String pVid = vids.get(i);
             fbFutures.add(fallbackRace.submit(() -> probePipedForVideoStatic(pVid, expectedDurationMs, cleanTitle, cleanArtist)));
@@ -2246,10 +2289,15 @@ public class MuchiAudioService extends Service {
     private static final String CLOUDFLARE_BACKEND_BASE = "https://muchi.twiarimascord.workers.dev";
 
     private static ResolvedStream probeCloudflareBackendStatic(String primaryVid, String candidatesCsv, String title, String artist, long expectedDurationMs) {
+        return probeCloudflareBackendStatic(primaryVid, candidatesCsv, title, artist, expectedDurationMs, "");
+    }
+
+    private static ResolvedStream probeCloudflareBackendStatic(String primaryVid, String candidatesCsv, String title, String artist, long expectedDurationMs, String isrc) {
         String vid = primaryVid != null ? primaryVid.trim() : "";
         String cleanTitle = title != null ? title.trim() : "";
         String cleanArtist = artist != null ? artist.trim() : "";
-        if (vid.isEmpty() && cleanTitle.isEmpty()) return null;
+        String cleanIsrc = isrc != null ? isrc.trim() : "";
+        if (vid.isEmpty() && cleanTitle.isEmpty() && cleanIsrc.isEmpty()) return null;
         HttpURLConnection con = null;
         try {
             StringBuilder sb = new StringBuilder(CLOUDFLARE_BACKEND_BASE + "/api/yt/stream?allowPreview=0");
@@ -2261,6 +2309,9 @@ public class MuchiAudioService extends Service {
             }
             if (!cleanArtist.isEmpty()) {
                 sb.append("&artist=").append(java.net.URLEncoder.encode(cleanArtist, "UTF-8"));
+            }
+            if (!cleanIsrc.isEmpty()) {
+                sb.append("&isrc=").append(java.net.URLEncoder.encode(cleanIsrc, "UTF-8"));
             }
             if (candidatesCsv != null && !candidatesCsv.trim().isEmpty()) {
                 sb.append("&candidates=").append(java.net.URLEncoder.encode(candidatesCsv.trim(), "UTF-8"));

@@ -50,8 +50,21 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let artist: String
         let artwork: String
         let durationMs: Double
+        let isrc: String
+
+        init(url: String, videoId: String, candidates: String, title: String, artist: String, artwork: String, durationMs: Double, isrc: String = "") {
+            self.url = url
+            self.videoId = videoId
+            self.candidates = candidates
+            self.title = title
+            self.artist = artist
+            self.artwork = artwork
+            self.durationMs = durationMs
+            self.isrc = isrc
+        }
     }
     private var queuedNextTrack: NextTrackInfo?
+    private var currentIsrc: String = ""
 
     private var player: AVPlayer?
     private var currentItem: AVPlayerItem?
@@ -109,12 +122,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func emitControls(_ message: String, positionMs: Int = 0) {
+        self.beginAudioBackgroundTask()
         self.notifyListeners("muchiControls", data: ["message": message, "position": positionMs])
         let safeMsg = message.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
         DispatchQueue.main.async { [weak self] in
             self?.bridge?.webView?.evaluateJavaScript(
                 "try{if(window._onMuchiNativeControls)window._onMuchiNativeControls({message:'\(safeMsg)',position:\(positionMs)});}catch(e){}",
-                completionHandler: nil
+                completionHandler: { _, _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        self?.endAudioBackgroundTask()
+                    }
+                }
             )
         }
     }
@@ -237,7 +255,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let candidates = call.getString("candidates") ?? ""
         let title = call.getString("title") ?? ""
         let artist = call.getString("artist") ?? ""
-        Self.preloadStream(videoId: videoId, candidates: candidates, title: title, artist: artist)
+        let isrc = call.getString("isrc") ?? ""
+        Self.preloadStream(videoId: videoId, candidates: candidates, title: title, artist: artist, isrc: isrc)
         call.resolve()
     }
 
@@ -249,14 +268,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let artwork = call.getString("artwork") ?? ""
         let candidates = call.getString("candidates") ?? ""
         let duration = call.getDouble("duration") ?? 0
+        let isrc = call.getString("isrc") ?? ""
         if url.isEmpty && videoId.isEmpty && title.isEmpty {
             queuedNextTrack = nil
         } else {
-            queuedNextTrack = NextTrackInfo(url: url, videoId: videoId, candidates: candidates, title: title, artist: artist, artwork: artwork, durationMs: duration)
+            queuedNextTrack = NextTrackInfo(url: url, videoId: videoId, candidates: candidates, title: title, artist: artist, artwork: artwork, durationMs: duration, isrc: isrc)
             if !videoId.isEmpty {
-                Self.preloadStream(videoId: videoId, candidates: candidates, title: title, artist: artist)
+                Self.preloadStream(videoId: videoId, candidates: candidates, title: title, artist: artist, isrc: isrc)
             } else if !title.isEmpty {
-                Self.preloadStream(videoId: "", candidates: candidates, title: title, artist: artist)
+                Self.preloadStream(videoId: "", candidates: candidates, title: title, artist: artist, isrc: isrc)
             }
         }
         call.resolve()
@@ -292,6 +312,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             prefSpatial = sp
         }
 
+        let isrc = call.getString("isrc") ?? ""
         playTrackDirect(
             url: url,
             videoId: videoId,
@@ -300,12 +321,13 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             artist: call.getString("artist") ?? "",
             artwork: call.getString("artwork") ?? "",
             durationMs: call.getDouble("duration") ?? 0,
-            startPosMs: max(0, call.getDouble("position") ?? 0)
+            startPosMs: max(0, call.getDouble("position") ?? 0),
+            isrc: isrc
         )
         call.resolve()
     }
 
-    private func playTrackDirect(url: String, videoId: String, candidates: String, title: String, artist: String, artwork: String, durationMs: Double, startPosMs: Double) {
+    private func playTrackDirect(url: String, videoId: String, candidates: String, title: String, artist: String, artwork: String, durationMs: Double, startPosMs: Double, isrc: String = "") {
         configureAudioSession()
         beginAudioBackgroundTask()
 
@@ -313,6 +335,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         currentCandidates = candidates
         currentTitle = title
         currentArtist = artist
+        currentIsrc = isrc
 
         var durMs = durationMs
         if durMs <= 0 {
@@ -389,9 +412,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             let cands = currentCandidates
             let tTitle = currentTitle
             let tArtist = currentArtist
+            let tIsrc = currentIsrc
             let expDur = fallbackDurationMs
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist, expectedDurationMs: expDur)
+                let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist, expectedDurationMs: expDur, isrc: tIsrc)
                 DispatchQueue.main.async {
                     guard let self = self, seq == self.loadSeq else { return }
                     self.resolvingOnDevice = false
@@ -473,7 +497,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     artist: next.artist,
                     artwork: next.artwork,
                     durationMs: next.durationMs,
-                    startPosMs: 0
+                    startPosMs: 0,
+                    isrc: next.isrc
                 )
             } else {
                 self.emitControls("ended", positionMs: 0)
@@ -970,10 +995,11 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let cands = currentCandidates
         let tTitle = currentTitle
         let tArtist = currentArtist
+        let tIsrc = currentIsrc
         let expDur = fallbackDurationMs
         let excl = failedVideoIds
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist, expectedDurationMs: expDur, excludedVids: excl)
+            let rs = Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist, expectedDurationMs: expDur, excludedVids: excl, isrc: tIsrc)
             DispatchQueue.main.async {
                 guard let self = self, seq == self.loadSeq else { return }
                 self.resolvingOnDevice = false
@@ -1156,7 +1182,8 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     artist: next.artist,
                     artwork: next.artwork,
                     durationMs: next.durationMs,
-                    startPosMs: 0
+                    startPosMs: 0,
+                    isrc: next.isrc
                 )
             } else {
                 self.emitControls("next", positionMs: 0)
@@ -1535,14 +1562,14 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         return "q:\(t)|\(a)"
     }
 
-    public static func preloadStream(videoId: String, candidates: String, title: String, artist: String) {
+    public static func preloadStream(videoId: String, candidates: String, title: String, artist: String, isrc: String = "") {
         let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         if vid.isEmpty && title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
         if !vid.isEmpty && getCachedStream(vid) != nil { return }
         let qKey = queryCacheKey(title: title, artist: artist)
         if !qKey.isEmpty && getCachedStream(qKey) != nil { return }
         DispatchQueue.global(qos: .utility).async {
-            _ = resolveStreamForDownload(videoId: vid, candidates: candidates, title: title, artist: artist)
+            _ = resolveStreamForDownload(videoId: vid, candidates: candidates, title: title, artist: artist, isrc: isrc)
         }
     }
 
@@ -1550,7 +1577,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         return resolveStreamForDownload(videoId: videoId, candidates: candidates, title: "", artist: "")
     }
 
-    public static func resolveStreamForDownload(videoId: String, candidates: String, title: String, artist: String, expectedDurationMs: Double = 0, excludedVids: Set<String> = []) -> ResolvedStream? {
+    public static func resolveStreamForDownload(videoId: String, candidates: String, title: String, artist: String, expectedDurationMs: Double = 0, excludedVids: Set<String> = [], isrc: String = "") -> ResolvedStream? {
         let primary = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         let qKey = queryCacheKey(title: title, artist: artist)
         let hasExclusions = !excludedVids.isEmpty
@@ -1575,6 +1602,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanIsrc = isrc.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Parallelize Cloudflare edge stream probing immediately alongside candidate probing
         var earlyCfHit: ResolvedStream?
@@ -1584,7 +1612,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             ? candidates
             : Array(vids.prefix(6)).joined(separator: ",")
         DispatchQueue.global(qos: .userInitiated).async {
-            earlyCfHit = probeCloudflareBackend(videoId: earlyCfVid, candidates: earlyCands, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs)
+            earlyCfHit = probeCloudflareBackend(videoId: earlyCfVid, candidates: earlyCands, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs, isrc: cleanIsrc)
             cfSem.signal()
         }
 
@@ -1632,7 +1660,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let effectiveCands = !candidates.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? candidates
             : Array(vids.prefix(6)).joined(separator: ",")
-        if let cfHit = probeCloudflareBackend(videoId: cfVid, candidates: effectiveCands, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs) {
+        if let cfHit = probeCloudflareBackend(videoId: cfVid, candidates: effectiveCands, title: cleanTitle, artist: cleanArtist, expectedDurationMs: expectedDurationMs, isrc: cleanIsrc) {
             if !cfVid.isEmpty { putCachedStream(cfVid, cfHit) }
             if !primary.isEmpty { putCachedStream(primary, cfHit) }
             if !qKey.isEmpty { putCachedStream(qKey, cfHit) }
@@ -1889,16 +1917,18 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static let cloudflareBackendBase = "https://muchi.twiarimascord.workers.dev"
 
-    private static func probeCloudflareBackend(videoId: String, candidates: String, title: String, artist: String, expectedDurationMs: Double = 0) -> ResolvedStream? {
+    private static func probeCloudflareBackend(videoId: String, candidates: String, title: String, artist: String, expectedDurationMs: Double = 0, isrc: String = "") -> ResolvedStream? {
         let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
-        if vid.isEmpty && cleanTitle.isEmpty { return nil }
+        let cleanIsrc = isrc.trimmingCharacters(in: .whitespacesAndNewlines)
+        if vid.isEmpty && cleanTitle.isEmpty && cleanIsrc.isEmpty { return nil }
         var comps = URLComponents(string: "\(cloudflareBackendBase)/api/yt/stream")
         var items: [URLQueryItem] = [URLQueryItem(name: "allowPreview", value: "0")]
         if !vid.isEmpty { items.append(URLQueryItem(name: "v", value: vid)) }
         if !cleanTitle.isEmpty { items.append(URLQueryItem(name: "title", value: cleanTitle)) }
         if !cleanArtist.isEmpty { items.append(URLQueryItem(name: "artist", value: cleanArtist)) }
+        if !cleanIsrc.isEmpty { items.append(URLQueryItem(name: "isrc", value: cleanIsrc)) }
         let cands = candidates.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cands.isEmpty { items.append(URLQueryItem(name: "candidates", value: cands)) }
         comps?.queryItems = items

@@ -813,7 +813,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.9.9", APP_VERSION === "1.9.9" && appJs.includes('const APP_VERSION = "1.9.9"'));
+  ok("version: APP_VERSION is 1.10.1", APP_VERSION === "1.10.1" && appJs.includes('const APP_VERSION = "1.10.1"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -1196,10 +1196,163 @@ await (async () => {
       taggedMp4[newEntryOffset + 1] === 0xad
     );
   }
+
+  // ── Phase 1: Explicit badges & Enhanced download metadata ─────────────────
+  {
+    const { normalizeDeezerTrack } = await import("../src/deezer.js");
+    const expT = normalizeDeezerTrack({
+      id: 9911,
+      title: "Explicit Track",
+      artist: { name: "Test Artist", id: 10 },
+      album: { title: "Test Album", artist: { name: "Album Artist" } },
+      explicit_lyrics: true,
+      explicit_content_lyrics: 1,
+      track_position: 2,
+      disk_number: 1,
+      isrc: "USUM72412345",
+      release_date: "2024-06-18",
+    });
+    const cleanT = normalizeDeezerTrack({
+      id: 9912,
+      title: "Clean Track",
+      artist: { name: "Clean Artist" },
+      explicit_lyrics: false,
+      explicit_content_lyrics: 0,
+    });
+    const unkT = normalizeDeezerTrack({
+      id: 9913,
+      title: "Unknown Track",
+      artist: { name: "Unknown Artist" },
+    });
+
+    ok("Phase 1: Deezer metadata normalization preserves isExplicit (true, false, undefined) and catalog tags (trackNumber, discNumber, albumArtist, isrc, releaseDate, year)",
+      expT.isExplicit === true &&
+      expT.trackNumber === 2 &&
+      expT.discNumber === 1 &&
+      expT.albumArtist === "Album Artist" &&
+      expT.isrc === "USUM72412345" &&
+      expT.releaseDate === "2024-06-18" &&
+      expT.year === "2024" &&
+      cleanT.isExplicit === false &&
+      unkT.isExplicit === undefined
+    );
+
+    const providersJs = readFileSync("src/providers.js", "utf8");
+    ok("Phase 1: Apple/iTunes metadata mapping preserves isExplicit and extended track tags",
+      providersJs.includes("t.trackExplicitness") &&
+      providersJs.includes("trackNumber: Number(t.trackNumber) || t.trackNumber") &&
+      providersJs.includes("discNumber: Number(t.discNumber) || t.discNumber") &&
+      providersJs.includes("albumArtist: String(t.collectionArtistName).trim()") &&
+      providersJs.includes("isrc: String(t.isrc).trim()")
+    );
+
+    ok("Phase 1: explicitBadgeHTML helper renders subtle E badge only when isExplicit is true",
+      appJs.includes("function explicitBadgeHTML(t)") &&
+      appJs.includes("return (t && t.isExplicit === true)") &&
+      appJs.includes('<span class="explicit-badge" title="Explicit" aria-label="Explicit">E</span>') &&
+      stylesCss.includes(".explicit-badge {")
+    );
+
+    // Test MuchiMeta enhanced download tagging for ID3v2 and MP4
+    const vm = await import("node:vm");
+    const sandbox = { TextEncoder, TextDecoder };
+    vm.createContext(sandbox);
+    vm.runInContext(readFileSync("public/meta.js", "utf8"), sandbox);
+    const MM = sandbox.MuchiMeta;
+
+    // ID3v2 test
+    const dummyMp3 = new Uint8Array([0xff, 0xfb, 0x90, 0x64, 0x00, 0x00, 0x00, 0x00]);
+    const taggedMp3 = MM.embed(dummyMp3, "mp3", {
+      title: "Tagged MP3",
+      artist: "MP3 Artist",
+      album: "MP3 Album",
+      albumArtist: "Band / Album Artist",
+      genre: "Electronic",
+      trackNumber: 5,
+      trackTotal: 12,
+      discNumber: 1,
+      discTotal: 2,
+      year: "2023",
+      releaseDate: "2023-11-03",
+      isrc: "GBAYE2300001",
+      lyrics: "Sample lyrics",
+    });
+    const parsedMp3 = MM.read(taggedMp3);
+
+    ok("Phase 1: ID3v2 embedding and reading of TRCK, TPOS, TPE2, TYER/TDRC, TSRC, and USLT",
+      parsedMp3.container === "mp3" &&
+      parsedMp3.title === "Tagged MP3" &&
+      parsedMp3.artist === "MP3 Artist" &&
+      parsedMp3.albumArtist === "Band / Album Artist" &&
+      parsedMp3.trackNumber === "5" &&
+      parsedMp3.trackTotal === "12" &&
+      parsedMp3.discNumber === "1" &&
+      parsedMp3.discTotal === "2" &&
+      parsedMp3.isrc === "GBAYE2300001" &&
+      parsedMp3.releaseDate === "2023-11-03" &&
+      parsedMp3.year === "2023" &&
+      parsedMp3.lyrics === "Sample lyrics"
+    );
+
+    // MP4 test
+    const u32 = (n) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+    const box = (type, payload) => {
+      const out = new Uint8Array(8 + payload.length);
+      out.set(u32(8 + payload.length), 0);
+      for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+      out.set(payload, 8);
+      return out;
+    };
+    const ftyp = box("ftyp", new Uint8Array([105, 115, 111, 109, 0, 0, 2, 0]));
+    const stcoPayload = new Uint8Array([0, 0, 0, 0, 0, 0, 0, 1, ...u32(84)]);
+    const moov = box("moov", box("trak", box("mdia", box("minf", box("stbl", box("stco", stcoPayload))))));
+    const mdatPayload = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4]);
+    const mdat = box("mdat", mdatPayload);
+    const rawMp4 = new Uint8Array(ftyp.length + moov.length + mdat.length);
+    rawMp4.set(ftyp, 0);
+    rawMp4.set(moov, ftyp.length);
+    rawMp4.set(mdat, ftyp.length + moov.length);
+
+    const taggedM4a = MM.embed(rawMp4, "m4a", {
+      title: "Tagged M4A",
+      artist: "M4A Artist",
+      album: "M4A Album",
+      albumArtist: "M4A Album Artist",
+      genre: "Rock",
+      trackNumber: 9,
+      trackTotal: 14,
+      discNumber: 2,
+      discTotal: 2,
+      releaseDate: "2024-04-12",
+      lyrics: "M4A lyrics",
+    });
+    const parsedM4a = MM.read(taggedM4a);
+
+    ok("Phase 1: MP4 embedding and reading of trkn, disk, aART, ©day, ©lyr, and stco offset shifts",
+      parsedM4a.container === "mp4" &&
+      parsedM4a.title === "Tagged M4A" &&
+      parsedM4a.artist === "M4A Artist" &&
+      parsedM4a.albumArtist === "M4A Album Artist" &&
+      parsedM4a.trackNumber === "9" &&
+      parsedM4a.trackTotal === "14" &&
+      parsedM4a.discNumber === "2" &&
+      parsedM4a.discTotal === "2" &&
+      parsedM4a.releaseDate === "2024-04-12" &&
+      parsedM4a.year === "2024" &&
+      parsedM4a.lyrics === "M4A lyrics"
+    );
+
+    ok("Phase 1: Android MuchiDownloadPlugin publishes trackNumber, year, and albumArtist to MediaStore",
+      androidDownloadPlugin.includes("publishFileToMediaStore(plainFile, safeName, realMime, title, artist, album, genre, year, trackNumber, albumArtist);") &&
+      androidDownloadPlugin.includes("values.put(MediaStore.Audio.Media.TRACK, trackNumber);") &&
+      androidDownloadPlugin.includes("values.put(MediaStore.Audio.Media.YEAR, year);") &&
+      androidDownloadPlugin.includes('values.put("album_artist", albumArtist);')
+    );
+  }
   ok("offline downloads (1.7.3): ensureStreamForDownload & handleDownload strip preview/placeholder streams and resolve full-length audio", appJs.includes("function isPreviewOrPlaceholderStream(") && appJs.includes("allowPreview=0") && streamJs.includes("const isPreviewStreamUrl = (u) =>") && streamJs.includes("Never fall back to 30-second Deezer/iTunes previews"));
   ok("offline downloads (1.7.3): Android MuchiDownloadPlugin resolves residential stream on-device and uses 4 MB chunked range downloads", androidDownloadPlugin.includes("MuchiAudioService.resolveStreamForDownload") && androidDownloadPlugin.includes("downloadChunkedToMediaStore") && androidService.includes("public static ResolvedStream resolveStreamForDownload("));
   ok("offline playback (1.7.3): playCurrent prioritizes saved local file / IndexedDB blob and playAudio uses getOfflineAudioBlob before network", appJs.includes("const hasOfflinePlayback = Boolean(") && appJs.includes("offlineBlob = await getOfflineAudioBlob(t);"));
-  ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${candParam}${fastParam}") && appJs.includes("getWarmStream(") && appJs.includes("`yt:${t.videoId}`"));
+  ok("native playback: playYtWithAudio sets _playingViaAudio = true, forwards track metadata + candidates to /api/yt/stream, and falls back to on-device yt: resolver on native", appJs.includes("t._playingViaAudio = true;\n    await playAudio(t);") && (appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${isrcParam}${candParam}${fastParam}") || appJs.includes("/api/yt/stream?v=${encodeURIComponent(vid)}&title=${encodeURIComponent(title || \"\")}&artist=${encodeURIComponent(artist || \"\")}${candParam}${fastParam}")) && appJs.includes("getWarmStream(") && appJs.includes("`yt:${t.videoId}`"));
   ok("native playback: playYtWithAudio rejects 30s preview streams (!data.isPreview) so full song always plays", (appJs.includes("if (data && data.url && !data.isPreview)") || appJs.includes("if (d && d.url && !d.isPreview)")) && appJs.includes("t._isPreviewStream = false;") && !appJs.includes("resolveFallbackStreamUrl(t, true)"));
   ok("native playback (1.7.8): playYtWithAudio resolves on-device yt: token and getWarmStream resolves verified HTTP streams",
     appJs.indexOf("function getWarmStream(") > 0 &&
@@ -2008,7 +2161,8 @@ await (async () => {
     appJs.includes("let resolvedStream = (t.streamUrl && /^https?:\\/\\//i.test(t.streamUrl) && !t._isPreviewStream) ? t.streamUrl : \"\";") &&
     appJs.includes("if (resolvedStream) {\n      t.streamUrl = resolvedStream;") &&
     !appJs.includes('else if (t.videoId && !t._isPreviewStream) {\n        url = `yt:${t.videoId}`;') &&
-    appJs.includes("getWarmStream(t.videoId, t.title || \"\", artistName(t) || t.artist || \"\", t._ytCandidates || [], 5500, true);")
+    (appJs.includes("getWarmStream(t.videoId, t.title || \"\", artistName(t) || t.artist || \"\", t._ytCandidates || [], 5500, true);") ||
+     appJs.includes("getWarmStream(t.videoId, t.title || \"\", artistName(t) || t.artist || \"\", t._ytCandidates || [], 5500, true, t.isrc || \"\");"))
   );
   ok(
     "v1.8.6 Cloudflare backend & native services: aggregate.js gives resolveForVideoId 650ms head start + directUrl, and Android/iOS native services connect to Cloudflare /api/yt/stream (probeCloudflareBackendStatic / probeCloudflareBackend) and decode ?u= duration",
@@ -2257,6 +2411,143 @@ await (async () => {
           String(collabData.directUrl || "").includes("id=kPa7bsKwL-c")
       );
 
+      // ── Phase 2: ISRC-Based Audio Matching functional validations ─────────
+      const { normalizeIsrc, extractIsrcFromText } = await import("../src/util.js");
+      ok(
+        "Phase 2: normalizeIsrc validates standard 12-char alphanumeric codes and strips dashes/spaces",
+        normalizeIsrc("USUM72412345") === "USUM72412345" &&
+          normalizeIsrc("US-UM7-24-12345") === "USUM72412345" &&
+          normalizeIsrc("  gbaht2000282  ") === "GBAHT2000282" &&
+          normalizeIsrc("US123") === null &&
+          normalizeIsrc("INVALID_TOO_LONG_12345") === null &&
+          normalizeIsrc("") === null &&
+          normalizeIsrc(null) === null
+      );
+
+      ok(
+        "Phase 2: extractIsrcFromText correctly identifies explicit ISRC tokens in video descriptions",
+        extractIsrcFromText("Provided to YouTube by Warner\n\nISRC: GBAHT2000282\n\nAuto-generated.") === "GBAHT2000282" &&
+          extractIsrcFromText("Official audio released under ISRC US-UM7-24-12345.") === "USUM72412345" &&
+          extractIsrcFromText("No code present here") === null
+      );
+
+      globalThis.fetch = async (u, init = {}) => {
+        const urlStr = String(u);
+        if (urlStr.includes("youtubei/v1/player")) {
+          const bodyStr = init && init.body ? String(init.body) : "";
+          if (bodyStr.includes("conflictVid001")) {
+            return new Response(
+              JSON.stringify({
+                playabilityStatus: { status: "OK" },
+                streamingData: {
+                  adaptiveFormats: [{
+                    itag: 140,
+                    mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+                    bitrate: 128000,
+                    url: "https://googlevideo.com/videoplayback?id=conflictVid001",
+                  }],
+                },
+                videoDetails: {
+                  videoId: "conflictVid001",
+                  title: "Levitating",
+                  author: "Dua Lipa",
+                  shortDescription: "Provided to YouTube by Warner Records\n\nISRC: GBAHT2000001\n\nRemix / Different Recording",
+                  lengthSeconds: "203",
+                },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+          if (bodyStr.includes("matchVid002")) {
+            return new Response(
+              JSON.stringify({
+                playabilityStatus: { status: "OK" },
+                streamingData: {
+                  adaptiveFormats: [{
+                    itag: 140,
+                    mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+                    bitrate: 128000,
+                    url: "https://googlevideo.com/videoplayback?id=matchVid002",
+                  }],
+                },
+                videoDetails: {
+                  videoId: "matchVid002",
+                  title: "Levitating",
+                  author: "Dua Lipa",
+                  shortDescription: "Provided to YouTube by Warner Records\n\nLevitating · Dua Lipa\n\nISRC: GBAHT2000282\n\nAuto-generated by YouTube.",
+                  lengthSeconds: "203",
+                },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+          if (bodyStr.includes("unconfirmedVid003")) {
+            return new Response(
+              JSON.stringify({
+                playabilityStatus: { status: "OK" },
+                streamingData: {
+                  adaptiveFormats: [{
+                    itag: 140,
+                    mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+                    bitrate: 128000,
+                    url: "https://googlevideo.com/videoplayback?id=unconfirmedVid003",
+                  }],
+                },
+                videoDetails: {
+                  videoId: "unconfirmedVid003",
+                  title: "Levitating",
+                  author: "Dua Lipa",
+                  shortDescription: "Official audio for Levitating by Dua Lipa.",
+                  lengthSeconds: "203",
+                },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+        }
+        return new Response("{}", { status: 500 });
+      };
+
+      // Functional test: Conflicting ISRC rejection in handleYtStream
+      const conflictUrl = new URL(
+        "https://muchi.twiarimascord.workers.dev/api/yt/stream?v=conflictVid001&candidates=matchVid002&title=Levitating&artist=Dua%20Lipa&isrc=GBAHT2000282&refresh=1"
+      );
+      const isrcRes1 = await handleYtStream(conflictUrl);
+      const isrcData1 = await isrcRes1.json();
+      ok(
+        "Phase 2 functional test: handleYtStream rejects candidate with conflicting ISRC in description and resolves matching ISRC stream",
+        Boolean(isrcData1) &&
+          isrcData1.videoId === "matchVid002" &&
+          String(isrcData1.directUrl || "").includes("id=matchVid002") &&
+          !String(isrcData1.directUrl || "").includes("conflictVid001")
+      );
+
+      // Functional test: Candidate with unconfirmed/no ISRC in description passes when title/artist match
+      const unconfUrl = new URL(
+        "https://muchi.twiarimascord.workers.dev/api/yt/stream?v=unconfirmedVid003&title=Levitating&artist=Dua%20Lipa&isrc=GBAHT2000282&refresh=1"
+      );
+      const isrcRes2 = await handleYtStream(unconfUrl);
+      const isrcData2 = await isrcRes2.json();
+      ok(
+        "Phase 2 functional test: unconfirmed candidate without ISRC in description passes when title and artist match",
+        Boolean(isrcData2) && isrcData2.videoId === "unconfirmedVid003"
+      );
+
+      // Functional test: Missing ISRC safely falls back to standard query/candidate matching
+      const fallbackUrl = new URL(
+        "https://muchi.twiarimascord.workers.dev/api/yt/stream?v=unconfirmedVid003&title=Levitating&artist=Dua%20Lipa&refresh=1"
+      );
+      const isrcRes3 = await handleYtStream(fallbackUrl);
+      const isrcData3 = await isrcRes3.json();
+      ok(
+        "Phase 2 functional test: missing ISRC safely continues existing matching without interruption",
+        Boolean(isrcData3) && isrcData3.videoId === "unconfirmedVid003"
+      );
+
+      ok(
+        "Phase 2: Android MuchiAudioService supports isrc parameter in probeCloudflareBackendStatic",
+        androidSvc.includes("sb.append(\"&isrc=\").append(java.net.URLEncoder.encode(cleanIsrc, \"UTF-8\"));")
+      );
       const mainActSrc = readFileSync("android/app/src/main/java/app/muchi/music/MainActivity.java", "utf8");
       const androidPlugSrc = readFileSync("android/app/src/main/java/app/muchi/music/MuchiAudioPlugin.java", "utf8");
       const iosAppDelSrc = readFileSync("ios/App/App/AppDelegate.swift", "utf8");
@@ -2286,6 +2577,23 @@ await (async () => {
           appJs.includes("if (playCurrentInFlight) return;") &&
           appJs.indexOf("NP.preload({") < appJs.indexOf("if (document.hidden && npActive) return;") &&
           androidSvc.includes("emitControls(\"pause\", Math.max(0L, player.getCurrentPosition()));")
+      );
+
+      ok(
+        "Item B: native ISRC passthrough across playback, preloading, auto-advance, and retries (Android, iOS, Web)",
+        appJs.includes('isrc: String(isrc || "")') &&
+          appJs.includes('isrc: String(nt.isrc || "")') &&
+          appJs.includes('const isrcParam = cleanIsrc ? `&isrc=${encodeURIComponent(cleanIsrc)}` : "";') &&
+          androidPlugSrc.includes('i.putExtra(MuchiAudioService.EXTRA_ISRC, call.getString("isrc", ""));') &&
+          androidPlugSrc.includes('i.putExtra(MuchiAudioService.EXTRA_ISRC, isrc);') &&
+          androidSvc.includes('trackIsrc = isrc != null ? isrc.trim() : "";') &&
+          androidSvc.includes('loadTrack(next.url, next.videoId, next.candidates, next.title, next.artist, next.artwork, next.durationMs, 0L, next.isrc);') &&
+          androidSvc.includes('resolveYoutubeStreamOnDevice(vid, cands, tTitle, tArtist, tIsrc);') &&
+          iosPlugin.includes('currentIsrc = isrc') &&
+          iosPlugin.includes('Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist, expectedDurationMs: expDur, isrc: tIsrc)') &&
+          iosPlugin.includes('Self.resolveStreamForDownload(videoId: vid, candidates: cands, title: tTitle, artist: tArtist, expectedDurationMs: expDur, excludedVids: excl, isrc: tIsrc)') &&
+          iosPlugin.includes('isrc: next.isrc') &&
+          iosPlugin.includes('if !cleanIsrc.isEmpty { items.append(URLQueryItem(name: "isrc", value: cleanIsrc)) }')
       );
     } finally {
       globalThis.fetch = realFetch;
@@ -2551,6 +2859,78 @@ if (BASE) {
     stylesText.includes('html[data-native="1"] .player .icon-btn') &&
     stylesText.includes('html[data-native="1"] .player .like-btn') &&
     stylesText.includes('html[data-ui="glass"] .player')
+  );
+
+  // ── 9. Player Bounce, Apple Watch Like, Keyboard & Artist Profile Validations ──
+  const indexHtml = readFileSync("public/index.html", "utf8");
+  ok("player UI: bouncy spring animation restricted to open/close only and not on inner button taps",
+    stylesText.includes(".player.is-bouncing") &&
+    !stylesText.includes(".player:active {\n  animation: playerSpringBounce") &&
+    stylesText.includes(".np-card.is-closing-bounce") &&
+    appJsText.includes("is-closing-bounce") &&
+    !appJsText.includes('card.addEventListener("pointerdown", () => {\n          bouncePlayer(card);')
+  );
+
+  ok("player UI: Apple Watch Charging UI animation replaces song like button with pulsing ring & ripple",
+    stylesText.includes(".like-btn.apple-watch-like") &&
+    stylesText.includes(".apple-charge-ring") &&
+    stylesText.includes("@keyframes appleChargeRingDraw") &&
+    stylesText.includes("@keyframes appleChargeRipplePulse") &&
+    stylesText.includes("@keyframes appleChargeIconPop") &&
+    indexHtml.includes('class="apple-charge-svg"') &&
+    indexHtml.includes('class="apple-charge-ring"') &&
+    indexHtml.includes('class="apple-charge-ripple"') &&
+    appJsText.includes('btn.classList.toggle("charging", !was)')
+  );
+
+  ok("search UI: dock navigation & player bars auto-hide when keyboard is active in search",
+    stylesText.includes("body.search-keyboard-active #dockNav") &&
+    stylesText.includes("html:has(#searchInput:focus) #dockNav") &&
+    stylesText.includes("body.search-keyboard-active #playerBar") &&
+    appJsText.includes("search-keyboard-active")
+  );
+
+  ok("artist UI: topbar with search & paste link is cleanly hidden in artist profile",
+    stylesText.includes('body[data-artist="1"] #topbar') &&
+    stylesText.includes('body.in-artist-page #topbar') &&
+    appJsText.includes('state.view === "search" && !isArtist') &&
+    appJsText.includes('document.body.dataset.artist = "1"')
+  );
+
+  // ── 10. Settings Header Under Back, Muchi On Top, Tab Transitions & Lottie ──
+  ok("settings UI: header words placed strictly under the back button",
+    stylesText.includes('body[data-view="settings"] .hero > div') &&
+    stylesText.includes('body[data-view="settings"] .hero h1') &&
+    !stylesText.includes('section#view .hero h1,\n')
+  );
+
+  ok("homepage UI: Muchi brand kicker placed strictly on top of greeting",
+    stylesText.includes(".home-hero-copy") &&
+    stylesText.includes(".home-hero-copy .hero-brand-kicker")
+  );
+
+  ok("navigation UI: snappy directional screen transitions on tab navigation",
+    stylesText.includes("#view.view-slide-right") &&
+    stylesText.includes("#view.view-slide-left") &&
+    appJsText.includes("view-slide-right")
+  );
+
+  ok("like button: exact Apple Watch charging Lottie animation data loaded",
+    existsSync("public/apple-watch-like.json") &&
+    existsSync("public/apple-watch-lottie-data.js") &&
+    appJsText.includes("playAppleWatchLikeLottie")
+  );
+
+  ok("native ExoPlayer: instant playback tuning with prioritizeTimeOverSizeThresholds & backBuffer",
+    androidService.includes(".setPrioritizeTimeOverSizeThresholds(true)") &&
+    androidService.includes(".setBackBuffer(15000, true)")
+  );
+
+  ok("spotify integration: backend route /api/spotify/resolve & UI import integration in settings and library",
+    existsSync("src/spotify.js") &&
+    appJsText.includes("openSpotifyImportModal") &&
+    appJsText.includes("openSpotifyImport") &&
+    appJsText.includes("libImportSpotifyBtn")
   );
 
   // Multi-provider live search via Cloudflare Worker
