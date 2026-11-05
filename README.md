@@ -50,10 +50,10 @@ npm run dev                  # local Node adapter: http://localhost:3000
 npm test                     # offline smoke and focused integration checks
 # Optional live checks require a running service and reachable upstreams:
 npm run test:live            # targets http://127.0.0.1:3000
-# For the Cloudflare Worker and D1 setup, follow SETUP.md / docs/TESTING.md.
+# For the Cloudflare Worker and D1 setup, follow docs/CUTOVER.md / docs/TESTING.md.
 ```
 
-## Deploy (summary — full steps in SETUP.md / docs/CUTOVER.md)
+## Deploy (summary — full steps in docs/CUTOVER.md)
 
 1. Create the new GitHub repository and push this project.
 2. Cloudflare: create an API token (Workers/R2/KV/D1 Edit + Account Settings
@@ -83,7 +83,6 @@ WebKit media session on iOS), lock-screen/notification controls,
 
 | Doc | Purpose |
 |---|---|
-| `SETUP.md` | Full first-time setup (GitHub, Cloudflare, D1, KV, secrets, deploy) |
 | `docs/CUTOVER.md` | Staging → production → rollback procedure |
 | `docs/API-CONFIG.md` | The one API-base config point per platform |
 | `docs/TESTING.md` | Deployed-Worker test checklist (real-internet items) |

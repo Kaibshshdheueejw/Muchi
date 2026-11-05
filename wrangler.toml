@@ -5,7 +5,7 @@
 #
 # SETUP (one-time): run `npm run setup` (creates D1 + KV namespaces, patches
 # the REPLACE_ME ids below, applies remote migrations) — then run the
-# `npx wrangler secret put …` commands it prints (see SETUP.md §5).
+# `npx wrangler secret put …` commands it prints (see docs/CUTOVER.md §5).
 #
 # Secrets are NEVER in this file: they live in Cloudflare via
 # `npx wrangler secret put NAME [--env staging]` (see .dev.vars.example).

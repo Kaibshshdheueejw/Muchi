@@ -80,7 +80,7 @@ at Render until you decide otherwise.**
    .github/workflows/deploy.yml
    docs/  migrations/  public/  scripts/  src/  test/
    package.json  package-lock.json  wrangler.toml
-   README.md  SETUP.md  MIGRATION.md  .dev.vars.example  .gitignore
+   README.md  MIGRATION.md  .dev.vars.example  .gitignore
    ```
 
 ---
