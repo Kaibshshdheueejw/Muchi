@@ -8,34 +8,31 @@ import { APP_VERSION, APP_NAME } from "./config.js";
 
 /**
  * Retrieves authorized admin emails from environment config.
- * Defaults to twiarimascord@gmail.com and any comma-separated ADMIN_EMAILS.
+ * Admin identities are deployment configuration, never source-controlled data.
  */
 export function getAdminEmails(env) {
   const envEmails = (env && env.ADMIN_EMAILS) || (typeof process !== "undefined" && process.env.ADMIN_EMAILS) || "";
-  const base = ["twiarimascord@gmail.com"];
-  const list = String(envEmails)
+  return Array.from(new Set(String(envEmails)
     .split(",")
     .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
-  return Array.from(new Set([...base, ...list]));
+    .filter(Boolean)));
 }
 
 /**
  * Evaluates whether a session has verified admin privileges.
  */
 export function isUserAdmin(session, env) {
-  if (!session) return false;
-  if (!session.email_verified) return false;
-  if (session.role === "admin") return true;
-  const emails = getAdminEmails(env);
+  if (!session || (session.email_verified !== true && session.email_verified !== "true")) return false;
+  // A stored role alone is not an authorization source: otherwise a stale or
+  // previously seeded admin session survives removal from the allowlist.
   const userEmail = String(session.email || "").trim().toLowerCase();
-  return emails.includes(userEmail);
+  return !!userEmail && getAdminEmails(env).includes(userEmail);
 }
 
 /**
  * Server-side RBAC authentication check.
  * Accepts either:
- *  1. Authenticated session with verified email and admin role/email match
+ *  1. Authenticated session with a verified email on the current admin allowlist
  *  2. Timing-safe x-admin-key / Authorization header matching MUCHI_ADMIN_KEY
  */
 export async function checkAdminAuth(request, env) {
@@ -109,7 +106,7 @@ export async function handleAdmin(request, env, url) {
         hasCache: !!(env && env.CACHE),
         googleAuthEnabled: !!(env && env.GOOGLE_CLIENT_ID),
         githubReleaseSync: !!(env && env.MUCHI_GITHUB_REPO),
-        webhooksConfigured: !!(env && (env.WEBHOOK_SECRET || env.GITHUB_WEBHOOK_SECRET || env.MUCHI_SESSION_SECRET)),
+        webhooksConfigured: !!(env && (env.WEBHOOK_SECRET || env.GITHUB_WEBHOOK_SECRET || env.MUCHI_WEBHOOK_SECRET)),
       },
     }, request);
   }

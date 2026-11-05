@@ -46,14 +46,14 @@ docs/                      Setup, migration, testing, cutover, API config, audit
 
 ```bash
 npm ci
-npm run d1:local:migrate     # create local D1 schema
-npm run dev                  # http://localhost:8787 (Worker + app + API)
-npm test                     # pure test suite
-# with `npm run dev` running in another terminal:
-npm run test:live            # full 137-check suite against the local Worker
+npm run dev                  # local Node adapter: http://localhost:3000
+npm test                     # offline smoke and focused integration checks
+# Optional live checks require a running service and reachable upstreams:
+npm run test:live            # targets http://127.0.0.1:3000
+# For the Cloudflare Worker and D1 setup, follow docs/CUTOVER.md / docs/TESTING.md.
 ```
 
-## Deploy (summary — full steps in SETUP.md / docs/CUTOVER.md)
+## Deploy (summary — full steps in docs/CUTOVER.md)
 
 1. Create the new GitHub repository and push this project.
 2. Cloudflare: create an API token (Workers/R2/KV/D1 Edit + Account Settings
@@ -69,8 +69,11 @@ npm run test:live            # full 137-check suite against the local Worker
 
 ## Mobile
 
-`android/` and `ios/` are standard Capacitor projects; the web app in
-`public/` is their UI (`npm run mobile:sync`). Native features: background
+`android/` and `ios/` are standard Capacitor projects. Their filtered UI entry
+files live in `native-shell/`; `npm run native:sync` updates the native bundles
+and `npm run native:check` verifies them. If Capacitor's `npm run mobile:sync`
+is needed, run `npm run native:sync` afterward to restore the filtered entries.
+Native features: background
 playback (Android Media3 service via `capacitor-music-controls-plugin` +
 WebKit media session on iOS), lock-screen/notification controls,
 `muchi://` deep-link OAuth. The single API configuration point is
@@ -80,7 +83,6 @@ WebKit media session on iOS), lock-screen/notification controls,
 
 | Doc | Purpose |
 |---|---|
-| `SETUP.md` | Full first-time setup (GitHub, Cloudflare, D1, KV, secrets, deploy) |
 | `docs/CUTOVER.md` | Staging → production → rollback procedure |
 | `docs/API-CONFIG.md` | The one API-base config point per platform |
 | `docs/TESTING.md` | Deployed-Worker test checklist (real-internet items) |
@@ -88,3 +90,24 @@ WebKit media session on iOS), lock-screen/notification controls,
 | `docs/CLOUDFLARE-GITHUB.md` | GitHub↔Cloudflare connection research + decisions |
 | `docs/AUDIT.md` | Final two-pass audit: features, tests, removals, PENDING items |
 | `MIGRATION.md` | Render→Cloudflare port details (route table, decisions) |
+
+## Muchi 1.10.2 integration
+
+The release metadata is synchronized across the Web, Android, and iOS projects.
+The native WebView entry files are maintained in `native-shell/`; run
+`npm run native:sync` to update packaged assets and `npm run native:check` to verify them.
+Authentication and administration fail closed without deployment configuration:
+
+- Supply a strong `MUCHI_SESSION_SECRET` of at least 32 characters and the
+  `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` values
+  required for OAuth. Do not reuse the session secret for another purpose.
+- Configure `ADMIN_EMAILS` for verified session administrators, or supply
+  `MUCHI_ADMIN_KEY` (the legacy `ADMIN_KEY` alias is also supported) for API
+  administration. A previously stored admin role alone no longer grants access.
+- Configure a dedicated `WEBHOOK_SECRET`, `GITHUB_WEBHOOK_SECRET`, or
+  `MUCHI_WEBHOOK_SECRET`; webhooks return 503 when none is configured.
+
+The Node adapter may create `.muchi-cloud-db.json` for local sessions and
+library data. Treat it as private, back it up only in an appropriate secure
+location, and never commit it, credentials, or signing material. A fresh
+installation does not seed a signed-in user or an administrator.

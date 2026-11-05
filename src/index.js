@@ -17,7 +17,7 @@
 // signal only; the real metric is per-invocation CPU in the Cloudflare
 // dashboard, which must stay < 10 ms on the free plan).
 
-import { corsHeaders, json } from "./util.js";
+import { corsHeaders, json, rateLimit } from "./util.js";
 import { handleHealth, handleMoods, handleGeo, handleAppIcon, handleManifest } from "./direct.js";
 import {
   handleAuthStatus, handleAuthUrl, handleGoogleCallback, handleYoutubeCallback,
@@ -49,7 +49,7 @@ export default {
     try {
       const url = new URL(request.url);
       if (request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders(request) });
+        return new Response(null, { status: 204, headers: corsHeaders(request, env) });
       }
       const cleanPath = url.pathname.replace(/\/+$/, "") || "/";
       if (cleanPath === "/privacy" || cleanPath === "/privacy.html") {
@@ -58,8 +58,7 @@ export default {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "public, max-age=3600",
-            "Access-Control-Allow-Origin": "*",
-            "X-Content-Type-Options": "nosniff",
+            ...corsHeaders(request, env),
           },
         });
       }
@@ -69,19 +68,28 @@ export default {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "public, max-age=3600",
-            "Access-Control-Allow-Origin": "*",
-            "X-Content-Type-Options": "nosniff",
+            ...corsHeaders(request, env),
           },
         });
       }
       let response;
       if (url.pathname.startsWith("/api/")) {
+        const limited = rateLimitForPath(request, url);
+        if (limited) return limited;
         await maybeSweep(env);
         response = await handleApi(request, env, url);
         if (response) {
-          const cors = corsHeaders(request);
-          for (const [k, v] of Object.entries(cors)) {
-            response.headers.set(k, v);
+          const cors = corsHeaders(request, env);
+          if (cors["Access-Control-Allow-Origin"]) {
+            for (const [k, v] of Object.entries(cors)) {
+              response.headers.set(k, v);
+            }
+          } else {
+            // Some endpoint helpers default to wildcard CORS when called
+            // without a Request. Never let that wildcard survive for a
+            // disallowed origin.
+            response.headers.delete("Access-Control-Allow-Origin");
+            response.headers.delete("Access-Control-Allow-Credentials");
           }
         }
       } else {
@@ -90,7 +98,8 @@ export default {
         response = await env.ASSETS.fetch(request);
       }
       const isDev = (env && env.NODE_ENV === "development") || (typeof process !== "undefined" && process.env.NODE_ENV === "development");
-      if (isDev && url.searchParams.get("debug") === "1" && response) {
+      const debugEnabled = isDev || (env && env.MUCHI_DEBUG === "1");
+      if (debugEnabled && url.searchParams.get("debug") === "1" && response) {
         response = new Response(response.body, response);
         response.headers.set("x-muchi-ms", (performance.now() - t0).toFixed(1));
       }
@@ -103,18 +112,52 @@ export default {
   },
 };
 
+function rateLimitForPath(request, url) {
+  const p = url.pathname;
+  if (p === "/api/health" || p === "/api/version" || p === "/api/moods" || p === "/api/geo") return null;
+  if (p === "/api/preview/audio") return rateLimit(request, "preview-audio", 20, 60 * 1000);
+  if (/^\/api\/auth\//.test(p)) return rateLimit(request, "auth", 20, 10 * 60 * 1000);
+  if (p === "/api/download") return rateLimit(request, "download", 20, 60 * 1000);
+  if (p === "/api/stream" || p === "/api/img" || p.startsWith("/api/audius/file/")) {
+    return rateLimit(request, "media-proxy", 180, 60 * 1000);
+  }
+  if (p.includes("search") || p === "/api/home" || p === "/api/shelf" || p === "/api/radio" || p === "/api/discover" || p === "/api/for-you" || p === "/api/related" || p === "/api/lyrics") {
+    return rateLimit(request, "provider", 120, 60 * 1000);
+  }
+  if (p.startsWith("/api/user/") || p.startsWith("/api/youtube/")) {
+    return rateLimit(request, "account", 90, 60 * 1000);
+  }
+  return rateLimit(request, "api", 180, 60 * 1000);
+}
+
+function allowedMethodsForPath(p) {
+  if (p === "/api/auth/signout" || p === "/api/auth/youtube/disconnect") return ["POST"];
+  if (p === "/api/auth/status" || p === "/api/auth/google/url" || p === "/api/auth/youtube/url" || p.endsWith("/callback")) return ["GET"];
+  if (p === "/api/user/library" || p === "/api/user/sync") return ["GET", "POST"];
+  if (p === "/api/youtube/like" || p === "/api/youtube/unlike" || p === "/api/youtube/playlist/add" || p === "/api/youtube/playlist/remove") return ["POST"];
+  if (p === "/api/youtube/liked" || p === "/api/youtube/playlists" || p === "/api/youtube/playlist") return ["GET"];
+  if (p.startsWith("/api/admin") || p === "/api/webhook" || p.startsWith("/api/webhooks")) return null;
+  if (p.startsWith("/api/")) return ["GET"];
+  return null;
+}
+
 async function handleApi(request, env, url) {
   const p = url.pathname;
+  const allowed = allowedMethodsForPath(p);
+  if (allowed && !allowed.includes(request.method)) {
+    return json(405, { error: "Method Not Allowed", allow: allowed.join(", ") }, request, env);
+  }
 
   // ── PREVIEW SEED (dev-only) ────────────────────────────────────────────
   if (p === "/api/preview/audio") {
+    if (!env || !env.MUCHI_PREVIEW_SEED) return json(404, { error: "Not found" }, request, env);
     const wav = previewAudioWav(url.searchParams.get("dur"));
     return new Response(new Uint8Array(wav), {
       status: 200,
       headers: {
         "Content-Type": "audio/wav",
-        "Access-Control-Allow-Origin": "*",
         "Cache-Control": "public, max-age=86400",
+        ...corsHeaders(request, env),
       },
     });
   }

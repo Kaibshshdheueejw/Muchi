@@ -11,3 +11,20 @@ capacitor-cordova-ios-plugins
 # Generated Config files
 App/App/capacitor.config.json
 App/App/config.xml
+
+# Explicitly version the reviewed 1.10.2 native assets while continuing to
+# ignore other generated Capacitor WebView files.
+!App/App/public/
+App/App/public/*
+!App/App/public/material-symbols-outlined.woff2
+!App/App/public/animations/
+App/App/public/animations/*
+!App/App/public/animations/muchi-player-button.json
+!App/App/public/assets/
+App/App/public/assets/*
+!App/App/public/assets/mood-doodles-v1.webp
+!App/App/public/covers/
+App/App/public/covers/*
+!App/App/public/covers/liked-songs.svg
+!App/App/public/covers/downloaded-songs.svg
+!App/App/public/covers/folder-playlist.svg

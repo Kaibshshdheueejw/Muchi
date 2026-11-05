@@ -58,3 +58,12 @@ ios/App/output/
 .DS_Store
 Thumbs.db
 preview-router.cjs
+
+# Local preview/session database: contains private account and library state.
+.muchi-cloud-db.json
+
+# AI/development planning artifacts are not product source.
+.aistudio/
+
+# Kotlin compiler session markers are generated build state.
+android/.kotlin/sessions/

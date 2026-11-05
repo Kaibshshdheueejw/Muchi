@@ -3,7 +3,7 @@
 // never sent to the client. Mirrors server.js env contract (lines 19–33).
 
 export const APP_NAME = "Muchi";
-export const APP_VERSION = "1.10.1"; // keep in sync with package.json (root)
+export const APP_VERSION = "1.10.2"; // keep in sync with package.json (root)
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (server.js line 35)
 
 export function authConfig(env) {
@@ -11,12 +11,13 @@ export function authConfig(env) {
   const googleClientSecret = String(env.GOOGLE_CLIENT_SECRET || "").trim();
   const googleRedirectUri = String(env.GOOGLE_REDIRECT_URI || "").trim();
   const sessionSecret = String(env.MUCHI_SESSION_SECRET || "").trim();
+  const validSessionSecret = sessionSecret.length >= 32;
   return {
     googleClientId,
     googleClientSecret,
     googleRedirectUri,
     sessionSecret,
-    on: !!(googleClientId && googleClientSecret && googleRedirectUri && sessionSecret),
+    on: !!(googleClientId && googleClientSecret && googleRedirectUri && validSessionSecret),
     github: String(env.MUCHI_GITHUB || "").trim(),
   };
 }

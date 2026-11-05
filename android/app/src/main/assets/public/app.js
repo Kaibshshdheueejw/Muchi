@@ -107,6 +107,8 @@
     offlineMode: Boolean(load("aura.offlineMode", false)),
     isNetworkOffline: typeof navigator !== "undefined" ? !navigator.onLine : false,
     showProfile: false,
+    showNotifications: false,
+    notifications: load("aura.notifications", []),
     downloads: [],
     dlQueue: [],
     following: [],
@@ -144,7 +146,7 @@
     state.prefs.theme = "dark";
   }
   if (!state.prefs.appearance) state.prefs.appearance = "system";
-  const APP_VERSION = "1.10.1";
+  const APP_VERSION = "1.10.2";
 
   const COUNTRIES = [
     ["IN", "India"], ["US", "United States"], ["GB", "United Kingdom"], ["CA", "Canada"],
@@ -262,7 +264,7 @@
     return s;
   }
   if (state.prefs.soundV !== 3) {
-    if (!state.prefs.spatial || state.prefs.spatial === "off" || !["phone", "bass", "spatial", "dynamic"].includes(state.prefs.spatial)) {
+    if (!state.prefs.spatial || !["phone", "bass", "spatial", "dynamic", "off"].includes(state.prefs.spatial)) {
       state.prefs.spatial = "phone";
     }
     state.prefs.bgPlay = true;
@@ -1212,6 +1214,94 @@
     return set.has(fk) || set.has(fn) || set.has(fnClean) || (Boolean(fnFold) && set.has(fnFold));
   }
 
+  function recordUnlikedTombstone(track) {
+    if (!track) return;
+    try {
+      const list = asArray(load("aura.unliked", []));
+      const set = new Set(list.map((x) => String(x).toLowerCase().trim()));
+      const k = typeof trackKey === "function" ? trackKey(track) : (track.id || "");
+      if (k) set.add(String(k).toLowerCase().trim());
+      if (track.id) set.add(String(track.id).toLowerCase().trim());
+      if (track.videoId) set.add(`yt:${String(track.videoId).toLowerCase().trim()}`);
+      if (track.trackId) set.add(`audius:${String(track.trackId).toLowerCase().trim()}`);
+      if (track.title) {
+        const norm = `${String(track.title).toLowerCase().trim()}-${String(track.artist || "").toLowerCase().trim()}`;
+        set.add(norm);
+      }
+      save("aura.unliked", Array.from(set).slice(-500));
+      save("aura.likedLocalAt", Date.now());
+    } catch {}
+  }
+
+  function clearUnlikedTombstone(track) {
+    if (!track) return;
+    try {
+      const list = asArray(load("aura.unliked", []));
+      if (!list.length) return;
+      const remove = new Set();
+      const k = typeof trackKey === "function" ? trackKey(track) : (track.id || "");
+      if (k) remove.add(String(k).toLowerCase().trim());
+      if (track.id) remove.add(String(track.id).toLowerCase().trim());
+      if (track.videoId) remove.add(`yt:${String(track.videoId).toLowerCase().trim()}`);
+      if (track.trackId) remove.add(`audius:${String(track.trackId).toLowerCase().trim()}`);
+      if (track.title) {
+        const norm = `${String(track.title).toLowerCase().trim()}-${String(track.artist || "").toLowerCase().trim()}`;
+        remove.add(norm);
+      }
+      save("aura.unliked", list.filter((x) => !remove.has(String(x).toLowerCase().trim())));
+      save("aura.likedLocalAt", Date.now());
+    } catch {}
+  }
+
+  function isUnlikedTombstone(t) {
+    if (!t) return false;
+    const list = asArray(load("aura.unliked", []));
+    if (!list.length) return false;
+    const set = new Set(list.map((x) => String(x).toLowerCase().trim()));
+    const k = typeof trackKey === "function" ? trackKey(t) : (t.id || "");
+    if (k && set.has(String(k).toLowerCase().trim())) return true;
+    if (t.id && set.has(String(t.id).toLowerCase().trim())) return true;
+    if (t.videoId && set.has(`yt:${String(t.videoId).toLowerCase().trim()}`)) return true;
+    if (t.trackId && set.has(`audius:${String(t.trackId).toLowerCase().trim()}`)) return true;
+    if (t.title) {
+      const norm = `${String(t.title).toLowerCase().trim()}-${String(t.artist || "").toLowerCase().trim()}`;
+      if (set.has(norm)) return true;
+    }
+    return false;
+  }
+
+  function recordDeletedPlaylistTombstone(nameOrId) {
+    if (!nameOrId) return;
+    try {
+      const list = asArray(load("aura.deletedPlaylists", []));
+      const set = new Set(list.map((x) => String(x).toLowerCase().trim()));
+      set.add(String(nameOrId).toLowerCase().trim());
+      save("aura.deletedPlaylists", Array.from(set).slice(-100));
+      save("aura.playlistsLocalAt", Date.now());
+    } catch {}
+  }
+
+  function clearDeletedPlaylistTombstone(nameOrId) {
+    if (!nameOrId) return;
+    try {
+      const list = asArray(load("aura.deletedPlaylists", []));
+      if (!list.length) return;
+      const target = String(nameOrId).toLowerCase().trim();
+      save("aura.deletedPlaylists", list.filter((x) => String(x).toLowerCase().trim() !== target));
+      save("aura.playlistsLocalAt", Date.now());
+    } catch {}
+  }
+
+  function isDeletedPlaylistTombstone(p) {
+    if (!p) return false;
+    const list = asArray(load("aura.deletedPlaylists", []));
+    if (!list.length) return false;
+    const set = new Set(list.map((x) => String(x).toLowerCase().trim()));
+    if (p.id && set.has(String(p.id).toLowerCase().trim())) return true;
+    if (p.name && set.has(String(p.name).toLowerCase().trim())) return true;
+    return false;
+  }
+
   function hydrateLibrary() {
     state.liked = asArray(load("aura.liked", state.liked));
     state.recents = asArray(load("aura.recents", state.recents));
@@ -1242,12 +1332,14 @@
   let syncLibraryTimeout = null;
   let _pendingReplaceFollowing = false;
   let _pendingReplaceLiked = false;
+  let _pendingReplacePlaylists = false;
   let _hasPendingLibraryPush = false;
   let lastLibrarySyncTime = 0;
 
   function scheduleUserLibraryPush(opts) {
     if (opts && opts.replaceFollowing) _pendingReplaceFollowing = true;
     if (opts && opts.replaceLiked) _pendingReplaceLiked = true;
+    if (opts && opts.replacePlaylists) _pendingReplacePlaylists = true;
     _hasPendingLibraryPush = true;
     if (!state.auth || !state.auth.signedIn) return;
     clearTimeout(syncLibraryTimeout);
@@ -1255,9 +1347,11 @@
       _hasPendingLibraryPush = false;
       const repF = _pendingReplaceFollowing;
       const repL = _pendingReplaceLiked;
+      const repP = _pendingReplacePlaylists;
       _pendingReplaceFollowing = false;
       _pendingReplaceLiked = false;
-      pushUserLibrary({ replaceFollowing: repF, replaceLiked: repL });
+      _pendingReplacePlaylists = false;
+      pushUserLibrary({ replaceFollowing: repF, replaceLiked: repL, replacePlaylists: repP });
     }, 600);
   }
 
@@ -1268,9 +1362,11 @@
       _hasPendingLibraryPush = false;
       const repF = _pendingReplaceFollowing;
       const repL = _pendingReplaceLiked;
+      const repP = _pendingReplacePlaylists;
       _pendingReplaceFollowing = false;
       _pendingReplaceLiked = false;
-      pushUserLibrary({ replaceFollowing: repF, replaceLiked: repL });
+      _pendingReplacePlaylists = false;
+      pushUserLibrary({ replaceFollowing: repF, replaceLiked: repL, replacePlaylists: repP });
     }
   }
 
@@ -1278,7 +1374,7 @@
     if (!state.auth || !state.auth.signedIn) return;
     const onboardedFlag = Boolean(localStorage.getItem("aura.onboarded") || state.prefs.onboarded);
     try {
-      await api("/api/user/library", 10000, {
+      const res = await api("/api/user/library", 10000, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1294,6 +1390,7 @@
           following: dedupeFollowingList(state.following).slice(0, 400),
           recents: (state.recents || []).slice(0, 100),
           replaceLiked: Boolean(opts && opts.replaceLiked),
+          replacePlaylists: Boolean(opts && opts.replacePlaylists),
           replaceFollowing: Boolean(opts && opts.replaceFollowing),
           onboarded: onboardedFlag,
           taste: {
@@ -1313,6 +1410,14 @@
         save("aura.followingSyncedAt", sAt);
         if (opts && opts.replaceFollowing) {
           save("aura.unfollowed", []);
+        }
+        if (opts && opts.replaceLiked) {
+          save("aura.likedSyncedAt", sAt);
+          save("aura.unliked", []);
+        }
+        if (opts && opts.replacePlaylists) {
+          save("aura.playlistsSyncedAt", sAt);
+          save("aura.deletedPlaylists", []);
         }
       }
     } catch {}
@@ -1350,71 +1455,92 @@
           (Array.isArray(remote.recents) && remote.recents.length > 0)
         );
 
-        // 1. Liked songs merge
+        // 1. Liked songs merge & cross-device reconciliation (seamlessly syncs likes/unlikes across Web & Phone)
         if (Array.isArray(remote.liked)) {
+          const remoteNormalized = [];
           const remoteKeySet = new Set();
-          const remoteList = [];
           for (const t of remote.liked) {
             if (!t) continue;
             const k = trackKey(t) || t.id;
             if (k && !remoteKeySet.has(k)) {
               remoteKeySet.add(k);
-              remoteList.push(t.id ? t : { ...t, id: k });
+              remoteNormalized.push(t.id ? t : { ...t, id: k });
             }
           }
 
-          if (forcePull || state.liked.length === 0) {
-            if (remoteList.length > 0 || state.liked.length > 0) {
-              state.liked = remoteList;
-              save("aura.liked", state.liked);
-              restoredAny = true;
-            }
+          const remoteSyncedAt = Number(res.syncedAt || (remote && remote.updated_at) || 0);
+          const lastSyncedAt = Number(load("aura.likedSyncedAt", 0));
+          const lastLocalAt = Number(load("aura.likedLocalAt", 0));
+          const hasLocalUnpushed = _hasPendingLibraryPush || _pendingReplaceLiked || (lastLocalAt > 0 && lastLocalAt > lastSyncedAt);
+
+          if (forcePull || !lastSyncedAt || !hasLocalUnpushed) {
+            // Cloud is authoritative: apply remote liked cleanly and purge matching tombstones
+            const targetLiked = remoteNormalized.filter((t) => !isUnlikedTombstone(t));
+            state.liked = targetLiked;
+            save("aura.liked", state.liked);
+            save("aura.likedSyncedAt", remoteSyncedAt || Date.now());
+            save("aura.unliked", []);
+            restoredAny = true;
           } else {
-            // Find local-only likes (liked offline or while waiting to push)
-            const localOnly = [];
-            for (const t of state.liked) {
-              if (!t) continue;
+            // Local device has offline/unpushed actions: reconcile without resurrecting unliked songs
+            const filteredRemote = remoteNormalized.filter((t) => !isUnlikedTombstone(t));
+            const remoteKeys = new Set(filteredRemote.map((t) => trackKey(t) || t.id));
+            const localNewAdditions = (state.liked || []).filter((t) => {
+              if (!t || isUnlikedTombstone(t)) return false;
               const k = trackKey(t) || t.id;
-              if (k && !remoteKeySet.has(k)) {
-                localOnly.push(t.id ? t : { ...t, id: k });
-              }
-            }
-
-            // Union preserving recency: local-only at the top, then remote
-            const merged = [...localOnly, ...remoteList];
-            const hasChanged = merged.length !== state.liked.length ||
-              merged.some((t, i) => (trackKey(t) || t.id) !== (trackKey(state.liked[i]) || state.liked[i].id));
-
-            if (hasChanged) {
-              state.liked = merged;
-              save("aura.liked", state.liked);
-              restoredAny = true;
-            }
-            if (localOnly.length > 0) {
+              if (remoteKeys.has(k)) return false;
+              return (lastLocalAt > lastSyncedAt);
+            });
+            const merged = [...localNewAdditions, ...filteredRemote];
+            state.liked = merged;
+            save("aura.liked", state.liked);
+            save("aura.likedSyncedAt", remoteSyncedAt || Date.now());
+            if (localNewAdditions.length > 0) {
               modified = true;
+            } else {
+              save("aura.unliked", []);
             }
+            restoredAny = true;
           }
         } else if (state.liked.length > 0) {
           modified = true;
         }
 
-        // 2. Playlists merge
-        if (Array.isArray(remote.playlists) && remote.playlists.length > 0) {
-          const plMap = new Map();
-          for (const p of remote.playlists) {
-            if (p && (p.id || p.name)) plMap.set(p.id || p.name, p);
-          }
-          for (const p of state.playlists) {
-            const key = p && (p.id || p.name);
-            if (key && !plMap.has(key)) {
-              plMap.set(key, p);
-              modified = true;
+        // 2. Playlists merge & cross-device reconciliation (seamlessly syncs playlist creations/deletions)
+        if (Array.isArray(remote.playlists)) {
+          const remoteNormalized = remote.playlists.filter((p) => p && !isDeletedPlaylistTombstone(p));
+          const remoteSyncedAt = Number(res.syncedAt || (remote && remote.updated_at) || 0);
+          const lastSyncedAt = Number(load("aura.playlistsSyncedAt", 0));
+          const lastLocalAt = Number(load("aura.playlistsLocalAt", 0));
+          const hasLocalUnpushed = _hasPendingLibraryPush || _pendingReplacePlaylists || (lastLocalAt > 0 && lastLocalAt > lastSyncedAt);
+
+          if (forcePull || !lastSyncedAt || !hasLocalUnpushed) {
+            state.playlists = remoteNormalized;
+            save("aura.playlists", state.playlists);
+            save("aura.playlistsSyncedAt", remoteSyncedAt || Date.now());
+            save("aura.deletedPlaylists", []);
+            renderPlaylistsNav();
+            restoredAny = true;
+          } else {
+            const plMap = new Map();
+            for (const p of remoteNormalized) {
+              const k = p && (p.id || p.name);
+              if (k) plMap.set(k, p);
             }
+            for (const p of state.playlists) {
+              if (!p || isDeletedPlaylistTombstone(p)) continue;
+              const k = p && (p.id || p.name);
+              if (k && !plMap.has(k)) {
+                plMap.set(k, p);
+                modified = true;
+              }
+            }
+            state.playlists = Array.from(plMap.values());
+            save("aura.playlists", state.playlists);
+            save("aura.playlistsSyncedAt", remoteSyncedAt || Date.now());
+            renderPlaylistsNav();
+            restoredAny = true;
           }
-          state.playlists = Array.from(plMap.values());
-          save("aura.playlists", state.playlists);
-          renderPlaylistsNav();
-          restoredAny = true;
         } else if (state.playlists.length > 0) {
           modified = true;
         }
@@ -1551,9 +1677,9 @@
     }
   }
 
-  function savePlaylists() {
+  function savePlaylists(opts) {
     save("aura.playlists", state.playlists);
-    scheduleUserLibraryPush();
+    scheduleUserLibraryPush(opts || { replacePlaylists: true });
   }
   if (!state.prefs.hqV) {
     state.prefs.quality = "high";
@@ -2065,8 +2191,13 @@
       track.id = k;
     }
     const was = isLiked(track);
-    if (was) state.liked = state.liked.filter((t) => trackKey(t) !== trackKey(track));
-    else {
+    const nativeHomeLike = isNativeApp() && state.view === "home";
+    const useAppleLikeMotion = !isNativeApp();
+    if (was) {
+      state.liked = state.liked.filter((t) => trackKey(t) !== trackKey(track));
+      recordUnlikedTombstone(track);
+    } else {
+      clearUnlikedTombstone(track);
       state.liked.unshift(track);
       if (typeof recordSessionAffinity === "function") recordSessionAffinity(track);
     }
@@ -2076,7 +2207,7 @@
     const btn = $("likeBtn");
     if (btn) {
       btn.classList.toggle("pop", !was);
-      btn.classList.toggle("charging", !was);
+      btn.classList.toggle("charging", !was && useAppleLikeMotion);
       setTimeout(() => {
         btn.classList.remove("pop");
         btn.classList.remove("charging");
@@ -2085,7 +2216,7 @@
     const npBtn = $("npLikeBtn");
     if (npBtn) {
       npBtn.classList.toggle("pop", !was);
-      npBtn.classList.toggle("charging", !was);
+      npBtn.classList.toggle("charging", !was && useAppleLikeMotion);
       setTimeout(() => {
         npBtn.classList.remove("pop");
         npBtn.classList.remove("charging");
@@ -2093,18 +2224,13 @@
     }
     renderChrome();
     if (!was) {
-      burstHearts(btn);
-      playAppleWatchLikeLottie($("likeLottieBox"));
-      playAppleWatchLikeLottie($("npLikeLottieBox"));
-    } else {
-      if ($("likeLottieBox")) $("likeLottieBox").innerHTML = "";
-      if ($("npLikeLottieBox")) $("npLikeLottieBox").innerHTML = "";
+      if (typeof burstHearts === "function") burstHearts(btn);
     }
     // No toast on like/unlike — the heart fills/empties and the button pop are
     // enough feedback. A toast on every tap is noisy and interrupts playback.
-    if (state.view === "library" || state.view === "home") render();
+    if (!nativeHomeLike && (state.view === "library" || state.view === "home")) render();
     // Liking shifts the taste profile — reorder "Made for you" cards too.
-    paintHomeSoon();
+    if (!nativeHomeLike) paintHomeSoon();
   }
 
   function openLikedFolder() {
@@ -3202,6 +3328,121 @@
     return out;
   }
 
+  // Build a lightweight, session-only mood mix for the Discovery tab. It uses
+  // tracks already present in the client (weekly Discovery, taste/followed
+  // shelves, home catalog, likes, and recent plays) and never writes a playlist
+  // or new backend record.
+  function smartMoodMixContext() {
+    const live = current();
+    const seed = live && live.source !== "radio"
+      ? live
+      : (state.recents || []).find((t) => t && t.source !== "radio") || (state.liked || [])[0] || null;
+    const vibe = seed ? inferTrackVibeClient(seed) : null;
+    const prefMoods = Array.isArray(state.prefs && state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
+    const day = timeOfDayContext();
+    const timeMood = { late_night: "chill", morning: "upbeat", daytime: "upbeat", evening: "romantic" }[day] || "upbeat";
+    const prefAlias = {
+      chill: "chill", latenight: "dark", workout: "hype", focus: "focus", party: "hype",
+      morning: "upbeat", romance: "romantic", sad: "melancholic", roadtrip: "upbeat",
+      gaming: "hype", acoustic: "chill", rainy: "chill",
+    };
+    const mood = String((vibe && vibe.mood) || prefAlias[String(prefMoods[0] || "").toLowerCase()] || timeMood).toLowerCase();
+    const labels = {
+      upbeat: "Upbeat",
+      chill: "Chill",
+      romantic: "Romantic",
+      melancholic: "Reflective",
+      hype: "High-energy",
+      dark: "After-hours",
+      focus: "Focused",
+    };
+    const dayLabels = { late_night: "late-night listening", morning: "a fresh start", daytime: "the middle of your day", evening: "your evening" };
+    const basis = seed
+      ? `Following ${artistName(seed) || "your current listening"}`
+      : prefMoods.length
+        ? "Using your taste profile"
+        : "A balanced starting point";
+    return {
+      seed,
+      vibe,
+      mood,
+      label: labels[mood] || "Your mood",
+      detail: `${basis} · tuned for ${dayLabels[day] || "right now"}`,
+    };
+  }
+
+  let _smartMoodMixCache = { key: "", at: 0, value: null };
+  function buildSmartMoodMix(home = state.home || {}) {
+    const context = smartMoodMixContext();
+    const discoveryTracks = state.discovery && Array.isArray(state.discovery.tracks) ? state.discovery.tracks : [];
+    const queueKey = (state.queue || []).slice(0, 8).map((t) => canonicalSongKey(t)).join(",");
+    const shelfCount = Array.isArray(home.shelves)
+      ? home.shelves.reduce((n, shelf) => n + (Array.isArray(shelf && shelf.tracks) ? shelf.tracks.length : 0), 0)
+      : 0;
+    const cacheKey = [
+      context.mood,
+      canonicalSongKey(context.seed),
+      state.discovery && state.discovery.week,
+      discoveryTracks.length,
+      queueKey,
+      shelfCount,
+      ...(Array.isArray(state.prefs && state.prefs.tasteMoods) ? state.prefs.tasteMoods : []),
+    ].join("|");
+    if (_smartMoodMixCache.value && _smartMoodMixCache.key === cacheKey && Date.now() - _smartMoodMixCache.at < 900) {
+      return _smartMoodMixCache.value;
+    }
+    const candidates = [];
+    const seen = new Set();
+    const addTracks = (list) => {
+      for (const t of (Array.isArray(list) ? list : [])) {
+        if (!t || t.source === "radio" || !t.title || !looksLikeSong(t)) continue;
+        const key = canonicalSongKey(t) || String(t.id || t.videoId || "").toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        candidates.push(t);
+      }
+    };
+    addTracks(state.discovery && state.discovery.tracks);
+    addTracks(state.tasteTracks);
+    addTracks(state.followedArtistTracks);
+    addTracks(state.forYou);
+    addTracks(state.liked);
+    addTracks(state.recents);
+    addTracks(home.youtubeCharts);
+    addTracks(home.youtubeLocal);
+    addTracks(home.youtubeIndia);
+    addTracks(home.audius);
+    addTracks(home.underground);
+    for (const shelf of (Array.isArray(home.shelves) ? home.shelves : [])) addTracks(shelf && shelf.tracks);
+    for (const playlist of [
+      ...(Array.isArray(home.forYouPlaylists) ? home.forYouPlaylists : []),
+      ...(Array.isArray(home.globalPlaylists) ? home.globalPlaylists : []),
+      ...(Array.isArray(home.countryPlaylists) ? home.countryPlaylists : []),
+      ...(Array.isArray(home.viralPlaylists) ? home.viralPlaylists : []),
+    ]) addTracks(playlist && playlist.tracks);
+
+    const moodSeed = context.seed ||
+      candidates.find((t) => inferTrackVibeClient(t).mood === context.mood) ||
+      candidates[0] || null;
+    const queue = Array.isArray(state.queue) ? state.queue : [];
+    let tracks = scoreAndSequenceSpotifyStyle(moodSeed, candidates, {
+      max: 18,
+      maxPerArtist: 2,
+      excludeTracks: queue,
+    });
+    if (tracks.length < 6) {
+      const used = new Set(tracks.map((t) => canonicalSongKey(t)).filter(Boolean));
+      const fallback = candidates.filter((t) => {
+        const key = canonicalSongKey(t);
+        return key && !used.has(key) && !queue.some((q) => isSameSongClient(q, t));
+      });
+      tracks = tracks.concat(fallback.slice(0, Math.max(0, 12 - tracks.length)));
+    }
+    const value = { ...context, tracks: tracks.slice(0, 18) };
+    _smartMoodMixCache = { key: cacheKey, at: Date.now(), value };
+    return value;
+  }
+
   function playNext(track) {
     if (!track) return;
     if (!state.queue.length || state.index < 0) {
@@ -3241,6 +3482,41 @@
     savePlayerSession(true);
     toast("Added to queue", true, "success");
   }
+  function playSmartMoodMix() {
+    const mix = buildSmartMoodMix();
+    if (!mix.tracks.length) {
+      toast("Smart Mood Mix needs a few more songs", true, "error");
+      return;
+    }
+    playFromList(mix.tracks, 0);
+    toast(`${mix.label} Smart Mood Mix is playing`, true, "success");
+  }
+
+  function queueSmartMoodMix() {
+    const mix = buildSmartMoodMix();
+    if (!mix.tracks.length) {
+      toast("Smart Mood Mix needs a few more songs", true, "error");
+      return;
+    }
+    if (!state.queue.length || state.index < 0 || !current()) {
+      playFromList(mix.tracks, 0);
+      toast(`${mix.label} Smart Mood Mix is playing`, true, "success");
+      return;
+    }
+    const additions = mix.tracks
+      .filter((t) => !state.queue.some((q) => isSameSongClient(q, t)))
+      .map((t) => ({ ...t, _userQueued: true, _userPinned: true }));
+    if (!additions.length) {
+      toast("Smart Mood Mix is already in your queue");
+      return;
+    }
+    state.queue.push(...additions);
+    renderQueue();
+    syncNativeNextTrack();
+    savePlayerSession(true);
+    toast(`Queued ${additions.length} Smart Mood Mix songs`, true, "success");
+  }
+
   function removeQueued(i) {
     if (i === state.index) return;
     state.queue.splice(i, 1);
@@ -5284,6 +5560,20 @@
     return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
   function escapeAttr(s) { return escapeHTML(s); }
+
+  function safeImageUrl(value, fallback = "/cover-default.jpg") {
+    const raw = String(value ?? "").trim();
+    if (!raw || /[\\\u0000-\u001f\u007f]/.test(raw)) return fallback;
+    if (/^data:image\/(?:png|jpe?g|gif|webp|avif)(?:[;,])/i.test(raw)) return raw;
+    if (/^blob:[^\s]+$/i.test(raw)) return raw;
+    if (raw.startsWith("/") && !raw.startsWith("//")) return raw;
+    try {
+      const parsed = new URL(raw, window.location.href);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.href;
+    } catch {}
+    return fallback;
+  }
+
 
   function homeTrackPool() {
     const h = state.home;
@@ -7519,6 +7809,7 @@
             tr._isPreviewStream = false;
             if (res.videoId && !tr.videoId) tr.videoId = res.videoId;
             if (res.duration && !tr.duration) tr.duration = Number(res.duration);
+            syncNativeNextTrack();
           }
         }).catch(() => {});
       }
@@ -7867,6 +8158,7 @@
     savePlayerSession(true);
     playCurrentInFlight = true;
     t._playingViaAudio = false;
+    state._xfading = false;
     if (t.streamUrl && isUnwantedRemixStreamUrl(t.streamUrl, t.source)) {
       t.streamUrl = "";
     }
@@ -7885,7 +8177,6 @@
         t._isPreviewStream = false;
       }
     }
-    state._xfading = false;
     state.playing = true;
     setWantPlay(true);
     if (reset) {
@@ -8027,11 +8318,23 @@
           try {
             if (!t.videoId) await resolveYouTubePlay(t);
             if (gen !== playGen) return;
-            if (IS_NATIVE && !state.showVideo) {
+            if (IS_NATIVE) {
+              // On native mobile (Android/iOS), never fall back to YouTube iframe video player!
+              // Iframe video stops when app is backgrounded or screen locked. Always play through native audio service.
               const okFallback = await playFallbackAudioForTrack(t);
               if (!okFallback) {
                 t._playingViaAudio = true;
                 await playAudio(t);
+              }
+            } else if (!state.showVideo) {
+              const okFallback = await playFallbackAudioForTrack(t);
+              if (!okFallback) {
+                if (t.videoId) {
+                  await playYouTube(t, reset);
+                } else {
+                  t._playingViaAudio = true;
+                  await playAudio(t);
+                }
               }
             } else {
               await playYouTube(t, reset);
@@ -8039,7 +8342,20 @@
           } catch (ytErr) {
             if (gen !== playGen) return;
             const okFallback = await playFallbackAudioForTrack(t);
-            if (!okFallback) throw ytErr;
+            if (!okFallback) {
+              if (IS_NATIVE) {
+                t._playingViaAudio = true;
+                await playAudio(t);
+              } else if (t.videoId) {
+                try {
+                  await playYouTube(t, reset);
+                } catch {
+                  throw ytErr;
+                }
+              } else {
+                throw ytErr;
+              }
+            }
           }
         }
       }
@@ -8183,16 +8499,22 @@
     return (!!nativePlayer() && npActive) || !audio.paused;
   }
 
-  function stopOthers(keep) {
-    if (keep !== "audio") {
-      try {
-        audio.pause();
-      } catch {}
-      nativeStopPlayback();
-    }
-    if (keep !== "yt" && state.yt && state.yt.pauseVideo) {
+  function pauseYouTubeSink() {
+    if (state.yt && state.yt.pauseVideo) {
       try { state.yt.pauseVideo(); } catch {}
     }
+  }
+
+  // Playback routes are exclusive: the caller names the sink it is keeping.
+  // Native stop is returned so WebView/YouTube handoffs can wait for the
+  // native service to release its sink before starting another one.
+  function stopOthers(keep) {
+    if (keep !== "audio") {
+      try { audio.pause(); } catch {}
+    }
+    const nativeStop = keep !== "native" ? nativeStopPlayback() : Promise.resolve();
+    if (keep !== "yt") pauseYouTubeSink();
+    return nativeStop;
   }
 
   function applyNativePendingSeek() {
@@ -8215,7 +8537,9 @@
       nativeEnsureNotifyPermission();
       nativeEnsureStoragePermission();
     }
-    stopOthers("audio");
+    // Keep the previous route alive only while this call resolves. The
+    // actual sink is stopped immediately before the replacement starts.
+    pauseYouTubeSink();
     let url = "";
     const isNetworkOff = Boolean(
       state.offlineMode ||
@@ -8251,6 +8575,15 @@
         activeOfflineBlobTrackKey = trackKey(t);
       }
       url = activeOfflineBlobUrl;
+      // On Native (Android/iOS), if we have an on-disk URI or track identifier,
+      // route through the native background audio service so background playback is uninterrupted!
+      if (IS_NATIVE && nativePlayer()) {
+        if (saved && saved.uri && (/^file:\/\//i.test(saved.uri) || /^content:\/\//i.test(saved.uri))) {
+          url = saved.uri;
+        } else if (t.videoId || t.title) {
+          url = `yt:${t.videoId || ""}`;
+        }
+      }
     } else if (!isNetworkOff) {
       if (t.streamUrl && isUnwantedRemixStreamUrl(t.streamUrl, t.source)) {
         t.streamUrl = "";
@@ -8323,6 +8656,18 @@
       if (isNetworkOff) {
         throw new Error("Track is not available offline");
       }
+      if (!IS_NATIVE && t) {
+        if (!t.videoId && (t.title || t.playQuery)) {
+          try {
+            await resolveYouTubePlay(t);
+          } catch {}
+        }
+        if (t.videoId) {
+          t._playingViaAudio = false;
+          await playYouTube(t, false);
+          return;
+        }
+      }
       throw new Error("No audio stream available");
     }
     // Proxy URLs from the API (e.g. /api/stream?url=… from /api/yt/stream) are
@@ -8330,11 +8675,27 @@
     // resolve them against API_BASE before handing over. On the web there is no
     // native plugin, so audio plays in the WebView <audio> element instead.
     if (url.startsWith("/")) url = API_BASE + url;
-    if (nativePlayer() && (/^https?:\/\//i.test(url) || /^yt:/i.test(url))) {
+    if (nativePlayer() && (/^https?:\/\//i.test(url) || /^yt:/i.test(url) || /^file:\/\//i.test(url) || /^content:\/\//i.test(url))) {
       const cands = Array.isArray(t._ytCandidates) ? t._ytCandidates.slice(0, 5).join(",") : "";
       const startAt = _pendingSeek > 0 ? _pendingSeek : 0;
       if (nativePlayTrack(url, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", cands, startAt, t.isrc || "")) {
         if (/^yt:/i.test(url)) t.streamUrl = "";
+        setWantPlay(true);
+        state.playing = true;
+        showEl($("eqBars"), true);
+        applyNativePendingSeek();
+        updateMediaSession();
+        updateWakeLock();
+        startTimer();
+        return;
+      }
+    }
+    if (IS_NATIVE && nativePlayer()) {
+      // Ensure native mobile NEVER drops into WebView <audio> element:
+      const fallbackNativeUrl = (saved && saved.uri && (/^file:\/\//i.test(saved.uri) || /^content:\/\//i.test(saved.uri)))
+        ? saved.uri
+        : (t.videoId ? `yt:${t.videoId}` : (t.title ? "yt:" : ""));
+      if (fallbackNativeUrl && nativePlayTrack(fallbackNativeUrl, t.title, artistName(t) || t.artist, artUrl(t), t.duration || 0, t.videoId || "", "", 0, t.isrc || "")) {
         setWantPlay(true);
         state.playing = true;
         showEl($("eqBars"), true);
@@ -8360,6 +8721,8 @@
     const t = current();
     if (!t || !url) return;
     if (url.startsWith("/")) url = API_BASE + url;
+    // WebView audio is the sink being kept; release native/YouTube first.
+    await stopOthers("audio");
     t._playingViaAudio = true;
     const seq = ++audioPlaySeq;
     adaptiveBuffer.buffering = false;
@@ -8744,7 +9107,8 @@
     ytWanted = id;
     ytSwitching = true;
     ytRetry = 0;
-    stopOthers("yt");
+    // YouTube is the sink being kept; wait for native teardown before it starts.
+    await stopOthers("yt");
     // Warm the direct audio stream in parallel so if this YouTube video is VEVO/embed-gated
     // or blocked from autoplaying, fallback audio starts in 0ms.
     if (!IS_NATIVE && !t.streamUrl) {
@@ -8795,16 +9159,28 @@
   }
 
   let lastPlayGlyph = "play_arrow";
-  function swapPlayGlyph(el, glyph) {
+  function swapPlayGlyph(el, glyph, animate = true) {
     if (!el) return;
     const changed = el.textContent !== glyph;
     if (changed) {
       el.textContent = glyph;
       el.classList.remove("icon-swap");
-      void el.offsetWidth;
-      el.classList.add("icon-swap");
+      if (animate) {
+        void el.offsetWidth;
+        el.classList.add("icon-swap");
+      }
     }
     lastPlayGlyph = glyph;
+  }
+
+  function isNativeHomePlaybackControl(el) {
+    return Boolean(
+      isNativeApp() &&
+      state.view === "home" &&
+      el &&
+      el.matches &&
+      el.matches("#playBtn, #nextBtn, #prevBtn")
+    );
   }
 
   function togglePlay() {
@@ -8880,13 +9256,14 @@
     renderChrome();
     savePlayerSession(true);
     const pb = $("playBtn");
-    if (pb) triggerFabRipple(pb);
+    if (pb && !isNativeHomePlaybackControl(pb)) triggerFabRipple(pb);
     if (state.playing && !cheapPhone() && !IS_NATIVE) burstHearts(pb);
   }
 
   async function next(force) {
     if (force !== true) hapticFeedback("light");
     if (!state.queue.length) return;
+    const cur = current();
     if (!force && state.sleep.mode === "track") {
       pauseForSleep();
       return;
@@ -8897,8 +9274,6 @@
       return;
     }
     if (state.repeat === "one" && !force) return playCurrent(true);
-
-    const cur = current();
     if (cur && cur.source !== "radio") {
       const listenedSec = _trackStartedAt > 0 ? (Date.now() - _trackStartedAt) / 1000 : 0;
       const curDur = Number(cur.duration) || 180;
@@ -9313,7 +9688,9 @@
       if (npDur) npDur.textContent = current() && current().source === "radio" ? "LIVE" : fmt(d);
       const npSeek = $("npSeek");
       if (npSeek) {
-        npSeek.value = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+        const npSeekValue = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+        npSeek.value = npSeekValue;
+        npSeek.style.setProperty("--seek-pct", `${(npSeekValue / 10).toFixed(1)}%`);
       }
     }
     if (seek) {
@@ -9382,15 +9759,23 @@
   }
 
   function drawSeekWave() {
-    const svg = $("seekWave");
     const seek = $("seek");
+    if (seek) {
+      const v = Math.max(0, Math.min(1000, Number(seek.value) || 0));
+      seek.style.setProperty("--seek-pct", `${(v / 10).toFixed(1)}%`);
+    }
+    const npSeek = $("npSeek");
+    if (npSeek) {
+      const vNp = Math.max(0, Math.min(1000, Number(npSeek.value) || 0));
+      npSeek.style.setProperty("--seek-pct", `${(vNp / 10).toFixed(1)}%`);
+    }
+    const svg = $("seekWave");
     if (!svg || !seek) return;
     const playing = !!state.playing;
     const style = normalizePlayerStyle(document.documentElement.dataset.player);
     const wiggle = normalizeSeekWiggle(document.documentElement.dataset.wiggle || state.prefs.seekWiggle);
     const strong = style === "wave" || style === "pill" || style === "aura";
     const v = Math.max(0, Math.min(1000, Number(seek.value) || 0));
-    seek.style.setProperty("--seek-pct", `${(v / 10).toFixed(1)}%`);
     const t = Date.now() / 240;
     const W = 400, mid = 8;
     const amp = !playing ? 0.38 : strong ? 4.2 : 3.1;
@@ -9649,7 +10034,13 @@
   let npInitPos = 0;      // initial start position requested for the current track
   let npTrackStartedAt = 0; // timestamp when nativePlayTrack was invoked for the current track
   let npCmdUntil = 0;     // guard window after JS play/pause/resume command so stale progress ticks don't flip UI
-  let npSeekGuardUntil = 0; // guard window after JS seek command so stale pre-seek ticks don't snap slider back
+  let npSeekGuardUntil = 0; // short visual guard after a JS seek command
+  // Keep the optimistic seek target until native progress acknowledges it. This
+  // is a UI-state guard only; the native seek command remains unchanged.
+  const NATIVE_SEEK_ACK_TOLERANCE_SEC = 1.5;
+  const NATIVE_SEEK_ACK_TIMEOUT_MS = 5000;
+  let npPendingSeek = null;
+  let npSeekRequestSeq = 0;
   let npPermAsked = false; // one-time native notification permission ask
   function nativeEnsureNotifyPermission() {
     const NP = nativePlayer();
@@ -9728,6 +10119,8 @@
   function nativePlayTrack(url, title, artist, artwork, durationSec, videoId = "", candidates = "", startPosSec = 0, isrc = "") {
     const NP = nativePlayer();
     if (!NP) return false;
+    // Native is the sink being kept; stop WebView/YouTube before submitting play.
+    stopOthers("native");
     nativeEnsureNotifyPermission();
     const resolvedDur = Number(durationSec) || parseStreamUrlDuration(url) || 0;
     const initPos = Math.max(0, Number(startPosSec) || ((!_pendingSeekApplied && Number(_pendingSeek) > 0) ? Number(_pendingSeek) : 0));
@@ -9745,6 +10138,7 @@
     npDur = resolvedDur;
     npCmdUntil = Date.now() + 4500;
     npSeekGuardUntil = initPos > 0 ? Date.now() + 2500 : 0;
+    npPendingSeek = null;
     NP.play({
       url: String(url),
       videoId: String(videoId || ""),
@@ -9759,9 +10153,10 @@
       normalize: Boolean(state.prefs.normalize),
       speed: Number(state.prefs.speed || 1),
       spatial: String(spatialMode() || "phone"),
-    }).catch(() => {
-      // Native playback failed — fall back to the WebView audio element or YouTube player.
-      if (npActive) npActive = false;
+    }).catch(async () => {
+      // Native playback failed — release the native sink before falling back
+      // to WebView audio or YouTube so the failed route cannot keep playing.
+      await nativeStopPlayback();
       if (!/^yt:/i.test(String(url))) {
         playAudioWeb(url);
       } else {
@@ -9789,13 +10184,19 @@
   }
   function nativeStopPlayback() {
     const NP = nativePlayer();
-    if (!NP || !npActive) return;
+    const wasActive = Boolean(npActive || npPlaying || npSeenPlaying);
     npActive = false;
     npPlaying = false;
     npSeenPlaying = false;
     npPos = 0;
     npPosAt = 0;
-    NP.stop().catch(() => {});
+    npPendingSeek = null;
+    if (!NP || !wasActive) return Promise.resolve();
+    try {
+      return Promise.resolve(NP.stop()).catch(() => {});
+    } catch {
+      return Promise.resolve();
+    }
   }
   function nativeSeekTo(sec) {
     const NP = nativePlayer();
@@ -9804,6 +10205,13 @@
     npInitPos = npPos;
     npPosAt = performance.now();
     npSeekGuardUntil = Date.now() + 2500;
+    npPendingSeek = {
+      id: ++npSeekRequestSeq,
+      target: npPos,
+      startedAt: Date.now(),
+      playing: Boolean(state.playing && npPlaying),
+      rate: Number(state.prefs.speed || 1) || 1,
+    };
     npCmdUntil = Math.max(npCmdUntil, Date.now() + 2500);
     NP.seekTo({ position: Math.round(npPos * 1000) }).catch(() => {});
     return true;
@@ -10168,7 +10576,29 @@
       const isDifferentTrackDur = rawDur > 0 && npDur > 0 && Math.abs(rawDur - npDur) > 2;
       const isStaleStartJump = !npSeenPlaying && npInitPos === 0 && rawPos > 2.0 && (!v.playing || isDifferentTrackDur);
       if (!isStaleStartJump) {
-        if (now < npSeekGuardUntil) {
+        const pendingSeek = npPendingSeek;
+        if (pendingSeek && pendingSeek.id === npSeekRequestSeq) {
+          // Native progress can still carry the pre-seek position while the
+          // platform seek is completing. Accept only a position near the
+          // requested target and its expected playback advance; otherwise
+          // retain the optimistic target until the bounded fallback expires.
+          const elapsedMs = Math.max(0, now - pendingSeek.startedAt);
+          const expectedPos = pendingSeek.target + (
+            pendingSeek.playing ? (elapsedMs / 1000) * pendingSeek.rate : 0
+          );
+          const seekAcknowledged = Math.abs(rawPos - expectedPos) <= NATIVE_SEEK_ACK_TOLERANCE_SEC;
+          const seekTimedOut = elapsedMs >= NATIVE_SEEK_ACK_TIMEOUT_MS;
+          if (seekAcknowledged || seekTimedOut) {
+            npPendingSeek = null;
+            npSeekGuardUntil = 0;
+            npPos = Math.max(0, rawPos);
+            npPosAt = performance.now();
+          }
+        } else if (pendingSeek) {
+          // A newer track/seek superseded this request; never let its callback
+          // affect the current position state.
+          npPendingSeek = null;
+        } else if (now < npSeekGuardUntil) {
           if (Math.abs(rawPos - npPos) <= 4.0) {
             npSeekGuardUntil = 0;
             npPos = Math.max(0, rawPos);
@@ -11725,7 +12155,9 @@
       if (durEl) durEl.textContent = t && t.source === "radio" ? "LIVE" : fmt(d);
       const seekEl = $("npSeek");
       if (seekEl) {
-        seekEl.value = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+        const seekValue = d > 0 ? Math.max(0, Math.min(1000, Math.round((p / d) * 1000))) : 0;
+        seekEl.value = seekValue;
+        seekEl.style.setProperty("--seek-pct", `${(seekValue / 10).toFixed(1)}%`);
       }
     }
 
@@ -12427,7 +12859,11 @@
       const ico = $("dlIcon");
       if (ico) ico.textContent = saved ? "download_done" : "download";
     }
-    swapPlayGlyph($("playIcon"), state.playing ? "pause" : "play_arrow");
+    swapPlayGlyph(
+      $("playIcon"),
+      state.playing ? "pause" : "play_arrow",
+      !(isNativeApp() && state.view === "home")
+    );
     const coverBtn = $("openNow");
     if (coverBtn) coverBtn.classList.toggle("live", !!state.playing);
     const playBtn = $("playBtn");
@@ -12580,7 +13016,7 @@
     $("playlistNav").innerHTML = [
       `<button data-open-liked>Liked songs · ${state.liked.length}</button>`,
       `<button data-open-downloads>Downloads · ${state.downloads.length}</button>`,
-      ...state.playlists.map((p, i) => `<button data-pl="${i}">${escapeHTML(p.name)} · ${p.tracks.length}</button>`),
+      ...state.playlists.map((p, i) => `<button data-pl="${i}">${escapeHTML(p.name)}</button>`),
     ].join("");
   }
 
@@ -12741,8 +13177,548 @@
     return `<span>${escapeHTML(name[0].toUpperCase())}</span>`;
   }
 
+  const NOTIFICATION_LIMIT = 60;
+  function notificationTrackKey(track) {
+    if (!track) return "";
+    return String(track.id || track.trackId || track.videoId || `${track.title || ""}|${artistName(track) || track.artist || ""}`).trim().toLowerCase();
+  }
+  function normalizeReleaseNotification(item) {
+    if (!item || typeof item !== "object") return null;
+    const rawTrack = item.track && typeof item.track === "object" ? item.track : item;
+    const artist = String(item.artist || rawTrack.artist || rawTrack.artistName || "").trim();
+    const title = String(item.title || rawTrack.title || "").trim();
+    if (!artist || !title) return null;
+    const track = {
+      id: String(rawTrack.id || rawTrack.trackId || rawTrack.videoId || ""),
+      trackId: String(rawTrack.trackId || ""),
+      videoId: String(rawTrack.videoId || ""),
+      source: String(rawTrack.source || item.source || "catalog"),
+      title,
+      artist,
+      album: String(rawTrack.album || item.album || ""),
+      releaseDate: String(rawTrack.releaseDate || rawTrack.release_date || item.releaseDate || item.release_date || "").trim(),
+      artwork: safeImageUrl(rawTrack.artwork || item.artwork || "/cover-default.jpg"),
+      duration: Number(rawTrack.duration) || 0,
+      playQuery: String(rawTrack.playQuery || `${title} ${artist} official audio`).trim(),
+    };
+    const id = String(item.id || `release:${item.artistKey || artistKey({ artist })}:${notificationTrackKey(track)}`).trim();
+    return {
+      id,
+      type: "release",
+      artist,
+      artistKey: String(item.artistKey || artistKey({ artist })),
+      title,
+      album: track.album,
+      releaseDate: track.releaseDate,
+      artwork: track.artwork,
+      source: track.source,
+      track,
+      createdAt: Number(item.createdAt || item.releaseAt || Date.now()) || Date.now(),
+      read: Boolean(item.read || item.readAt),
+      readAt: Number(item.readAt) || 0,
+    };
+  }
+  function notificationEntries() {
+    const next = asArray(state.notifications)
+      .map(normalizeReleaseNotification)
+      .filter(Boolean)
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+      .slice(0, NOTIFICATION_LIMIT);
+    state.notifications = next;
+    return next;
+  }
+  function saveNotificationEntries() {
+    state.notifications = notificationEntries();
+    save("aura.notifications", state.notifications);
+  }
+  function notificationUnreadCount() {
+    return notificationEntries().filter((item) => !item.read).length;
+  }
+  function notificationAgeLabel(timestamp) {
+    const then = Number(timestamp) || Date.now();
+    const diff = Math.max(0, Date.now() - then);
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "Just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+    return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+  function notificationDateLabel(item) {
+    const raw = String(item && item.releaseDate || "").trim();
+    const parsed = raw ? new Date(raw) : null;
+    if (parsed && !Number.isNaN(parsed.getTime())) {
+      const now = new Date();
+      const options = { month: "short", day: "numeric" };
+      if (parsed.getFullYear() !== now.getFullYear()) options.year = "numeric";
+      return parsed.toLocaleDateString(undefined, options);
+    }
+    return notificationAgeLabel(item && item.createdAt);
+  }
+  function buildReleaseNotification(followed, latest) {
+    if (!followed || !latest || !latest.title) return null;
+    const artist = String(followed.name || artistName(latest) || latest.artist || "Artist").trim();
+    const track = {
+      id: String(latest.id || latest.trackId || latest.videoId || ""),
+      trackId: String(latest.trackId || ""),
+      videoId: String(latest.videoId || ""),
+      source: String(latest.source || followed.source || "catalog"),
+      title: String(latest.title || "").trim(),
+      artist,
+      album: String(latest.album || ""),
+      releaseDate: String(latest.releaseDate || latest.release_date || "").trim(),
+      artwork: safeImageUrl(latest.artwork || followed.artwork || "/cover-default.jpg"),
+      duration: Number(latest.duration) || 0,
+      playQuery: String(latest.playQuery || `${latest.title} ${artist} official audio`).trim(),
+    };
+    const key = notificationTrackKey(track) || String(latest.title).toLowerCase();
+    return normalizeReleaseNotification({
+      id: `release:${String(followed.key || artistKey({ artist })).toLowerCase()}:${key}`,
+      artist,
+      artistKey: followed.key || artistKey({ artist }),
+      title: track.title,
+      album: track.album,
+      releaseDate: track.releaseDate,
+      artwork: track.artwork,
+      source: track.source,
+      track,
+      createdAt: Date.now(),
+    });
+  }
+  function addReleaseNotification(followed, latest) {
+    if (state.prefs.notifyFollows === false) return false;
+    const item = buildReleaseNotification(followed, latest);
+    if (!item) return false;
+    const currentItems = notificationEntries();
+    if (currentItems.some((existing) => existing.id === item.id)) return false;
+    state.notifications = [item, ...currentItems].slice(0, NOTIFICATION_LIMIT);
+    return true;
+  }
+  function markNotificationRead(id, shouldSave = true) {
+    const target = String(id || "");
+    let changed = false;
+    state.notifications = notificationEntries().map((item) => {
+      if (item.id !== target || item.read) return item;
+      changed = true;
+      return { ...item, read: true, readAt: Date.now() };
+    });
+    if (changed && shouldSave) saveNotificationEntries();
+    return changed;
+  }
+  function markAllNotificationsRead() {
+    const now = Date.now();
+    state.notifications = notificationEntries().map((item) => item.read ? item : { ...item, read: true, readAt: now });
+    saveNotificationEntries();
+  }
+  function openReleaseNotification(id) {
+    const item = notificationEntries().find((candidate) => candidate.id === String(id || ""));
+    if (!item) return;
+    markNotificationRead(item.id);
+    state.showNotifications = false;
+    state.showProfile = false;
+    syncNotificationSurface({ immediate: true });
+    openArtistProfile({
+      name: item.artist,
+      artwork: item.artwork,
+      source: item.source,
+      query: item.artist,
+    });
+  }
+  function notificationDrawerHTML() {
+    const items = notificationEntries();
+    const unread = items.filter((item) => !item.read).length;
+    return `<aside class="notification-drawer" id="notificationDrawer" role="dialog" aria-label="Notifications">
+      <div class="notification-drawer-head">
+        <div>
+          <p class="lib-kicker">Following your artists</p>
+          <h2>Notifications</h2>
+          <p class="notification-drawer-sub">${unread ? `${unread} unread release${unread === 1 ? "" : "s"}` : "You’re all caught up"}</p>
+        </div>
+        <div class="notification-drawer-actions">
+          <button type="button" class="notification-icon-btn" id="markAllNotifications" title="Mark all as read" aria-label="Mark all as read" ${unread ? "" : "disabled"}><span class="material-symbols-outlined">done_all</span></button>
+          <button type="button" class="notification-icon-btn" id="closeNotifications" title="Close notifications" aria-label="Close notifications"><span class="material-symbols-outlined">close</span></button>
+        </div>
+      </div>
+      <div class="notification-drawer-list" aria-live="polite">
+        ${items.length ? items.map((item, index) => `<button type="button" class="notification-item${item.read ? "" : " unread"}" data-open-release-notification="${escapeAttr(item.id)}" style="--notification-index:${index}" aria-label="${escapeAttr(`${item.artist} released ${item.title}`)}">
+          <span class="notification-art"><img src="${escapeAttr(item.artwork)}" alt="" loading="lazy" onerror="this.src='/cover-default.jpg'"/></span>
+          <span class="notification-copy">
+            <span class="notification-meta"><span>New release</span><time>${escapeHTML(notificationDateLabel(item))}</time></span>
+            <strong>${escapeHTML(item.artist)}</strong>
+            <span>${escapeHTML(item.title)}${item.album ? ` · ${escapeHTML(item.album)}` : ""}</span>
+          </span>
+          <span class="material-symbols-outlined notification-chevron" aria-hidden="true">chevron_right</span>
+          ${item.read ? "" : `<span class="notification-unread-dot" aria-label="Unread"></span>`}
+        </button>`).join("") : `<div class="notification-empty"><span class="material-symbols-outlined">notifications_none</span><strong>No new releases yet</strong><p>When an artist you follow releases a song, it will appear here.</p></div>`}
+      </div>
+    </aside>`;
+  }
+
+  let notificationCloseTimer = 0;
+  let profileCloseTimer = 0;
+
+  function clearProfileDocumentListener() {
+    if (state._profileDismiss) {
+      document.removeEventListener("click", state._profileDismiss);
+      state._profileDismiss = null;
+    }
+  }
+
+  function clearNotificationDocumentListeners() {
+    if (state._notificationDismiss) {
+      document.removeEventListener("click", state._notificationDismiss);
+      state._notificationDismiss = null;
+    }
+    if (state._notificationKeydown) {
+      document.removeEventListener("keydown", state._notificationKeydown);
+      state._notificationKeydown = null;
+    }
+  }
+
+  function updateNotificationTrigger() {
+    const button = document.getElementById("notificationsBtn");
+    if (!button) return null;
+    const hasUnread = notificationUnreadCount() > 0;
+    button.classList.toggle("has-unread", hasUnread);
+    button.setAttribute("aria-expanded", state.showNotifications ? "true" : "false");
+    button.setAttribute("aria-label", hasUnread ? "Notifications, unread releases available" : "Notifications");
+    let dot = button.querySelector(".notification-trigger-dot");
+    if (hasUnread && !dot) {
+      dot = document.createElement("span");
+      dot.className = "notification-trigger-dot";
+      dot.setAttribute("aria-hidden", "true");
+      button.appendChild(dot);
+    } else if (!hasUnread && dot) {
+      dot.remove();
+    }
+    return button;
+  }
+
+  function setNotificationLiquidMetrics(button, drawer) {
+    if (!button || !drawer) return;
+    const source = button.getBoundingClientRect();
+    const target = drawer.getBoundingClientRect();
+    if (!source.width || !source.height || !target.width || !target.height) return;
+    const sourceCenterX = source.left + source.width / 2;
+    const sourceCenterY = source.top + source.height / 2;
+    const targetCenterX = target.left + target.width / 2;
+    const targetCenterY = target.top + target.height / 2;
+    drawer.style.setProperty("--notification-liquid-from-x", `${sourceCenterX - targetCenterX}px`);
+    drawer.style.setProperty("--notification-liquid-from-y", `${sourceCenterY - targetCenterY}px`);
+    drawer.style.setProperty("--notification-liquid-from-scale-x", String(Math.max(0.06, Math.min(1.1, source.width / target.width))));
+    drawer.style.setProperty("--notification-liquid-from-scale-y", String(Math.max(0.06, Math.min(1.1, source.height / target.height))));
+  }
+
+  function applyNotificationLiquidState(drawer, button, nextState) {
+    if (!drawer) return;
+    setNotificationLiquidMetrics(button, drawer);
+    drawer.classList.add("notification-drawer-liquid");
+    drawer.classList.remove("notification-drawer-liquid-closing");
+    if (nextState === "open") {
+      drawer.classList.remove("notification-drawer-liquid-closed");
+      drawer.classList.add("notification-drawer-liquid-open");
+    } else {
+      drawer.classList.remove("notification-drawer-liquid-open");
+      drawer.classList.add("notification-drawer-liquid-closed");
+    }
+  }
+
+  function beginNotificationLiquidOpen(drawer, button) {
+    if (!drawer) return;
+    applyNotificationLiquidState(drawer, button, "closed");
+    const open = () => {
+      if (!drawer.isConnected || !state.showNotifications) return;
+      drawer.classList.remove("notification-drawer-liquid-closed", "notification-drawer-liquid-closing");
+      drawer.classList.add("notification-drawer-liquid-open");
+      drawer.removeAttribute("aria-hidden");
+    };
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(open);
+    } else {
+      setTimeout(open, 0);
+    }
+  }
+
+  function beginNotificationLiquidClose(drawer, button) {
+    if (!drawer) return;
+    setNotificationLiquidMetrics(button, drawer);
+    drawer.classList.add("notification-drawer-liquid");
+    drawer.classList.remove("notification-drawer-liquid-closing");
+    if (!drawer.classList.contains("notification-drawer-liquid-open") && !drawer.classList.contains("notification-drawer-liquid-closed")) {
+      drawer.classList.add("notification-drawer-liquid-open");
+      void drawer.offsetWidth;
+    }
+    drawer.classList.remove("notification-drawer-liquid-open");
+    drawer.classList.add("notification-drawer-liquid-closed", "notification-drawer-liquid-closing");
+  }
+
+  function bindNotificationDrawerControls() {
+    const drawer = document.getElementById("notificationDrawer");
+    if (!drawer || drawer.dataset.bound === "1") return;
+    drawer.dataset.bound = "1";
+    const close = drawer.querySelector("#closeNotifications");
+    if (close) close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.showNotifications = false;
+      syncNotificationSurface();
+    });
+    const markAll = drawer.querySelector("#markAllNotifications");
+    if (markAll) markAll.addEventListener("click", (e) => {
+      e.stopPropagation();
+      markAllNotificationsRead();
+      syncNotificationSurface({ rebuild: true, animate: false });
+    });
+    drawer.querySelectorAll("[data-open-release-notification]").forEach((item) => {
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openReleaseNotification(item.dataset.openReleaseNotification);
+      });
+    });
+  }
+
+  function ensureNotificationDocumentListeners() {
+    if (state._notificationDismiss && state._notificationKeydown) return;
+    const dismiss = (e) => {
+      const target = e && e.target;
+      if (target && target.closest && target.closest("#notificationDrawer, #notificationsBtn")) return;
+      state.showNotifications = false;
+      if (state.view === "home") syncNotificationSurface();
+    };
+    const keydown = (e) => {
+      if (!e || e.key !== "Escape") return;
+      state.showNotifications = false;
+      if (state.view === "home") syncNotificationSurface();
+    };
+    state._notificationDismiss = dismiss;
+    state._notificationKeydown = keydown;
+    setTimeout(() => {
+      if (state._notificationDismiss !== dismiss) return;
+      document.addEventListener("click", dismiss);
+      document.addEventListener("keydown", keydown);
+    }, 0);
+  }
+
+  function syncNotificationSurface({ immediate = false, rebuild = false, animate } = {}) {
+    const shouldAnimate = animate === undefined ? !immediate : Boolean(animate);
+    const button = updateNotificationTrigger();
+    if (!button) {
+      clearNotificationDocumentListeners();
+      return;
+    }
+    const host = button.closest(".home-bar-profile-wrap") || button.parentElement;
+    if (!host) return;
+    clearTimeout(notificationCloseTimer);
+    let drawer = host.querySelector("#notificationDrawer");
+    if (state.showNotifications) {
+      if (drawer && rebuild) {
+        drawer.remove();
+        drawer = null;
+      }
+      const created = !drawer;
+      if (!drawer) {
+        host.insertAdjacentHTML("beforeend", notificationDrawerHTML());
+        drawer = host.querySelector("#notificationDrawer");
+      }
+      if (drawer) {
+        drawer.classList.remove("notification-drawer-closing", "notification-drawer-liquid-closing");
+        if (shouldAnimate && created && !prefersReducedMotion()) {
+          drawer.setAttribute("aria-hidden", "true");
+          beginNotificationLiquidOpen(drawer, button);
+        } else {
+          drawer.removeAttribute("aria-hidden");
+          applyNotificationLiquidState(drawer, button, "open");
+        }
+      }
+      bindNotificationDrawerControls();
+      ensureNotificationDocumentListeners();
+      return;
+    }
+
+    clearNotificationDocumentListeners();
+    if (!drawer) return;
+    if (immediate || prefersReducedMotion()) {
+      drawer.remove();
+      return;
+    }
+    drawer.classList.add("notification-drawer-closing");
+    drawer.setAttribute("aria-hidden", "true");
+    beginNotificationLiquidClose(drawer, button);
+    notificationCloseTimer = setTimeout(() => {
+      if (!state.showNotifications && drawer.isConnected) drawer.remove();
+    }, 290);
+  }
+
+  function setProfileLiquidMetrics(button, menu) {
+    // Reuse the same measured source/target geometry as the notification
+    // container transform; only the Web-scoped surface classes differ.
+    setNotificationLiquidMetrics(button, menu);
+  }
+
+  function applyProfileLiquidState(menu, button, nextState) {
+    if (!menu) return;
+    setProfileLiquidMetrics(button, menu);
+    menu.classList.add("profile-menu-liquid");
+    menu.classList.remove("profile-menu-liquid-closing");
+    if (nextState === "open") {
+      menu.classList.remove("profile-menu-liquid-closed");
+      menu.classList.add("profile-menu-liquid-open");
+    } else {
+      menu.classList.remove("profile-menu-liquid-open");
+      menu.classList.add("profile-menu-liquid-closed");
+    }
+  }
+
+  function beginProfileLiquidOpen(menu, button) {
+    if (!menu) return;
+    applyProfileLiquidState(menu, button, "closed");
+    const open = () => {
+      if (!menu.isConnected || !state.showProfile || state.view !== "home") return;
+      menu.classList.remove("profile-menu-liquid-closed", "profile-menu-liquid-closing");
+      menu.classList.add("profile-menu-liquid-open");
+      menu.removeAttribute("aria-hidden");
+    };
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(open);
+    } else {
+      setTimeout(open, 0);
+    }
+  }
+
+  function beginProfileLiquidClose(menu, button) {
+    if (!menu) return;
+    setProfileLiquidMetrics(button, menu);
+    menu.classList.add("profile-menu-liquid");
+    menu.classList.remove("profile-menu-liquid-closing");
+    if (!menu.classList.contains("profile-menu-liquid-open") && !menu.classList.contains("profile-menu-liquid-closed")) {
+      menu.classList.add("profile-menu-liquid-open");
+      void menu.offsetWidth;
+    }
+    menu.classList.remove("profile-menu-liquid-open");
+    menu.classList.add("profile-menu-liquid-closed", "profile-menu-liquid-closing");
+  }
+
+  function bindProfileSurfaceControls(root) {
+    if (!root || !root.querySelector) return;
+    const gotoSettings = root.querySelector("#gotoSettings");
+    if (gotoSettings && !gotoSettings._muchiProfileBound) {
+      gotoSettings._muchiProfileBound = true;
+      gotoSettings.addEventListener("click", () => {
+        state.showProfile = false;
+        clearProfileDocumentListener();
+        state.settingsPage = null;
+        setView("settings");
+      });
+    }
+    const pickAvatar = root.querySelector("#pickAvatar");
+    if (pickAvatar && !pickAvatar._muchiProfileBound) {
+      pickAvatar._muchiProfileBound = true;
+      pickAvatar.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        state.pickingAvatar = true;
+        pickImage("avatar");
+      });
+    }
+    const setUsername = root.querySelector("#setUsername");
+    if (setUsername && !setUsername._muchiProfileBound) {
+      setUsername._muchiProfileBound = true;
+      setUsername.addEventListener("change", () => {
+        state.prefs.username = String(setUsername.value || "").trim().slice(0, 32);
+        savePrefs();
+        toast(state.prefs.username ? `Hi, ${state.prefs.username}` : "Name cleared");
+        if (state.view === "settings") render();
+      });
+    }
+  }
+
+  function ensureProfileDocumentListener() {
+    clearProfileDocumentListener();
+    if (!state.showProfile) return;
+    const closeProf = (e) => {
+      const target = e && e.target;
+      if (target && target.closest && target.closest("#profileMenu, #profileBtn")) return;
+      state.showProfile = false;
+      clearProfileDocumentListener();
+      if (state.view === "home") syncProfileSurface();
+      else if (state.view === "home" || state.view === "settings") render();
+    };
+    state._profileDismiss = closeProf;
+    setTimeout(() => {
+      if (state._profileDismiss === closeProf) document.addEventListener("click", closeProf);
+    }, 0);
+  }
+
+  function homeProfileMenuHTML() {
+    const name = String(state.prefs.username || "").trim();
+    return `<div class="profile-menu" id="profileMenu" role="dialog" aria-label="Profile menu">
+      <div class="profile-head">
+        <button type="button" class="avatar-btn lg" id="pickAvatar" title="Change photo">${avatarInner()}</button>
+        <div class="profile-fields">
+          <label>Name
+            <input id="setUsername" type="text" maxlength="32" value="${escapeAttr(name)}" placeholder="Your name"/>
+          </label>
+          <p>Tap the photo to crop and save a picture.</p>
+        </div>
+      </div>
+      <button type="button" class="profile-link" id="gotoSettings">
+        <span class="material-symbols-outlined">settings</span>
+        Settings
+      </button>
+    </div>`;
+  }
+
+  function syncProfileSurface({ immediate = false, animate } = {}) {
+    if (state.view !== "home") return;
+    const shouldAnimate = animate === undefined ? !immediate : Boolean(animate);
+    const button = document.getElementById("profileBtn");
+    const host = button && button.closest(".home-bar-profile-wrap");
+    if (!button || !host) {
+      clearProfileDocumentListener();
+      return;
+    }
+    button.setAttribute("aria-expanded", state.showProfile ? "true" : "false");
+    clearTimeout(profileCloseTimer);
+    let menu = host.querySelector("#profileMenu");
+    if (state.showProfile) {
+      const created = !menu;
+      if (!menu) {
+        host.insertAdjacentHTML("beforeend", homeProfileMenuHTML());
+        menu = host.querySelector("#profileMenu");
+      }
+      if (menu) {
+        menu.classList.remove("profile-menu-liquid-closing");
+        if (shouldAnimate && created && !prefersReducedMotion()) {
+          menu.setAttribute("aria-hidden", "true");
+          beginProfileLiquidOpen(menu, button);
+        } else {
+          menu.removeAttribute("aria-hidden");
+          applyProfileLiquidState(menu, button, "open");
+        }
+        bindProfileSurfaceControls(menu);
+      }
+      ensureProfileDocumentListener();
+      return;
+    }
+
+    clearProfileDocumentListener();
+    if (!menu) return;
+    if (immediate || prefersReducedMotion()) {
+      menu.remove();
+      return;
+    }
+    menu.setAttribute("aria-hidden", "true");
+    beginProfileLiquidClose(menu, button);
+    profileCloseTimer = setTimeout(() => {
+      if (!state.showProfile && menu.isConnected) menu.remove();
+    }, 290);
+  }
+
+
   function homeBarHTML() {
     const name = String(state.prefs.username || "").trim();
+    const unread = notificationUnreadCount();
     return `
       <div class="home-bar">
         <div class="home-brand">
@@ -12750,23 +13726,13 @@
           <span class="home-brand-title">Muchi</span>
         </div>
         <div class="home-bar-profile-wrap">
-          <button type="button" class="avatar-btn" id="profileBtn" title="${escapeAttr(name || "Profile")}">${avatarInner()}</button>
-          ${state.showProfile ? `
-            <div class="profile-menu" id="profileMenu">
-              <div class="profile-head">
-                <button type="button" class="avatar-btn lg" id="pickAvatar" title="Change photo">${avatarInner()}</button>
-                <div class="profile-fields">
-                  <label>Name
-                    <input id="setUsername" type="text" maxlength="32" value="${escapeAttr(name)}" placeholder="Your name"/>
-                  </label>
-                  <p>Tap the photo to crop and save a picture.</p>
-                </div>
-              </div>
-              <button type="button" class="profile-link" id="gotoSettings">
-                <span class="material-symbols-outlined">settings</span>
-                Settings
-              </button>
-            </div>` : ""}
+          <button type="button" class="notification-trigger${unread ? " has-unread" : ""}" id="notificationsBtn" title="Notifications" aria-label="Notifications${unread ? ", unread releases available" : ""}" aria-expanded="${state.showNotifications ? "true" : "false"}">
+            <span class="material-symbols-outlined notification-trigger-icon">notifications</span>
+            ${unread ? `<span class="notification-trigger-dot" aria-hidden="true"></span>` : ""}
+          </button>
+          <button type="button" class="avatar-btn" id="profileBtn" title="${escapeAttr(name || "Profile")}" aria-expanded="${state.showProfile ? "true" : "false"}">${avatarInner()}</button>
+          ${state.showNotifications ? notificationDrawerHTML() : ""}
+          ${state.showProfile ? homeProfileMenuHTML() : ""}
         </div>
       </div>`;
   }
@@ -12810,6 +13776,7 @@
     const prefGenres = Array.isArray(state.prefs.tasteGenres) ? state.prefs.tasteGenres : [];
     const prefMoods = Array.isArray(state.prefs.tasteMoods) ? state.prefs.tasteMoods : [];
     const taste = tasteProfile();
+    const smartMood = buildSmartMoodMix(h);
     if (prefGenres.length || taste.genres.length) {
       const genreWeight = (id) => {
         if (id === "today") return 100; // Keep Today's Top Hits anchored first
@@ -12852,6 +13819,18 @@
               <p>${(state.discovery.tracks || []).length ? trackStats(state.discovery.tracks) + (state.discovery.week ? " · " + escapeHTML(state.discovery.week) : "") : "Building your weekly mix…"}</p>
             </div>
             ${(state.discovery.tracks || []).length ? `<button class="filled-btn" id="openDiscoveryBtn" type="button"><span class="material-symbols-outlined">queue_music</span> Open</button>` : ""}
+          </div>
+          <div class="smart-mood-mix" data-smart-mood="1">
+            <div class="smart-mood-icon" aria-hidden="true"><span class="material-symbols-outlined">auto_awesome</span></div>
+            <div class="smart-mood-copy">
+              <p class="lib-kicker">Smart Mood Mix</p>
+              <h4>${escapeHTML(smartMood.label)} · right now</h4>
+              <p>${escapeHTML(smartMood.detail)} · ${smartMood.tracks.length ? trackStats(smartMood.tracks) : "Gathering songs"}</p>
+            </div>
+            <div class="smart-mood-actions">
+              <button class="filled-btn" id="playSmartMoodMix" type="button" ${smartMood.tracks.length ? "" : "disabled"}><span class="material-symbols-outlined">play_arrow</span> Play</button>
+              <button class="tonal-btn" id="queueSmartMoodMix" type="button" ${smartMood.tracks.length ? "" : "disabled"}><span class="material-symbols-outlined">queue_music</span> Queue</button>
+            </div>
           </div>
         ` : `
         <div class="moods">
@@ -14445,8 +15424,9 @@
                 banner: data.artwork || "",
                 tracks: data.tracks,
               };
+              clearDeletedPlaylistTombstone(newPl.name);
               state.playlists.push(newPl);
-              savePlaylists();
+              savePlaylists({ replacePlaylists: true });
               hideModal();
               toast(`Added "${newPl.name}" (${newPl.tracks.length} songs) to Library!`, true, "success");
               state.view = "library";
@@ -14565,7 +15545,10 @@
     }
     if (pl === "yt-liked") {
       const L = state.ytLiked || { tracks: [], loading: true };
-      const tracks = L.tracks || [];
+      const rawTracks = L.tracks || [];
+      const showAll = !!state.prefs.ytShowAllLiked;
+      const tracks = showAll ? rawTracks : rawTracks.filter((t) => t && t.isMusic !== false);
+      const filteredOutCount = rawTracks.length - tracks.length;
       return `
         <div class="lib-detail">
           <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
@@ -14574,9 +15557,17 @@
             <div class="lib-hero-copy">
               <p class="lib-kicker">YouTube</p>
               <h1>Liked Songs</h1>
-              <p class="lib-stats">${tracks.length ? trackStats(tracks) : ""}</p>
+              <p class="lib-stats">${tracks.length ? trackStats(tracks) : ""}${filteredOutCount > 0 ? ` · ${filteredOutCount} non-music hidden` : ""}</p>
               <p class="lib-note">From your YouTube account</p>
-              ${tracks.length ? `<button class="filled-btn" id="playYtLiked" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+              <div class="lib-hero-actions">
+                ${tracks.length ? `<button class="filled-btn" id="playYtLiked" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+                ${rawTracks.length > 0 && (filteredOutCount > 0 || showAll) ? `
+                  <button class="chip-btn" id="toggleYtLikedFilter" type="button" title="Toggle music-only filter">
+                    <span class="material-symbols-outlined">${showAll ? "filter_alt" : "music_note"}</span>
+                    <span>${showAll ? "Filter non-music" : `Show all (${rawTracks.length})`}</span>
+                  </button>
+                ` : ""}
+              </div>
             </div>
           </div>
           ${L.loading ? `<div class="ly-wait">Loading YouTube likes…</div>` : (L.error ? `<div class="empty"><h3>Couldn't load YouTube likes</h3><p>Check your connection or reconnect YouTube in Settings.</p></div>` : `<div class="list">${tracks.map((t, i) => libTrackHTML(t, i)).join("") || emptyLib()}</div>`)}
@@ -14584,7 +15575,10 @@
     }
     if (typeof pl === "string" && pl.indexOf("yt-pl:") === 0) {
       const o = state.ytOpen || { title: "Playlist", tracks: null, loading: true };
-      const tracks = o.tracks || [];
+      const rawTracks = o.tracks || [];
+      const showAll = !!state.prefs.ytShowAllPl;
+      const tracks = showAll ? rawTracks : rawTracks.filter((t) => t && t.isMusic !== false);
+      const filteredOutCount = rawTracks.length - tracks.length;
       return `
         <div class="lib-detail">
           <button class="chip-btn page-back" id="libBack" type="button"><span class="material-symbols-outlined">arrow_back</span> Back</button>
@@ -14593,9 +15587,17 @@
             <div class="lib-hero-copy">
               <p class="lib-kicker">YouTube Playlist</p>
               <h1>${escapeHTML(o.title || "Playlist")}</h1>
-              <p class="lib-stats">${o.loading ? "Loading songs…" : trackStats(tracks)}</p>
+              <p class="lib-stats">${o.loading ? "Loading songs…" : trackStats(tracks)}${!o.loading && filteredOutCount > 0 ? ` · ${filteredOutCount} non-music hidden` : ""}</p>
               <p class="lib-note">From your YouTube account</p>
-              ${tracks.length ? `<button class="filled-btn" id="playYtPl" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+              <div class="lib-hero-actions">
+                ${tracks.length ? `<button class="filled-btn" id="playYtPl" type="button"><span class="material-symbols-outlined filled">play_arrow</span> Play</button>` : ""}
+                ${rawTracks.length > 0 && (filteredOutCount > 0 || showAll) ? `
+                  <button class="chip-btn" id="toggleYtPlFilter" type="button" title="Toggle music-only filter">
+                    <span class="material-symbols-outlined">${showAll ? "filter_alt" : "music_note"}</span>
+                    <span>${showAll ? "Filter non-music" : `Show all (${rawTracks.length})`}</span>
+                  </button>
+                ` : ""}
+              </div>
             </div>
           </div>
           ${o.loading ? `<div class="ly-wait">Loading songs…</div>` : (o.error ? `<div class="empty"><h3>Couldn't load this playlist</h3><p>Check your connection or reconnect YouTube in Settings.</p></div>` : `<div class="list">${tracks.map((t, i) => libTrackHTML(t, i)).join("") || emptyLib()}</div>`)}
@@ -14709,7 +15711,6 @@
               <img src="${escapeAttr(playlistArt(p))}" alt="" onerror="this.src='/cover-default.jpg'"/>
               <div>
                 <div class="t-title">${escapeHTML(p.name)}</div>
-                <div class="t-sub">Playlist · ${trackStats(p.tracks)}</div>
                 ${pinned ? `<span class="pin-badge"><span class="material-symbols-outlined filled">push_pin</span> Pinned</span>` : ""}
               </div>
             </button>`
@@ -14742,13 +15743,17 @@
       const likedRowYt = state.ytLiked
         ? (state.ytLiked.error
           ? `<p class="yt-note">Couldn't load YouTube likes.</p>`
-          : `<button type="button" class="lib-row" data-open-yt-liked>
+          : (() => {
+              const rawTracks = state.ytLiked.tracks || [];
+              const musicCount = rawTracks.filter((t) => t && t.isMusic !== false).length;
+              const countDesc = `${musicCount} song${musicCount === 1 ? "" : "s"}`;
+              return `<button type="button" class="lib-row" data-open-yt-liked>
               <div class="lib-liked-art sm yt"><span class="material-symbols-outlined filled">thumb_up</span></div>
               <div>
                 <div class="t-title">Liked Songs</div>
-                <div class="t-sub">YouTube · ${state.ytLiked.tracks.length} song${state.ytLiked.tracks.length === 1 ? "" : "s"}${state.ytLiked.truncated ? "+" : ""}</div>
               </div>
-            </button>`)
+            </button>`;
+            })())
         : `<div class="ly-wait">Loading YouTube likes…</div>`;
       const plsYt = state.ytPlaylists
         ? (state.ytPlaylists.error
@@ -14758,7 +15763,6 @@
               <img src="${escapeAttr(p.artwork || "/cover-default.jpg")}" alt="" onerror="this.src='/cover-default.jpg'"/>
               <div>
                 <div class="t-title">${escapeHTML(p.title)}</div>
-                <div class="t-sub">Playlist · ${p.count} item${p.count === 1 ? "" : "s"}</div>
               </div>
             </button>`).join(""))
         : `<div class="ly-wait">Loading YouTube playlists…</div>`;
@@ -14801,7 +15805,7 @@
       <div class="lib-head">
         <h1>Your Library</h1>
         <div class="lib-head-actions">
-          <button class="icon-btn lib-tool-btn ${isGrid ? "active" : ""}" id="libGridToggle" type="button" title="${isGrid ? "Switch to list view" : "Squares (2 boxes each row like Spotify)"}">
+          <button class="icon-btn lib-tool-btn ${isGrid ? "active" : ""}" id="libGridToggle" type="button" title="${isGrid ? "Switch to list view" : "Switch to grid view"}" aria-label="${isGrid ? "Switch to list view" : "Switch to grid view"}">
             <span class="material-symbols-outlined">${isGrid ? "view_list" : "grid_view"}</span>
           </button>
           <button class="icon-btn lib-tool-btn" id="libSortBtn" type="button" title="Filter & sort songs/folders">
@@ -14872,12 +15876,12 @@
      current release, so the user never leaves the app for a changelog. */
   const WHATS_NEW = [
     {
-      ver: "1.10.1",
-      title: "Muchi 1.10.1",
+      ver: "1.10.2",
+      title: "Muchi 1.10.2",
       notes: [
         "Fixed Like button overlap, refined Apple Watch charging animation crossfade, and optimized smooth 60fps emerald particle physics.",
         "Instant custom playlist cover change and banner image updates in Library without synchronous DOM redraw lag.",
-        "Library upgrades: Spotify-style 2-column square boxes grid view, folder pinning, and track sorting (New to Old, Old to New, A-Z).",
+        "Library upgrades: 2-column square boxes grid view, folder pinning, and track sorting (New to Old, Old to New, A-Z).",
         "Zero-delay instant navigation transitions eliminating main-thread layout thrashing and frame drops.",
       ],
     },
@@ -14885,7 +15889,7 @@
       ver: "1.9.9",
       title: "Muchi 1.9.9",
       notes: [
-        "Spotify-level intelligent adaptive Queue with real-time session affinity learning, seamless tempo and mood flow, and dynamic upcoming re-ranking.",
+        "Intelligent adaptive Queue with real-time session affinity learning, seamless tempo and mood flow, and dynamic upcoming re-ranking.",
         "Premium native UI refinement: tactile press feedback, interactive search bar tap animation with glowing focus states, and eliminated blurry/saturated blue overlays.",
         "Smooth homepage loading pipeline: stabilized shelf hydration, anchored card heights, and fluid entrance animations eliminating initial startup flickering.",
       ],
@@ -16064,6 +17068,7 @@
   function renderPlayerPage() {
     const cur = normalizePlayerStyle(state.prefs.playerStyle);
     const curWiggle = normalizeSeekWiggle(state.prefs.seekWiggle);
+    const fade = Number(state.prefs.crossfade || 0);
     const types = [
       ["pill", "Glass pill"],
       ["wave", "Wave"],
@@ -16076,7 +17081,6 @@
       ["glow", "Laser Glow", "M 4 12 C 26 9, 52 15, 78 11 C 94 9, 106 13, 116 12"],
       ["orbit", "Dual Helix", "M 4 12 C 20 2, 36 22, 52 12 C 68 2, 84 22, 100 12 C 108 7, 112 10, 116 12"],
     ];
-    const fade = Number(state.prefs.crossfade || 0);
     return `
       ${settingsSubChrome("Player")}
       <div class="settings">
@@ -16139,8 +17143,7 @@
             <select id="setFade">
               ${[0, 3, 6, 12].map((n) => `<option value="${n}" ${Number(p.crossfade) === n ? "selected" : ""}>${n ? n + "s" : "Off"}</option>`).join("")}
             </select>
-          </label>
-          <div class="set-row">
+          </label>          <div class="set-row">
             <div class="set-label"><span class="material-symbols-outlined set-ico" data-ico="amber">graphic_eq</span><div><strong>Even volume</strong></div></div>
             <button class="switch ${p.normalize ? "on" : ""}" data-pref="normalize" type="button"><i></i></button>
           </div>
@@ -16944,10 +17947,12 @@
         } else if (state.view === "library" && (state.activePlaylist === "downloads" || state.libFilter === "downloaded")) {
           track = (state.downloads[idx] && state.downloads[idx].id === id) ? state.downloads[idx] : state.downloads.find((t) => t.id === id);
         } else if (state.view === "library" && state.activePlaylist === "yt-liked") {
-          const rows = (state.ytLiked && state.ytLiked.tracks) || [];
+          const rawRows = (state.ytLiked && state.ytLiked.tracks) || [];
+          const rows = state.prefs.ytShowAllLiked ? rawRows : rawRows.filter((t) => t && t.isMusic !== false);
           track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t && t.id === id);
         } else if (state.view === "library" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0) {
-          const rows = (state.ytOpen && state.ytOpen.tracks) || [];
+          const rawRows = (state.ytOpen && state.ytOpen.tracks) || [];
+          const rows = state.prefs.ytShowAllPl ? rawRows : rawRows.filter((t) => t && t.isMusic !== false);
           track = (rows[idx] && rows[idx].id === id) ? rows[idx] : rows.find((t) => t && t.id === id);
         } else if (state.view === "library" && state.activePlaylist === "catalog") {
           const rows = (state.catalogPlaylist && state.catalogPlaylist.tracks) || [];
@@ -17080,8 +18085,14 @@
         let list = [];
         if (state.view === "library" && state.activePlaylist === "liked") list = state.liked;
         else if (state.view === "library" && state.activePlaylist === "downloads") list = state.downloads;
-        else if (state.view === "library" && state.activePlaylist === "yt-liked") list = (state.ytLiked && state.ytLiked.tracks) || [];
-        else if (state.view === "library" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0) list = (state.ytOpen && state.ytOpen.tracks) || [];
+        else if (state.view === "library" && state.activePlaylist === "yt-liked") {
+          const rawRows = (state.ytLiked && state.ytLiked.tracks) || [];
+          list = state.prefs.ytShowAllLiked ? rawRows : rawRows.filter((t) => t && t.isMusic !== false);
+        }
+        else if (state.view === "library" && typeof state.activePlaylist === "string" && state.activePlaylist.indexOf("yt-pl:") === 0) {
+          const rawRows = (state.ytOpen && state.ytOpen.tracks) || [];
+          list = state.prefs.ytShowAllPl ? rawRows : rawRows.filter((t) => t && t.isMusic !== false);
+        }
         else if (state.view === "library" && state.activePlaylist === "discovery") list = (state.discovery && state.discovery.tracks) || [];
         else if (state.view === "library" && state.activePlaylist === "catalog") list = (state.catalogPlaylist && state.catalogPlaylist.tracks) || [];
         else if (state.view === "library" && typeof state.activePlaylist === "number") list = state.playlists[state.activePlaylist].tracks;
@@ -17175,6 +18186,16 @@
         if (list[0]) playFromList(list, 0);
       });
     }
+    const playSmartMood = viewEl.querySelector("#playSmartMoodMix");
+    if (playSmartMood) playSmartMood.addEventListener("click", (e) => {
+      e.stopPropagation();
+      playSmartMoodMix();
+    });
+    const queueSmartMood = viewEl.querySelector("#queueSmartMoodMix");
+    if (queueSmartMood) queueSmartMood.addEventListener("click", (e) => {
+      e.stopPropagation();
+      queueSmartMoodMix();
+    });
     const openDisc = () => {
       rememberScroll();
       const originView = (state.view === "library" && state.activePlaylist != null)
@@ -17397,9 +18418,39 @@
     const ytConnectNow = viewEl.querySelector("#ytConnectNow");
     if (ytConnectNow) ytConnectNow.addEventListener("click", connectYouTube);
     const playYtLiked = viewEl.querySelector("#playYtLiked");
-    if (playYtLiked) playYtLiked.addEventListener("click", () => playTrackList((state.ytLiked && state.ytLiked.tracks) || [], 0));
+    if (playYtLiked) {
+      playYtLiked.addEventListener("click", () => {
+        const raw = (state.ytLiked && state.ytLiked.tracks) || [];
+        const tracks = state.prefs.ytShowAllLiked ? raw : raw.filter((t) => t && t.isMusic !== false);
+        playTrackList(tracks, 0);
+      });
+    }
     const playYtPl = viewEl.querySelector("#playYtPl");
-    if (playYtPl) playYtPl.addEventListener("click", () => playTrackList((state.ytOpen && state.ytOpen.tracks) || [], 0));
+    if (playYtPl) {
+      playYtPl.addEventListener("click", () => {
+        const raw = (state.ytOpen && state.ytOpen.tracks) || [];
+        const tracks = state.prefs.ytShowAllPl ? raw : raw.filter((t) => t && t.isMusic !== false);
+        playTrackList(tracks, 0);
+      });
+    }
+    const toggleYtLikedFilter = viewEl.querySelector("#toggleYtLikedFilter");
+    if (toggleYtLikedFilter) {
+      toggleYtLikedFilter.addEventListener("click", () => {
+        state.prefs.ytShowAllLiked = !state.prefs.ytShowAllLiked;
+        savePrefs();
+        toast(state.prefs.ytShowAllLiked ? "Showing all YouTube items" : "Filtering non-music items");
+        render();
+      });
+    }
+    const toggleYtPlFilter = viewEl.querySelector("#toggleYtPlFilter");
+    if (toggleYtPlFilter) {
+      toggleYtPlFilter.addEventListener("click", () => {
+        state.prefs.ytShowAllPl = !state.prefs.ytShowAllPl;
+        savePrefs();
+        toast(state.prefs.ytShowAllPl ? "Showing all YouTube items" : "Filtering non-music items");
+        render();
+      });
+    }
     const gSignInBtn = viewEl.querySelector("#gSignInBtn");
     if (gSignInBtn) gSignInBtn.addEventListener("click", startGoogleSignIn);
     const gYtConnect = viewEl.querySelector("#gYtConnect");
@@ -17551,48 +18602,37 @@
     });
     const tp = viewEl.querySelector("#testPlay");
     if (tp) tp.addEventListener("click", testPlay);
+    clearNotificationDocumentListeners();
+    const notificationsBtn = viewEl.querySelector("#notificationsBtn");
+    if (notificationsBtn && !notificationsBtn._muchiNotificationBound) {
+      notificationsBtn._muchiNotificationBound = true;
+      notificationsBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        state.showNotifications = !state.showNotifications;
+        state.showProfile = false;
+        clearProfileDocumentListener();
+        syncProfileSurface({ immediate: true, animate: false });
+        syncNotificationSurface({ animate: true });
+      });
+    }
+    syncNotificationSurface({ immediate: true });
     const profileBtn = viewEl.querySelector("#profileBtn");
     if (profileBtn) {
       profileBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         state.showProfile = !state.showProfile;
-        render();
+        state.showNotifications = false;
+        if (state.view === "home") {
+          syncNotificationSurface({ immediate: true, animate: false });
+          syncProfileSurface({ animate: true });
+        } else {
+          render();
+        }
       });
     }
-    const gotoSettings = viewEl.querySelector("#gotoSettings");
-    if (gotoSettings) {
-      gotoSettings.addEventListener("click", () => {
-        state.showProfile = false;
-        state.settingsPage = null;
-        setView("settings");
-      });
-    }
-    const pickAvatar = viewEl.querySelector("#pickAvatar");
-    if (pickAvatar) {
-      pickAvatar.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        state.pickingAvatar = true;
-        pickImage("avatar");
-      });
-    }
-    const setUsername = viewEl.querySelector("#setUsername");
-    if (setUsername) {
-      setUsername.addEventListener("change", () => {
-        state.prefs.username = String(setUsername.value || "").trim().slice(0, 32);
-        savePrefs();
-        toast(state.prefs.username ? `Hi, ${state.prefs.username}` : "Name cleared");
-      });
-    }
-    if (state.showProfile) {
-      const closeProf = (e) => {
-        if (e.target.closest("#profileMenu, #profileBtn")) return;
-        state.showProfile = false;
-        document.removeEventListener("click", closeProf);
-        if (state.view === "home") render();
-      };
-      setTimeout(() => document.addEventListener("click", closeProf), 0);
-    }
+    bindProfileSurfaceControls(viewEl);
+    if (state.view === "home") syncProfileSurface({ immediate: true, animate: false });
+    ensureProfileDocumentListener();
     const nowBack = viewEl.querySelector("#nowBack");
     if (nowBack) nowBack.addEventListener("click", requestBack);
     const lyScroll = viewEl.querySelector("#lyScroll");
@@ -18219,8 +19259,11 @@
     });
     viewEl.querySelectorAll("[data-del-pl]").forEach((el) => {
       el.addEventListener("click", () => {
-        state.playlists.splice(Number(el.dataset.delPl), 1);
-        savePlaylists();
+        const plIdx = Number(el.dataset.delPl);
+        const p = state.playlists[plIdx];
+        if (p) recordDeletedPlaylistTombstone(p.id || p.name);
+        state.playlists.splice(plIdx, 1);
+        savePlaylists({ replacePlaylists: true });
         state.activePlaylist = null;
         render();
       });
@@ -18258,6 +19301,7 @@
       catalogMeta: state.catalogMeta || null,
       queue: !!state.showQueue,
       profile: !!state.showProfile,
+      notifications: !!state.showNotifications,
       homeScroll: state.homeScroll || 0,
     };
   }
@@ -18367,6 +19411,7 @@
     }
     state.showQueue = !!s.queue;
     state.showProfile = !!s.profile;
+    state.showNotifications = !!s.notifications;
     if (typeof s.homeScroll === "number") state.homeScroll = s.homeScroll;
     if (state.view !== "now" && state.view !== "settings" && state.view !== "detail") {
       /* keep prevView */
@@ -18388,8 +19433,15 @@
       navReplace();
       return true;
     }
+    if (state.showNotifications) {
+      state.showNotifications = false;
+      syncNotificationSurface({ immediate: true, animate: false });
+      navReplace();
+      return true;
+    }
     if (state.showProfile) {
       state.showProfile = false;
+      syncProfileSurface({ immediate: true, animate: false });
       render();
       navReplace();
       return true;
@@ -18462,6 +19514,7 @@
     if (!fromBack && name === state.view && !state.settingsPage && state.activePlaylist == null && !state.artistPage && !state.detailTrack && !state.showQueue) {
       if (name === "home") {
         state.showProfile = false;
+        state.showNotifications = false;
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
       return;
@@ -18471,7 +19524,10 @@
         state.prevView = state.view;
       }
     }
-    if (name !== "home") state.showProfile = false;
+    if (name !== "home") {
+      state.showProfile = false;
+      state.showNotifications = false;
+    }
     if (name !== "search" && name !== "now" && name !== "settings" && name !== "detail") state.artistPage = null;
     if (name !== "detail") {
       state.detailTrack = null;
@@ -21005,17 +22061,9 @@
           f.lastId = latest.id;
           changed = true;
           if (!first) {
-            newCount++;
-            if ("Notification" in window && Notification.permission === "granted" && state.prefs.notifyFollows) {
-              try {
-                new Notification(`${f.name} released a track`, {
-                  body: latest.title,
-                  icon: artUrl(latest) || f.artwork || "/logo.png?v=53",
-                });
-              } catch {}
-            }
-            if (state.prefs.notifyInApp !== false) {
-              toast(`New release from ${f.name}: "${latest.title}"`, true, "info");
+            if (addReleaseNotification(f, latest)) {
+              newCount++;
+              if (state.prefs.notifyInApp !== false) toast(`New release from ${f.name}: "${latest.title}"`, true, "info");
             }
           }
         } else if (latest && latest.id && !f.lastId) {
@@ -21025,8 +22073,12 @@
       } catch {}
     }
     if (changed) saveFollowing();
+    if (newCount > 0) {
+      saveNotificationEntries();
+      if (state.view === "home") syncNotificationSurface({ rebuild: state.showNotifications, animate: false });
+    }
     if (manual) {
-      toast(newCount > 0 ? `Found ${newCount} new release(s)!` : `All ${state.following.length} followed artists are up to date`, true, "success");
+      toast(newCount > 0 ? `Found ${newCount} new release(s) in Notifications` : `All ${state.following.length} followed artists are up to date`, true, "success");
     }
   }
 
@@ -21168,12 +22220,13 @@
           return;
         }
         const created = { name, tracks: [], cover: draft.cover || "", banner: draft.banner || "" };
+        clearDeletedPlaylistTombstone(name);
         if (state.pendingAdd && !created.tracks.some((t) => t.id === state.pendingAdd.id)) {
           created.tracks.push(state.pendingAdd);
           state.pendingAdd = null;
         }
         state.playlists.push(created);
-        savePlaylists();
+        savePlaylists({ replacePlaylists: true });
         state.plDraft = null;
         renderPlaylistsNav();
         state.view = "library";
@@ -21390,7 +22443,7 @@
     const playBtnEl = $("playBtn");
     if (playBtnEl) {
       playBtnEl.addEventListener("pointerdown", (e) => {
-        triggerFabRipple(playBtnEl, e);
+        if (!isNativeHomePlaybackControl(playBtnEl)) triggerFabRipple(playBtnEl, e);
       });
       playBtnEl.onclick = togglePlay;
     }
@@ -21824,6 +22877,10 @@
         if (e.button && e.button !== 0) return;
         const t = e.target && e.target.closest ? e.target.closest(PRESS_SEL) : null;
         if (!t || t.disabled || t.getAttribute("aria-disabled") === "true") return;
+        if (isNativeHomePlaybackControl(t)) {
+          clearPressed(true);
+          return;
+        }
         if (activePressEl && activePressEl !== t) {
           activePressEl.classList.remove("is-pressed");
         }
@@ -21838,7 +22895,6 @@
       window.addEventListener("blur", () => clearPressed(true));
     }
     audio.addEventListener("ended", () => {
-      if (state._xfading) { state._xfading = false; return; }
       // Track finished: mark stopped BEFORE advancing so the play/pause glyph
       // is never a stale "pause" (which previously happened when next(false)
       // ran without re-rendering, e.g. when autoplay was off or the queue ran
@@ -21948,7 +23004,7 @@
     if (bar) {
       bar.addEventListener("click", (e) => {
         const btn = e.target.closest("button");
-        if (btn) bump(btn);
+        if (btn && !isNativeHomePlaybackControl(btn)) bump(btn);
         showPlayerChrome();
         if (isNativeApp()) {
           const actionBtn = e.target.closest("#playBtn, #prevBtn, #nextBtn, #likeBtn, #dlBtn, #repeatBtn, #shuffleBtn, #volume, #openNow, #lyricsBtn, #queueBtn, #sleepBtn, #videoBtn, #optionsBtn, #followBtn, #trackArtist, #toggleQueue, input, a, button");
@@ -22230,7 +23286,7 @@
         });
       }
     }
-    const isAppleWatchLike = el && el.classList && el.classList.contains("apple-watch-like");
+    const isAppleWatchLike = !isNativeApp() && el && el.classList && el.classList.contains("apple-watch-like");
     const glyphs = isAppleWatchLike ? ["⚡", "♥", "✦", "⚡", "♥"] : ["♥", "♡", "♪", "♫", "♥"];
     const count = isCoarse ? 12 : 20;
     for (let i = 0; i < count; i++) {

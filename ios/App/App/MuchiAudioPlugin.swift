@@ -51,8 +51,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let artwork: String
         let durationMs: Double
         let isrc: String
+        let sequence: Int64
 
-        init(url: String, videoId: String, candidates: String, title: String, artist: String, artwork: String, durationMs: Double, isrc: String = "") {
+        init(url: String, videoId: String, candidates: String, title: String, artist: String, artwork: String, durationMs: Double, isrc: String = "", sequence: Int64 = 0) {
             self.url = url
             self.videoId = videoId
             self.candidates = candidates
@@ -61,13 +62,21 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             self.artwork = artwork
             self.durationMs = durationMs
             self.isrc = isrc
+            self.sequence = max(0, sequence)
         }
     }
     private var queuedNextTrack: NextTrackInfo?
+    // Matches the web bridge token so delayed next-track updates cannot replace
+    // a newer queue snapshot on the main thread.
+    private var nextTrackSequence: Int64 = 0
     private var currentIsrc: String = ""
 
     private var player: AVPlayer?
     private var currentItem: AVPlayerItem?
+    // Main-thread handle/token for the delayed cache start. This makes the
+    // six-second guard explicitly cancellable on replacement, pause, and stop.
+    private var pendingCacheStart: DispatchWorkItem?
+    private var cacheStartToken: Int = 0
     private var ticker: Timer?
     private var errorSent = false
     private var fallbackDurationMs: Double = 0
@@ -148,24 +157,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         Self.sharedInstance = self
         setupRemoteCommands()
         setupSessionObservers()
+        // Phase 3C: route startup cleanup through the same serialized cache
+        // initialization used by reads and URLSession publication.
         DispatchQueue.global(qos: .utility).async {
-            if let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
-                let cacheDir = base.appendingPathComponent("muchi_audio_cache", isDirectory: true)
-                let fm = FileManager.default
-                let markerUrl = cacheDir.appendingPathComponent(".v193_clean")
-                let wipeAll = !fm.fileExists(atPath: markerUrl.path)
-                if let urls = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
-                    for u in urls {
-                        if let sz = (try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
-                           (wipeAll || sz == 983040 || sz < 1150000) {
-                            try? fm.removeItem(at: u)
-                        }
-                    }
-                }
-                if wipeAll {
-                    try? Data().write(to: markerUrl)
-                }
-            }
+            _ = Self.getAudioCacheDir()
         }
     }
 
@@ -189,6 +184,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 // The system took the audio (call/Siri). Pause and tell the
                 // web layer so its UI no longer claims "playing".
                 if self.player?.rate ?? 0 > 0 {
+                    self.cancelPendingCacheStart()
                     self.player?.pause()
                     self.updateRate()
                     self.emitControls("pause", positionMs: 0)
@@ -214,6 +210,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             if reason == .oldDeviceUnavailable, self.player?.rate ?? 0 > 0 {
                 // Headphones unplugged (or Bluetooth device lost) — the iOS
                 // convention is to stop audio, not blast it into the speaker.
+                self.cancelPendingCacheStart()
                 self.player?.pause()
                 self.updateRate()
                 self.emitControls("pause", positionMs: 0)
@@ -269,13 +266,27 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let candidates = call.getString("candidates") ?? ""
         let duration = call.getDouble("duration") ?? 0
         let isrc = call.getString("isrc") ?? ""
+        let sequence = max(0, Int64(call.getDouble("sequence") ?? 0))
+        let shouldPreload = call.getBool("preload") ?? true
+        if sequence > 0 {
+            if sequence <= nextTrackSequence {
+                call.resolve()
+                return
+            }
+            nextTrackSequence = sequence
+        } else if nextTrackSequence > 0 {
+            // Ignore legacy/unsequenced deliveries after the tokenized bridge
+            // has started; they may be delayed copies of an older queue state.
+            call.resolve()
+            return
+        }
         if url.isEmpty && videoId.isEmpty && title.isEmpty {
             queuedNextTrack = nil
         } else {
-            queuedNextTrack = NextTrackInfo(url: url, videoId: videoId, candidates: candidates, title: title, artist: artist, artwork: artwork, durationMs: duration, isrc: isrc)
-            if !videoId.isEmpty {
+            queuedNextTrack = NextTrackInfo(url: url, videoId: videoId, candidates: candidates, title: title, artist: artist, artwork: artwork, durationMs: duration, isrc: isrc, sequence: sequence)
+            if shouldPreload && !videoId.isEmpty {
                 Self.preloadStream(videoId: videoId, candidates: candidates, title: title, artist: artist, isrc: isrc)
-            } else if !title.isEmpty {
+            } else if shouldPreload && !title.isEmpty {
                 Self.preloadStream(videoId: "", candidates: candidates, title: title, artist: artist, isrc: isrc)
             }
         }
@@ -328,6 +339,9 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func playTrackDirect(url: String, videoId: String, candidates: String, title: String, artist: String, artwork: String, durationMs: Double, startPosMs: Double, isrc: String = "") {
+        // A replacement invalidates the previous stream's delayed cache start
+        // and any stale replacement state before its new load sequence is published.
+        cancelPendingCacheStart()
         configureAudioSession()
         beginAudioBackgroundTask()
 
@@ -362,13 +376,15 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             elapsedMs: startPosMs
         )
 
-        let lowUrl = url.lowercased()
+        let initialLowUrl = url.lowercased()
         // Instant App Audio Cache Hit: If this song has already been played and cached in
         // muchi_audio_cache on disk, play the local cached audio file immediately in 0ms
         // with zero backend or network load!
-        if !lowUrl.hasPrefix("file:") {
-            if let cachedFileUrl = Self.getCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist) {
-                let minFullSongBytes: Int64 = fallbackDurationMs >= 90000 ? Int64((fallbackDurationMs / 1000.0) * 9500.0) : 262144
+        if !initialLowUrl.hasPrefix("file:") {
+            if let cachedFileUrl = Self.getCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist, isrc: currentIsrc) {
+                let minFullSongBytes: Int64 = fallbackDurationMs >= 90000
+                    ? Int64((fallbackDurationMs / 1000.0) * 9500.0)
+                    : minUncappedAudioCacheBytes
                 let fileSize = ((try? FileManager.default.attributesOfItem(atPath: cachedFileUrl.path)[.size] as? NSNumber)?.int64Value) ?? 0
                 if fileSize >= minFullSongBytes {
                     resolvingOnDevice = false
@@ -377,13 +393,36 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                     startPlayer(with: cachedFileUrl, rawUrl: cachedFileUrl.absoluteString, userAgent: "")
                     return
                 } else {
-                    Self.evictCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist)
+                    Self.evictCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist, isrc: currentIsrc)
                 }
             }
         }
 
-        let isUnsupportedWebm = lowUrl.contains("mime=audio%2fwebm") || lowUrl.contains("mime=audio/webm") || lowUrl.contains(" codecs=\"opus\"")
-        if lowUrl.hasPrefix("yt:") || (isUnsupportedWebm && !currentVideoId.isEmpty) {
+        var effectiveUrl = url
+        let lowUrl = effectiveUrl.lowercased()
+
+        // Check if the provided URL is an expired googlevideo stream URL before attempting playback.
+        // A near-expiry URL is not safe to hand to AVPlayer: invalidate all matching resolver
+        // entries and force a fresh on-device resolution instead of starting a stream that dies
+        // during startup or shortly after backgrounding.
+        if lowUrl.contains("googlevideo.com") || lowUrl.contains("expire=") {
+            var urlExpireSec: Double = 0
+            if let regex = try? NSRegularExpression(pattern: "(?:[?&]|%26)expire(?:=|%3D)([0-9]+)"),
+               let match = regex.firstMatch(in: effectiveUrl, range: NSRange(effectiveUrl.startIndex..., in: effectiveUrl)),
+               let r = Range(match.range(at: 1), in: effectiveUrl),
+               let parsed = Double(effectiveUrl[r]) {
+                urlExpireSec = parsed
+            }
+            if urlExpireSec > 0 && (urlExpireSec * 1000.0) <= (Date().timeIntervalSince1970 * 1000.0 + 15000.0) {
+                Self.invalidateResolvedCacheForTrack(videoId: currentVideoId, title: currentTitle, artist: currentArtist, failedUrl: effectiveUrl)
+                effectiveUrl = !currentVideoId.isEmpty ? ("yt:" + currentVideoId) : "yt:"
+                currentUrl = effectiveUrl
+            }
+        }
+
+        let effectiveLowUrl = effectiveUrl.lowercased()
+        let isUnsupportedWebm = effectiveLowUrl.contains("mime=audio%2fwebm") || effectiveLowUrl.contains("mime=audio/webm") || effectiveLowUrl.contains(" codecs=\"opus\"") || effectiveLowUrl.hasSuffix(".webm") || effectiveLowUrl.contains("format=opus")
+        if effectiveLowUrl.hasPrefix("yt:") || (isUnsupportedWebm && !currentVideoId.isEmpty) {
             let syncQKey = Self.queryCacheKey(title: currentTitle, artist: currentArtist)
             let syncHit = (!currentVideoId.isEmpty ? Self.getCachedStream(currentVideoId) : nil)
                 ?? (!syncQKey.isEmpty ? Self.getCachedStream(syncQKey) : nil)
@@ -405,6 +444,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             triedOnDeviceResolve = true
             resolvingOnDevice = true
             stopTicker()
+            cancelPendingCacheStart()
             player?.pause()
             player?.replaceCurrentItem(with: nil)
             currentItem = nil
@@ -437,15 +477,18 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
-        guard let streamUrl = URL(string: url) else {
+        guard let streamUrl = URL(string: effectiveUrl) else {
             return
         }
         resolvingOnDevice = false
         triedOnDeviceResolve = false
-        startPlayer(with: streamUrl, rawUrl: url, userAgent: Self.userAgentForStreamUrl(url))
+        startPlayer(with: streamUrl, rawUrl: effectiveUrl, userAgent: Self.userAgentForStreamUrl(effectiveUrl))
     }
 
     private func startPlayer(with streamUrl: URL, rawUrl: String, userAgent: String) {
+        // Also covers mid-song recovery: never let the previous URL's delayed
+        // cache start run against this replacement player item.
+        cancelPendingCacheStart()
         let p: AVPlayer
         if let existing = player { p = existing } else { p = AVPlayer() }
         p.automaticallyWaitsToMinimizeStalling = false
@@ -517,22 +560,40 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
         p.playImmediately(atRate: prefSpeed)
+        // The ramp begins from the ready/playing ticker state, not while AVPlayer
+        // is still resolving or buffering the replacement stream.
         if !streamUrl.isFileURL && (rawUrl.hasPrefix("http://") || rawUrl.hasPrefix("https://")) {
             let expectedSeq = loadSeq
             let vid = currentVideoId
             let tTitle = currentTitle
             let tArtist = currentArtist
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
-                guard let self = self, self.loadSeq == expectedSeq, (self.player?.rate ?? 0) > 0 else { return }
+            let tIsrc = currentIsrc
+            let expectedDurationForCache = fallbackDurationMs
+            cacheStartToken += 1
+            let expectedCacheToken = cacheStartToken
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self, self.cacheStartToken == expectedCacheToken else { return }
+                self.pendingCacheStart = nil
+                guard self.loadSeq == expectedSeq,
+                      !self.resolvingOnDevice,
+                      let p = self.player,
+                      let item = self.currentItem,
+                      item.status == .readyToPlay,
+                      p.rate > 0,
+                      p.timeControlStatus == .playing else { return }
                 Self.cacheStreamToDiskAsync(
                     streamUrl: streamUrl,
                     rawUrl: rawUrl,
                     userAgent: ua,
                     videoId: vid,
                     title: tTitle,
-                    artist: tArtist
+                    artist: tArtist,
+                    isrc: tIsrc,
+                    expectedDurationMs: expectedDurationForCache
                 )
             }
+            pendingCacheStart = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)
         }
         startTicker()
     }
@@ -583,6 +644,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc public func pause(_ call: CAPPluginCall) {
+        cancelPendingCacheStart()
         player?.pause()
         updateRate()
         call.resolve()
@@ -949,7 +1011,17 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         doStop(notifyJs: false)
     }
 
+    private func cancelPendingCacheStart() {
+        cacheStartToken += 1
+        pendingCacheStart?.cancel()
+        pendingCacheStart = nil
+        // Phase 3B: cancel an already-running cache task as well; the
+        // URLSession completion path never publishes its temporary file.
+        Self.cancelAudioCacheDownload(videoId: currentVideoId, title: currentTitle, artist: currentArtist, isrc: currentIsrc)
+    }
+
     private func doStop(notifyJs: Bool = false) {
+        cancelPendingCacheStart()
         stopTicker()
         endAudioBackgroundTask()
         player?.pause()
@@ -976,6 +1048,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func recoverMidSongStream(resumeMs: Double) {
+        cancelPendingCacheStart()
         triedOnDeviceResolve = true
         midSongRecoveryCount += 1
         resolvingOnDevice = true
@@ -984,7 +1057,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             failedVideoIds.insert(currentVideoId)
         }
         Self.invalidateResolvedCacheForTrack(videoId: currentVideoId, title: currentTitle, artist: currentArtist, failedUrl: currentUrl)
-        Self.evictCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist)
+        Self.evictCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist, isrc: currentIsrc)
         pendingSeekMs = max(0, resumeMs)
         pendingSeekSetAt = CFAbsoluteTimeGetCurrent()
         lastKnownPositionMs = pendingSeekMs
@@ -1036,7 +1109,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 }
                 Self.invalidateResolvedCacheForTrack(videoId: self.currentVideoId, title: self.currentTitle, artist: self.currentArtist, failedUrl: self.currentUrl)
                 if let urlAsset = item.asset as? AVURLAsset, urlAsset.url.isFileURL {
-                    Self.evictCachedAudioFile(videoId: self.currentVideoId, title: self.currentTitle, artist: self.currentArtist)
+                    Self.evictCachedAudioFile(videoId: self.currentVideoId, title: self.currentTitle, artist: self.currentArtist, isrc: self.currentIsrc)
                     self.triedOnDeviceResolve = false
                 }
                 if (!self.triedOnDeviceResolve || (errPosMs > 1500 && self.midSongRecoveryCount < 2))
@@ -1108,13 +1181,33 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         info[MPNowPlayingInfoPropertyPlaybackRate] = 1
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
 
-        if !artwork.isEmpty, let artUrl = URL(string: artwork) {
+        func applyDefaultArtworkFallback() {
+            if let path = Bundle.main.path(forResource: "cover-default", ofType: "jpg", inDirectory: "public") ??
+                          Bundle.main.path(forResource: "cover-default", ofType: "jpg") {
+                if let img = UIImage(contentsOfFile: path) {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.updateArtwork(img)
+                    }
+                }
+            }
+        }
+
+        if !artwork.isEmpty,
+           !artwork.contains("localhost"),
+           !artwork.contains("cover-default"),
+           let artUrl = URL(string: artwork),
+           artUrl.scheme == "http" || artUrl.scheme == "https" {
             URLSession.shared.dataTask(with: artUrl) { [weak self] data, _, _ in
-                guard let data = data, let img = UIImage(data: data) else { return }
-                DispatchQueue.main.async {
-                    self?.updateArtwork(img)
+                if let data = data, let img = UIImage(data: data) {
+                    DispatchQueue.main.async {
+                        self?.updateArtwork(img)
+                    }
+                } else {
+                    applyDefaultArtworkFallback()
                 }
             }.resume()
+        } else {
+            applyDefaultArtworkFallback()
         }
     }
 
@@ -1145,6 +1238,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return .success
         }
         cc.pauseCommand.addTarget { [weak self] _ in
+            self?.cancelPendingCacheStart()
             self?.emitControls("pause", positionMs: 0)
             self?.player?.pause()
             self?.updateRate()
@@ -1153,6 +1247,7 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cc.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self = self else { return .commandFailed }
             if self.player?.rate ?? 0 > 0 {
+                self.cancelPendingCacheStart()
                 self.emitControls("pause", positionMs: 0)
                 self.player?.pause()
             } else {
@@ -1327,30 +1422,74 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private static let cacheLock = NSLock()
     private static var resolvedCache: [String: CachedStream] = [:]
     private static let cacheTTL: TimeInterval = 20 * 60
-    private static var activeAudioCacheDownloads = Set<String>()
+    private static let minUncappedAudioCacheBytes: Int64 = 1150000
     private static let maxAudioCacheBytes: Int64 = 250 * 1024 * 1024
     private static var cacheCleanChecked = false
+
+    private final class AudioCacheDownload {
+        let canonicalKey: String
+        let keys: Set<String>
+        var cancelled = false
+        var task: URLSessionDownloadTask?
+
+        init(canonicalKey: String, keys: Set<String>) {
+            self.canonicalKey = canonicalKey
+            self.keys = keys
+        }
+    }
+    private static var activeAudioCacheDownloads: [String: AudioCacheDownload] = [:]
 
     private static func getAudioCacheDir() -> URL? {
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         let dir = base.appendingPathComponent("muchi_audio_cache", isDirectory: true)
         let fm = FileManager.default
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         if !cacheCleanChecked {
+            cleanAudioCacheDirOnStartup(dir)
             cacheCleanChecked = true
-            let marker = dir.appendingPathComponent(".v193_clean")
-            if !fm.fileExists(atPath: marker.path) {
-                if let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-                    for u in items where u.lastPathComponent != ".v193_clean" {
-                        try? fm.removeItem(at: u)
-                    }
-                }
-                try? Data().write(to: marker)
-            }
         }
         return dir
+    }
+
+    private static func cleanAudioCacheDirOnStartup(_ dir: URL) {
+        let fm = FileManager.default
+        let marker = dir.appendingPathComponent(".v193_clean")
+        let wipeAll = !fm.fileExists(atPath: marker.path)
+        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: []) else { return }
+        if wipeAll {
+            for item in items where item != marker {
+                try? fm.removeItem(at: item)
+            }
+            try? Data().write(to: marker)
+            return
+        }
+
+        var validCanonicalKeys = Set<String>()
+        for item in items where item.pathExtension == "m4a" {
+            let key = item.deletingPathExtension().lastPathComponent
+            if key.isEmpty || key != sanitizeAudioCacheKey(key) || !isCompleteAudioCacheFile(item) {
+                try? fm.removeItem(at: item)
+            } else {
+                validCanonicalKeys.insert(key)
+            }
+        }
+        for item in items where item != marker {
+            let ext = item.pathExtension
+            if ext == "meta" {
+                let key = item.deletingPathExtension().lastPathComponent
+                if !validCanonicalKeys.contains(key) { try? fm.removeItem(at: item) }
+            } else if ext == "alias" {
+                let canonicalKey = readAudioCacheAlias(item)
+                if !validCanonicalKeys.contains(canonicalKey) { try? fm.removeItem(at: item) }
+            } else if ext != "m4a" {
+                // Temporary downloads and unknown cache debris are never reusable after restart.
+                try? fm.removeItem(at: item)
+            }
+        }
     }
 
     private static func sanitizeAudioCacheKey(_ raw: String) -> String {
@@ -1364,98 +1503,277 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         return cleaned
     }
 
-    public static func getCachedAudioFile(videoId: String, title: String, artist: String) -> URL? {
-        guard let dir = getAudioCacheDir() else { return nil }
+    private static func audioCacheVideoKey(_ videoId: String) -> String {
+        let clean = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? "" : sanitizeAudioCacheKey("vid_\(clean)")
+    }
+
+    private static func audioCacheQueryKey(_ title: String, _ artist: String) -> String {
+        let query = queryCacheKey(title: title, artist: artist)
+        return query.isEmpty ? "" : sanitizeAudioCacheKey(query)
+    }
+
+    private static func audioCacheIsrcKey(_ isrc: String) -> String {
+        let clean = isrc.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? "" : sanitizeAudioCacheKey("isrc_\(clean.uppercased())")
+    }
+
+    private static func audioCacheKeys(videoId: String, title: String, artist: String, isrc: String) -> Set<String> {
+        var keys = Set<String>()
+        let vidKey = audioCacheVideoKey(videoId)
+        let queryKey = audioCacheQueryKey(title, artist)
+        let isrcKey = audioCacheIsrcKey(isrc)
+        if !vidKey.isEmpty { keys.insert(vidKey) }
+        if !queryKey.isEmpty { keys.insert(queryKey) }
+        if !isrcKey.isEmpty { keys.insert(isrcKey) }
+        return keys
+    }
+
+    private static func canonicalAudioCacheKey(videoId: String, title: String, artist: String, isrc: String) -> String {
+        let vidKey = audioCacheVideoKey(videoId)
+        if !vidKey.isEmpty { return vidKey }
+        let queryKey = audioCacheQueryKey(title, artist)
+        if !queryKey.isEmpty { return queryKey }
+        return audioCacheIsrcKey(isrc)
+    }
+
+    private static func audioCacheFile(_ dir: URL, _ key: String) -> URL? {
+        key.isEmpty ? nil : dir.appendingPathComponent("\(key).m4a")
+    }
+
+    private static func isCompleteAudioCacheFile(_ file: URL) -> Bool {
         let fm = FileManager.default
-        let minValidBytes: Int64 = 262144
-        let minUncappedBytes: Int64 = 1150000 // > 1.15 MB minimum to reject 983,040-byte (1-minute) c=IOS/c=ANDROID files
-        let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !vid.isEmpty {
-            let vf = dir.appendingPathComponent(sanitizeAudioCacheKey("vid_\(vid)") + ".m4a")
-            if fm.fileExists(atPath: vf.path) {
-                if let attrs = try? fm.attributesOfItem(atPath: vf.path),
-                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value >= minUncappedBytes && size.int64Value != 983040 {
-                    try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: vf.path)
-                    return vf
-                } else {
-                    try? fm.removeItem(at: vf)
-                }
-            }
+        guard fm.fileExists(atPath: file.path),
+              let attrs = try? fm.attributesOfItem(atPath: file.path),
+              let size = attrs[.size] as? NSNumber else { return false }
+        let bytes = size.int64Value
+        return bytes >= minUncappedAudioCacheBytes
+            && bytes != 983040
+    }
+
+    private static func validAudioCacheFile(_ file: URL?) -> URL? {
+        guard let file = file else { return nil }
+        let fm = FileManager.default
+        if isCompleteAudioCacheFile(file) {
+            try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
+            return file
         }
-        let qKey = queryCacheKey(title: title, artist: artist)
-        if !qKey.isEmpty {
-            let qf = dir.appendingPathComponent(sanitizeAudioCacheKey(qKey) + ".m4a")
-            if fm.fileExists(atPath: qf.path) {
-                if let attrs = try? fm.attributesOfItem(atPath: qf.path),
-                   let size = attrs[.size] as? NSNumber, size.int64Value >= minValidBytes && size.int64Value >= minUncappedBytes && size.int64Value != 983040 {
-                    try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: qf.path)
-                    return qf
-                } else {
-                    try? fm.removeItem(at: qf)
-                }
+        if fm.fileExists(atPath: file.path) { try? fm.removeItem(at: file) }
+        return nil
+    }
+
+    private static func readAudioCacheAlias(_ alias: URL) -> String {
+        guard let raw = try? String(contentsOf: alias, encoding: .utf8) else { return "" }
+        return sanitizeAudioCacheKey(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func resolveAudioCacheFile(_ dir: URL, _ key: String) -> URL? {
+        guard !key.isEmpty else { return nil }
+        if let direct = validAudioCacheFile(audioCacheFile(dir, key)) { return direct }
+        let alias = dir.appendingPathComponent("\(key).alias")
+        let canonicalKey = readAudioCacheAlias(alias)
+        if !canonicalKey.isEmpty {
+            if let aliased = validAudioCacheFile(audioCacheFile(dir, canonicalKey)) {
+                return aliased
             }
+            deleteAudioCacheArtifact(dir, canonicalKey)
+        } else if FileManager.default.fileExists(atPath: alias.path) {
+            try? FileManager.default.removeItem(at: alias)
         }
         return nil
     }
 
-    public static func evictCachedAudioFile(videoId: String, title: String, artist: String) {
-        guard let dir = getAudioCacheDir() else { return }
+    public static func getCachedAudioFile(videoId: String, title: String, artist: String, isrc: String = "") -> URL? {
+        guard let dir = getAudioCacheDir() else { return nil }
+        let keys = [
+            audioCacheVideoKey(videoId),
+            audioCacheQueryKey(title, artist),
+            audioCacheIsrcKey(isrc)
+        ]
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for key in keys {
+            if let hit = resolveAudioCacheFile(dir, key) { return hit }
+        }
+        return nil
+    }
+
+    private static func removeAliasesForCanonical(_ dir: URL, _ canonicalKey: String) {
+        guard !canonicalKey.isEmpty,
+              let items = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        for item in items where item.pathExtension == "alias" {
+            if readAudioCacheAlias(item) == canonicalKey { try? FileManager.default.removeItem(at: item) }
+        }
+    }
+
+    private static func deleteAudioCacheKey(_ dir: URL, _ key: String, _ removed: inout Set<String>) {
+        guard !key.isEmpty else { return }
         let fm = FileManager.default
-        let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !vid.isEmpty {
-            let vf = dir.appendingPathComponent(sanitizeAudioCacheKey("vid_\(vid)") + ".m4a")
-            try? fm.removeItem(at: vf)
+        let alias = dir.appendingPathComponent("\(key).alias")
+        let canonicalKey = readAudioCacheAlias(alias).isEmpty ? key : readAudioCacheAlias(alias)
+        if removed.insert(canonicalKey).inserted {
+            if let target = audioCacheFile(dir, canonicalKey) { try? fm.removeItem(at: target) }
+            try? fm.removeItem(at: dir.appendingPathComponent("\(canonicalKey).meta"))
+            removeAliasesForCanonical(dir, canonicalKey)
         }
-        let qKey = queryCacheKey(title: title, artist: artist)
-        if !qKey.isEmpty {
-            let qf = dir.appendingPathComponent(sanitizeAudioCacheKey(qKey) + ".m4a")
-            try? fm.removeItem(at: qf)
-        }
+        try? fm.removeItem(at: alias)
+    }
+
+    public static func evictCachedAudioFile(videoId: String, title: String, artist: String, isrc: String = "") {
+        // Invalidation is also a cancellation boundary: a stale URLSession task
+        // must not publish a replacement after this method removes the artifact.
+        cancelAudioCacheDownload(videoId: videoId, title: title, artist: artist, isrc: isrc)
+        guard let dir = getAudioCacheDir() else { return }
+        cacheLock.lock()
+        var removed = Set<String>()
+        deleteAudioCacheKey(dir, audioCacheVideoKey(videoId), &removed)
+        deleteAudioCacheKey(dir, audioCacheQueryKey(title, artist), &removed)
+        deleteAudioCacheKey(dir, audioCacheIsrcKey(isrc), &removed)
+        cacheLock.unlock()
+    }
+
+    private static func deleteAudioCacheArtifact(_ dir: URL, _ canonicalKey: String) {
+        guard !canonicalKey.isEmpty else { return }
+        let fm = FileManager.default
+        if let target = audioCacheFile(dir, canonicalKey) { try? fm.removeItem(at: target) }
+        try? fm.removeItem(at: dir.appendingPathComponent("\(canonicalKey).meta"))
+        removeAliasesForCanonical(dir, canonicalKey)
+    }
+
+    private static func isAudioCacheCanonicalActive(_ canonicalKey: String) -> Bool {
+        guard !canonicalKey.isEmpty else { return false }
+        return activeAudioCacheDownloads.values.contains { $0.canonicalKey == canonicalKey }
     }
 
     private static func pruneAudioCacheDir(_ dir: URL) {
         let fm = FileManager.default
-        guard let urls = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) else { return }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard let urls = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: []) else { return }
+        var audioFiles: [(url: URL, key: String, size: Int64, date: Date)] = []
         var total: Int64 = 0
-        var entries: [(url: URL, size: Int64, date: Date)] = []
-        for u in urls {
-            if let vals = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
-               let sz = vals.fileSize {
-                let s64 = Int64(sz)
-                total += s64
-                entries.append((u, s64, vals.contentModificationDate ?? Date.distantPast))
+        for url in urls where url.pathExtension == "m4a" {
+            let key = url.deletingPathExtension().lastPathComponent
+            if !isCompleteAudioCacheFile(url) {
+                if !isAudioCacheCanonicalActive(key) { deleteAudioCacheArtifact(dir, key) }
+                continue
             }
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let size = Int64(values?.fileSize ?? 0)
+            let date = values?.contentModificationDate ?? Date.distantPast
+            total += size
+            audioFiles.append((url, key, size, date))
         }
-        if total <= maxAudioCacheBytes { return }
-        entries.sort { $0.date < $1.date }
-        for e in entries {
-            if (try? fm.removeItem(at: e.url)) != nil {
-                total -= e.size
-                if total <= (maxAudioCacheBytes * 80) / 100 { break }
-            }
+        guard total > maxAudioCacheBytes else { return }
+        audioFiles.sort { $0.date < $1.date }
+        for entry in audioFiles {
+            if isAudioCacheCanonicalActive(entry.key) { continue }
+            deleteAudioCacheArtifact(dir, entry.key)
+            total -= entry.size
+            if total <= (maxAudioCacheBytes * 80) / 100 { break }
         }
     }
 
-    private static func cacheStreamToDiskAsync(streamUrl: URL, rawUrl: String, userAgent: String, videoId: String, title: String, artist: String) {
-        if getCachedAudioFile(videoId: videoId, title: title, artist: artist) != nil { return }
+    private static func writeAudioCacheTextAtomically(_ target: URL, _ text: String) {
+        let fm = FileManager.default
+        let tmp = target.deletingLastPathComponent()
+            .appendingPathComponent("\(target.lastPathComponent).\(UUID().uuidString).tmp")
+        guard let data = text.data(using: .utf8) else { return }
+        do {
+            try data.write(to: tmp, options: .atomic)
+            if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+            try fm.moveItem(at: tmp, to: target)
+        } catch {
+            try? fm.removeItem(at: tmp)
+        }
+    }
+
+    private static func writeAudioCacheMetadata(_ dir: URL, _ canonicalKey: String, _ keys: Set<String>,
+                                                videoId: String, title: String, artist: String, isrc: String,
+                                                expectedDurationMs: Double) {
+        let metadata: [String: Any] = [
+            "version": 1,
+            "canonicalKey": canonicalKey,
+            "videoId": videoId.trimmingCharacters(in: .whitespacesAndNewlines),
+            "queryKey": queryCacheKey(title: title, artist: artist),
+            "isrc": isrc.trimmingCharacters(in: .whitespacesAndNewlines),
+            "title": title,
+            "artist": artist,
+            "expectedDurationMs": max(0, expectedDurationMs)
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: metadata),
+           let text = String(data: data, encoding: .utf8) {
+            writeAudioCacheTextAtomically(dir.appendingPathComponent("\(canonicalKey).meta"), text)
+        }
+        for key in keys where !key.isEmpty && key != canonicalKey {
+            writeAudioCacheTextAtomically(dir.appendingPathComponent("\(key).alias"), canonicalKey)
+        }
+    }
+
+    private static func claimAudioCacheDownload(_ canonicalKey: String, _ keys: Set<String>) -> AudioCacheDownload? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for key in keys where activeAudioCacheDownloads[key] != nil { return nil }
+        let state = AudioCacheDownload(canonicalKey: canonicalKey, keys: keys)
+        for key in keys { activeAudioCacheDownloads[key] = state }
+        return state
+    }
+
+    private static func releaseAudioCacheDownload(_ state: AudioCacheDownload) {
+        cacheLock.lock()
+        for key in state.keys where activeAudioCacheDownloads[key] === state {
+            activeAudioCacheDownloads.removeValue(forKey: key)
+        }
+        cacheLock.unlock()
+    }
+
+    private static func cancelAudioCacheDownload(videoId: String, title: String, artist: String, isrc: String) {
+        cacheLock.lock()
+        var seen = Set<ObjectIdentifier>()
+        var states = [AudioCacheDownload]()
+        for key in audioCacheKeys(videoId: videoId, title: title, artist: artist, isrc: isrc) {
+            if let state = activeAudioCacheDownloads[key], seen.insert(ObjectIdentifier(state)).inserted {
+                states.append(state)
+            }
+        }
+        cacheLock.unlock()
+        for state in states {
+            cacheLock.lock()
+            state.cancelled = true
+            let task = state.task
+            cacheLock.unlock()
+            task?.cancel()
+        }
+    }
+
+    private static func isAudioCacheDownloadCancelled(_ state: AudioCacheDownload) -> Bool {
+        cacheLock.lock()
+        let cancelled = state.cancelled
+        cacheLock.unlock()
+        return cancelled
+    }
+
+    private static func cacheStreamToDiskAsync(streamUrl: URL, rawUrl: String, userAgent: String,
+                                               videoId: String, title: String, artist: String,
+                                               isrc: String = "", expectedDurationMs: Double = 0) {
+        // Never attempt to cache infinite live radio streams or playlist manifests.
+        // Decode proxy query URLs first so /api/stream?url=...radio... is covered too.
+        let decodedRawUrl = rawUrl.removingPercentEncoding ?? rawUrl
+        let lowerRawUrl = decodedRawUrl.lowercased()
+        if lowerRawUrl.contains("/radio/") || lowerRawUrl.contains(":8000/") || lowerRawUrl.contains(":8080/")
+            || lowerRawUrl.contains(".pls") || lowerRawUrl.contains(".m3u") {
+            return
+        }
+        if getCachedAudioFile(videoId: videoId, title: title, artist: artist, isrc: isrc) != nil { return }
         // Never open a second competing HTTP download connection to googlevideo.com while
         // AVPlayer is actively streaming that single-session token (prevents ~1-minute stream cutoffs).
         if rawUrl.contains("googlevideo.com") || rawUrl.contains("c=IOS") || rawUrl.contains("c=ANDROID&") {
             return
         }
-        let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let primaryKey = !vid.isEmpty ? sanitizeAudioCacheKey("vid_\(vid)") : sanitizeAudioCacheKey(queryCacheKey(title: title, artist: artist))
-        guard !primaryKey.isEmpty else { return }
-        let secondaryKey = (!vid.isEmpty && !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            ? sanitizeAudioCacheKey(queryCacheKey(title: title, artist: artist))
-            : ""
-        cacheLock.lock()
-        if activeAudioCacheDownloads.contains(primaryKey) {
-            cacheLock.unlock()
-            return
-        }
-        activeAudioCacheDownloads.insert(primaryKey)
-        cacheLock.unlock()
+        let primaryKey = canonicalAudioCacheKey(videoId: videoId, title: title, artist: artist, isrc: isrc)
+        let cacheKeys = audioCacheKeys(videoId: videoId, title: title, artist: artist, isrc: isrc)
+        guard !primaryKey.isEmpty, !cacheKeys.isEmpty,
+              let state = claimAudioCacheDownload(primaryKey, cacheKeys) else { return }
 
         var urlClen: Int64 = 0
         if let regex = try? NSRegularExpression(pattern: "(?:[?&]|%26)clen(?:=|%3D)([0-9]+)"),
@@ -1472,13 +1790,10 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
             req.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
         }
-        URLSession.shared.downloadTask(with: req) { tempUrl, response, _ in
-            defer {
-                cacheLock.lock()
-                activeAudioCacheDownloads.remove(primaryKey)
-                cacheLock.unlock()
-            }
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+        let task = URLSession.shared.downloadTask(with: req) { tempUrl, response, _ in
+            defer { releaseAudioCacheDownload(state) }
+            guard !isAudioCacheDownloadCancelled(state),
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                   let tempUrl = tempUrl,
                   let dir = getAudioCacheDir() else { return }
             let fm = FileManager.default
@@ -1486,22 +1801,38 @@ public class MuchiAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let attrs = try? fm.attributesOfItem(atPath: tempUrl.path),
                   let size = attrs[.size] as? NSNumber else { return }
             let written = size.int64Value
-            let completeEnough = written >= 262144
+            let completeEnough = written >= minUncappedAudioCacheBytes
                 && written < 45 * 1024 * 1024
+                && written != 983040
                 && (expectedBytes <= 0 || written >= (expectedBytes * 98) / 100)
-            guard completeEnough else { return }
-            let targetUrl = dir.appendingPathComponent(primaryKey + ".m4a")
-            try? fm.removeItem(at: targetUrl)
-            if (try? fm.moveItem(at: tempUrl, to: targetUrl)) != nil {
-                if !secondaryKey.isEmpty && secondaryKey != primaryKey {
-                    let secUrl = dir.appendingPathComponent(secondaryKey + ".m4a")
-                    if !fm.fileExists(atPath: secUrl.path) {
-                        try? fm.copyItem(at: targetUrl, to: secUrl)
-                    }
+            guard completeEnough, !isAudioCacheDownloadCancelled(state) else { return }
+            let targetUrl = dir.appendingPathComponent("\(primaryKey).m4a")
+            var published = false
+            cacheLock.lock()
+            if !state.cancelled && !isCompleteAudioCacheFile(targetUrl) {
+                if fm.fileExists(atPath: targetUrl.path) { try? fm.removeItem(at: targetUrl) }
+                // URLSession's temporary file and this same-directory move ensure no partial
+                // file is visible under the final .m4a name. The lock serializes
+                // cancellation with the publication decision.
+                do {
+                    try fm.moveItem(at: tempUrl, to: targetUrl)
+                    published = true
+                } catch {
+                    try? fm.removeItem(at: targetUrl)
                 }
+            }
+            cacheLock.unlock()
+            if published {
+                writeAudioCacheMetadata(dir, primaryKey, cacheKeys, videoId: videoId, title: title, artist: artist, isrc: isrc, expectedDurationMs: expectedDurationMs)
                 pruneAudioCacheDir(dir)
             }
-        }.resume()
+        }
+        cacheLock.lock()
+        state.task = task
+        let cancelledBeforeResume = state.cancelled
+        cacheLock.unlock()
+        if cancelledBeforeResume { task.cancel() }
+        task.resume()
     }
 
     public static func invalidateResolvedCache(_ videoId: String) {

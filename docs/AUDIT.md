@@ -138,7 +138,7 @@ Run exactly as a new user with ONLY the ZIP:
    `node_modules`/`.wrangler`/`.dev.vars` in the archive, no Render backend
    files, android/ios present
 9. Workflow files present under `.github/workflows/` (moved there from a
-   root-level `workflows/` in commit 7319b26 — see SETUP.md §2)
+   root-level `workflows/` in commit 7319b26 — see CUTOVER.md §2)
 
 Result: **all steps pass** (137/137 live, dry-run OK, scans clean).
 
@@ -157,7 +157,7 @@ Result: **all steps pass** (137/137 live, dry-run OK, scans clean).
 | `.github/workflows/deploy.yml` | test → D1 migrate → deploy → smoke (GitHub Actions) |
 | `public/_headers`, `public/_redirects` | Workers static-assets cache/redirect parity |
 | `docs/CLOUDFLARE-GITHUB.md`, `docs/CUTOVER.md`, `docs/TESTING.md`, `docs/API-CONFIG.md`, `docs/MOBILE.md`, `docs/AUDIT.md` | setup/ops documentation |
-| `README.md`, `SETUP.md`, `MIGRATION.md`, `.dev.vars.example`, `.gitignore` | Cloudflare-first project docs and hygiene |
+| `README.md`, `MIGRATION.md`, `.dev.vars.example`, `.gitignore` | Cloudflare-first project docs and hygiene |
 
 Files preserved unchanged: all 8 frontend files (only the API-base block of
 `app.js` was re-marked as the single config constant), `migrations` content,

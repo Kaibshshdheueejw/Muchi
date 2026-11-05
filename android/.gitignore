@@ -99,3 +99,20 @@ app/src/main/assets/public
 app/src/main/assets/capacitor.config.json
 app/src/main/assets/capacitor.plugins.json
 app/src/main/res/xml/config.xml
+
+# Explicitly version the reviewed 1.10.2 native assets while continuing to
+# ignore other generated Capacitor WebView files.
+!app/src/main/assets/public/
+app/src/main/assets/public/*
+!app/src/main/assets/public/material-symbols-outlined.woff2
+!app/src/main/assets/public/animations/
+app/src/main/assets/public/animations/*
+!app/src/main/assets/public/animations/muchi-player-button.json
+!app/src/main/assets/public/assets/
+app/src/main/assets/public/assets/*
+!app/src/main/assets/public/assets/mood-doodles-v1.webp
+!app/src/main/assets/public/covers/
+app/src/main/assets/public/covers/*
+!app/src/main/assets/public/covers/liked-songs.svg
+!app/src/main/assets/public/covers/downloaded-songs.svg
+!app/src/main/assets/public/covers/folder-playlist.svg

@@ -8,45 +8,145 @@
 //      (protects the YouTube quota + keeps CPU ~0 on cache hits). Key space is
 //      bounded (~30 writes/day) — inside KV free's 1k writes/day.
 
-export function securityHeaders() {
-  return {
+const DEFAULT_CORS_ORIGINS = new Set([
+  "capacitor://localhost",
+  "http://localhost",
+  "https://localhost",
+  "http://127.0.0.1",
+  "https://127.0.0.1",
+]);
+
+function configuredCorsOrigins(env) {
+  const raw =
+    (env && env.MUCHI_CORS_ORIGINS) ||
+    (typeof process !== "undefined" && process.env && process.env.MUCHI_CORS_ORIGINS) ||
+    "";
+  return new Set(
+    String(raw)
+      .split(",")
+      .map((s) => s.trim().replace(/\/$/, ""))
+      .filter((s) => s && s !== "*")
+  );
+}
+
+function requestOrigin(reqOrOrigin) {
+  if (typeof reqOrOrigin === "string") return reqOrOrigin;
+  if (reqOrOrigin && reqOrOrigin.headers && typeof reqOrOrigin.headers.get === "function") {
+    return reqOrOrigin.headers.get("origin") || "";
+  }
+  return "";
+}
+
+function isAllowedOrigin(origin, reqOrOrigin, env) {
+  if (!origin) return false;
+  const configured = configuredCorsOrigins(env);
+  if (configured.has(origin) || DEFAULT_CORS_ORIGINS.has(origin)) return true;
+
+  // Same-origin requests do not need CORS, but allowing their exact origin is
+  // useful for credentialed POSTs from the Web shell and the live preview.
+  try {
+    if (reqOrOrigin && typeof reqOrOrigin.url === "string") {
+      return new URL(reqOrOrigin.url).origin === origin;
+    }
+  } catch {}
+  return false;
+}
+
+export function securityHeaders(reqOrOrigin) {
+  const headers = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "SAMEORIGIN",
     "X-XSS-Protection": "1; mode=block",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    // Compatible baseline policy: dynamic UI still needs inline styles and the
+    // existing YouTube player, but objects, framing, and unknown connections
+    // are restricted. This is deliberately not a claim of a strict CSP.
+    "Content-Security-Policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https: wss:; font-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https://www.youtube.com https://www.gstatic.com; frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com; worker-src 'self' blob:;",
   };
+  let protocol = "";
+  try {
+    if (reqOrOrigin && typeof reqOrOrigin.url === "string") protocol = new URL(reqOrOrigin.url).protocol;
+    else if (typeof reqOrOrigin === "string" && /^https?:/i.test(reqOrOrigin)) protocol = new URL(reqOrOrigin).protocol;
+  } catch {}
+  if (protocol === "https:") {
+    headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
+  }
+  return headers;
 }
 
-export function corsHeaders(reqOrOrigin) {
-  let origin = "";
-  if (typeof reqOrOrigin === "string") {
-    origin = reqOrOrigin;
-  } else if (reqOrOrigin && reqOrOrigin.headers && typeof reqOrOrigin.headers.get === "function") {
-    origin = reqOrOrigin.headers.get("origin") || "";
-  }
+export function corsHeaders(reqOrOrigin, env) {
+  const origin = requestOrigin(reqOrOrigin);
   const headers = {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Key, X-Hub-Signature-256, X-Webhook-Signature, X-Webhook-Timestamp",
-    ...securityHeaders(),
+    ...securityHeaders(reqOrOrigin),
   };
   if (origin) {
-    headers["Access-Control-Allow-Origin"] = origin;
-    headers["Access-Control-Allow-Credentials"] = "true";
     headers["Vary"] = "Origin";
+    if (isAllowedOrigin(origin, reqOrOrigin, env)) {
+      headers["Access-Control-Allow-Origin"] = origin;
+      headers["Access-Control-Allow-Credentials"] = "true";
+    }
   } else {
+    // Non-browser/native requests do not send credentials through CORS. A
+    // wildcard is safe here and avoids breaking simple media/API clients.
     headers["Access-Control-Allow-Origin"] = "*";
   }
   return headers;
 }
 
-export function json(status, obj, reqOrOrigin) {
+export function json(status, obj, reqOrOrigin, env) {
   return new Response(JSON.stringify(obj), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...corsHeaders(reqOrOrigin),
-      ...securityHeaders(),
+      ...corsHeaders(reqOrOrigin, env),
+      ...securityHeaders(reqOrOrigin),
+    },
+  });
+}
+
+// Lightweight per-isolate abuse control. This is intentionally endpoint-scoped
+// and burst-tolerant; production should also enforce limits at the edge/WAF.
+const rateBuckets = new Map();
+function clientRateKey(request) {
+  const forwarded = request && request.headers && (
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-real-ip") ||
+    request.headers.get("x-forwarded-for")
+  );
+  const ip = String(forwarded || "").split(",")[0].trim();
+  if (ip) return ip;
+  const ua = request && request.headers && request.headers.get("user-agent");
+  return `anon:${String(ua || "unknown").slice(0, 120)}`;
+}
+
+export function rateLimit(request, bucket, limit, windowMs) {
+  if (!request) return null;
+  const now = Date.now();
+  const key = `${bucket}:${clientRateKey(request)}`;
+  let entry = rateBuckets.get(key);
+  if (!entry || entry.resetAt <= now) {
+    entry = { count: 0, resetAt: now + windowMs };
+    rateBuckets.set(key, entry);
+  }
+  entry.count += 1;
+  if (rateBuckets.size > 10000) {
+    for (const [k, v] of rateBuckets) {
+      if (v.resetAt <= now) rateBuckets.delete(k);
+      if (rateBuckets.size <= 9000) break;
+    }
+  }
+  if (entry.count <= limit) return null;
+  const retryAfter = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+  return new Response(JSON.stringify({ error: "Too many requests", retryAfter }), {
+    status: 429,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Retry-After": String(retryAfter),
+      ...corsHeaders(request),
+      ...securityHeaders(request),
     },
   });
 }
@@ -438,5 +538,3 @@ export function rankTracksByVersionIntent(tracks, query) {
   scored.sort((a, b) => b.score - a.score);
   return scored.map((s) => s.track);
 }
-
-

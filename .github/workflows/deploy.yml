@@ -51,6 +51,8 @@ jobs:
 
   deploy:
     needs: test
+    # Arena candidate branches run tests only; they must never deploy on push.
+    if: ${{ !startsWith(github.ref, 'refs/heads/arena/') }}
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

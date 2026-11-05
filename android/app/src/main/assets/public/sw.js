@@ -1,5 +1,5 @@
-const CACHE = "muchi-shell-v115";
-const SHELL = ["/", "/index.html", "/terms.html", "/privacy.html", "/styles.css?v=115", "/app.js?v=115", "/meta.js", "/logo.png?v=53", "/cover-default.jpg", "/manifest.json"];
+const CACHE = "muchi-shell-v190";
+const SHELL = ["/", "/index.html", "/terms.html", "/privacy.html", "/styles.css?v=190", "/app.js?v=190", "/assets/mood-doodles-v1.webp", "/meta.js", "/lottie.min.js", "/apple-watch-lottie-data.js", "/apple-watch-like.json", "/logo.png?v=53", "/cover-default.jpg", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
