@@ -12,7 +12,7 @@
 // cache 86400) with an early Content-Length guard added.
 
 import { json, corsHeaders, cached, hasCached, invalidateCached, tidyTitle, tidyArtist } from "./util.js";
-import { assertPublicUrl } from "./ssrf.js";
+import { assertPublicUrl, fetchPublic } from "./ssrf.js";
 import { APP_NAME, APP_VERSION } from "./config.js";
 import { audiusStreamUrl, youtubeAudioStream, youtubeAudioStreamDirect, searchYouTube, audiusSearch } from "./providers.js";
 
@@ -123,9 +123,8 @@ async function pipeUrl(request, src, accept, overrideMime) {
   const connectTimer = setTimeout(() => ctrl.abort(), isRadio ? 30000 : 15000);
   let r;
   try {
-    r = await fetch(src, {
+    r = await fetchPublic(src, {
       headers,
-      redirect: "follow",
       signal: ctrl.signal,
     });
   } catch {
@@ -143,22 +142,20 @@ async function pipeUrl(request, src, accept, overrideMime) {
         Accept: accept || "*/*",
         Range: headers.Range || "bytes=0-",
       };
-      const r2 = await fetch(src, {
+      const r2 = await fetchPublic(src, {
         headers: retryHeaders,
-        redirect: "follow",
-      });
+        });
       if (r2.ok && r2.body) {
         r = r2;
       } else if (r2.status === 403) {
         // Fallback retry without Referer (certain Android/GoogleVideo edge nodes reject browser Referer)
-        const r3 = await fetch(src, {
+        const r3 = await fetchPublic(src, {
           headers: {
             "User-Agent": headers["User-Agent"] || retryHeaders["User-Agent"],
             Accept: accept || "*/*",
             Range: headers.Range || "bytes=0-",
           },
-          redirect: "follow",
-        });
+            });
         if (r3.ok && r3.body) r = r3;
       }
     } catch {}
@@ -181,7 +178,7 @@ async function pipeUrl(request, src, accept, overrideMime) {
         Accept: accept || "*/*",
         Range: `bytes=0-${firstEnd}`,
       };
-      const rFirst = await fetch(src, { headers: chunkHeaders, redirect: "follow" });
+      const rFirst = await fetchPublic(src, { headers: chunkHeaders });
       if ((rFirst.status === 206 || rFirst.status === 200) && rFirst.body) {
         let totalBytes = clen;
         const cr = rFirst.headers.get("content-range") || "";
@@ -206,14 +203,13 @@ async function pipeUrl(request, src, accept, overrideMime) {
                 let offset = firstEnd + 1;
                 while (offset < totalBytes) {
                   const end = Math.min(offset + CHUNK_SIZE - 1, totalBytes - 1);
-                  const rNext = await fetch(src, {
+                  const rNext = await fetchPublic(src, {
                     headers: {
                       "User-Agent": uaForChunks,
                       Accept: acceptForChunks,
                       Range: `bytes=${offset}-${end}`,
                     },
-                    redirect: "follow",
-                  });
+                                });
                   if (!rNext.ok || !rNext.body) {
                     throw new Error(`chunk ${offset}-${end} failed with ${rNext.status}`);
                   }
@@ -449,7 +445,7 @@ async function fetchForDownload(request, src, accept, overrideMime) {
         const useQueryRange = attempt === 1;
         const target = useQueryRange ? withQueryRange(src, start, end, 1) : src;
         const reqHeaders = useQueryRange ? { ...baseHeaders } : { ...baseHeaders, Range: clientRange };
-        const r = await fetch(target, { headers: reqHeaders, redirect: "follow" });
+        const r = await fetchPublic(target, { headers: reqHeaders });
         if ((r.status === 206 || r.status === 200) && r.body) {
           const ab = await r.arrayBuffer();
           const bytes = new Uint8Array(ab);
@@ -491,10 +487,9 @@ async function fetchForDownload(request, src, accept, overrideMime) {
   const isMobileYtClient = /c=(?:ANDROID|IOS)(?:&|$)/i.test(src);
   if (!isMobileYtClient) {
     try {
-      const rFull = await fetch(src, {
+      const rFull = await fetchPublic(src, {
         headers: { ...baseHeaders, Range: "bytes=0-" },
-        redirect: "follow",
-      });
+        });
       if ((rFull.status === 206 || rFull.status === 200) && rFull.body) {
         if (!detectedCt) detectedCt = rFull.headers.get("content-type") || "";
         if (!totalBytes) {
@@ -533,7 +528,7 @@ async function fetchForDownload(request, src, accept, overrideMime) {
         const reqHeaders = useQueryParam
           ? { ...baseHeaders }
           : { ...baseHeaders, Range: `bytes=${received}-${end}` };
-        const rChunk = await fetch(target, { headers: reqHeaders, redirect: "follow" });
+        const rChunk = await fetchPublic(target, { headers: reqHeaders });
         lastStatus = rChunk.status || 403;
         if ((rChunk.status === 206 || rChunk.status === 200) && rChunk.body) {
           if (!detectedCt) detectedCt = rChunk.headers.get("content-type") || "";
@@ -865,9 +860,8 @@ export async function handleImg(url) {
     } else if (/ytimg\.com|googleusercontent\.com|ggpht\.com|youtube\.com/i.test(src)) {
       imgHeaders.Referer = "https://www.youtube.com/";
     }
-    const r = await fetch(src, {
+    const r = await fetchPublic(src, {
       signal: ctrl.signal,
-      redirect: "follow",
       headers: imgHeaders,
     });
     if (!r.ok) return json(r.status, { error: "image fetch failed" });

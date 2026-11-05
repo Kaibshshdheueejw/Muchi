@@ -12,7 +12,8 @@
 // realistic fixtures. Real-internet tests: docs/TESTING.md (PENDING).
 
 import { hmac, sessionToken, sidFromToken, safeCompare } from "../src/auth.js";
-import { isPrivateIp } from "../src/ssrf.js";
+import { isPrivateIp, fetchPublic } from "../src/ssrf.js";
+import { takeOAuthState } from "../src/db.js";
 import { isUserAdmin, getAdminEmails, checkAdminAuth, handleAdmin } from "../src/admin.js";
 import { handleWebhook } from "../src/webhook.js";
 import {
@@ -29,7 +30,7 @@ import { codecMatch, tidyTitle, tidyArtist } from "../src/util.js";
 import { parseLyricsHit, pickInnertubeStream, lyricsFor } from "../src/providers.js";
 import { previewHome, previewShelf, previewDiscover } from "../src/preview-seed.js";
 import { APP_VERSION } from "../src/config.js";
-import { createHmac as nodeHmac } from "node:crypto";
+import { createHmac as nodeHmac, randomBytes as secureRandomBytes } from "node:crypto";
 import {
   parseVersion, versionAtLeast, versionEqual, checkVersionSync, isSync,
   readBuildGradleVersion, readPbxprojVersion, readConfigVersion, readAppJsVersion,
@@ -47,8 +48,8 @@ const ok = (name, cond, extra = "") => {
 };
 
 // ── 1. Token parity (server.js:81–98) ───────────────────────────────────────
-const SECRET = "test-secret-123";
-const sid = "a1b2c3d4e5f6a7b8c9d0e1f2";
+const SECRET = secureRandomBytes(32).toString("base64url");
+const sid = secureRandomBytes(16).toString("hex");
 const token = sessionToken(sid, SECRET);
 ok("token format sid.sig", token.startsWith(sid + "."));
 ok("hmac base64url sha256", /^[A-Za-z0-9_-]{43}$/.test(token.split(".")[1]));
@@ -60,28 +61,30 @@ const nodeStyle = nodeHmac("sha256", SECRET).update(sid).digest("base64url");
 ok("hmac matches server.js output", token.split(".")[1] === nodeStyle);
 
 // ── 1.5 Timing safe comparison & Security Hardening ───────────────────────
-ok("safeCompare matches equal", safeCompare("secret123", "secret123"));
-ok("safeCompare rejects unequal length", !safeCompare("secret", "secret123"));
-ok("safeCompare rejects mismatched content", !safeCompare("secret123", "secret999"));
-ok("safeCompare handles non-string safely", !safeCompare(null, "secret") && !safeCompare(undefined, undefined));
+const comparisonFixture = secureRandomBytes(16).toString("hex");
+const comparisonMismatch = (comparisonFixture[0] === "0" ? "1" : "0") + comparisonFixture.slice(1);
+ok("safeCompare matches equal", safeCompare(comparisonFixture, comparisonFixture));
+ok("safeCompare rejects unequal length", !safeCompare(comparisonFixture, comparisonFixture + "0"));
+ok("safeCompare rejects mismatched content", !safeCompare(comparisonFixture, comparisonMismatch));
+ok("safeCompare handles non-string safely", !safeCompare(null, comparisonFixture) && !safeCompare(undefined, undefined));
 
 // ── 1.6 Admin verification & RBAC permissions ──────────────────────────────
 const defaultAdmins = getAdminEmails({});
-ok("default admin email present", defaultAdmins.includes("twiarimascord@gmail.com"));
+ok("admin allowlist has no source-controlled default", defaultAdmins.length === 0);
 const customAdmins = getAdminEmails({ ADMIN_EMAILS: "admin@example.com, user@test.com" });
-ok("custom admin emails parsed", customAdmins.includes("admin@example.com") && customAdmins.includes("twiarimascord@gmail.com"));
+ok("custom admin emails parsed", customAdmins.includes("admin@example.com") && customAdmins.includes("user@test.com"));
 
-const unverifiedSession = { email: "twiarimascord@gmail.com", email_verified: false, role: "admin" };
-ok("unverified email cannot be admin", !isUserAdmin(unverifiedSession, {}));
+const unverifiedSession = { email: "admin@example.com", email_verified: false, role: "user" };
+ok("unverified email cannot be admin", !isUserAdmin(unverifiedSession, { ADMIN_EMAILS: "admin@example.com" }));
 
 const normalUserSession = { email: "normal@example.com", email_verified: true, role: "user" };
-ok("normal user is not admin", !isUserAdmin(normalUserSession, {}));
+ok("normal user is not admin", !isUserAdmin(normalUserSession, { ADMIN_EMAILS: "admin@example.com" }));
 
-const verifiedAdminSession = { email: "twiarimascord@gmail.com", email_verified: true, role: "admin" };
-ok("verified admin recognized", isUserAdmin(verifiedAdminSession, {}));
+const verifiedAdminSession = { email: "admin@example.com", email_verified: true, role: "user" };
+ok("verified configured admin recognized", isUserAdmin(verifiedAdminSession, { ADMIN_EMAILS: "admin@example.com" }));
 
 // ── 1.7 Webhook signature verification ─────────────────────────────────────
-const hookSecret = "webhook-secret-999";
+const hookSecret = secureRandomBytes(32).toString("base64url");
 const payloadStr = JSON.stringify({ event: "release", tag: "v1.6.3" });
 const validGhSig = "sha256=" + nodeHmac("sha256", hookSecret).update(payloadStr).digest("hex");
 const invalidSig = "sha256=0000000000000000000000000000000000000000000000000000000000000000";
@@ -122,7 +125,7 @@ const reqAdminNoAuth = new Request("http://localhost/api/admin/status", { method
 const resAdminNoAuth = await handleAdmin(reqAdminNoAuth, {}, new URL("http://localhost/api/admin/status"));
 ok("unauthorized admin route access blocked 401", resAdminNoAuth.status === 401);
 
-const adminApiKey = "admin-secret-key-super-secure";
+const adminApiKey = secureRandomBytes(32).toString("base64url");
 const reqAdminWithKey = new Request("http://localhost/api/admin/status", {
   method: "GET",
   headers: { "x-admin-key": adminApiKey },
@@ -149,6 +152,90 @@ ok("public: 8.8.8.8", !isPrivateIp("8.8.8.8"));
 ok("public: 142.250.72.14", !isPrivateIp("142.250.72.14"));
 ok("public: 2606:4700:4700::1111", !isPrivateIp("2606:4700:4700::1111"));
 ok("garbage rejected", isPrivateIp("999.1.1.1"));
+
+// ── 2a. Redirect-hop SSRF regression checks ────────────────────────────────
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    globalThis.fetch = async (target, init = {}) => {
+      calls.push({ target: String(target), redirect: init.redirect });
+      if (calls.length === 1) {
+        return new Response(null, { status: 302, headers: { location: "http://8.8.8.8/safe" } });
+      }
+      return new Response("safe upstream", { status: 200 });
+    };
+    const safeHop = await fetchPublic("https://8.8.8.8/start", { redirect: "follow" });
+    ok("redirect chain validates and follows public hop", safeHop.status === 200 && calls.length === 2);
+    ok("redirect chain forces manual redirect mode", calls.every((call) => call.redirect === "manual"));
+
+    calls.length = 0;
+    globalThis.fetch = async (target, init = {}) => {
+      calls.push({ target: String(target), redirect: init.redirect });
+      return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/metadata" } });
+    };
+    let blocked = false;
+    try { await fetchPublic("https://8.8.8.8/start"); } catch { blocked = true; }
+    ok("redirect chain blocks private destination before request", blocked && calls.length === 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// ── 2b. OAuth replay and browser-binding regression checks ─────────────────
+{
+  const rows = new Map();
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...args) {
+          return {
+            async first() {
+              if (sql.startsWith("DELETE FROM oauth_state")) {
+                const [state, nowMs] = args;
+                const row = rows.get(state);
+                if (!row || row.expires_at <= nowMs) return null;
+                rows.delete(state);
+                return { payload: row.payload };
+              }
+              return null;
+            },
+            async run() { return { success: true }; },
+          };
+        },
+      };
+    },
+  };
+  rows.set("oauth-once", { payload: JSON.stringify({ ok: true }), expires_at: Date.now() + 60000 });
+  const [oauthFirst, oauthReplay] = await Promise.all([
+    takeOAuthState({ DB: db }, "oauth-once"),
+    takeOAuthState({ DB: db }, "oauth-once"),
+  ]);
+  ok("OAuth state is single-use under replay", Boolean(oauthFirst) !== Boolean(oauthReplay));
+  ok("OAuth state replay leaves no row", !(await takeOAuthState({ DB: db }, "oauth-once")));
+
+  const { handleGoogleCallback } = await import("../src/oauth.js");
+  const secret = secureRandomBytes(32).toString("base64url");
+  const binding = secureRandomBytes(16).toString("base64url");
+  const bindingHash = nodeHmac("sha256", secret).update(binding).digest("base64url");
+  const csrfState = secureRandomBytes(16).toString("base64url");
+  rows.set(csrfState, {
+    payload: JSON.stringify({ step: "signin", platform: "web", nonce: "nonce", bindingHash, exp: Date.now() + 60000 }),
+    expires_at: Date.now() + 60000,
+  });
+  const csrfReq = new Request(`https://muchi.example/api/auth/google/callback?code=unused&state=${encodeURIComponent(csrfState)}`, {
+    headers: { cookie: "muchi_oauth=wrong-browser" },
+  });
+  const csrfRes = await handleGoogleCallback(csrfReq, {
+    MUCHI_SESSION_SECRET: secret,
+    GOOGLE_CLIENT_ID: "focused-client",
+    GOOGLE_CLIENT_SECRET: secureRandomBytes(32).toString("base64url"),
+    GOOGLE_REDIRECT_URI: "https://muchi.example/api/auth/google/callback",
+    DB: db,
+  }, new URL(csrfReq.url));
+  ok("OAuth callback rejects mismatched browser binding", csrfRes.status === 302 && csrfRes.headers.get("location") === "/?auth=error");
+  ok("OAuth CSRF failure clears binding cookie", /muchi_oauth=;/.test(csrfRes.headers.get("set-cookie") || ""));
+}
 
 // ── 3. Parsers (server.js:114–683) ──────────────────────────────────────────
 ok("ytDurationToSec PT1M30S", ytDurationToSec("PT1M30S") === 90);
@@ -401,7 +488,7 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
     const { handleStream, handleDownload } = await import("../src/stream.js");
     // 1) Range forwarding + header echo on /api/stream
     seen = [];
-    let req = new Request("http://w/api/stream?url=" + encodeURIComponent("https://ok.example/a.m4a"), { headers: { Range: "bytes=0-4" } });
+    let req = new Request("http://w/api/stream?url=" + encodeURIComponent("https://ok.example.com/a.m4a"), { headers: { Range: "bytes=0-4" } });
     let res = await handleStream(req, new URL(req.url));
     ok("proxy: forwards Range upstream", seen.some((s) => s.range === "bytes=0-4"));
     ok("proxy: 206 preserved", res.status === 206);
@@ -410,17 +497,17 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
     ok("proxy: accept-ranges echoed", res.headers.get("accept-ranges") === "bytes");
     ok("proxy: body intact", (await res.text()) === "HELLO");
     // 2) plain GET keeps 200 + length, no bogus 206
-    req = new Request("http://w/api/stream?url=" + encodeURIComponent("https://ok.example/a.m4a"));
+    req = new Request("http://w/api/stream?url=" + encodeURIComponent("https://ok.example.com/a.m4a"));
     res = await handleStream(req, new URL(req.url));
     ok("proxy: 200 stays 200", res.status === 200 && res.headers.get("content-length") === "5" && !res.headers.get("content-range"));
     // 3) /api/download success path: attachment + real extension
-    req = new Request("http://w/api/download?name=Song&streamUrl=" + encodeURIComponent("https://ok.example/a.m4a") + "&mime=audio%2Fmp4");
+    req = new Request("http://w/api/download?name=Song&streamUrl=" + encodeURIComponent("https://ok.example.com/a.m4a") + "&mime=audio%2Fmp4");
     res = await handleDownload(req, new URL(req.url));
     const cd = res.headers.get("content-disposition") || "";
     ok("download: 200 attachment", res.status === 200 && cd.includes('attachment') && cd.includes('Song.m4a'));
     ok("download: length passes through", res.headers.get("content-length") === "5");
     // 4) /api/download error path: NO attachment on error (the corrupt-file bug)
-    req = new Request("http://w/api/download?name=Song&streamUrl=" + encodeURIComponent("https://want404.example/a.m4a") + "&mime=audio%2Fmp4");
+    req = new Request("http://w/api/download?name=Song&streamUrl=" + encodeURIComponent("https://want404.example.com/a.m4a") + "&mime=audio%2Fmp4");
     res = await handleDownload(req, new URL(req.url));
     ok("download: error keeps real status", res.status === 404);
     ok("download: NO content-disposition on error", !res.headers.get("content-disposition"));
@@ -655,6 +742,397 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
 
   const appJsCheck = readFileSync("public/app.js", "utf8");
   const stylesCssCheck = readFileSync("public/styles.css", "utf8");
+  const indexHtmlCheck = readFileSync("public/index.html", "utf8");
+  const androidAmbientIndexCheck = readFileSync("android/app/src/main/assets/public/index.html", "utf8");
+  const iosAmbientIndexCheck = readFileSync("ios/App/App/public/index.html", "utf8");
+  const androidAmbientAppCheck = readFileSync("android/app/src/main/assets/public/app.js", "utf8");
+  const iosAmbientAppCheck = readFileSync("ios/App/App/public/app.js", "utf8");
+  const androidLyricsCssCheck = readFileSync("android/app/src/main/assets/public/styles.css", "utf8");
+  const iosLyricsCssCheck = readFileSync("ios/App/App/public/styles.css", "utf8");
+  const androidAudioServiceCheck = readFileSync("android/app/src/main/java/app/muchi/music/MuchiAudioService.java", "utf8");
+  const androidAudioPluginCheck = readFileSync("android/app/src/main/java/app/muchi/music/MuchiAudioPlugin.java", "utf8");
+  const iosAudioPluginCheck = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
+  ok("fixed crossfade restored: preference, controls, fade-in, and completion timer are active",
+    appJsCheck.includes("crossfade: 0") &&
+    appJsCheck.includes("function fadeInTrack()") &&
+    appJsCheck.includes("function tickCrossfade(d, p)") &&
+    appJsCheck.includes("data-player-fade") &&
+    appJsCheck.includes('id="setFade"') &&
+    !appJsCheck.includes("smoothHandoff") &&
+    !androidAmbientAppCheck.includes("smoothHandoff") &&
+    !iosAmbientAppCheck.includes("smoothHandoff") &&
+    !androidAudioServiceCheck.includes("smoothHandoff") &&
+    !iosAudioPluginCheck.includes("smoothHandoff")
+  );
+  ok("bass DSP preservation: Web and native keep the original harmonic branch and acoustic tuning",
+    appJsCheck.includes("wet.gain.value = 0.72") &&
+    appJsCheck.includes("out.gain.value = 1.55") &&
+    androidAmbientAppCheck.includes("bass.frequency.value = 92; bass.gain.value = 11.2;") &&
+    iosAmbientAppCheck.includes("bass.frequency.value = 92; bass.gain.value = 11.2;") &&
+    androidAmbientAppCheck.includes("wet.gain.value = 0.72") &&
+    iosAmbientAppCheck.includes("wet.gain.value = 0.72") &&
+    androidAmbientAppCheck.includes("out.gain.value = 1.55") &&
+    iosAmbientAppCheck.includes("out.gain.value = 1.55") &&
+    androidAudioServiceCheck.includes("Math.min(gainMb, 180)") &&
+    androidAudioServiceCheck.includes("Math.min(strength, (short) 480)") &&
+    androidAudioServiceCheck.includes("targetMb = 780") &&
+    iosAudioPluginCheck.includes("dbGain: 6.2") &&
+    iosAudioPluginCheck.includes("let preTrim: Float = 0.82") &&
+    iosAudioPluginCheck.includes("let postMakeup: Float = 1.22")
+  );
+  ok("library UI: Your library exposes list and square tile layout controls",
+    indexHtmlCheck.includes('id="libraryLayoutToggle"') &&
+    indexHtmlCheck.includes('data-library-layout="list"') &&
+    indexHtmlCheck.includes('data-library-layout="grid"') &&
+    appJsCheck.includes('libraryLayout: load("aura.libraryLayout", "list")') &&
+    appJsCheck.includes('save("aura.libraryLayout", layout)')
+  );
+  ok("library UI: both layouts preserve playlist navigation rendering and desktop grid styling",
+    appJsCheck.includes('nav.dataset.layout = layout') &&
+    appJsCheck.includes('data-open-liked') &&
+    appJsCheck.includes('data-open-downloads') &&
+    appJsCheck.includes('data-open-discovery') &&
+    stylesCssCheck.includes('.playlist-nav[data-layout="grid"]') &&
+    stylesCssCheck.includes('aspect-ratio: 1 / 1')
+  );
+  ok("library UI: Muchi brand is visible above Home and Liked/Downloads retain sidebar counts",
+    indexHtmlCheck.includes('id="sidebarBrandIcon"') &&
+    indexHtmlCheck.includes('<strong>Muchi</strong>') &&
+    !stylesCssCheck.includes('html:not([data-native="1"]) .sidebar .brand { display: none !important; }') &&
+    appJsCheck.includes('item("data-open-liked", "favorite", "Liked songs", state.liked.length,') &&
+    appJsCheck.includes('item("data-open-downloads", "download_for_offline", "Downloads", state.downloads.length,') &&
+    appJsCheck.includes('count === null || count === undefined || count === ""')
+  );
+  ok("Web Library sidebar: custom playlist counts are hidden while opened-folder counts remain",
+    appJsCheck.includes('escapeHTML(p.name), null, state.activePlaylist === i, playlistArt(p)') &&
+    !appJsCheck.includes('escapeHTML(p.name), p.tracks.length, state.activePlaylist === i, playlistArt(p)') &&
+    appJsCheck.includes('<p class="lib-stats">${trackStats(p.tracks)}</p>') &&
+    appJsCheck.includes('<p class="lib-stats">${trackStats(state.liked)}</p>')
+  );
+  ok("library buttons: layout, sort, pin, playlist, Spotify, release and error feedback remain wired",
+    appJsCheck.includes('toast(state.prefs.libLayout === "grid" ? "Squares view (Spotify style)" : "List view")') &&
+    appJsCheck.includes('toast(`Sorted: ${b.querySelector("span:nth-child(2)").textContent}`)') &&
+    appJsCheck.includes('toast(`Sorted: ${next === "oldest" ? "Old to New" : (next === "alpha" ? "A to Z" : "New to Old")}`)') &&
+    androidAmbientAppCheck.includes('toast(`Sorted: ${b.querySelector("span:nth-child(2)").textContent}`)') &&
+    androidAmbientAppCheck.includes('toast(`Sorted: ${next === "oldest" ? "Old to New" : (next === "alpha" ? "A to Z" : "New to Old")}`)') &&
+    androidAmbientAppCheck.includes('toast("Folder pinned to top")') &&
+    androidAmbientAppCheck.includes('toast("Folder unpinned")') &&
+    appJsCheck.includes('toast("Folder pinned to top")') &&
+    appJsCheck.includes('toast("Folder unpinned")') &&
+    androidAmbientAppCheck.includes('toast("Playlist updated")') &&
+    androidAmbientAppCheck.includes('toast(created.tracks.length ? `Added to ${name}` : "Playlist ready")') &&
+    appJsCheck.includes('toast("Playlist updated")') &&
+    appJsCheck.includes('toast(created.tracks.length ? `Added to ${name}` : "Playlist ready")') &&
+    androidAmbientAppCheck.includes('toast(`Added "${newPl.name}" (${newPl.tracks.length} songs) to Library!`, true, "success")') &&
+    appJsCheck.includes('toast(`Added "${newPl.name}" (${newPl.tracks.length} songs) to Library!`, true, "success")') &&
+    androidAmbientAppCheck.includes('libGridToggle.addEventListener') &&
+    androidAmbientAppCheck.includes('openLibSortModal') &&
+    androidAmbientAppCheck.includes('openPinFoldersModal') &&
+    androidAmbientAppCheck.includes('openSpotifyImportModal') &&
+    androidAmbientAppCheck.includes('newPlaylist') &&
+    [appJsCheck, androidAmbientAppCheck, iosAmbientAppCheck].every((source) =>
+      source.includes('toast("Folder pinned to top")') &&
+      source.includes('toast("Folder unpinned")') &&
+      source.includes('toast("Playlist updated")') &&
+      source.includes('toast(created.tracks.length ? `Added to ${name}` : "Playlist ready")') &&
+      source.includes('toast(`Added "${newPl.name}" (${newPl.tracks.length} songs) to Library!`, true, "success")') &&
+      source.includes('toast(`New release from ${f.name}: "${latest.title}"`, true, "info")') &&
+      source.includes('if (show === false) return;') &&
+      source.includes('kind === "error" ? "error" : "check"') &&
+      source.includes('toast(state.prefs.libLayout === "grid" ? "Squares view (Spotify style)" : "List view")') &&
+      source.includes('toast(`Sorted: ${b.querySelector("span:nth-child(2)").textContent}`)') &&
+      source.includes('toast(`Sorted: ${next === "oldest" ? "Old to New" : (next === "alpha" ? "A to Z" : "New to Old")}`)')
+    )
+  );
+  ok("native Library folder rows: hides custom folder subtitles while preserving Liked/Downloads and detail counts",
+    (() => {
+      const rows = [androidAmbientAppCheck, iosAmbientAppCheck];
+      const hiddenOuterCounts = [
+        '<div class="t-sub">Playlist · ${trackStats(p.tracks)}</div>',
+        '<div class="t-sub">YouTube · ${countDesc}${state.ytLiked.truncated ? "+" : ""}</div>',
+        '<div class="t-sub">Playlist · ${p.count} item${p.count === 1 ? "" : "s"}</div>',
+      ];
+      return rows.every((source) =>
+        hiddenOuterCounts.every((needle) => !source.includes(needle)) &&
+        source.includes('<div class="t-sub">Playlist · ${trackStats(state.liked)}</div>') &&
+        source.includes('<div class="t-sub">Playlist · ${trackStats(state.downloads)}</div>') &&
+        source.includes('<button data-open-liked>Liked songs · ${state.liked.length}</button>') &&
+        source.includes('<button data-open-downloads>Downloads · ${state.downloads.length}</button>') &&
+        source.includes('`<button data-pl="${i}">${escapeHTML(p.name)}</button>`') &&
+        source.includes('<p class="lib-stats">${trackStats(state.liked)}</p>') &&
+        source.includes('<p class="lib-stats">${trackStats(tracks)}${tracks.length ? ` · ${withLyricsCount}/${tracks.length} with synced lyrics` : ""}</p>') &&
+        source.includes('<p class="lib-stats">${trackStats(p.tracks)}</p>')
+      );
+    })()
+  );
+  ok("Web/PWA Library folder rows: hides custom folder subtitles while preserving Liked/Downloads and detail counts",
+    appJsCheck.includes('<div class="t-sub">Playlist · ${trackStats(state.liked)}</div>') &&
+    appJsCheck.includes('<div class="t-sub">Playlist · ${trackStats(state.downloads)}</div>') &&
+    !appJsCheck.includes('<div class="t-sub">Playlist · ${trackStats(p.tracks)}</div>') &&
+    !appJsCheck.includes('<div class="t-sub">YouTube · ${state.ytLiked.tracks.length} song${state.ytLiked.tracks.length === 1 ? "" : "s"}${state.ytLiked.truncated ? "+" : ""}</div>') &&
+    !appJsCheck.includes('<div class="t-sub">Playlist · ${escapeHTML(String(p.count ?? 0))} item${p.count === 1 ? "" : "s"}</div>') &&
+    appJsCheck.includes('<p class="lib-stats">${trackStats(state.liked)}</p>') &&
+    appJsCheck.includes('<p class="lib-stats">${trackStats(tracks)}${tracks.length ? ` · ${withLyricsCount}/${tracks.length} with line-synced lyrics` : ""}</p>') &&
+    appJsCheck.includes('<p class="lib-stats">${trackStats(p.tracks)}</p>') &&
+    appJsCheck.includes('<p class="lib-stats">${tracks.length ? trackStats(tracks) : ""}</p>') &&
+    appJsCheck.includes('<p class="lib-stats">${o.loading ? "Loading songs…" : trackStats(tracks)}</p>')
+  );
+  ok("web Explore: Jump back in moves from Home into Discovery Mix while native Home keeps it",
+    !indexHtmlCheck.includes('Material music') &&
+    appJsCheck.includes('isNativeApp() && recents.length ? section("Jump back in", recents)') &&
+    appJsCheck.includes('const discoveryRecents = Array.isArray(state.recents)') &&
+    appJsCheck.includes('!isNativeApp() && discoveryRecents.length ? section("Jump back in", discoveryRecents)')
+  );
+  ok("navigation scroll: desktop #view is saved/reset/restored while window remains the mobile fallback",
+    appJsCheck.includes('function navigationScrollSurface()') &&
+    appJsCheck.includes('const overflowY = getComputedStyle(el).overflowY') &&
+    appJsCheck.includes('function navigationScrollTop()') &&
+    appJsCheck.includes('function setNavigationScrollTop(y)') &&
+    appJsCheck.includes('surface.scrollTo({ left: 0, top, behavior: "auto" })') &&
+    appJsCheck.includes('state.scrollMap[scrollKey()] = y') &&
+    appJsCheck.includes('setNavigationScrollTop(y)')
+  );
+  ok("search focus: homepage and actual search keep the container focus state without a nested orange input box",
+    indexHtmlCheck.includes('id="searchInput"') &&
+    appJsCheck.includes('id="homeSearchInput"') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) .search-wrap input:focus,') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) .search-wrap input:focus-visible') &&
+    stylesCssCheck.includes('outline: none !important;') &&
+    stylesCssCheck.includes('outline-offset: 0;') &&
+    stylesCssCheck.includes('.search-wrap:focus-within')
+  );
+  ok("web navigation: Discovery is visibly Explore with the Explore icon while retaining the discovery route",
+    indexHtmlCheck.includes('data-view="discovery"') &&
+    indexHtmlCheck.includes('material-symbols-outlined">explore</span>') &&
+    indexHtmlCheck.includes("\n            Explore\n") &&
+    appJsCheck.includes("function openDiscoveryView()") &&
+    appJsCheck.includes('state.activePlaylist = "discovery"')
+  );
+  ok("web library: duplicate Discovery Mix shortcut is native-only",
+    appJsCheck.includes('isNativeApp() ? item("data-open-discovery", "auto_awesome", "Discovery Mix"') &&
+    (appJsCheck.match(/item\("data-open-discovery"/g) || []).length === 1
+  );
+  ok("web Explore: only the taste shelf moves off Home and keeps playlist actions",
+    appJsCheck.includes('isNativeApp() ? tastePlaylistSection() : ""') &&
+    appJsCheck.includes('isNativeApp() ? "" : tastePlaylistSection()') &&
+    appJsCheck.includes('data-open-taste-pl') &&
+    appJsCheck.includes('data-open-shelf="taste"')
+  );
+  ok("web homepage shelves: every card shelf has smooth previous/next controls without removing free scrolling",
+    appJsCheck.includes("function shelfRowHTML(") &&
+    appJsCheck.includes("function bindShelfControls(") &&
+    appJsCheck.includes("data-shelf-prev") &&
+    appJsCheck.includes("data-shelf-next") &&
+    (appJsCheck.includes('track.scrollBy({ left: distance, behavior })') || appJsCheck.includes('track.scrollBy({ left: distance, behavior: "smooth" })')) &&
+    [
+      'shelfRowHTML(pls.map(forYouCardHTML)',
+      'shelfRowHTML(pls.map(tastePlaylistCardHTML)',
+      'shelfRowHTML(pls.map(viralCardHTML)',
+      'shelfRowHTML(cards, group, title)',
+      'shelfRowHTML(rows.length ? rows.map(cardHTML)',
+    ].every((needle) => appJsCheck.includes(needle)) &&
+    stylesCssCheck.includes('.shelf-arrow') &&
+    stylesCssCheck.includes('.shelf-controls') &&
+    stylesCssCheck.includes('.shelf-scroll:hover .shelf-arrow') &&
+    stylesCssCheck.includes('opacity: 0') &&
+    stylesCssCheck.includes('@keyframes shelfArrowTap') &&
+    appJsCheck.includes('button.classList.add("is-tapped")') &&
+    stylesCssCheck.includes('scroll-behavior: smooth') &&
+    stylesCssCheck.includes('overflow-x: auto')
+  );
+  const tasteTabsStart = appJsCheck.indexOf('root.querySelectorAll("[data-taste-tab]")');
+  const tasteTabsEnd = appJsCheck.indexOf("    const playDiscovery", tasteTabsStart);
+  const tasteTabsCheck = tasteTabsStart >= 0 && tasteTabsEnd > tasteTabsStart
+    ? appJsCheck.slice(tasteTabsStart, tasteTabsEnd)
+    : "";
+  const tasteWebStart = tasteTabsCheck.indexOf("        paintHomeTasteSurface();");
+  const tasteWebEnd = tasteTabsCheck.indexOf("      });", tasteWebStart);
+  const tasteWebBranch = tasteWebStart >= 0 && tasteWebEnd > tasteWebStart
+    ? tasteTabsCheck.slice(tasteWebStart, tasteWebEnd)
+    : "";
+  ok("Web homepage taste tabs: Moods and Discovery Mix repaint only their local surface without extra motion",
+    appJsCheck.includes("function homeTasteSurfaceHTML(h)") &&
+    appJsCheck.includes("function paintHomeTasteSurface()") &&
+    appJsCheck.includes("currentSurface.replaceWith(nextSurface)") &&
+    appJsCheck.includes("function bindHomeTasteSurface(root)") &&
+    tasteTabsCheck.includes("state.homeTasteTab = el.dataset.tasteTab === \"discover\" ? \"discover\" : \"moods\";") &&
+    tasteTabsCheck.includes("paintHomeTasteSurface();") &&
+    appJsCheck.includes("else if (state.homeTasteTab === \"discover\") paintHomeTasteSurface();") &&
+    !tasteWebBranch.includes("render();") &&
+    !androidAmbientAppCheck.includes("function paintHomeTasteSurface()") &&
+    !iosAmbientAppCheck.includes("function paintHomeTasteSurface()") &&
+    !androidLyricsCssCheck.includes("homeTasteSurface") &&
+    !iosLyricsCssCheck.includes("homeTasteSurface")
+  );
+  ok("web topbar: search and Paste link are scoped to Search instead of appearing across library destinations",
+    appJsCheck.includes('const showTopbar = on && !immersiveWebView;') &&
+    appJsCheck.includes('bar.hidden = !showTopbar;') &&
+    !appJsCheck.includes('bar.hidden = immersiveWebView || !(on || desktop);')
+  );
+  ok("web player: full-viewport Spotify-style bar restores the action rail on desktop without changing mobile/native layouts",
+    stylesCssCheck.includes('left: 0 !important') &&
+    stylesCssCheck.includes('right: 0 !important') &&
+    stylesCssCheck.includes('height: 88px !important') &&
+    stylesCssCheck.includes('grid-template-areas: "now controls extras" !important') &&
+    stylesCssCheck.includes('.player .extras {\n    display: flex !important;') &&
+    stylesCssCheck.includes('@media (min-width: 1024px)') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) .player')
+  );
+  ok("web ambient light: artwork palette stays Web-only without attaching to the preserved audio graph",
+    indexHtmlCheck.includes('id="ambientLight"') &&
+    indexHtmlCheck.includes('id="ambientLightA"') &&
+    indexHtmlCheck.includes('id="ambientLightB"') &&
+    indexHtmlCheck.includes('id="ambientPointer"') &&
+    appJsCheck.includes('function extractAmbientPalette(') &&
+    !appJsCheck.includes('function syncAmbientAudioGraph(') &&
+    !appJsCheck.includes('function ambientAudioTick(') &&
+    !appJsCheck.includes('function startAmbientAudioLoop(') &&
+    appJsCheck.includes('const queueAmbientPointer = (event) =>') &&
+    appJsCheck.includes('const flushPointerFrame = () =>') &&
+    appJsCheck.includes('ambientPointer.style.transform') &&
+    appJsCheck.includes('requestAnimationFrame(flushPointerFrame)') &&
+    appJsCheck.includes('const scheduleUpdate = () =>') &&
+    appJsCheck.includes('is-scroll-active') &&
+    appJsCheck.includes('const webAmbient = !isNativeApp();') &&
+    !appJsCheck.includes('ambientAnalyser = fx.ctx.createAnalyser()') &&
+    !appJsCheck.includes('ambientAudioAttached = false;') &&
+    !appJsCheck.includes('syncAmbientAudioGraph();') &&
+    (appJsCheck.match(/fx\.ctx\.createMediaElementSource\(audio\)/g) || []).length === 1 &&
+    !indexHtmlCheck.includes('<video id="ambient') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) .ambient-light') &&
+    stylesCssCheck.includes('--ambient-blur') &&
+    stylesCssCheck.includes('--ambient-spread') &&
+    stylesCssCheck.includes('--ambient-animation-duration') &&
+    stylesCssCheck.includes('.ambient-pointer') &&
+    stylesCssCheck.includes('will-change: transform, opacity') &&
+    !stylesCssCheck.includes('.ambient-light-layer::after') &&
+    stylesCssCheck.includes('scroll-snap-type: x proximity') &&
+    stylesCssCheck.includes('scroll-behavior: smooth') &&
+    stylesCssCheck.includes('content-visibility: auto') &&
+    !stylesCssCheck.includes('heroAutoplayProgress') &&
+    !stylesCssCheck.includes('hero-carousel.is-autoplaying::after') &&
+    stylesCssCheck.includes('data-hero-direction="next"') &&
+    stylesCssCheck.includes('data-hero-direction="prev"') &&
+    stylesCssCheck.includes('@keyframes ambientLightDrift') &&
+    stylesCssCheck.includes('html[data-native="1"] #ambientLight') &&
+    stylesCssCheck.includes('html[data-battery-saver="1"] #ambientLight') &&
+    stylesCssCheck.includes('@media (prefers-reduced-motion: reduce)') &&
+    !androidAmbientIndexCheck.includes('id="ambientLight"') &&
+    !iosAmbientIndexCheck.includes('id="ambientLight"') &&
+    !androidAmbientAppCheck.includes('function extractAmbientPalette(') &&
+    !iosAmbientAppCheck.includes('function extractAmbientPalette(')
+  );
+  ok("while-listening: static, position-synced progress with one playhead, restrained artwork motion, buffering feedback, and optional lighting scenes are wired",
+    indexHtmlCheck.includes('class="seek-progress-dot"') &&
+    appJsCheck.includes('lightingScene: "auto"') &&
+    appJsCheck.includes("function normalizeLightingScene(v)") &&
+    appJsCheck.includes('document.documentElement.dataset.lighting = lighting') &&
+    appJsCheck.includes('seekBox.style.setProperty("--seek-pct", seekPct)') &&
+    appJsCheck.includes('const dBg = `M 0 ${mid} L ${W} ${mid}`;') &&
+    !appJsCheck.includes('sampleSeekWiggleY(wiggle, x, t, amp, mid, filled)') &&
+    !appJsCheck.includes('seekCur += diff * 0.28') &&
+    stylesCssCheck.includes('seek-wave-fg { stroke-linecap: butt;') &&
+    stylesCssCheck.includes('opacity: 0 !important') &&
+    !stylesCssCheck.includes('@keyframes seekProgressBreath') &&
+    !stylesCssCheck.includes('transition: left 180ms linear') &&
+    appJsCheck.includes('data-set-lighting') &&
+    appJsCheck.includes('${!isNativeApp() ? `') &&
+    appJsCheck.includes('class="ly-art-motion"') &&
+    stylesCssCheck.includes('@keyframes nowArtDrift') &&
+    stylesCssCheck.includes('@keyframes bufferingHalo') &&
+    stylesCssCheck.includes('html:not([data-native="1"])[data-lighting="aurora"]') &&
+    stylesCssCheck.includes('prefers-reduced-motion: reduce') &&
+    stylesCssCheck.includes('@keyframes vinylArtDrift') &&
+    !stylesCssCheck.includes('@keyframes vinylSpin')
+  );
+  ok("web player actions: the complete Muchi bundle opens on click, animates its options, and closes on pointer leave",
+    indexHtmlCheck.includes('id="playerActionStage"') &&
+    !indexHtmlCheck.includes('id="playerActionHub"') &&
+    !indexHtmlCheck.includes('id="playerActionMenu"') &&
+    [
+      'data-player-action="open"',
+      'data-player-action="queue"',
+      'data-player-action="lyrics"',
+      'data-player-action="sleep"',
+      'data-player-action="detail"',
+      'data-player-action="follow"',
+      'data-player-action="collapse"',
+    ].every((needle) => indexHtmlCheck.includes(needle)) &&
+    !indexHtmlCheck.includes('/vendor/lottie.min.js') &&
+    indexHtmlCheck.includes('class="player-custom-art"') &&
+    [
+      'data-custom-action-icon="queue">apps</span>',
+      'data-custom-action-icon="lyrics">lyrics</span>',
+      'data-custom-action-icon="sleep">bedtime</span>',
+      'data-custom-action-icon="detail">info</span>',
+      'data-custom-action-icon="follow">person_add</span>',
+      'data-custom-action-icon="collapse">chevron_left</span>',
+    ].every((needle) => indexHtmlCheck.includes(needle)) &&
+    appJsCheck.includes('const PLAYER_ACTION_ICONS') &&
+    appJsCheck.includes('function renderPlayerActionArtwork()') &&
+    appJsCheck.includes('function triggerPlayerActionIconAnimation(action)') &&
+    appJsCheck.includes('stage.dataset.hoverAction') &&
+    appJsCheck.includes('stage.dataset.burstAction') &&
+    appJsCheck.includes('function initPlayerActionBundle()') &&
+    appJsCheck.includes('renderPlayerActionArtwork();') &&
+    appJsCheck.includes('window.addEventListener("resize", () => renderPlayerActionArtwork(), { passive: true });') &&
+    appJsCheck.includes('const LIBRARY_COVER_ART = Object.freeze') &&
+    appJsCheck.includes('liked: "/covers/liked-songs.svg"') &&
+    appJsCheck.includes('downloads: "/covers/downloaded-songs.svg"') &&
+    appJsCheck.includes('folder: "/covers/folder-playlist.svg"') &&
+    appJsCheck.includes('library-nav-cover${cover === LIBRARY_COVER_ART.folder') &&
+    appJsCheck.includes('b.dataset.libraryAnimating') &&
+    appJsCheck.includes('class="lib-liked-art cover-art"') &&
+    appJsCheck.includes('function animatePlayerActionState(next)') &&
+    appJsCheck.includes('function runPlayerAction(action)') &&
+    appJsCheck.includes('playerActionMotionTimer = setTimeout') &&
+    appJsCheck.includes('stage.addEventListener("pointerleave"') &&
+    !appJsCheck.includes('playerActionMenu') &&
+    stylesCssCheck.includes('.player-action-stage') &&
+    stylesCssCheck.includes('.player-custom-art') &&
+    stylesCssCheck.includes('@keyframes playerQueuePremium') &&
+    stylesCssCheck.includes('@keyframes playerLyricsPremium') &&
+    stylesCssCheck.includes('@keyframes playerSleepPremium') &&
+    stylesCssCheck.includes('@keyframes playerDetailPremium') &&
+    stylesCssCheck.includes('@keyframes playerFollowPremium') &&
+    stylesCssCheck.includes('@keyframes playerCollapsePremium') &&
+    stylesCssCheck.includes('width: 50px') &&
+    stylesCssCheck.includes('width: 210px') &&
+    stylesCssCheck.includes('backdrop-filter: blur(16px) saturate(1.6)') &&
+    stylesCssCheck.includes('.library-nav-cover') &&
+    stylesCssCheck.includes('.library-nav-press') &&
+    stylesCssCheck.includes('@keyframes libraryNavPress') &&
+    stylesCssCheck.includes('backdrop-filter: blur(14px) saturate(1.35)') &&
+    stylesCssCheck.includes('.player-action-hit') &&
+    stylesCssCheck.includes('aspect-ratio: 4 / 3') &&
+    stylesCssCheck.includes('.player-legacy-action') &&
+    !stylesCssCheck.includes('.player-action-menu')
+  );
+  ok("custom playlist editor: new-playlist banner and cover crops are retained in the draft before Create/Save",
+    appJsCheck.includes('if (crop.plIndex === -1 && state.plDraft && state.plDraft.open)') &&
+    appJsCheck.includes('state.plDraft.banner = data') &&
+    appJsCheck.includes('paintPlEditor()')
+  );
+  ok("desktop polish: homepage search has no slash shortcut and square labels remain resize-safe",
+    !appJsCheck.includes('<kbd>/</kbd>') &&
+    stylesCssCheck.includes('container-name: muchi-sidebar') &&
+    stylesCssCheck.includes('overflow-wrap: anywhere') &&
+    stylesCssCheck.includes('min-width: 0')
+  );
+  ok("homepage hero: desktop music carousel uses a larger responsive feature panel with short-window limits",
+    stylesCssCheck.includes('height: clamp(340px, 46vh, 500px)') &&
+    stylesCssCheck.includes('height: clamp(300px, 50vh, 390px)') &&
+    stylesCssCheck.includes('min-height: 340px') &&
+    stylesCssCheck.includes('hero-carousel-controls')
+  );
+  ok("homepage hero: search and profile overlay the wide music artwork in a compact glass treatment",
+    appJsCheck.includes('placeholder="Search by artists, songs or albums"') &&
+    stylesCssCheck.includes('body[data-view="home"] #view > .home-bar') &&
+    stylesCssCheck.includes('background: rgba(14,16,16,.62)') &&
+    stylesCssCheck.includes('width: calc(100vw - var(--desktop-sidebar) - var(--desktop-rail))') &&
+    stylesCssCheck.includes('max-width: none') &&
+    stylesCssCheck.includes('home-bar-profile-wrap > .avatar-btn')
+  );
   ok("client app.js: includes mixThreeSourcesClient and fetchLyricsBrowserFallback",
     appJsCheck.includes("function mixThreeSourcesClient(") &&
     appJsCheck.includes("function fetchLyricsBrowserFallback(") &&
@@ -681,6 +1159,338 @@ ok("parseLyricsHit empty → null", parseLyricsHit({}) === null);
     stylesCssCheck.includes("@keyframes songTitleMarquee") &&
     stylesCssCheck.includes(".player .meta #trackTitle.is-marquee .marquee-track") &&
     stylesCssCheck.includes(".ly-meta strong.is-marquee .marquee-track")
+  );
+  ok("web lyrics view: hide global topbar and player while preserving native layout behavior",
+    appJsCheck.includes('const immersiveWebView = !isNativeApp() && (state.view === "now" || state.view === "settings");') &&
+    appJsCheck.includes('const showTopbar = on && !immersiveWebView;') &&
+    appJsCheck.includes('bar.hidden = !showTopbar;') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) body[data-view="now"] #topbar') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) body[data-view="now"] #playerBar')
+  );
+  ok("lyrics experience: distinguishes loading, unavailable, plain, line-synced, and offline states without claiming word-level timing",
+    appJsCheck.includes("function lyricsStateInfo(L)") &&
+    appJsCheck.includes('label: "Loading lyrics"') &&
+    appJsCheck.includes('label: "Lyrics unavailable"') &&
+    appJsCheck.includes('label: "Plain lyrics"') &&
+    appJsCheck.includes('label: "Line-synced"') &&
+    appJsCheck.includes('label: "Offline · line-synced"') &&
+    appJsCheck.includes('label: "Offline · plain lyrics"') &&
+    appJsCheck.includes("word-level timing isn't available") &&
+    appJsCheck.includes('data-lyrics-follow') &&
+    appJsCheck.includes('data-lyrics-retry') &&
+    appJsCheck.includes('function hasTimedLyricsPayload(data)') &&
+    appJsCheck.includes('Saved plain lyrics as') &&
+    appJsCheck.includes('.txt') &&
+    stylesCssCheck.includes('.ly-status') &&
+    stylesCssCheck.includes('.ly-loading-state') &&
+    stylesCssCheck.includes('@keyframes lyricsLoadingShimmer') &&
+    stylesCssCheck.includes('@media (max-width: 600px)') &&
+    !androidAmbientAppCheck.includes("function lyricsStateInfo(L)") &&
+    !iosAmbientAppCheck.includes("function lyricsStateInfo(L)") &&
+    !androidLyricsCssCheck.includes(".ly-status") &&
+    !iosLyricsCssCheck.includes(".ly-loading-state")
+  );
+  ok("Web notifications: followed-artist releases use a local unread drawer beside the profile instead of surprise release popups",
+    appJsCheck.includes('aura.notifications') &&
+    appJsCheck.includes('id="notificationsBtn"') &&
+    appJsCheck.includes('id="notificationDrawer"') &&
+    appJsCheck.includes('id="markAllNotifications"') &&
+    appJsCheck.includes('function addReleaseNotification(followed, latest)') &&
+    appJsCheck.includes('function notificationDateLabel(item)') &&
+    appJsCheck.includes('function openReleaseNotification(id)') &&
+    appJsCheck.includes('Found ${newCount} new release(s) in Notifications') &&
+    !appJsCheck.includes('new Notification(`${f.name} released a track`') &&
+    stylesCssCheck.includes('.notification-drawer') &&
+    stylesCssCheck.includes('@keyframes notificationDrawerIn') &&
+    stylesCssCheck.includes('@keyframes notificationItemIn') &&
+    stylesCssCheck.includes('@media (prefers-reduced-motion: reduce)') &&
+    androidAmbientAppCheck.includes('id="notificationsBtn"') &&
+    androidAmbientAppCheck.includes('id="notificationDrawer"') &&
+    iosAmbientAppCheck.includes('id="notificationsBtn"') &&
+    iosAmbientAppCheck.includes('id="notificationDrawer"')
+  );
+  const notificationCheckStart = appJsCheck.indexOf("async function checkFollowReleases");
+  const notificationCheckEnd = appJsCheck.indexOf("\n  async function loadRadio", notificationCheckStart);
+  const notificationCheck = notificationCheckStart >= 0 && notificationCheckEnd > notificationCheckStart
+    ? appJsCheck.slice(notificationCheckStart, notificationCheckEnd)
+    : "";
+  ok("Web notifications: release polling refreshes the local surface without a homepage render",
+    notificationCheck.includes("syncNotificationSurface({ rebuild: state.showNotifications, animate: false });") &&
+    !notificationCheck.includes("if (state.view === \"home\") render();")
+  );
+  ok("Web notifications: localized open/close, red unread dot, ringing trigger, and exit animation avoid homepage re-render",
+    appJsCheck.includes("function syncNotificationSurface({ immediate = false, rebuild = false, animate } = {})") &&
+    appJsCheck.includes("function ensureNotificationDocumentListeners()") &&
+    appJsCheck.includes("function setNotificationLiquidMetrics(button, drawer)") &&
+    appJsCheck.includes("function beginNotificationLiquidOpen(drawer, button)") &&
+    appJsCheck.includes("function beginNotificationLiquidClose(drawer, button)") &&
+    appJsCheck.includes("syncNotificationSurface();") &&
+    appJsCheck.includes('className = "notification-trigger-dot"') &&
+    !appJsCheck.includes("notification-count-badge") &&
+    !stylesCssCheck.includes("notification-count-badge") &&
+    stylesCssCheck.includes(".notification-trigger-dot") &&
+    stylesCssCheck.includes("#ef4444") &&
+    stylesCssCheck.includes(".notification-drawer.notification-drawer-closing") &&
+    stylesCssCheck.includes("@keyframes notificationDrawerOut") &&
+    stylesCssCheck.includes("notificationBellNudge") &&
+    stylesCssCheck.includes(".notification-drawer-liquid") &&
+    stylesCssCheck.includes(".notification-drawer-liquid-open") &&
+    stylesCssCheck.includes(".notification-drawer-liquid-closed") &&
+    stylesCssCheck.includes("clip-path: inset(0 round 999px)") &&
+    stylesCssCheck.includes("notification-liquid-from-x") &&
+    stylesCssCheck.includes("prefers-reduced-motion: reduce") &&
+    androidAmbientAppCheck.includes("function syncNotificationSurface({ immediate = false, rebuild = false, animate } = {})") &&
+    iosAmbientAppCheck.includes("function syncNotificationSurface({ immediate = false, rebuild = false, animate } = {})") &&
+    androidLyricsCssCheck.includes("notificationDrawerOut") &&
+    iosLyricsCssCheck.includes("notificationDrawerOut")
+  );
+  const profileCheckStart = appJsCheck.indexOf('const profileBtn = viewEl.querySelector("#profileBtn")');
+  const profileCheckEnd = appJsCheck.indexOf("    const nowBack", profileCheckStart);
+  const profileCheck = profileCheckStart >= 0 && profileCheckEnd > profileCheckStart
+    ? appJsCheck.slice(profileCheckStart, profileCheckEnd)
+    : "";
+  const homeProfileBranchStart = profileCheck.indexOf('if (state.view === "home")');
+  const homeProfileBranchEnd = profileCheck.indexOf("        } else {", homeProfileBranchStart);
+  const homeProfileBranch = homeProfileBranchStart >= 0 && homeProfileBranchEnd > homeProfileBranchStart
+    ? profileCheck.slice(homeProfileBranchStart, homeProfileBranchEnd)
+    : "";
+  ok("Home profile: Web and native avatar menus open locally with a liquid reverse transition instead of a homepage render",
+    appJsCheck.includes("function syncProfileSurface({ immediate = false, animate } = {})") &&
+    appJsCheck.includes("function homeProfileMenuHTML()") &&
+    appJsCheck.includes("function beginProfileLiquidOpen(menu, button)") &&
+    appJsCheck.includes("function beginProfileLiquidClose(menu, button)") &&
+    profileCheck.includes('if (state.view === "home")') &&
+    !profileCheck.includes('if (state.view === "home" && !isNativeApp())') &&
+    profileCheck.includes("syncProfileSurface({ animate: true });") &&
+    profileCheck.includes("syncNotificationSurface({ immediate: true, animate: false });") &&
+    !homeProfileBranch.includes("render();") &&
+    stylesCssCheck.includes(".profile-menu.profile-menu-liquid") &&
+    stylesCssCheck.includes(".profile-menu.profile-menu-liquid-open") &&
+    stylesCssCheck.includes(".profile-menu.profile-menu-liquid-closed") &&
+    stylesCssCheck.includes("html[data-native=\"1\"] .profile-menu.profile-menu-liquid") &&
+    stylesCssCheck.includes("html:not([data-native=\"1\"]) .profile-menu.profile-menu-liquid") &&
+    androidAmbientAppCheck.includes("function syncProfileSurface({ immediate = false, animate } = {})") &&
+    iosAmbientAppCheck.includes("function syncProfileSurface({ immediate = false, animate } = {})") &&
+    androidLyricsCssCheck.includes("profile-menu-liquid") &&
+    iosLyricsCssCheck.includes("profile-menu-liquid")
+  );
+  ok("native Home header: removes the unwanted Home search bar and adds animated notification/profile controls beside each other",
+    !androidAmbientAppCheck.includes('class="home-search-wrap search-wrap"') &&
+    !iosAmbientAppCheck.includes('class="home-search-wrap search-wrap"') &&
+    androidAmbientAppCheck.includes('id="notificationsBtn"') &&
+    iosAmbientAppCheck.includes('id="notificationsBtn"') &&
+    androidAmbientAppCheck.includes('function syncNotificationSurface({ immediate = false, rebuild = false, animate } = {})') &&
+    iosAmbientAppCheck.includes('function syncNotificationSurface({ immediate = false, rebuild = false, animate } = {})') &&
+    androidAmbientAppCheck.includes('function syncProfileSurface({ immediate = false, animate } = {})') &&
+    iosAmbientAppCheck.includes('function syncProfileSurface({ immediate = false, animate } = {})') &&
+    androidLyricsCssCheck.includes('html[data-native="1"] body[data-view="home"] #topbar') &&
+    iosLyricsCssCheck.includes('html[data-native="1"] body[data-view="home"] #topbar') &&
+    androidLyricsCssCheck.includes('.notification-drawer-liquid-open') &&
+    iosLyricsCssCheck.includes('.notification-drawer-liquid-open') &&
+    androidLyricsCssCheck.includes('.profile-menu.profile-menu-liquid-open') &&
+    iosLyricsCssCheck.includes('.profile-menu.profile-menu-liquid-open')
+  );
+  ok("Web motion foundation: scoped tokens and guarded View Transition fallback are additive and absent from native bundles",
+    appJsCheck.includes("function runWebViewTransition(update, options = {})") &&
+    appJsCheck.includes("function canRunWebViewTransition()") &&
+    stylesCssCheck.includes("--web-motion-standard-fast: 140ms") &&
+    stylesCssCheck.includes("--web-motion-expressive-spatial: 460ms") &&
+    stylesCssCheck.includes('html:not([data-native="1"])') &&
+    stylesCssCheck.includes("--web-motion-stagger-step: 0ms") &&
+    !androidAmbientAppCheck.includes("function runWebViewTransition(update, options = {})") &&
+    !iosAmbientAppCheck.includes("function runWebViewTransition(update, options = {})") &&
+    !androidLyricsCssCheck.includes("--web-motion-standard-fast: 140ms") &&
+    !iosLyricsCssCheck.includes("--web-motion-standard-fast: 140ms")
+  );
+  ok("Web reduced-motion contract: centralizes preference checks and disables non-essential motion only in Web mode",
+    appJsCheck.includes("return prefersReducedMotion();") &&
+    appJsCheck.includes("if (prefersReducedMotion()) return;") &&
+    stylesCssCheck.includes("Web reduced-motion contract (Step 3)") &&
+    stylesCssCheck.includes('html:not([data-native="1"]) *::before') &&
+    stylesCssCheck.includes("scroll-behavior: auto !important") &&
+    !androidLyricsCssCheck.includes("Web reduced-motion contract (Step 3)") &&
+    !iosLyricsCssCheck.includes("Web reduced-motion contract (Step 3)")
+  );
+  ok("Web route transition: only the Web #view surface uses a guarded View Transition and native bundles retain the existing fallback",
+    appJsCheck.includes("function canRunWebViewTransition()") &&
+    appJsCheck.includes("const useWebViewTransition = canRunWebViewTransition();") &&
+    appJsCheck.includes("if (useWebViewTransition) void runWebViewTransition(performRender, { cleanup: clearTransitionContext });") &&
+    appJsCheck.includes("if (!useWebViewTransition) fadeView(dir);") &&
+    stylesCssCheck.includes("view-transition-name: muchi-view") &&
+    stylesCssCheck.includes("::view-transition-old(muchi-view)") &&
+    stylesCssCheck.includes("@keyframes webRouteFadeIn") &&
+    !androidAmbientAppCheck.includes("function canRunWebViewTransition()") &&
+    !iosAmbientAppCheck.includes("function canRunWebViewTransition()") &&
+    !androidLyricsCssCheck.includes("view-transition-name: muchi-view") &&
+    !iosLyricsCssCheck.includes("view-transition-name: muchi-view")
+  );
+  ok("Web directional route transition: forward, back, and lateral intent share the guarded Web path",
+    appJsCheck.includes("const TAB_INDEX = { home: 0, search: 1, radio: 2, library: 3 };") &&
+    appJsCheck.includes("root.dataset.webNavDirection = dir") &&
+    appJsCheck.includes("cleanup: clearTransitionContext") &&
+    stylesCssCheck.includes('data-web-nav-direction="right"]::view-transition-new(muchi-view)') &&
+    stylesCssCheck.includes('data-web-nav-direction="left"]::view-transition-new(muchi-view)') &&
+    stylesCssCheck.includes("@keyframes webRouteSlideInRight") &&
+    stylesCssCheck.includes("@keyframes webRouteSlideInLeft") &&
+    stylesCssCheck.includes("--web-motion-distance-md") &&
+    !androidAmbientAppCheck.includes("data-web-nav-direction") &&
+    !iosAmbientAppCheck.includes("data-web-nav-direction") &&
+    !androidLyricsCssCheck.includes("@keyframes webRouteSlideInRight") &&
+    !iosLyricsCssCheck.includes("@keyframes webRouteSlideInRight")
+  );
+  ok("Web shared artwork transition: card-to-detail pairing is opt-in, expressive, reduced-motion safe, and absent from native bundles",
+    appJsCheck.includes("function prepareWebSharedArtworkTransition()") &&
+    appJsCheck.includes("webSharedArtworkTransition = { key: webTrackMotionKey(track)") &&
+    appJsCheck.includes('data-shared-artwork="1"') &&
+    appJsCheck.includes("cleanup: clearTransitionContext") &&
+    stylesCssCheck.includes("view-transition-name: muchi-artwork") &&
+    stylesCssCheck.includes("::view-transition-old(muchi-artwork)") &&
+    stylesCssCheck.includes("@keyframes webSharedArtworkNew") &&
+    stylesCssCheck.includes("--web-motion-expressive-spatial") &&
+    !androidAmbientAppCheck.includes("muchi-artwork") &&
+    !iosAmbientAppCheck.includes("muchi-artwork") &&
+    !androidLyricsCssCheck.includes("view-transition-name: muchi-artwork") &&
+    !iosLyricsCssCheck.includes("view-transition-name: muchi-artwork")
+  );
+  ok("Web skeleton resolution: loading surfaces resolve with one Web-only entrance and preserve the reduced-motion/native contract",
+    appJsCheck.includes('data-web-skeleton="1"') &&
+    appJsCheck.includes("function triggerWebSkeletonResolution()") &&
+    appJsCheck.includes("hadWebSkeleton && !hasWebSkeleton") &&
+    appJsCheck.includes("!render._routeTransitionRender && !webViewTransitionActive") &&
+    stylesCssCheck.includes("#view.web-content-resolved") &&
+    stylesCssCheck.includes("@keyframes webContentResolve") &&
+    stylesCssCheck.includes("--web-motion-distance-sm") &&
+    !androidAmbientAppCheck.includes("web-content-resolved") &&
+    !iosAmbientAppCheck.includes("web-content-resolved") &&
+    !androidLyricsCssCheck.includes("@keyframes webContentResolve") &&
+    !iosLyricsCssCheck.includes("@keyframes webContentResolve")
+  );
+  ok("Web utility enter/exit transitions: modal sheets and queue close cleanly without touching the notification drawer or native bundles",
+    appJsCheck.includes("function showWebUtilityModal(modal)") &&
+    appJsCheck.includes("modal.dataset.webUtilityState = \"exit\"") &&
+    appJsCheck.includes("setQueueOpen._webExitT") &&
+    appJsCheck.includes("prefersReducedMotion() ? 1 : 270") &&
+    stylesCssCheck.includes("#modal.web-utility-modal[data-web-utility-state=\"enter\"]") &&
+    stylesCssCheck.includes(".queue-panel[data-web-utility-state=\"exit\"]") &&
+    stylesCssCheck.includes("@keyframes webUtilitySheetEnter") &&
+    stylesCssCheck.includes("@keyframes webUtilityQueueExit") &&
+    stylesCssCheck.includes("notification drawer") &&
+    !androidAmbientAppCheck.includes("web-utility-modal") &&
+    !iosAmbientAppCheck.includes("web-utility-modal") &&
+    !androidLyricsCssCheck.includes("@keyframes webUtilitySheetEnter") &&
+    !iosLyricsCssCheck.includes("@keyframes webUtilitySheetEnter")
+  );
+  ok("Stage 4 Smart Mood Mix: Web and native use a separate sibling card, session taste/context, and safe non-persistent queue actions",
+    appJsCheck.includes("function smartMoodMixContext()") &&
+    appJsCheck.includes("function buildSmartMoodMix(home = state.home || {})") &&
+    (() => {
+      const discoveryStart = appJsCheck.indexOf('          <div class="disc-banner" id="openDiscovery">');
+      const smartStart = appJsCheck.indexOf('          <div class="smart-mood-mix" data-smart-mood="1">');
+      const beforeSmart = appJsCheck.slice(discoveryStart, smartStart);
+      const opens = (beforeSmart.match(/<div\b/g) || []).length;
+      const closes = (beforeSmart.match(/<\/div>/g) || []).length;
+      return discoveryStart >= 0 && smartStart > discoveryStart && opens === closes;
+    })() &&
+    appJsCheck.includes('data-smart-mood="1"') &&
+    appJsCheck.includes("state.discovery && state.discovery.tracks") &&
+    appJsCheck.includes("timeOfDayContext()") &&
+    appJsCheck.includes("function playSmartMoodMix()") &&
+    appJsCheck.includes("function queueSmartMoodMix()") &&
+    appJsCheck.includes(".filter((t) => !state.queue.some((q) => isSameSongClient(q, t)))") &&
+    appJsCheck.includes('id="playSmartMoodMix"') &&
+    appJsCheck.includes('id="queueSmartMoodMix"') &&
+    !appJsCheck.includes('save("aura.smartMoodMix"') &&
+    stylesCssCheck.includes(".smart-mood-mix") &&
+    stylesCssCheck.includes(".smart-mood-actions") &&
+    stylesCssCheck.includes("@keyframes smartMoodMixIn") &&
+    stylesCssCheck.includes('html:not([data-native="1"]) .smart-mood-mix') &&
+    stylesCssCheck.includes('transform: translate3d(0, 8px, 0)') &&
+    stylesCssCheck.includes('transition: none !important') &&
+    androidAmbientAppCheck.includes("function buildSmartMoodMix(home = state.home || {})") &&
+    iosAmbientAppCheck.includes("function buildSmartMoodMix(home = state.home || {})") &&
+    androidAmbientAppCheck.includes('id="playSmartMoodMix"') &&
+    iosAmbientAppCheck.includes('id="queueSmartMoodMix"') &&
+    androidLyricsCssCheck.includes('html[data-native="1"] .smart-mood-mix') &&
+    iosLyricsCssCheck.includes('html[data-native="1"] .smart-mood-actions') &&
+    androidLyricsCssCheck.includes('grid-template-columns: repeat(2, minmax(0, 1fr))') &&
+    !androidAmbientAppCheck.includes("function paintHomeTasteSurface()") &&
+    !iosAmbientAppCheck.includes("function paintHomeTasteSurface()")
+  );
+  ok("Stage 5 downloads: buttons expose preparing, progress, saving, saved, failed, cancelled, and retry states without duplicate jobs", (() => {
+    const activeNeedle = 'const DOWNLOAD_ACTIVE_STATUSES = new Set(["preparing", "resolving", "downloading", "saving"])';
+    const stateNeedles = [
+      'status: "preparing"', 'job.status = "resolving"', 'job.status = "downloading"', 'job.status = "saving"',
+      'state: "saved"', 'state: "error"', 'state: "cancelled"', 'state: "idle"',
+    ];
+    const stateOrder = stateNeedles.every((needle) => appJsCheck.includes(needle));
+    const reserveBeforeResolve = appJsCheck.indexOf('status: "preparing"') < appJsCheck.indexOf('const resolved = await ensureStreamForDownload(t)');
+    return appJsCheck.includes(activeNeedle) &&
+      stateOrder && reserveBeforeResolve &&
+      appJsCheck.includes("function downloadJobForTrack(t)") &&
+      appJsCheck.includes("function downloadButtonState(t)") &&
+      appJsCheck.includes("function syncDownloadButton(el, t)") &&
+      appJsCheck.includes("function syncDownloadButtons()") &&
+      appJsCheck.includes("function retryDownload(id)") &&
+      appJsCheck.includes('data-retry-dl=') &&
+      appJsCheck.includes('Download failed — tap to retry') &&
+      appJsCheck.includes('Download cancelled — tap to retry') &&
+      appJsCheck.includes('class="download-progress-ring"') &&
+      appJsCheck.includes('save("aura.dlQueue", state.dlQueue)') &&
+      appJsCheck.includes('state.dlQueue = (state.dlQueue || []).filter((job) => !downloadJobMatchesTrack(job, t)') &&
+      !androidAmbientAppCheck.includes("function downloadButtonState(t)") &&
+      !iosAmbientAppCheck.includes("function retryDownload(id)") &&
+      stylesCssCheck.includes(".download-progress-ring") &&
+      stylesCssCheck.includes('data-download-state="downloading"') &&
+      stylesCssCheck.includes('data-download-state="error"') &&
+      stylesCssCheck.includes("@keyframes downloadRingSpin") &&
+      stylesCssCheck.includes("prefers-reduced-motion: reduce") &&
+      !androidLyricsCssCheck.includes(".download-progress-ring") &&
+      !iosLyricsCssCheck.includes(".dl-retry-btn") &&
+      !androidAmbientIndexCheck.includes("download-progress-ring") &&
+      !iosAmbientIndexCheck.includes("download-progress-ring");
+  })());
+  ok("web context rail: starts collapsed until explicit playback, then preserves hide/restore behavior",
+    !appJsCheck.includes('rail-kicker">Your listening space') &&
+    appJsCheck.includes('contextRailPlaybackActivated: false') &&
+    appJsCheck.includes('function activateContextRailForPlayback()') &&
+    appJsCheck.includes('!current() || !state.contextRailPlaybackActivated || !!state.contextRailHidden') &&
+    appJsCheck.includes('if (!cur || !state.contextRailPlaybackActivated)') &&
+    appJsCheck.includes('data-rail-action="hide"') &&
+    !appJsCheck.includes('data-rail-action="lyrics"') &&
+    !appJsCheck.includes('data-rail-action="queue"') &&
+    !appJsCheck.includes('data-rail-action="queue-full"') &&
+    !stylesCssCheck.includes('.rail-show-all') &&
+    appJsCheck.includes('function hideContextRail()') &&
+    appJsCheck.includes('function showContextRail()') &&
+    appJsCheck.includes('state.contextRailHiddenTrackKey !== curKey') &&
+    appJsCheck.includes('activateContextRailForPlayback();') &&
+    appJsCheck.includes('showContextRail();') &&
+    stylesCssCheck.includes('body.context-rail-hidden #app') &&
+    stylesCssCheck.includes('body.context-rail-hidden .right-rail') &&
+    stylesCssCheck.includes('.rail-queue-section') &&
+    stylesCssCheck.includes('backdrop-filter: blur(24px) saturate(155%)') &&
+    stylesCssCheck.includes('@keyframes railPlayHover') &&
+    stylesCssCheck.includes('@keyframes railNextHover') &&
+    stylesCssCheck.includes('@keyframes railLikeHover')
+  );
+  ok("web player glow: desktop player bloom and album wash stay restrained",
+    stylesCssCheck.includes('box-shadow: 0 -8px 22px rgba(0,0,0,.18)') &&
+    stylesCssCheck.includes('opacity: .10 !important') &&
+    !stylesCssCheck.includes('animation-duration: 12s')
+  );
+  ok("web settings: immersive full-screen chrome, profile header, and native-only option boundaries",
+    appJsCheck.includes('const immersiveWebView = !native && (state.view === "now" || state.view === "settings");') &&
+    appJsCheck.includes('settingsChrome("Settings")') &&
+    appJsCheck.includes('function settingsProfileData()') &&
+    appJsCheck.includes('state.settingsPage === "ui" || state.settingsPage === "appicon"') &&
+    appJsCheck.includes('if (isNativeApp()) checkUpdates(true);') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) body[data-view="settings"] .sidebar') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) body[data-view="settings"] .right-rail') &&
+    stylesCssCheck.includes('html:not([data-native="1"]) body[data-view="settings"] #playerBar') &&
+    stylesCssCheck.includes('@keyframes webSettingsCardIn') &&
+    appJsCheck.includes('settings-motion-enter') &&
+    appJsCheck.includes('render._settingsMotionEntry') &&
+    stylesCssCheck.includes('border-radius: 50%')
   );
 }
 
@@ -779,9 +1589,9 @@ await (async () => {
   const { handleAuthUrl } = await import("../src/oauth.js");
   const mockEnv = {
     GOOGLE_CLIENT_ID: "test-client-id.apps.googleusercontent.com",
-    GOOGLE_CLIENT_SECRET: "test-secret",
+    GOOGLE_CLIENT_SECRET: secureRandomBytes(32).toString("base64url"),
     GOOGLE_REDIRECT_URI: "https://muchi.twiarimascord.workers.dev/api/auth/google/callback",
-    MUCHI_SESSION_SECRET: "test-session-secret-1234567890",
+    MUCHI_SESSION_SECRET: secureRandomBytes(32).toString("base64url"),
     DB: {
       prepare() {
         return {
@@ -813,7 +1623,7 @@ await (async () => {
   const iosPlugin = readFileSync("ios/App/App/MuchiAudioPlugin.swift", "utf8");
   const iosPbxproj = readFileSync("ios/App/App.xcodeproj/project.pbxproj", "utf8");
 
-  ok("version: APP_VERSION is 1.10.1", APP_VERSION === "1.10.1" && appJs.includes('const APP_VERSION = "1.10.1"'));
+  ok("version: APP_VERSION is 1.10.2", APP_VERSION === "1.10.2" && appJs.includes('const APP_VERSION = "1.10.2"'));
   {
     const javaFiles = [
       ["MainActivity.java", androidMainActivity],
@@ -924,22 +1734,22 @@ await (async () => {
     androidService.includes("extractDurationMsFromUrl") &&
     iosPlugin.includes("timeInterval: 0.25")
   );
-  ok("sound quality (1.7.6 restores exact 1.6.6): WebAudio Phone Speaker DSP (78Hz +9.5dB, 58Hz +5.5dB, 145Hz +3.2dB, 420Hz -2.8dB, 2800Hz +2.8dB, 8500Hz +2.6dB, wet 0.72, punch -20dB 3.6:1, limiter -0.9dB 20:1, out 1.55)",
+  ok("sound quality: WebAudio Phone Speaker retains its original EQ, harmonic branch and output",
     appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") &&
-    appJs.includes("sub.frequency.value = 58; sub.Q.value = 0.75; sub.gain.value = 5.5;") &&
-    appJs.includes("body.frequency.value = 145; body.Q.value = 0.8; body.gain.value = 3.2;") &&
+    appJs.includes("sub.type = \"peaking\"; sub.frequency.value = 58; sub.Q.value = 0.75; sub.gain.value = 5.5;") &&
+    appJs.includes("body.type = \"peaking\"; body.frequency.value = 145; body.Q.value = 0.8; body.gain.value = 3.2;") &&
     appJs.includes("scoop.frequency.value = 420; scoop.Q.value = 0.85; scoop.gain.value = -2.8;") &&
-    appJs.includes("presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;") &&
-    appJs.includes("air.frequency.value = 8500; air.gain.value = 2.6;") &&
+    appJs.includes("presence.type = \"peaking\"; presence.frequency.value = 2800; presence.Q.value = 0.75; presence.gain.value = 2.8;") &&
+    appJs.includes("air.type = \"highshelf\"; air.frequency.value = 8500; air.gain.value = 2.6;") &&
     appJs.includes("wet.gain.value = 0.72;") &&
     appJs.includes("punch.threshold.value = -20;") &&
     appJs.includes("punch.ratio.value = 3.6;") &&
     appJs.includes("lim.threshold.value = -0.9;") &&
     appJs.includes("lim.ratio.value = 20;") &&
     appJs.includes("out.gain.value = 1.55;") &&
-    !/out\.gain\.value\s*=\s*1\.08/.test(appJs)
+    appJs.includes("out.connect(ctx.destination);")
   );
-  ok("sound quality (1.7.6 restores exact 1.6.6): Bass, Spatial, and Dynamic modes (EQ, compressors, HRTF 0.38/0.28, drive 5/4, out 1.28/1.22/1.18, no extra post-output limiter)",
+  ok("sound quality: Bass, Spatial, and Dynamic modes retain their original routing, bass drive and output",
     appJs.includes("bass.frequency.value = 72; bass.gain.value = 8.5;") &&
     appJs.includes("bass.frequency.value = 90; bass.gain.value = 2.4;") &&
     appJs.includes("bass.frequency.value = 85; bass.gain.value = 5.5;") &&
@@ -956,8 +1766,7 @@ await (async () => {
     appJs.includes("out.connect(ctx.destination);") &&
     !androidService.includes("DynamicsProcessing") &&
     !androidService.includes("setEnableAudioFloatOutput") &&
-    (androidService.includes('int gainMb = "phone".equals(mode) ? 310 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;') ||
-     androidService.includes('int gainMb = "phone".equals(mode) ? 380 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;')) &&
+    androidService.includes('int gainMb = "phone".equals(mode) ? 310 : "bass".equals(mode) ? 280 : "dynamic".equals(mode) ? 240 : 200;') &&
     (androidService.includes("bestM4aBitrate >= 96000") || androidService.includes("bestM4aBitrate >= 115000"))
   );
   ok("full-quality stream enforcement (1.7.6): no 8kHz synthetic WAV test tone and no 30-second low-bitrate previewUrl override in playback or catalog normalization",
@@ -1052,11 +1861,14 @@ await (async () => {
 
     const androidAppJs = readFileSync("android/app/src/main/assets/public/app.js", "utf8");
     const iosAppJs = readFileSync("ios/App/App/public/app.js", "utf8");
-    ok("Made For You: native Android and iOS app bundles match web public/app.js recommendation logic and define normalizeKeyText",
-      androidAppJs === appJs &&
-      iosAppJs === appJs &&
+    // The checked-in Android/iOS bundles intentionally stay isolated from
+    // web-only UI and catalog changes. Validate the shared recommendation
+    // primitives without requiring native assets to mirror the web bundle.
+    ok("Made For You: web and native bundles retain recommendation primitives without native rewrites",
       appJs.includes("function normalizeKeyText(") &&
-      androidAppJs.includes("function personalizeForYouCardTracks(")
+      appJs.includes("function personalizeForYouCardTracks(") &&
+      androidAppJs.includes("function personalizeForYouCardTracks(") &&
+      iosAppJs.includes("function personalizeForYouCardTracks(")
     );
 
     // ── Spotify-level Adaptive Queue Intelligence Validations ──────────────
@@ -1142,7 +1954,7 @@ await (async () => {
   );
   ok("offline lyrics movement: downloads persist lyrics to IDB & state.downloads, loadLyrics runs offline, and synthesizeSyncedLyrics + highlightLyric move lyrics offline",
     appJs.includes("async function saveOfflineLyrics(t, data)") &&
-    appJs.includes("async function getOfflineLyrics(t)") &&
+    appJs.includes("async function getOfflineLyrics(t, includeTrackData = true)") &&
     appJs.includes("async function ensureOfflineLyricsForTrack(t)") &&
     appJs.includes("function synthesizeSyncedLyrics(plainText, durSec)") &&
     appJs.includes("// Always load lyrics (uses IndexedDB / saved download cache when offline)\n    loadLyrics(t);")
@@ -1362,7 +2174,7 @@ await (async () => {
     (() => {
       const fnStart = appJs.indexOf("function nativeHandleControls(");
       const errBlockStart = appJs.indexOf('} else if (msg === "error") {', fnStart);
-      const errBlock = appJs.slice(errBlockStart, errBlockStart + 3500);
+      const errBlock = appJs.slice(errBlockStart, errBlockStart + 7000);
       const refreshIdx = errBlock.indexOf("!cur._nativeRefreshTried");
       const fallbackIdx = errBlock.indexOf("!cur._nativeFallbackTried");
       const ytFallbackIdx = errBlock.indexOf("!cur._nativeYtFallbackTried");
@@ -1396,8 +2208,21 @@ await (async () => {
   ok("native background & notification: MuchiAudioPlugin exposes syncSession and setAudioPrefs and deduplicates loadTrack", androidPlugin.includes("public void syncSession(PluginCall call)") && androidPlugin.includes("public void setAudioPrefs(PluginCall call)") && androidService.includes("url.equals(currentRequestedUrl)"));
   ok("native background & notification: MainActivity keeps WebView media and JS timers alive in background (onPause/onStop/onWindowFocusChanged)", androidMainActivity.includes("keepWebViewAwake()") && androidMainActivity.includes("wv.onResume()") && androidMainActivity.includes("wv.resumeTimers()"));
   ok("native background & notification: app.js syncs native session notification on updateMediaSession and checks npActive first in keepBackgroundPlay", appJs.includes("nativeSyncSession();") && appJs.includes("function nativeSyncSession(") && /function keepBackgroundPlay\(\)\s*\{[\s\S]*?if\s*\(npActive\)/.test(appJs));
-  ok("sound quality (1.5.5): WebAudio DSP graph (5-band EQ, bass shelf + harmonic warmth shaper, Haas 3D spatial stereo widener, clarity/air loudness compressor) and native hardware DSP effects active by default", appJs.includes("state.prefs.soundV !== 3") && appJs.includes("function hookSound()") && appJs.includes("function spatialMode()") && appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") && appJs.includes("Math.tanh(3.1 * x) * 0.52") && appJs.includes("out.gain.value = 1.55;") && appJs.includes("function nativeSyncAudioPrefs()") && androidService.includes("applyPlayerPrefsAndEffects") && androidService.includes("LoudnessEnhancer") && androidService.includes("BassBoost") && androidService.includes("Equalizer"));
-  ok("phone thermal optimization: disables continuous 60-120fps waveRaf/seekRaf loops on phones, pauses background CSS animations via data-hidden, and uses GPU scaleY for eqBars", (appJs.includes("if (cheapPhone() || isBatterySaver()) {\n      drawSeekWave();\n      return;\n    }") || appJs.includes("if (cheapPhone()) {\n      drawSeekWave();\n      return;\n    }")) && appJs.includes("if (document.hidden && npActive) return;") && appJs.includes('document.documentElement.dataset.hidden = document.hidden ? "1" : "0"') && stylesCss.includes('html[data-hidden="1"] *') && stylesCss.includes("transform: scaleY(0.25)"));
+  ok("Phase 2C native next-track synchronization: JS tokens, stale warm guards, and Android/iOS sequence rejection are present without generated-bundle edits",
+    appJs.includes("let nativeNextSyncSeq = 0;") &&
+      appJs.includes("let nativeNextTrackRef = null;") &&
+      appJs.includes("function nextNativeNextSyncSequence()") &&
+      appJs.includes("sequence: syncSeq") &&
+      appJs.includes("t._nativeWarmRequestSeq === warmRequestSeq") &&
+      androidPlugin.includes("EXTRA_NEXT_SEQUENCE") &&
+      androidPlugin.includes("EXTRA_PRELOAD") &&
+      androidService.includes("if (sequence <= nextTrackSequence) return;") &&
+      androidService.includes("if (shouldPreload && videoId") &&
+      iosPlugin.includes("if sequence <= nextTrackSequence") &&
+      iosPlugin.includes("if shouldPreload && !videoId.isEmpty")
+  );
+  ok("sound quality: WebAudio DSP graph and native hardware effects remain active with the original bass path", appJs.includes("state.prefs.soundV !== 3") && appJs.includes("function hookSound()") && appJs.includes("function spatialMode()") && appJs.includes("bass.frequency.value = 78; bass.gain.value = 9.5;") && appJs.includes("wet.gain.value = 0.72;") && appJs.includes("out.gain.value = 1.55;") && appJs.includes("function nativeSyncAudioPrefs()") && androidService.includes("applyPlayerPrefsAndEffects") && androidService.includes("LoudnessEnhancer") && androidService.includes("BassBoost") && androidService.includes("Equalizer"));
+  ok("phone thermal optimization: static seek artwork has no continuous waveRaf/seekRaf loops, pauses background CSS animations via data-hidden, and uses GPU scaleY for eqBars", appJs.includes("function restartWaveLoop() {\n    drawSeekWave();\n  }") && !appJs.includes("requestAnimationFrame(loop)") && !appJs.includes("seekRaf") && appJs.includes("if (document.hidden && npActive) return;") && appJs.includes('document.documentElement.dataset.hidden = document.hidden ? "1" : "0"') && stylesCss.includes('html[data-hidden="1"] *') && stylesCss.includes("transform: scaleY(0.25)"));
 
   // ── Native Android & iOS Background Playback E2E Simulation ──────────────
   {
@@ -1433,6 +2258,7 @@ await (async () => {
           }
         },
         async preload(opts) { calls.push({ method: "preload", ...opts }); },
+        async setNextTrack(opts) { calls.push({ method: "setNextTrack", ...opts }); },
         async syncSession(opts) { calls.push({ method: "syncSession", ...opts }); },
         async pause() { calls.push({ method: "pause" }); },
         async resume() { calls.push({ method: "resume" }); },
@@ -1958,7 +2784,7 @@ await (async () => {
       iosPlugin.includes("playImmediately(atRate: prefSpeed)") &&
       aggregateJs.includes("const resolvedStreamCache = new Map();") &&
       aggregateJs.includes("Promise.any(fastRaces)") &&
-      appJs.includes("function warmTrack(t)") &&
+      appJs.includes("function warmTrack(t, nativeNextSequence = 0)") &&
       appJs.includes("clearTimeout(secondaryRaceTimer)")
     );
     ok("v1.8.2 native background tap-out: hookSound skips WebView AudioContext on IS_NATIVE, ExoPlayer setAudioAttributes(..., false) avoids WebView focus loss, and appStateChange resumes/hands off native audio",
@@ -1970,33 +2796,68 @@ await (async () => {
     );
     ok("v1.8.2 native app audio cache: MuchiAudioService & MuchiAudioPlugin cache played streams to muchi_audio_cache on disk and app.js persists aura.nativeAudioCache.v1 for 0-backend-load instant replay",
       androidService.includes('private static final String AUDIO_CACHE_DIR_NAME = "muchi_audio_cache";') &&
-      androidService.includes("getCachedAudioFile(this, currentVideoId, trackTitle, trackArtist)") &&
-      androidService.includes("cacheStreamToDiskAsync(appCtx, cacheUrl, effectiveUaForCache, cacheVid, cacheTitle, cacheArtist);") &&
+      androidService.includes("getCachedAudioFile(this, currentVideoId, trackTitle, trackArtist, trackIsrc)") &&
+      androidService.includes("cacheStreamToDiskAsync(appCtx, cacheUrl, effectiveUaForCache, cacheVid, cacheTitle, cacheArtist, cacheIsrc, expectedDurationForCache);") &&
       iosPlugin.includes('appendingPathComponent("muchi_audio_cache", isDirectory: true)') &&
-      iosPlugin.includes("Self.getCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist)") &&
+      iosPlugin.includes("Self.getCachedAudioFile(videoId: currentVideoId, title: currentTitle, artist: currentArtist, isrc: currentIsrc)") &&
       iosPlugin.includes("Self.cacheStreamToDiskAsync(") &&
       appJs.includes('const NATIVE_AUDIO_CACHE_KEY = "aura.nativeAudioCache.v1";') &&
       appJs.includes("function storeNativeAppAudioCache(") &&
       appJs.includes("function getNativeAppAudioCache(") &&
       appJs.includes("t._fromNativeAppCache = true;")
     );
-    ok("v1.8.3 zero-jump native playback: tick() guards !resolvingOnDevice, loadTrack avoids yt: deduplication collision, WEB_REMIX search + parallel candidate probing active, and disk cache download waits for STATE_READY + 6s",
+    ok("v1.8.3/Phase 3A zero-jump native playback: tick() guards !resolvingOnDevice, loadTrack avoids yt: deduplication collision, WEB_REMIX search + parallel candidate probing active, and cancellable disk cache waits for READY + 6s active playback",
       androidService.includes("long rawDur = resolvingOnDevice ? C.TIME_UNSET : player.getDuration();") &&
       androidService.includes('boolean sameIdentity = url != null && !url.equals("yt:")') &&
       androidService.includes("https://music.youtube.com/youtubei/v1/search?prettyPrint=false") &&
       androidService.includes("probeMultipleVideoIdsParallel") &&
-      androidService.includes("ticker.postDelayed(() -> {") &&
+      androidService.includes("ticker.postDelayed(pendingCacheStart, 6000L);") &&
+      androidService.includes("player.getPlaybackState() != Player.STATE_READY") &&
+      androidService.includes("cancelPendingCacheStart()") &&
       iosPlugin.includes("player?.replaceCurrentItem(with: nil)") &&
       iosPlugin.includes("https://music.youtube.com/youtubei/v1/search?prettyPrint=false") &&
-      iosPlugin.includes("probeMultipleVideosParallel")
+      iosPlugin.includes("probeMultipleVideosParallel") &&
+      iosPlugin.includes("DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)") &&
+      iosPlugin.includes("pendingCacheStart?.cancel()") &&
+      iosPlugin.includes("p.timeControlStatus == .playing")
     );
-    ok("v1.8.4 native iTunes & Deezer full-track playback: sharedResolvePool anti-deadlock, WEB_REMIX Songs filter, 256KB + 98% clen anti-truncation cache guard, ANDROID_VR/ANDROID_TESTSUITE Tier 1 priority, and strict Audius artist matching",
+    ok("Phase 3B native cache safety: Android/iOS single-flight alias keys, atomic temp publication, cancellation, metadata, and no duplicate artifact copies",
+      androidService.includes("private static final Object AUDIO_CACHE_LOCK") &&
+      androidService.includes("claimAudioCacheDownload(canonicalKey, cacheKeys)") &&
+      androidService.includes("audioCacheIsrcKey") &&
+      androidService.includes("writeAudioCacheMetadata") &&
+      androidService.includes("tmpFile.renameTo(targetFile)") &&
+      !androidService.includes("secondaryKey") &&
+      iosPlugin.includes("private static var activeAudioCacheDownloads: [String: AudioCacheDownload] = [:]") &&
+      iosPlugin.includes("claimAudioCacheDownload(primaryKey, cacheKeys)") &&
+      iosPlugin.includes("try fm.moveItem(at: tempUrl, to: targetUrl)") &&
+      iosPlugin.includes("writeAudioCacheMetadata") &&
+      !iosPlugin.includes("try? fm.copyItem(at: targetUrl, to: secUrl)")
+    );
+    ok("Phase 3C native cache acceptance and eviction: serialized startup cleanup, complete-artifact-only pruning, cancellation-bound invalidation, 1.15 MB floor, cap rejection, and bounded file size",
+      androidService.includes("private static boolean audioCacheCleanChecked = false") &&
+      androidService.includes("cleanAudioCacheDirOnStartup(dir)") &&
+      androidService.includes("private static boolean isAudioCacheCanonicalActive") &&
+      androidService.includes("deleteAudioCacheArtifact(dir, canonicalKey)") &&
+      androidService.includes("written >= MIN_UNCAPPED_AUDIO_CACHE_BYTES") &&
+      androidService.includes("written < 45L * 1024L * 1024L") &&
+      androidService.includes("written != 983040L") &&
+      iosPlugin.includes("cleanAudioCacheDirOnStartup(dir)") &&
+      iosPlugin.includes("private static func isAudioCacheCanonicalActive") &&
+      iosPlugin.includes("deleteAudioCacheArtifact(dir, entry.key)") &&
+      iosPlugin.includes("written >= minUncappedAudioCacheBytes") &&
+      iosPlugin.includes("written < 45 * 1024 * 1024") &&
+      iosPlugin.includes("written != 983040")
+    );
+    ok("v1.8.4 native iTunes & Deezer full-track playback: sharedResolvePool anti-deadlock, WEB_REMIX Songs filter, 1.15 MB + 98% clen anti-truncation cache guard, ANDROID_VR/ANDROID_TESTSUITE Tier 1 priority, and strict Audius artist matching",
       androidService.includes("final ExecutorService exec = sharedResolvePool;") &&
       androidService.includes("EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D") &&
-      androidService.includes("final long minValidBytes = 262144L;") &&
+      !androidService.includes("MIN_AUDIO_CACHE_BYTES = 262144L") &&
+      androidService.includes("MIN_UNCAPPED_AUDIO_CACHE_BYTES = 1150000L") &&
       androidService.includes("written >= (expectedBytes * 98L) / 100L") &&
       androidService.includes("if (titleMatch && artistMatch && durSec >= 60L)") &&
-      iosPlugin.includes("let minValidBytes: Int64 = 262144") &&
+      !iosPlugin.includes("minAudioCacheBytes: Int64 = 262144") &&
+      iosPlugin.includes("private static let minUncappedAudioCacheBytes: Int64 = 1150000") &&
       iosPlugin.includes("EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D") &&
       iosPlugin.includes("written >= (expectedBytes * 98) / 100") &&
       iosPlugin.includes("if titleMatch && artistMatch && durSec >= 60") &&
@@ -2087,8 +2948,10 @@ await (async () => {
   );
   ok("hero scenes: homepage Still up? bar renders scoped winter, christmas, and autumn scenes behind text", appJs.includes("homeHeroSceneHTML()") && appJs.includes('class="hero-scene hero-scene-winter"') && appJs.includes('class="winter-forest-svg"') && appJs.includes('class="hero-scene hero-scene-christmas"') && appJs.includes('class="xmas-sleigh-svg"') && appJs.includes('class="hero-scene hero-scene-autumn"') && appJs.includes('class="autumn-forest-svg"') && appJs.includes('class="autumn-leaves"') && appJs.includes('class="home-hero-copy"'));
   ok("styles: app-wide winter, christmas & autumn UI overhaul, mood color preservation, and mobile optimizations present in styles.css", stylesCss.includes('html[data-ui="winter"]') && stylesCss.includes('html[data-ui="christmas"]') && stylesCss.includes('html[data-ui="autumn"]') && stylesCss.includes('html[data-ui="autumn"] .mood') && stylesCss.includes("@keyframes santaNightSkyFlight") && stylesCss.includes("@keyframes alaskaSnowLoopFront") && stylesCss.includes("@keyframes autumnLeafDrift"));
+  ok("web mood cards: scroll-aware paint containment disables only expensive moving-state effects while preserving card surfaces", appJs.includes('document.body.classList.add("is-scroll-active")') && appJs.includes('viewEl.addEventListener("scroll", markScrollActive') && stylesCss.includes('body[data-view="home"] .moods > .mood') && stylesCss.includes('body[data-view="home"].is-scroll-active .moods > .mood') && stylesCss.includes('contain: layout paint') && stylesCss.includes('backdrop-filter: none !important') && stylesCss.includes('mix-blend-mode: normal !important'));
+  ok("web mood cards: licensed reference sprite gives every mood a unique picture and personality animation", appJs.includes("function moodDoodleHTML(") && appJs.includes("moodDoodleHTML(m, i)") && appJs.includes('moodDoodleVariant(m, index') && appJs.includes('"headphone"') && appJs.includes('"strawberry"') && appJs.includes('doodle-motion-accent') && stylesCss.includes('background-image: url("/assets/mood-doodles-v1.webp")') && stylesCss.includes("background-size: 300% 400%") && stylesCss.includes("@keyframes moodDoodleFlight") && stylesCss.includes("@keyframes moodDoodleBerry") && stylesCss.includes("@keyframes moodDoodleAccentPop") && stylesCss.includes("prefers-reduced-motion: reduce") && stylesCss.includes("is-scroll-active .mood-doodle") && readFileSync("public/sw.js", "utf8").includes('/assets/mood-doodles-v1.webp'));
   ok("homepage: 'Customize taste' and Settings 'Music Taste & Setup' removed (onboarding is 1-time only for new users)", !appJs.includes("customizeTasteHomeBtn") && !appJs.includes(">Customize taste<") && !appJs.includes("openTasteSetup") && !appJs.includes("Music Taste & Setup"));
-  ok("taste: tastePlaylistSection placed directly under forYouSection", /\$\{forYouSection\(\)\}\s*\$\{tastePlaylistSection\(\)\}\s*\$\{viralSection\(\)\}/.test(appJs));
+  ok("taste: Web moves tastePlaylistSection to Explore while native keeps the Home shelf", appJs.includes('${forYouSection()}\n      ${isNativeApp() ? tastePlaylistSection() : ""}\n      ${viralSection()}') && appJs.includes('${isNativeApp() ? "" : tastePlaylistSection()}'));
   ok("taste: tastePlaylistList always tops up to 10 playlists (never stops at 4 when only artists are followed)", appJs.includes("taste-country-genre-") && appJs.includes("taste-country-artist-") && appJs.includes("cards.length >= 10") && appJs.includes("return cards.slice(0, 10);"));
   ok("library: artistRows in Library has no inline Unfollow button and opens Artist page where #followArtist unfollows", !appJs.includes('data-unfollow="${escapeAttr(a.key)}"') && appJs.includes('id="followArtist"') && appJs.includes("origName: a.origName"));
   ok("onboarding: returning Google user auto-skips onboarding and restores library", appJs.includes("res.isReturningUser") && appJs.includes('localStorage.setItem("aura.onboarded", "1")'));
@@ -2120,7 +2983,7 @@ await (async () => {
     provSrc.includes("export async function soundcloudStreamForQuery")
   );
   ok(
-    "v1.8.5 native phone speaker DSP: Android 6-zone acoustic Equalizer + controlled LoudnessEnhancer (310 mB) & BassBoost (580) + iOS MTAudioProcessingTap active",
+    "v1.8.5 native phone speaker DSP: Android original 6-zone acoustic Equalizer + LoudnessEnhancer/BassBoost + iOS MTAudioProcessingTap active",
     androidSvc.includes("if (freqHz <= 75) targetMb = 320;") &&
     androidSvc.includes("else if (freqHz <= 160) targetMb = 780;") &&
     androidSvc.includes("else if (freqHz <= 280) targetMb = 340;") &&
@@ -2146,7 +3009,8 @@ await (async () => {
     androidSvc.includes("private void recoverMidSongStream(final long resumePosMs)") &&
     androidSvc.includes("invalidateResolvedCacheForTrack(currentVideoId, trackTitle, trackArtist, currentUrl);") &&
     androidSvc.includes("private static boolean isDurationAcceptableStatic(long gotDurationMs, long expectedDurationMs)") &&
-    androidSvc.includes("long minFullSongBytes = currentDurationMs >= 90000L ? (currentDurationMs / 1000L) * 9500L : 262144L;") &&
+    androidSvc.includes("long minFullSongBytes = currentDurationMs >= 90000L") &&
+    androidSvc.includes(": MIN_UNCAPPED_AUDIO_CACHE_BYTES;") &&
     iosPlug.includes('if rawUrl.contains("googlevideo.com") || rawUrl.contains("c=IOS") || rawUrl.contains("c=ANDROID&")') &&
     iosPlug.includes("private func recoverMidSongStream(resumeMs: Double)") &&
     iosPlug.includes("Self.invalidateResolvedCacheForTrack(videoId: self.currentVideoId, title: self.currentTitle, artist: self.currentArtist, failedUrl: self.currentUrl)") &&
@@ -2231,7 +3095,7 @@ await (async () => {
   );
   ok(
     "Old-is-Gold (v1.5.6–1.6.7) pure YouTube/Piped native audio & anti-remix architecture: WEB 'official audio' search priority, title+artist anti-remix/wrong-artist guard across Android/iOS/Worker/JS, and .v193_clean cache purge",
-    androidSvc.includes('new File(oldDir, ".v193_clean")') &&
+    androidSvc.includes('new File(dir, ".v193_clean")') &&
     androidSvc.includes("private static boolean isVideoTitleAcceptableStatic(String gotTitle, String expectedTitle)") &&
     androidSvc.includes("private static boolean isVideoMetadataAcceptableStatic(") &&
     androidSvc.includes("stopPlaybackInternal(true);") &&
@@ -2568,7 +3432,7 @@ await (async () => {
       );
 
       ok(
-        "v1.9.5 native phone speaker DSP calibration & background playback continuity: 0% clipping headroom, 7-stage biquad EQ, C2 soft-knee limiter, playCurrentInFlight guard, background preload/refill, and iOS emitControls wake",
+        "v1.9.5 native phone speaker DSP calibration & background playback continuity: original headroom and 7-stage biquad EQ, C2 soft-knee limiter, playCurrentInFlight guard, background preload/refill, and iOS emitControls wake",
         androidSvc.includes("float dspHeadroom = \"off\".equals(mode) ? 1.0f : (\"phone\".equals(mode) ? 0.62f : 0.72f);") &&
           iosPlugin.includes("let preTrim: Float = 0.82") &&
           iosPlugin.includes("let ceiling: Float = 0.965") &&
@@ -2600,6 +3464,17 @@ await (async () => {
     }
   }
 })();
+
+// ── 5f. Dynamic HTML/style sink audit ─────────────────────────────────────
+{
+  const appText = readFileSync("public/app.js", "utf8");
+  ok("client sink audit: URL/CSS validators are present", appText.includes("function safeImageUrl") && appText.includes("function safeCssImage") && appText.includes("function safeHttpUrl"));
+  ok("client sink audit: download manager IDs use domToken", appText.includes("id=\"dlBar-${domToken(job.id)}\"") && appText.includes("id=\"dlStat-${domToken(job.id)}\""));
+  ok("client sink audit: dynamic backgrounds avoid inline URL interpolation", !appText.includes("style=\"background-image:url('${escapeAttr(art)}')\"") && !appText.includes('backgroundImage = `url(\\"${d.banner}\\")`'));
+  ok("client sink audit: external update link is protocol-validated", appText.includes("const appStoreUrl = safeHttpUrl(u.appStoreUrl)") && appText.includes("href=\"${escapeAttr(appStoreUrl)}\""));
+  ok("client sink audit: custom colors are hex-validated before style sinks", appText.includes("safeHexColor(c[key])") && appText.includes("safeHexColor(g.color)") && appText.includes("hexOk(raw.surface)"));
+  ok("client sink audit: API shelf and catalog labels are HTML-escaped", appText.includes("const safeTitle = escapeHTML(String(title ?? \"\"))") && appText.includes("${escapeHTML(kind)}") && appText.includes("${escapeHTML(p.title)}"));
+}
 
 // ── 6. Live worker checks (only when WRANGLER_DEV_URL is set) ───────────────
 const BASE = process.env.WRANGLER_DEV_URL;
@@ -2638,9 +3513,9 @@ if (BASE) {
   const yCb = await get("/api/auth/youtube/callback?code=x&state=y");
   ok("youtube callback bad state → 302 error home", yCb.status === 302 && yCb.loc === "/?youtube=error");
   const signout = await get("/api/auth/signout");
-  ok("signout → 200 ok", signout.status === 200 && signout.body.ok === true);
+  ok("GET signout rejected without mutating", signout.status === 405);
   const disc = await get("/api/auth/youtube/disconnect");
-  ok("youtube/disconnect unauth → 401 auth", disc.status === 401 && disc.body.error === "auth");
+  ok("GET youtube/disconnect rejected", disc.status === 405);
   const liked = await get("/api/youtube/liked");
   ok("youtube/liked unauth → 401 auth", liked.status === 401 && liked.body.error === "auth");
   const pls = await get("/api/youtube/playlists");
@@ -2663,60 +3538,25 @@ if (BASE) {
   });
   ok("post user/library unauth → 401", postLibUnauth.status === 401);
 
-  // 2. Authenticated checks using dev session token
-  const devSid = "test-smoke-session-sid-12345";
-  const devSecret = "muchi-preview-session-secret-key-32chars!";
+  // 2. An unseeded, test-only signed SID must not authenticate or mutate persisted data.
+  const devSid = `unseeded-fixture-${secureRandomBytes(16).toString("hex")}`;
+  const devSecret = secureRandomBytes(32).toString("base64url");
   const validToken = sessionToken(devSid, devSecret);
   const authHeaders = {
     Authorization: `Bearer ${validToken}`,
     "Content-Type": "application/json",
   };
-
-  // Auth status with bearer token
-  const authStatus = await (await fetch(BASE + "/api/auth/status", { headers: authHeaders })).json();
-  ok("auth/status with token → signedIn", authStatus && authStatus.signedIn === true && authStatus.profile && authStatus.profile.email === "twiarimascord@gmail.com");
-
-  // Read initial library
+  const authStatusRes = await fetch(BASE + "/api/auth/status", { headers: authHeaders });
+  const authStatus = await authStatusRes.json();
+  ok("unseeded signed fixture is not authenticated", authStatus && authStatus.signedIn === false);
   const libInitRes = await fetch(BASE + "/api/user/library", { headers: authHeaders });
-  ok("get user/library authenticated → 200", libInitRes.status === 200);
-  const libInitData = await libInitRes.json();
-  ok("user/library shape", libInitData && typeof libInitData.library === "object");
-
-  // Save/Sync library with liked songs, custom playlists, and followed artists
-  const testPayload = {
-    liked: [
-      { id: "yt:smoke_1", title: "Smoke Test Song", artist: "Muchi Test", source: "youtube" },
-    ],
-    playlists: [
-      { id: "pl_smoke_custom", name: "Smoke Favorites", tracks: [] },
-      { name: "Unnamed Playlist", tracks: [] },
-    ],
-    following: ["Coldplay", "Imagine Dragons"],
-    taste: { genre: "electronic" },
-  };
-
+  ok("unseeded signed fixture cannot read library", libInitRes.status === 401);
   const saveRes = await fetch(BASE + "/api/user/library", {
     method: "POST",
     headers: authHeaders,
-    body: JSON.stringify(testPayload),
+    body: JSON.stringify({ liked: [{ id: "should-not-persist" }] }),
   });
-  ok("post user/library authenticated → 200 ok", saveRes.status === 200);
-  const saveData = await saveRes.json();
-  ok("post user/library returns merged library", saveData.ok === true && saveData.library && saveData.library.liked.length >= 1);
-  ok("post user/library preserved named playlist without id", saveData.library.playlists.some((p) => p.name === "Unnamed Playlist"));
-
-  // Verify round-trip read after persist
-  const libVerifyRes = await fetch(BASE + "/api/user/library", { headers: authHeaders });
-  const libVerifyData = await libVerifyRes.json();
-  ok("persisted library round-trip verification", libVerifyData && libVerifyData.library && libVerifyData.library.following && libVerifyData.library.following.includes("Coldplay"));
-
-  // Bad payload validation
-  const badPayloadRes = await fetch(BASE + "/api/user/library", {
-    method: "POST",
-    headers: authHeaders,
-    body: "non-json-body",
-  });
-  ok("post user/library invalid body → 400", badPayloadRes.status === 400);
+  ok("unseeded signed fixture cannot write library", saveRes.status === 401);
 
   // Search speed benchmark test
   const t0Search = Date.now();
@@ -2808,7 +3648,9 @@ if (BASE) {
   // CORS/OPTIONS/static/debug
   const pre = await get("/api/health", { Origin: "capacitor://localhost" });
   const allowOrigin = pre.headers.get("access-control-allow-origin");
-  ok("CORS on JSON", allowOrigin === "*" || allowOrigin === "capacitor://localhost");
+  ok("CORS allowlist keeps native origin", allowOrigin === "capacitor://localhost" && pre.headers.get("access-control-allow-credentials") === "true");
+  const evilPre = await get("/api/health", { Origin: "https://evil.example" });
+  ok("CORS rejects arbitrary origin", !evilPre.headers.get("access-control-allow-origin") && !evilPre.headers.get("access-control-allow-credentials"));
   const opts = await fetch(BASE + "/api/health", { method: "OPTIONS" });
   ok("OPTIONS 204 + headers", opts.status === 204 && opts.headers.get("access-control-allow-methods") === "GET,POST,OPTIONS");
   const staticPage = await fetch(BASE + "/");
@@ -2817,7 +3659,7 @@ if (BASE) {
   const sw = await fetch(BASE + "/sw.js");
   ok("sw.js served", sw.status === 200);
   const debug = await get("/api/health?debug=1");
-  ok("debug header", debug.headers.get("x-muchi-ms") !== null);
+  ok("debug timing header is not exposed in production", debug.headers.get("x-muchi-ms") === null);
   const favicon = await fetch(BASE + "/favicon.ico", { redirect: "manual" });
   // Dev: public/ lacks _redirects (they're added at package build from
   // public-extra/) → SPA fallback serves index.html. Deployed package: 302
@@ -2871,16 +3713,58 @@ if (BASE) {
     !appJsText.includes('card.addEventListener("pointerdown", () => {\n          bouncePlayer(card);')
   );
 
-  ok("player UI: Apple Watch Charging UI animation replaces song like button with pulsing ring & ripple",
-    stylesText.includes(".like-btn.apple-watch-like") &&
-    stylesText.includes(".apple-charge-ring") &&
-    stylesText.includes("@keyframes appleChargeRingDraw") &&
-    stylesText.includes("@keyframes appleChargeRipplePulse") &&
-    stylesText.includes("@keyframes appleChargeIconPop") &&
-    indexHtml.includes('class="apple-charge-svg"') &&
-    indexHtml.includes('class="apple-charge-ring"') &&
-    indexHtml.includes('class="apple-charge-ripple"') &&
-    appJsText.includes('btn.classList.toggle("charging", !was)')
+  ok("player UI: Web and native Like controls use the direct red SVG heart without Apple Watch treatment",
+    stylesText.includes(".like-btn:not(.apple-watch-like)") &&
+    stylesText.includes(".like-btn:not(.apple-watch-like).on svg") &&
+    stylesText.includes(".like-btn:not(.apple-watch-like).pop svg") &&
+    indexHtml.includes('id="likeBtn" class="icon-btn like-btn"') &&
+    indexHtml.includes('id="npLikeBtn"') &&
+    indexHtml.includes('class="heart-icon"') &&
+    indexHtml.includes('class="heart-path"') &&
+    !indexHtml.includes("apple-watch-like") &&
+    !indexHtml.includes("apple-charge-ring") &&
+    !indexHtml.includes("apple-charge-ripple") &&
+    !appJsText.includes('btn.classList.toggle("charging", !was') &&
+    !appJsText.includes('playAppleWatchLikeLottie($("likeLottieBox"))') &&
+    appJsText.includes('const isAppleWatchLike = false;')
+  );
+
+  ok("Home Like: Web and native update the player locally without rebuilding Home or scheduling a delayed Home repaint",
+    appJsText.includes('const homeLikeWithoutFullRepaint = state.view === "home";') &&
+    appJsText.includes('if (!homeLikeWithoutFullRepaint && (state.view === "library" || state.view === "home")) render();') &&
+    appJsText.includes('if (!homeLikeWithoutFullRepaint) paintHomeSoon();') &&
+    androidAmbientAppCheck.includes('const nativeHomeLike = isNativeApp() && state.view === "home";') &&
+    iosAmbientAppCheck.includes('const nativeHomeLike = isNativeApp() && state.view === "home";') &&
+    androidAmbientAppCheck.includes('if (!nativeHomeLike) paintHomeSoon();') &&
+    iosAmbientAppCheck.includes('if (!nativeHomeLike) paintHomeSoon();')
+  );
+
+  ok("native Home playback controls: remove stacked ripple, bump, pressed, and icon-swap flashes without changing playback handlers",
+    androidAmbientAppCheck.includes("function isNativeHomePlaybackControl(el)") &&
+    iosAmbientAppCheck.includes("function isNativeHomePlaybackControl(el)") &&
+    androidAmbientAppCheck.includes('if (pb && !isNativeHomePlaybackControl(pb)) triggerFabRipple(pb);') &&
+    iosAmbientAppCheck.includes('if (pb && !isNativeHomePlaybackControl(pb)) triggerFabRipple(pb);') &&
+    androidAmbientAppCheck.includes('if (!isNativeHomePlaybackControl(playBtnEl)) triggerFabRipple(playBtnEl, e);') &&
+    iosAmbientAppCheck.includes('if (!isNativeHomePlaybackControl(playBtnEl)) triggerFabRipple(playBtnEl, e);') &&
+    androidAmbientAppCheck.includes('if (isNativeHomePlaybackControl(t)) {') &&
+    iosAmbientAppCheck.includes('if (isNativeHomePlaybackControl(t)) {') &&
+    androidAmbientAppCheck.includes('if (btn && !isNativeHomePlaybackControl(btn)) bump(btn);') &&
+    iosAmbientAppCheck.includes('if (btn && !isNativeHomePlaybackControl(btn)) bump(btn);') &&
+    androidLyricsCssCheck.includes('body[data-view="home"] #playBtn.bump') &&
+    androidLyricsCssCheck.includes('body[data-view="home"] #playIcon.icon-swap') &&
+    iosLyricsCssCheck.includes('body[data-view="home"] #playBtn.bump') &&
+    iosLyricsCssCheck.includes('body[data-view="home"] #playIcon.icon-swap') &&
+    !appJsCheck.includes("function isNativeHomePlaybackControl(el)")
+  );
+
+  ok("native Home playback controls: Next, Previous, and Play remain direct handlers with Android/iOS parity",
+    androidAmbientAppCheck.includes('$("nextBtn").onclick = () =>') &&
+    androidAmbientAppCheck.includes('$("prevBtn").onclick = () =>') &&
+    androidAmbientAppCheck.includes('playBtnEl.onclick = togglePlay;') &&
+    iosAmbientAppCheck.includes('$("nextBtn").onclick = () =>') &&
+    iosAmbientAppCheck.includes('$("prevBtn").onclick = () =>') &&
+    iosAmbientAppCheck.includes('playBtnEl.onclick = togglePlay;') &&
+    androidAmbientAppCheck === iosAmbientAppCheck
   );
 
   ok("search UI: dock navigation & player bars auto-hide when keyboard is active in search",
@@ -2915,10 +3799,11 @@ if (BASE) {
     appJsText.includes("view-slide-right")
   );
 
-  ok("like button: exact Apple Watch charging Lottie animation data loaded",
+  ok("like button: legacy Apple Watch assets remain available without being attached to the Web player markup",
     existsSync("public/apple-watch-like.json") &&
     existsSync("public/apple-watch-lottie-data.js") &&
-    appJsText.includes("playAppleWatchLikeLottie")
+    appJsText.includes("playAppleWatchLikeLottie") &&
+    !indexHtml.includes("apple-watch-like")
   );
 
   ok("native ExoPlayer: instant playback tuning with prioritizeTimeOverSizeThresholds & backBuffer",

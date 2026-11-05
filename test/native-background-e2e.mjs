@@ -1,15 +1,17 @@
-// MUCHI v1.7.8 — Real Android & iOS Native Background Playback E2E Test Suite
+// MUCHI v1.7.8 — Mocked Android & iOS Native Background Playback E2E Test Suite
 //
-// Verifies the complete native background playback lifecycle on both Android
-// (MuchiAudioPlugin.java + MuchiAudioService.java + MainActivity.java) and iOS
-// (MuchiAudioPlugin.swift + Info.plist) coupled with the real public/app.js
-// runtime:
+// Verifies the native background playback lifecycle against the real tracked
+// Android/iOS source files and public/app.js runtime, using a mocked WebView,
+// bridge, resolver, and OS-audio environment:
 //   1. Phone-speaker DSP / audio pipeline integrity (100% unmodified check)
-//   2. Play song in foreground -> verified HTTP stream + native service start + next-track preload
-//   3. Background the app -> foreground service / AVAudioSession + UIBackgroundTask stay active
-//   4. Lock the screen & wait -> continuous progress ticks (0s -> 120s) with zero WebView interference
-//   5. Lock-screen Pause & Resume controls -> MediaStyle / MPRemoteCommandCenter + NP.pause/resume
+//   2. Play song in foreground -> mocked verified HTTP stream + native service start + next-track preload
+//   3. Background the app -> mocked foreground service / AVAudioSession + UIBackgroundTask stay active
+//   4. Lock the screen & wait -> mocked continuous progress ticks (0s -> 120s) with zero WebView interference
+//   5. Lock-screen Pause & Resume controls -> mocked MediaStyle / MPRemoteCommandCenter + NP.pause/resume
 //   6. Lock-screen Next-track, Previous-track, natural track-end auto-advance & error recovery
+//
+// This suite is not physical Android/iOS device acceptance; run the external
+// device checklist separately for release validation.
 
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
@@ -68,6 +70,314 @@ assertE2E(
     iosPluginSwift.includes("MTAudioProcessingTapCreate")
 );
 
+// ── 1b. Expired native stream URL recovery ──────────────────────────────────
+// This is a source-level regression check. The stateful harness below is not a
+// physical Android/iOS device; real device playback remains a release gate.
+console.log("\n=== 1b. Expired Native Stream URL Recovery ===");
+const androidExpiryAt = androidServiceJava.indexOf("Check if the provided URL is an expired googlevideo stream URL");
+const androidYtResolveAt = androidServiceJava.indexOf('if (url != null && url.startsWith("yt:"))', androidExpiryAt);
+assertE2E(
+  "Android: near-expiry googlevideo URLs invalidate matching cache entries before on-device resolve",
+  androidExpiryAt >= 0 &&
+    androidExpiryAt < androidYtResolveAt &&
+    androidServiceJava.includes("urlExpireSec") &&
+    androidServiceJava.includes("invalidateResolvedCacheForTrack(currentVideoId, trackTitle, trackArtist, url)") &&
+    androidServiceJava.includes('url = !currentVideoId.isEmpty() ? ("yt:" + currentVideoId) : "yt:";')
+);
+const iosExpiryAt = iosPluginSwift.indexOf("var effectiveUrl = url");
+const iosResolveAt = iosPluginSwift.indexOf('if effectiveLowUrl.hasPrefix("yt:")');
+assertE2E(
+  "iOS: near-expiry googlevideo URLs invalidate matching cache entries before AVPlayer/resolve",
+  iosExpiryAt >= 0 &&
+    iosExpiryAt < iosResolveAt &&
+    iosPluginSwift.includes("urlExpireSec") &&
+    iosPluginSwift.includes("Self.invalidateResolvedCacheForTrack(videoId: currentVideoId, title: currentTitle, artist: currentArtist, failedUrl: effectiveUrl)") &&
+    iosPluginSwift.includes('effectiveUrl = !currentVideoId.isEmpty ? ("yt:" + currentVideoId) : "yt:"') &&
+    iosPluginSwift.includes("URL(string: effectiveUrl)")
+);
+assertE2E(
+  "iOS: WebM and Opus URL variants route through the compatible native resolver",
+  iosPluginSwift.includes('effectiveLowUrl.hasSuffix(".webm")') &&
+    iosPluginSwift.includes('effectiveLowUrl.contains("format=opus")') &&
+    iosPluginSwift.includes("if effectiveLowUrl.hasPrefix(\"yt:\") || (isUnsupportedWebm && !currentVideoId.isEmpty)")
+);
+const androidRadioCacheAt = androidServiceJava.indexOf("Never attempt to cache infinite live radio streams");
+const androidGoogleCacheAt = androidServiceJava.indexOf("Never open a second competing HTTP download connection to googlevideo.com", androidRadioCacheAt);
+assertE2E(
+  "Android: live radio and playlist manifests are rejected before disk-cache work",
+  androidRadioCacheAt >= 0 &&
+    androidRadioCacheAt < androidGoogleCacheAt &&
+    androidServiceJava.includes('lowCacheUrl.contains("/radio/")') &&
+    androidServiceJava.includes('lowCacheUrl.contains(":8000/")') &&
+    androidServiceJava.includes('lowCacheUrl.contains(":8080/")') &&
+    androidServiceJava.includes('lowCacheUrl.contains(".pls")') &&
+    androidServiceJava.includes('lowCacheUrl.contains(".m3u")') &&
+    androidServiceJava.includes('URLDecoder.decode(streamUrl, "UTF-8")')
+);
+const iosRadioCacheAt = iosPluginSwift.indexOf("Never attempt to cache infinite live radio streams");
+const iosGoogleCacheAt = iosPluginSwift.indexOf("Never open a second competing HTTP download connection to googlevideo.com", iosRadioCacheAt);
+assertE2E(
+  "iOS: live radio and playlist manifests are rejected before disk-cache work",
+  iosRadioCacheAt >= 0 &&
+    iosRadioCacheAt < iosGoogleCacheAt &&
+    iosPluginSwift.includes('lowerRawUrl.contains("/radio/")') &&
+    iosPluginSwift.includes('lowerRawUrl.contains(":8000/")') &&
+    iosPluginSwift.includes('lowerRawUrl.contains(":8080/")') &&
+    iosPluginSwift.includes('lowerRawUrl.contains(".pls")') &&
+    iosPluginSwift.includes('lowerRawUrl.contains(".m3u")') &&
+    iosPluginSwift.includes("rawUrl.removingPercentEncoding")
+);
+assertE2E(
+  "Android: native notification artwork has a bundled default fallback",
+  androidServiceJava.includes("with asset fallback") &&
+    androidServiceJava.includes('getAssets().open("public/cover-default.jpg")') &&
+    androidServiceJava.includes('artworkUrl.startsWith("http://")') &&
+    androidServiceJava.includes("Remote artwork failed")
+);
+assertE2E(
+  "iOS: lock-screen artwork has a bundled default fallback",
+  iosPluginSwift.includes("func applyDefaultArtworkFallback()") &&
+    iosPluginSwift.includes('Bundle.main.path(forResource: "cover-default"') &&
+    iosPluginSwift.includes("applyDefaultArtworkFallback()") &&
+    iosPluginSwift.includes('artUrl.scheme == "http" || artUrl.scheme == "https"')
+);
+const nativeOfflineRouteAt = appJs.indexOf("Native shells cannot hand a WebView blob URL");
+const nativeAudioPredicateAt = appJs.indexOf('^file:\\/\\//i.test(url)');
+assertE2E(
+  "Native offline routing accepts persisted file/content URIs without pretending yt: is offline",
+  nativeOfflineRouteAt >= 0 &&
+    nativeAudioPredicateAt > nativeOfflineRouteAt &&
+    appJs.includes('saved.uri && (/^file:\\/\\//i.test(saved.uri) || /^content:\\/\\//i.test(saved.uri))') &&
+    appJs.includes('else if (!isNetworkOff && (t.videoId || t.title))') &&
+    appJs.includes("rather than pretending that a network-only yt: token is offline audio")
+);
+assertE2E(
+  "Web fallback remains available for non-native playback",
+  appJs.includes("await playAudioWeb(url);") &&
+    appJs.includes("if (nativePlayer() &&")
+);
+assertE2E(
+  "Android: Muchi's six-second cache-start guard remains intact",
+  androidServiceJava.includes("Delay background disk caching by 6 seconds") &&
+    androidServiceJava.includes("ticker.postDelayed(pendingCacheStart, 6000L);")
+);
+
+// ── 1c. Bounded native fallback ─────────────────────────────────────────────
+// The fallback state machine is source-checked here because the device bridge
+// is mocked below; physical failure injection remains an external device gate.
+const nativeFallbackAt = appJs.indexOf("const NATIVE_MAX_ATTEMPTS = 3;");
+const nativePlayAt = appJs.indexOf("function nativePlayTrack(", nativeFallbackAt);
+const nativeErrorAt = appJs.indexOf('} else if (msg === "error") {', nativePlayAt);
+const nativeErrorBlock = nativeErrorAt >= 0 ? appJs.slice(nativeErrorAt, nativeErrorAt + 8000) : "";
+const nativeRefreshAt = nativeErrorBlock.indexOf("!cur._nativeRefreshTried");
+const nativeResolvedAt = nativeErrorBlock.indexOf("!cur._nativeFallbackTried");
+const nativeIdentifierAt = nativeErrorBlock.indexOf("!cur._nativeOnDeviceTried");
+const nativeWebAt = nativeErrorBlock.indexOf("!cur._nativeYtFallbackTried");
+const nativeExhaustedAt = nativeErrorBlock.indexOf("cur._nativeFallbackExhausted = true");
+assertE2E(
+  "Native fallback is bounded and ordered local -> resolved stream -> one native identifier -> report failure",
+  nativeFallbackAt >= 0 &&
+    nativePlayAt > nativeFallbackAt &&
+    nativeErrorAt > nativePlayAt &&
+    nativeRefreshAt >= 0 &&
+    nativeResolvedAt > nativeRefreshAt &&
+    nativeIdentifierAt > nativeResolvedAt &&
+    nativeWebAt > nativeIdentifierAt &&
+    nativeExhaustedAt > nativeWebAt &&
+    appJs.includes("attempts >= NATIVE_MAX_ATTEMPTS") &&
+    appJs.includes("t._nativeFallbackExhausted = false") &&
+    appJs.includes("nativeRouteForUrl(url)") &&
+    appJs.includes("nativeResolvedStreamCandidate(cur)") &&
+    appJs.includes("const offline = nativeNetworkOffline()") &&
+    appJs.includes("nativeHandleControls({ message: \"error\"")
+);
+assertE2E(
+  "Native fallback cannot retry network-only paths while offline or re-enter after exhaustion",
+  nativeErrorBlock.includes("if (!offline &&") &&
+    nativeErrorBlock.includes("cur._nativeFallbackExhausted || cur._nativeFallbackInFlight") &&
+    nativeErrorBlock.includes("Track is not available offline") &&
+    nativeErrorBlock.includes("All native attempts are exhausted")
+);
+
+// ── 1d. Sequence-safe native next-track synchronization ─────────────────────
+const nextSyncAt = appJs.indexOf("function syncNativeNextTrack()");
+const nextWarmAt = appJs.indexOf("function warmTrack(");
+const tickWarmAt = appJs.indexOf("// Audio playback optimization:");
+const tickWarmEndAt = appJs.indexOf("// When screen is off and native service owns playback", tickWarmAt);
+const tickWarmBlock = tickWarmAt >= 0 && tickWarmEndAt > tickWarmAt ? appJs.slice(tickWarmAt, tickWarmEndAt) : "";
+assertE2E(
+  "Phase 2C source guard: JS next-track sync carries a monotonic token and stale warm results cannot update a replaced queue entry",
+  nextSyncAt >= 0 &&
+    nextWarmAt >= 0 &&
+    appJs.includes("let nativeNextSyncSeq = 0;") &&
+    appJs.includes("let nativeNextTrackRef = null;") &&
+    appJs.includes("function nextNativeNextSyncSequence()") &&
+    appJs.includes("sequence: syncSeq") &&
+    appJs.includes("nativeNextSequence === nativeNextSyncSeq && nativeNextTrackRef === t") &&
+    appJs.includes("t._nativeWarmRequestSeq === warmRequestSeq") &&
+    !tickWarmBlock.includes("NP.preload")
+);
+assertE2E(
+  "Phase 2C native source guard: Android and iOS reject older or unsequenced next-track deliveries and gate duplicate native preload ownership",
+  androidPluginJava.includes("EXTRA_NEXT_SEQUENCE") &&
+    androidPluginJava.includes("EXTRA_PRELOAD") &&
+    androidServiceJava.includes("final long sequence") &&
+    androidServiceJava.includes("if (sequence <= nextTrackSequence) return;") &&
+    androidServiceJava.includes("else if (nextTrackSequence > 0L)") &&
+    androidServiceJava.includes("if (shouldPreload && videoId") &&
+    iosPluginSwift.includes('let sequence = max(0, Int64(call.getDouble("sequence") ?? 0))') &&
+    iosPluginSwift.includes("if sequence <= nextTrackSequence") &&
+    iosPluginSwift.includes("else if nextTrackSequence > 0") &&
+    iosPluginSwift.includes("if shouldPreload && !videoId.isEmpty")
+);
+
+// ── 1e. Phase 3A native delayed cache-start guard ───────────────────────────
+// These are source-level checks over the tracked native implementations. The
+// stateful harness below remains mocked and does not substitute for physical
+// Android/iOS device acceptance.
+console.log("\n=== 1e. Phase 3A Native Delayed Cache-Start Guard ===");
+const androidPauseBlock = androidServiceJava.slice(
+  androidServiceJava.indexOf("public void pausePlayback()"),
+  androidServiceJava.indexOf("public void resumePlayback()")
+);
+const androidLoadBlock = androidServiceJava.slice(
+  androidServiceJava.indexOf("private synchronized void loadTrack("),
+  androidServiceJava.indexOf("private void startExoPlayerWithUrl(")
+);
+const androidStopBlock = androidServiceJava.slice(
+  androidServiceJava.indexOf("private synchronized void stopPlaybackInternal("),
+  androidServiceJava.indexOf("/* ── notification / session metadata", androidServiceJava.indexOf("private synchronized void stopPlaybackInternal("))
+);
+assertE2E(
+  "Phase 3A Android: delayed disk-cache start is explicitly cancellable on replacement, pause, and stop",
+  androidServiceJava.includes("private Runnable pendingCacheStart;") &&
+    androidServiceJava.includes("ticker.removeCallbacks(pendingCacheStart)") &&
+    androidPauseBlock.includes("cancelPendingCacheStart();") &&
+    androidLoadBlock.includes("cancelPendingCacheStart();") &&
+    androidStopBlock.includes("cancelPendingCacheStart();")
+);
+assertE2E(
+  "Phase 3A Android: six-second cache guard requires the current load, resolver idle, READY state, playWhenReady, and active playback",
+  androidServiceJava.includes("ticker.postDelayed(pendingCacheStart, 6000L);") &&
+    androidServiceJava.includes("expectedSeq != loadSeq") &&
+    androidServiceJava.includes("resolvingOnDevice") &&
+    androidServiceJava.includes("player.getPlaybackState() != Player.STATE_READY") &&
+    androidServiceJava.includes("!player.getPlayWhenReady()") &&
+    androidServiceJava.includes("!player.isPlaying()") &&
+    androidServiceJava.includes("MIN_UNCAPPED_AUDIO_CACHE_BYTES = 1150000L")
+);
+const iosPlayBlock = iosPluginSwift.slice(
+  iosPluginSwift.indexOf("private func playTrackDirect("),
+  iosPluginSwift.indexOf("private func startPlayer(")
+);
+const iosPauseBlock = iosPluginSwift.slice(
+  iosPluginSwift.indexOf("@objc public func pause("),
+  iosPluginSwift.indexOf("@objc public func resume(")
+);
+const iosStopBlock = iosPluginSwift.slice(
+  iosPluginSwift.indexOf("private func doStop("),
+  iosPluginSwift.indexOf("private func configureAudioSession(")
+);
+assertE2E(
+  "Phase 3A iOS: delayed disk-cache start is explicitly cancellable on replacement, pause, and stop",
+  iosPluginSwift.includes("private var pendingCacheStart: DispatchWorkItem?") &&
+    iosPluginSwift.includes("pendingCacheStart?.cancel()") &&
+    iosPlayBlock.includes("cancelPendingCacheStart()") &&
+    iosPauseBlock.includes("cancelPendingCacheStart()") &&
+    iosStopBlock.includes("cancelPendingCacheStart()")
+);
+assertE2E(
+  "Phase 3A iOS: six-second cache guard requires the current token/load, resolver idle, READY item, active rate, and playing time-control state",
+  iosPluginSwift.includes("DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)") &&
+    iosPluginSwift.includes("self.cacheStartToken == expectedCacheToken") &&
+    iosPluginSwift.includes("self.loadSeq == expectedSeq") &&
+    iosPluginSwift.includes("!self.resolvingOnDevice") &&
+    iosPluginSwift.includes("item.status == .readyToPlay") &&
+    iosPluginSwift.includes("p.rate > 0") &&
+    iosPluginSwift.includes("p.timeControlStatus == .playing") &&
+    iosPluginSwift.includes("private static let minUncappedAudioCacheBytes: Int64 = 1150000")
+);
+
+// ── 1f. Phase 3B single-flight cache downloads ──────────────────────────────
+console.log("\n=== 1f. Phase 3B Single-Flight Cache Downloads ===");
+assertE2E(
+  "Phase 3B Android: video/query/ISRC aliases share one synchronized active download and one canonical artifact",
+  androidServiceJava.includes("private static final Object AUDIO_CACHE_LOCK") &&
+    androidServiceJava.includes("Map<String, AudioCacheDownload> activeAudioCacheDownloads") &&
+    androidServiceJava.includes("claimAudioCacheDownload(canonicalKey, cacheKeys)") &&
+    androidServiceJava.includes("audioCacheIsrcKey") &&
+    androidServiceJava.includes('new File(dir, key + ".alias")') &&
+    androidServiceJava.includes('canonicalKey + ".meta"') &&
+    !androidServiceJava.includes("secondaryKey") &&
+    !androidServiceJava.includes("new java.io.FileInputStream(targetFile)")
+);
+assertE2E(
+  "Phase 3B Android: active cache cancellation, atomic temp publication, metadata, and incomplete-file rejection are guarded",
+  androidServiceJava.includes("cancelAudioCacheDownload(currentVideoId, trackTitle, trackArtist, trackIsrc)") &&
+    androidServiceJava.includes("state.cancelled") &&
+    androidServiceJava.includes("state.connection") &&
+    androidServiceJava.includes("tmpFile.renameTo(targetFile)") &&
+    androidServiceJava.includes("writeAudioCacheMetadata") &&
+    androidServiceJava.includes("MIN_UNCAPPED_AUDIO_CACHE_BYTES = 1150000L") &&
+    androidServiceJava.includes("written >= MIN_UNCAPPED_AUDIO_CACHE_BYTES")
+);
+assertE2E(
+  "Phase 3B iOS: video/query/ISRC aliases share one synchronized active download and one canonical artifact",
+  iosPluginSwift.includes("private static var activeAudioCacheDownloads: [String: AudioCacheDownload] = [:]") &&
+    iosPluginSwift.includes("claimAudioCacheDownload(primaryKey, cacheKeys)") &&
+    iosPluginSwift.includes("audioCacheIsrcKey") &&
+    iosPluginSwift.includes(".alias") &&
+    iosPluginSwift.includes(".meta") &&
+    !iosPluginSwift.includes("try? fm.copyItem(at: targetUrl, to: secUrl)")
+);
+assertE2E(
+  "Phase 3B iOS: active URLSession cancellation, atomic temp publication, metadata, and incomplete-file rejection are guarded",
+  iosPluginSwift.includes("Self.cancelAudioCacheDownload") &&
+    iosPluginSwift.includes("state.cancelled") &&
+    iosPluginSwift.includes("state.task") &&
+    iosPluginSwift.includes("try fm.moveItem(at: tempUrl, to: targetUrl)") &&
+    iosPluginSwift.includes("writeAudioCacheMetadata") &&
+    iosPluginSwift.includes("private static let minUncappedAudioCacheBytes: Int64 = 1150000") &&
+    iosPluginSwift.includes("written >= minUncappedAudioCacheBytes") &&
+    iosPluginSwift.includes("written != 983040")
+);
+assertE2E(
+  "Phase 3C Android: startup cleanup, cache lookup, eviction, and pruning preserve only complete canonical artifacts",
+  androidServiceJava.includes("private static boolean audioCacheCleanChecked = false") &&
+    androidServiceJava.includes("cleanAudioCacheDirOnStartup(dir)") &&
+    androidServiceJava.includes("Temporary downloads and unknown cache debris are never reusable after restart") &&
+    androidServiceJava.includes("synchronized (AUDIO_CACHE_LOCK) {\n            for (String key : keys)") &&
+    androidServiceJava.includes("cancelAudioCacheDownload(videoId, title, artist, isrc);") &&
+    androidServiceJava.includes("private static boolean isAudioCacheCanonicalActive") &&
+    androidServiceJava.includes("if (!isCompleteAudioCacheFile(file))") &&
+    androidServiceJava.includes("audioFiles.sort") &&
+    androidServiceJava.includes("deleteAudioCacheArtifact(dir, canonicalKey)")
+);
+assertE2E(
+  "Phase 3C iOS: serialized startup cleanup, cache lookup, eviction, and pruning preserve only complete canonical artifacts",
+  iosPluginSwift.includes("cleanAudioCacheDirOnStartup(dir)") &&
+    iosPluginSwift.includes("Temporary downloads and unknown cache debris are never reusable after restart") &&
+    iosPluginSwift.includes("cacheLock.lock()\n        defer { cacheLock.unlock() }\n        for key in keys") &&
+    iosPluginSwift.includes("cancelAudioCacheDownload(videoId: videoId, title: title, artist: artist, isrc: isrc)") &&
+    iosPluginSwift.includes("private static func isAudioCacheCanonicalActive") &&
+    iosPluginSwift.includes("if !isCompleteAudioCacheFile(url)") &&
+    iosPluginSwift.includes("audioFiles.sort") &&
+    iosPluginSwift.includes("deleteAudioCacheArtifact(dir, entry.key)")
+);
+assertE2E(
+  "Phase 3C native cache acceptance: both platforms retain the six-second guard, 1.15 MB floor, capped-file rejection, and safe upper bound",
+  androidServiceJava.includes("ticker.postDelayed(pendingCacheStart, 6000L);") &&
+    !androidServiceJava.includes("MIN_AUDIO_CACHE_BYTES = 262144L") &&
+    androidServiceJava.includes("written >= MIN_UNCAPPED_AUDIO_CACHE_BYTES") &&
+    androidServiceJava.includes("written < 45L * 1024L * 1024L") &&
+    androidServiceJava.includes("written != 983040L") &&
+    iosPluginSwift.includes("DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)") &&
+    !iosPluginSwift.includes("minAudioCacheBytes: Int64 = 262144") &&
+    iosPluginSwift.includes("written >= minUncappedAudioCacheBytes") &&
+    iosPluginSwift.includes("written < 45 * 1024 * 1024") &&
+    iosPluginSwift.includes("written != 983040")
+);
+
 // ── 2. Stateful Native OS Audio Service Emulators (Android & iOS) ───────────
 function createNativeOSHarness(platform) {
   const controlsListeners = [];
@@ -93,6 +403,8 @@ function createNativeOSHarness(platform) {
     positionMs: 0,
     durationMs: 0,
     preloadedMap: new Map(),
+    queuedNextTrack: null,
+    nextTrackSequence: 0,
     mediaSessionState: "NONE",
     dspApplied: false,
   };
@@ -111,6 +423,8 @@ function createNativeOSHarness(platform) {
     positionSec: 0,
     durationSec: 0,
     preloadedStreams: new Map(),
+    queuedNextTrack: null,
+    nextTrackSequence: 0,
     nowPlayingInfo: {},
   };
 
@@ -184,6 +498,17 @@ function createNativeOSHarness(platform) {
       } else {
         iosState.preloadedStreams.set(opts.videoId, `https://rr1---sn-e2e.googlevideo.com/videoplayback?id=${opts.videoId}&preloaded=1`);
       }
+    },
+
+    async setNextTrack(opts) {
+      calls.push({ method: "setNextTrack", ...opts });
+      const nativeState = platform === "android" ? androidState : iosState;
+      const sequence = Number(opts.sequence) || 0;
+      if (sequence > 0 && sequence <= nativeState.nextTrackSequence) return;
+      if (sequence > 0) nativeState.nextTrackSequence = sequence;
+      nativeState.queuedNextTrack = (opts.url || opts.videoId || opts.title)
+        ? { ...opts }
+        : null;
     },
 
     async syncSession(opts) {
@@ -354,7 +679,7 @@ function createNativeOSHarness(platform) {
 // ── 3. Full E2E Runner for a Target Native Platform ("android" | "ios") ─────
 async function runFullPlatformE2E(platform) {
   const label = platform === "android" ? "Android" : "iOS";
-  console.log(`\n=== Running Real ${label} Native Background Playback E2E ===`);
+  console.log(`\n=== Running Mocked ${label} Native Background Playback E2E ===`);
 
   const harness = createNativeOSHarness(platform);
   const { MuchiAudioPluginBridge, calls, androidState, iosState } = harness;
@@ -523,7 +848,7 @@ async function runFullPlatformE2E(platform) {
 
   const instrumentedAppJs = appJs.replace(
     "  loadHome();\n  loadTasteRecommendations();",
-    "  window.__muchiE2E = { state, playCurrent, togglePlay, next, prev, keepBackgroundPlay, unlockSound, getNpState: () => ({ npActive, npPlaying, npDur, npPos, wantPlay }), setNpPos: (p, d) => { npPos = p; if (d) npDur = d; } };\n"
+    "  window.__muchiE2E = { state, playCurrent, syncNativeNextTrack, togglePlay, next, prev, keepBackgroundPlay, unlockSound, getNpState: () => ({ npActive, npPlaying, npDur, npPos, wantPlay }), setNpPos: (p, d) => { npPos = p; if (d) npDur = d; } };\n"
   );
 
   const sandbox = {
@@ -685,9 +1010,53 @@ async function runFullPlatformE2E(platform) {
     `preloadedVid=${preloadCall1?.videoId}`
   );
 
+  // Phase 2C mocked bridge check: two rapid queue snapshots must leave the
+  // newest track active even when an older native delivery arrives afterward.
+  const initialNextCall = calls.find((c) => c.method === "setNextTrack" && Number(c.sequence) > 0);
+  const initialSeq = Number(initialNextCall?.sequence) || 0;
+  const track2 = queue[1];
+  const track3 = queue[2];
+  api.state.queue[1] = track3;
+  api.syncNativeNextTrack();
+  const replacementNextCall = calls.filter((c) => c.method === "setNextTrack").at(-1);
+  const replacementSeq = Number(replacementNextCall?.sequence) || 0;
+  api.state.queue[1] = track2;
+  api.syncNativeNextTrack();
+  const newestNextCall = calls.filter((c) => c.method === "setNextTrack").at(-1);
+  const newestSeq = Number(newestNextCall?.sequence) || 0;
+  await MuchiAudioPluginBridge.setNextTrack({
+    url: `yt:${track3.videoId}`,
+    videoId: track3.videoId,
+    title: track3.title,
+    artist: track3.artist,
+    sequence: initialSeq,
+    preload: true,
+  });
+  const nativeState = platform === "android" ? androidState : iosState;
+  const sequenceSafe =
+    initialSeq > 0 &&
+    replacementSeq > initialSeq &&
+    newestSeq > replacementSeq &&
+    initialNextCall?.preload === false &&
+    replacementNextCall?.preload === false &&
+    newestNextCall?.preload === false &&
+    nativeState.nextTrackSequence === newestSeq &&
+    nativeState.queuedNextTrack?.videoId === track2.videoId;
+  assertE2E(
+    `${label} Step 1c (Phase 2C mocked next-track sync): newest queue metadata wins over a stale delivery`,
+    sequenceSafe,
+    `sequences=${initialSeq}->${replacementSeq}->${newestSeq}, queued=${nativeState.queuedNextTrack?.videoId}`
+  );
+  const track2PreloadCalls = calls.filter((c) => c.method === "preload" && c.videoId === track2.videoId);
+  assertE2E(
+    `${label} Step 1d (Phase 2C mocked preload ownership): one native preload request serves Track 2 despite repeated sync calls`,
+    track2PreloadCalls.length === 1,
+    `track2Preloads=${track2PreloadCalls.length}`
+  );
+
   if (platform === "android") {
     assertE2E(
-      `Android Step 1c (Foreground Service & Locks): MuchiAudioService promoted to foreground with MediaStyle notification, WakeLock, WifiLock, AudioFocus & hardware DSP`,
+      `Android Step 1e (Foreground Service & Locks): MuchiAudioService promoted to foreground with MediaStyle notification, WakeLock, WifiLock, AudioFocus & hardware DSP`,
       androidState.serviceCreated &&
         androidState.foregroundStarted &&
         androidState.notificationPosted &&
@@ -699,7 +1068,7 @@ async function runFullPlatformE2E(platform) {
     );
   } else {
     assertE2E(
-      `iOS Step 1c (AVAudioSession & NowPlaying): AVAudioSession(.playback) active, UIBackgroundModes=audio present, and MPNowPlayingInfoCenter populated`,
+      `iOS Step 1e (AVAudioSession & NowPlaying): AVAudioSession(.playback) active, UIBackgroundModes=audio present, and MPNowPlayingInfoCenter populated`,
       iosInfoPlist.includes("<string>audio</string>") &&
         iosState.audioSessionCategory === "AVAudioSessionCategoryPlayback" &&
         iosState.audioSessionActive &&
@@ -856,6 +1225,35 @@ async function runFullPlatformE2E(platform) {
     );
   }
 
+  // 5f. Two additional mocked errors must consume only the one identifier
+  // fallback and then stop; the hidden WebView must never be woken. Respect
+  // the bridge's duplicate-control debounce between injected errors.
+  await new Promise((r) => setTimeout(r, 100));
+  const boundedTrack = api.state.queue[api.state.index];
+  const playCountBeforeIdentifier = calls.filter((c) => c.method === "play").length;
+  MuchiAudioPluginBridge.triggerNativeStreamError();
+  await new Promise((r) => setTimeout(r, 35));
+  const identifierRetryCall = calls.find((c) => c.method === "play" && String(c.url).startsWith("yt:"));
+  const playCountAfterIdentifier = calls.filter((c) => c.method === "play").length;
+  // Isolate the terminal failure from the later queue/refill test.
+  api.state.queue = [boundedTrack];
+  api.state.index = 0;
+  await new Promise((r) => setTimeout(r, 100));
+  MuchiAudioPluginBridge.triggerNativeStreamError();
+  await new Promise((r) => setTimeout(r, 5));
+  const playCountAfterExhaustion = calls.filter((c) => c.method === "play").length;
+  assertE2E(
+    `${label} Step 5f (Bounded Native Fallback): one native identifier retry is allowed, then background playback reports failure without another native attempt`,
+    Boolean(identifierRetryCall) &&
+      playCountAfterIdentifier === playCountBeforeIdentifier + 1 &&
+      boundedTrack._nativeAttemptCount <= 3 &&
+      boundedTrack._nativeOnDeviceTried === true &&
+      boundedTrack._nativeFallbackExhausted === true &&
+      playCountAfterExhaustion === playCountAfterIdentifier &&
+      ytIframeCreated === false
+  );
+  await new Promise((r) => setTimeout(r, 50));
+
   // ── STEP 6: iTunes & Deezer Song Playback Past 1 Minute + Mid-Song Cutoff Recovery at 1:02 (62s) ──
   const itunesDeezerQueue = [
     {
@@ -914,5 +1312,5 @@ async function runFullPlatformE2E(platform) {
 await runFullPlatformE2E("android");
 await runFullPlatformE2E("ios");
 
-console.log(`\n=== Native Background Playback E2E Summary: ${passed} passed, ${failed} failed ===`);
+console.log(`\n=== Mocked Native Background Playback E2E Summary: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);

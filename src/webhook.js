@@ -20,7 +20,7 @@ export async function handleWebhook(request, env, url) {
   // Resolve webhook secret
   const secret = (env && (env.WEBHOOK_SECRET || env.GITHUB_WEBHOOK_SECRET || env.MUCHI_WEBHOOK_SECRET)) ||
     (typeof process !== "undefined" && (process.env.WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET || process.env.MUCHI_WEBHOOK_SECRET)) ||
-    (env && env.MUCHI_SESSION_SECRET) || "";
+    "";
 
   if (!secret) {
     return json(503, { error: "Webhook secret is not configured on the server" }, request);

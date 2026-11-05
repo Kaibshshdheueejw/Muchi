@@ -46,7 +46,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,600;8..144,700&display=swap" rel="stylesheet" />
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400..600,0..1,0" rel="stylesheet" />
     <meta http-equiv="Cache-Control" content="no-store" />
-    <link rel="stylesheet" href="/styles.css?v=115" />
+    <link rel="stylesheet" href="/styles.css?v=190" />
     <style>
       /* Beat stale cached CSS: nothing overlayed may steal clicks */
       [hidden], #scrim, #queuePanel, #toast, #modal, #eqBars {
@@ -91,6 +91,11 @@
   </head>
   <body>
     <canvas id="sparkLayer" aria-hidden="true"></canvas>
+    <div id="ambientLight" class="ambient-light" aria-hidden="true">
+      <div id="ambientLightA" class="ambient-light-layer"></div>
+      <div id="ambientLightB" class="ambient-light-layer"></div>
+      <div id="ambientPointer" class="ambient-pointer" aria-hidden="true"></div>
+    </div>
     <div id="appSplashScreen" class="app-splash-screen" hidden></div>
     <div id="app">
       <aside class="sidebar" id="sidebar">
@@ -98,7 +103,6 @@
           <img id="sidebarBrandIcon" src="/logo.png?v=53" alt="Muchi" width="40" height="40" />
           <div>
             <strong>Muchi</strong>
-            <span>Material music</span>
           </div>
         </div>
         <nav class="nav">
@@ -110,25 +114,33 @@
             <span class="nav-ico"><span class="material-symbols-outlined">search</span></span>
             Search
           </button>
-          <button data-view="radio">
-            <span class="nav-ico"><span class="material-symbols-outlined">radio</span></span>
-            Radio
+          <button data-view="discovery">
+            <span class="nav-ico"><span class="material-symbols-outlined">explore</span></span>
+            Explore
           </button>
-          <button data-view="library">
-            <span class="nav-ico"><span class="material-symbols-outlined">library_music</span></span>
-            Library
-          </button>
+
         </nav>
         <div class="side-block">
           <div class="side-head">
-            <span>Your mixes</span>
-            <button id="newPlaylistBtn" class="icon-btn" title="New playlist">
-              <span class="material-symbols-outlined">add</span>
-            </button>
+            <span>Your library</span>
+            <div class="side-head-actions">
+              <div class="library-layout-toggle" id="libraryLayoutToggle" role="group" aria-label="Library layout">
+                <button type="button" data-library-layout="list" class="active" title="List layout" aria-label="List layout" aria-pressed="true">
+                  <span class="material-symbols-outlined">view_list</span>
+                </button>
+                <button type="button" data-library-layout="grid" title="Square tile layout" aria-label="Square tile layout" aria-pressed="false">
+                  <span class="material-symbols-outlined">grid_view</span>
+                </button>
+              </div>
+              <button id="newPlaylistBtn" class="icon-btn" type="button" title="New playlist" aria-label="New playlist">
+                <span class="material-symbols-outlined">add</span>
+              </button>
+            </div>
           </div>
           <div id="playlistNav" class="playlist-nav"></div>
         </div>
-        <p class="legal">YouTube plays in Google’s official player. Independent tracks via Audius. Not affiliated with YouTube or Spotify. <a href="/privacy.html" style="color:inherit;text-decoration:underline">Privacy Policy</a> · <a href="/terms.html" style="color:inherit;text-decoration:underline">Terms of Service</a></p>
+        <p class="legal">Muchi · Music discovery and playback. <a href="/privacy.html" style="color:inherit;text-decoration:underline">Privacy Policy</a> · <a href="/terms.html" style="color:inherit;text-decoration:underline">Terms of Service</a></p>
+        <div class="rail-resizer rail-resizer-right" id="sidebarResizer" role="separator" aria-orientation="vertical" aria-label="Resize navigation rail" tabindex="0"></div>
       </aside>
 
       <main class="main">
@@ -141,7 +153,7 @@
             </div>
           </div>
           <div class="top-right">
-            <button id="offlineBtn" class="offline-pill" type="button" style="display:none" title="Offline mode active">
+            <button id="offlineBtn" class="offline-pill" type="button" style="display:none" title="Offline mode active" aria-label="Offline mode">
               <span class="material-symbols-outlined" style="font-size:18px">cloud_off</span>
               <span>Offline</span>
             </button>
@@ -153,6 +165,11 @@
         </header>
         <section id="view" class="view"></section>
       </main>
+
+      <aside class="right-rail" id="contextRail" aria-label="Now playing and queue">
+        <div class="rail-resizer rail-resizer-left" id="rightRailResizer" role="separator" aria-orientation="vertical" aria-label="Resize now playing rail" tabindex="0"></div>
+        <div class="rail-scroll" id="contextRailScroll"></div>
+      </aside>
     </div>
 
     <div id="scrim" class="scrim" hidden></div>
@@ -175,7 +192,7 @@
     <footer class="player" id="playerBar">
       <div class="player-wash" id="playerWash"></div>
       <div class="now">
-        <button class="cover-btn" id="openNow" title="Now playing">
+        <button class="cover-btn" id="openNow" title="Now playing" aria-label="Open now playing">
           <img id="coverArt" src="/cover-default.jpg" alt="" onerror="if(window.handleImgErr)handleImgErr(this);else this.src='/cover-default.jpg'" />
           <span class="eq" id="eqBars" hidden><i></i><i></i><i></i></span>
         </button>
@@ -185,32 +202,28 @@
           </div>
           <button type="button" id="trackArtist" class="artist-link">Pick a song to begin</button>
         </div>
-        <button id="likeBtn" class="icon-btn like-btn apple-watch-like" title="Like" aria-pressed="false">
-          <span class="apple-charge-ripple" aria-hidden="true"></span>
-          <span class="apple-watch-lottie-box" id="likeLottieBox" aria-hidden="true"></span>
-          <svg id="likeHeart" class="apple-charge-svg" viewBox="0 0 24 24" aria-hidden="true">
-            <circle class="apple-charge-track" cx="12" cy="12" r="10" fill="none" />
-            <circle class="apple-charge-ring" cx="12" cy="12" r="10" fill="none" />
-            <path class="apple-charge-icon" d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
+        <button id="likeBtn" class="icon-btn like-btn" title="Like" aria-pressed="false">
+          <svg id="likeHeart" class="heart-icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <path class="heart-path" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
           </svg>
         </button>
       </div>
 
       <div class="controls">
         <div class="ctrl-row">
-          <button id="shuffleBtn" class="icon-btn" title="Shuffle">
+          <button id="shuffleBtn" class="icon-btn" title="Shuffle" aria-label="Shuffle" aria-pressed="false">
             <span class="material-symbols-outlined">shuffle</span>
           </button>
-          <button id="prevBtn" class="icon-btn" title="Previous">
+          <button id="prevBtn" class="icon-btn" title="Previous" aria-label="Previous track">
             <span class="material-symbols-outlined">skip_previous</span>
           </button>
-          <button id="playBtn" class="fab" title="Play">
+          <button id="playBtn" class="fab" title="Play" aria-label="Play">
             <span class="material-symbols-outlined filled" id="playIcon">play_arrow</span>
           </button>
-          <button id="nextBtn" class="icon-btn" title="Next">
+          <button id="nextBtn" class="icon-btn" title="Next" aria-label="Next track">
             <span class="material-symbols-outlined">skip_next</span>
           </button>
-          <button id="repeatBtn" class="icon-btn" title="Repeat">
+          <button id="repeatBtn" class="icon-btn" title="Repeat" aria-label="Repeat" aria-pressed="false">
             <span class="material-symbols-outlined">repeat</span>
           </button>
         </div>
@@ -218,6 +231,7 @@
           <span id="curTime">0:00</span>
           <div class="seek-box">
             <svg id="seekWave" class="seek-wave" viewBox="0 0 400 16" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <span class="seek-progress-dot" aria-hidden="true"></span>
             <input id="seek" type="range" min="0" max="1000" value="0" />
           </div>
           <span id="durTime">0:00</span>
@@ -225,27 +239,58 @@
       </div>
 
       <div class="extras">
-        <button id="dlBtn" class="icon-btn" title="Save offline">
-          <span class="material-symbols-outlined" id="dlIcon">download</span>
+        <!-- The shared legacy controls remain available to the existing Web and
+             native playback wiring. Desktop Web replaces their visible row with
+             the complete Muchi animation below; mobile/native styling keeps the
+             original controls and behavior. The Video control is intentionally
+             legacy-only so it never appears in the desktop player. -->
+        <button id="dlBtn" class="icon-btn player-legacy-action" title="Save offline" aria-label="Save offline">
+          <span class="material-symbols-outlined" id="dlIcon">download</span><span class="download-progress-ring" aria-hidden="true"></span>
         </button>
-        <button id="sleepBtn" class="icon-btn" title="Sleep timer">
+        <button id="sleepBtn" class="icon-btn player-legacy-action" title="Sleep timer" aria-label="Sleep timer">
           <span class="material-symbols-outlined">bedtime</span>
         </button>
-        <button id="lyricsBtn" class="icon-btn" title="Lyrics">
+        <button id="lyricsBtn" class="icon-btn player-legacy-action" title="Lyrics" aria-label="Lyrics">
           <span class="material-symbols-outlined">lyrics</span>
         </button>
-        <button id="followBtn" class="icon-btn" title="Follow artist">
+        <button id="followBtn" class="icon-btn player-legacy-action" title="Follow artist" aria-label="Follow artist">
           <span class="material-symbols-outlined" id="followIcon">person_add</span>
         </button>
-        <button id="queueBtn" class="icon-btn" title="Queue">
+        <button id="queueBtn" class="icon-btn player-legacy-action" title="Queue" aria-label="Queue">
           <span class="material-symbols-outlined">queue_music</span>
         </button>
-        <button id="videoBtn" class="icon-btn" title="Video">
+        <button id="videoBtn" class="icon-btn player-legacy-action" title="Video" aria-label="Video">
           <span class="material-symbols-outlined">smart_display</span>
         </button>
-        <button id="optionsBtn" class="icon-btn" title="More options">
+        <button id="optionsBtn" class="icon-btn player-legacy-action" title="More options" aria-label="More options">
           <span class="material-symbols-outlined">tune</span>
         </button>
+
+        <div id="playerActionStage" class="player-action-stage" data-action-state="closed" aria-label="Player actions">
+          <div id="playerActionAnimation" class="player-action-animation" aria-hidden="true">
+            <div id="playerCustomArt" class="player-custom-art">
+              <span class="material-symbols-outlined player-custom-closed-icon">chevron_right</span>
+              <div class="player-custom-options">
+                <span class="material-symbols-outlined player-custom-option" data-custom-action-icon="queue">apps</span>
+                <span class="material-symbols-outlined player-custom-option" data-custom-action-icon="lyrics">lyrics</span>
+                <span class="material-symbols-outlined player-custom-option" data-custom-action-icon="sleep">bedtime</span>
+                <span class="material-symbols-outlined player-custom-option" data-custom-action-icon="detail">info</span>
+                <span class="material-symbols-outlined player-custom-option" data-custom-action-icon="follow">person_add</span>
+                <span class="material-symbols-outlined player-custom-option" data-custom-action-icon="collapse">chevron_left</span>
+              </div>
+            </div>
+          </div>
+          <div id="playerActionHits" class="player-action-hits">
+            <button type="button" class="player-action-hit player-action-hit-open" data-player-action="open" aria-label="Expand player actions" title="Expand player actions"></button>
+            <button type="button" class="player-action-hit player-action-hit-queue" data-player-action="queue" aria-label="Queue" title="Queue"></button>
+            <button type="button" class="player-action-hit player-action-hit-lyrics" data-player-action="lyrics" aria-label="Lyrics" title="Lyrics"></button>
+            <button type="button" class="player-action-hit player-action-hit-sleep" data-player-action="sleep" aria-label="Sleep timer" title="Sleep timer"></button>
+            <button type="button" class="player-action-hit player-action-hit-detail" data-player-action="detail" aria-label="Track details" title="Track details"></button>
+            <button type="button" class="player-action-hit player-action-hit-follow" data-player-action="follow" aria-label="Follow artist" title="Follow artist"></button>
+            <button type="button" class="player-action-hit player-action-hit-collapse" data-player-action="collapse" aria-label="Hide player actions" title="Hide player actions"></button>
+          </div>
+
+        </div>
         <div class="vol">
           <span class="material-symbols-outlined">volume_up</span>
           <input id="volume" type="range" min="0" max="100" value="85" />
@@ -278,14 +323,14 @@
       <div class="np-card" id="npCard">
         <div class="np-drag-handle" aria-hidden="true"></div>
         <header class="np-header">
-          <button type="button" class="icon-btn np-close-btn" id="npCloseBtn" title="Close player">
+          <button type="button" class="icon-btn np-close-btn" id="npCloseBtn" title="Close player" aria-label="Close player">
             <span class="material-symbols-outlined">expand_more</span>
           </button>
           <div class="np-header-meta">
             <span class="np-kicker" id="npHeaderKicker">PLAYING FROM</span>
             <strong class="np-header-title" id="npHeaderTitle">Muchi Music</strong>
           </div>
-          <button type="button" class="icon-btn" id="npOptionsBtn" title="More options">
+          <button type="button" class="icon-btn" id="npOptionsBtn" title="More options" aria-label="More options">
             <span class="material-symbols-outlined">more_vert</span>
           </button>
         </header>
@@ -306,13 +351,9 @@
             <button type="button" class="icon-btn np-action-btn" id="npQueueBtn" title="Queue" aria-label="Queue">
               <span class="material-symbols-outlined">queue_music</span>
             </button>
-            <button type="button" class="icon-btn like-btn np-like-btn apple-watch-like" id="npLikeBtn" title="Like">
-              <span class="apple-charge-ripple" aria-hidden="true"></span>
-              <span class="apple-watch-lottie-box" id="npLikeLottieBox" aria-hidden="true"></span>
-              <svg id="npLikeHeart" class="apple-charge-svg" viewBox="0 0 24 24" aria-hidden="true">
-                <circle class="apple-charge-track" cx="12" cy="12" r="10" fill="none" />
-                <circle class="apple-charge-ring" cx="12" cy="12" r="10" fill="none" />
-                <path class="apple-charge-icon" d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
+            <button type="button" class="icon-btn like-btn np-like-btn" id="npLikeBtn" title="Like" aria-pressed="false">
+              <svg id="npLikeHeart" class="heart-icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+                <path class="heart-path" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
               </svg>
             </button>
           </div>
@@ -329,19 +370,19 @@
         </div>
 
         <div class="np-controls-row">
-          <button type="button" class="icon-btn np-ctrl-btn" id="npShuffleBtn" title="Shuffle">
+          <button type="button" class="icon-btn np-ctrl-btn" id="npShuffleBtn" title="Shuffle" aria-label="Shuffle" aria-pressed="false">
             <span class="material-symbols-outlined">shuffle</span>
           </button>
-          <button type="button" class="icon-btn np-ctrl-btn" id="npPrevBtn" title="Previous">
+          <button type="button" class="icon-btn np-ctrl-btn" id="npPrevBtn" title="Previous" aria-label="Previous track">
             <span class="material-symbols-outlined">skip_previous</span>
           </button>
-          <button type="button" class="np-play-fab" id="npPlayBtn" title="Play">
+          <button type="button" class="np-play-fab" id="npPlayBtn" title="Play" aria-label="Play" aria-pressed="false">
             <span class="material-symbols-outlined filled" id="npPlayIcon">play_arrow</span>
           </button>
-          <button type="button" class="icon-btn np-ctrl-btn" id="npNextBtn" title="Next">
+          <button type="button" class="icon-btn np-ctrl-btn" id="npNextBtn" title="Next" aria-label="Next track">
             <span class="material-symbols-outlined">skip_next</span>
           </button>
-          <button type="button" class="icon-btn np-ctrl-btn" id="npRepeatBtn" title="Repeat">
+          <button type="button" class="icon-btn np-ctrl-btn" id="npRepeatBtn" title="Repeat" aria-label="Repeat" aria-pressed="false">
             <span class="material-symbols-outlined">repeat</span>
           </button>
         </div>
@@ -421,7 +462,7 @@
     <div id="ytWrap" class="yt-wrap" hidden>
       <div class="yt-head">
         <span>YouTube · official player</span>
-        <button id="closeVideo" class="icon-btn">
+        <button id="closeVideo" class="icon-btn" type="button" title="Close video" aria-label="Close video">
           <span class="material-symbols-outlined">close</span>
         </button>
       </div>
@@ -456,6 +497,6 @@
     <script src="/meta.js?v=1"></script>
     <script src="/lottie.min.js"></script>
     <script src="/apple-watch-lottie-data.js"></script>
-    <script src="/app.js?v=119"></script>
+    <script src="/app.js?v=192"></script>
   </body>
 </html>

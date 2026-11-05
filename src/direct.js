@@ -72,7 +72,11 @@ export async function handleHealth(env) {
   return json(200, {
     ok: true,
     name: APP_NAME,
-    version: pick.version,
+    // `version` is the deployed API/client version. A newer published APK is
+    // exposed separately so health/version contracts do not drift from the
+    // running application.
+    version: APP_VERSION,
+    latestVersion: pick.version,
     time: new Date().toISOString(),
     github: !!github,
     repo: String((env && env.MUCHI_GITHUB_REPO) || DEFAULT_RELEASE_REPO),

@@ -49,28 +49,24 @@ function createInMemoryD1() {
     }, 150);
   };
 
-  // Pre-seed authenticated dev session for live testing and admin verification
-  const devTestSid = "test-smoke-session-sid-12345";
-  sessions.set(devTestSid, {
-    payload: JSON.stringify({
-      sid: devTestSid,
-      email: "twiarimascord@gmail.com",
-      name: "Twiarima",
-      role: "admin",
-      at: Date.now(),
-      expiresAt: Date.now() + 86400000,
-    }),
-    expires_at: Date.now() + 86400000,
-    created_at: Date.now(),
-    updated_at: Date.now(),
-  });
-
+  // Never seed an authenticated session. Local tests must use an explicit
+  // test database/fixture and production must receive real signed sessions
+  // created by OAuth; a known SID must never be deployable.
   return {
     prepare(sql) {
       return {
         bind(...args) {
           return {
             async first() {
+              if (sql.includes("DELETE FROM oauth_state WHERE state = ? AND expires_at > ? RETURNING payload")) {
+                const [state, exp] = args;
+                const o = oauthStates.get(state);
+                if (o && o.expires_at > exp) {
+                  oauthStates.delete(state);
+                  return { payload: o.payload };
+                }
+                return null;
+              }
               if (sql.includes("FROM sessions WHERE sid = ? AND expires_at > ?")) {
                 const [sid, exp] = args;
                 const s = sessions.get(sid);
@@ -184,28 +180,45 @@ const env = {
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || "",
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || "",
   GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI || "",
-  MUCHI_SESSION_SECRET: process.env.MUCHI_SESSION_SECRET || "muchi-preview-session-secret-key-32chars!",
+  // Secrets must be injected explicitly. Empty values keep auth/webhooks off
+  // instead of silently enabling a shared preview credential in production.
+  MUCHI_SESSION_SECRET: process.env.MUCHI_SESSION_SECRET || "",
   MUCHI_ADMIN_KEY: process.env.MUCHI_ADMIN_KEY || process.env.ADMIN_KEY || "",
-  ADMIN_EMAILS: process.env.ADMIN_EMAILS || "twiarimascord@gmail.com",
-  WEBHOOK_SECRET: process.env.WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET || "",
+  ADMIN_EMAILS: process.env.ADMIN_EMAILS || "",
+  WEBHOOK_SECRET: process.env.WEBHOOK_SECRET || "",
+  GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET || "",
+  MUCHI_WEBHOOK_SECRET: process.env.MUCHI_WEBHOOK_SECRET || "",
   MUCHI_GITHUB: process.env.MUCHI_GITHUB || "",
   MUCHI_GITHUB_REPO: process.env.MUCHI_GITHUB_REPO || "Kaibshshdheueejw/Muchi",
   MUCHI_PREVIEW_SEED: process.env.MUCHI_PREVIEW_SEED || "",
+  MUCHI_CORS_ORIGINS: process.env.MUCHI_CORS_ORIGINS || "",
+  MUCHI_DEBUG: process.env.MUCHI_DEBUG || "",
   NODE_ENV: process.env.NODE_ENV || "production",
 };
 
 const app = express();
 app.disable("x-powered-by");
 
-// Global HTTP Security Headers
+// Global HTTP Security Headers. The policy is intentionally compatible with
+// the existing Web shell (inline styles, generated markup, YouTube iframe),
+// while blocking objects, unknown framing, and non-HTTPS remote code.
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
   res.setHeader("X-XSS-Protection", "1; mode=block");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' https: wss:; font-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https://www.youtube.com https://www.gstatic.com; frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com; worker-src 'self' blob:;");
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  if (req.secure || forwardedProto === "https") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
   next();
 });
+
+// Never let the private local session/library database resolve through the SPA
+// fallback or a static-file route, even if a developer creates it locally.
+app.get("/.muchi-cloud-db.json", (_req, res) => res.sendStatus(404));
 
 // Serve static assets from public/ directory
 const publicDir = path.join(__dirname, "public");

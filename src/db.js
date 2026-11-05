@@ -73,11 +73,14 @@ export async function putOAuthState(env, state, obj) {
 /** Atomic get-and-delete of a single-use OAuth state. */
 export async function takeOAuthState(env, state) {
   if (!state) return null;
-  const row = await env.DB.prepare("SELECT payload FROM oauth_state WHERE state = ? AND expires_at > ?")
+  // SQLite/D1 executes this as one delete-and-return operation, preventing two
+  // concurrent callbacks from consuming the same OAuth state.
+  const row = await env.DB.prepare(
+    "DELETE FROM oauth_state WHERE state = ? AND expires_at > ? RETURNING payload"
+  )
     .bind(state, now())
     .first();
   if (!row) return null;
-  await env.DB.prepare("DELETE FROM oauth_state WHERE state = ?").bind(state).run();
   try {
     return JSON.parse(row.payload);
   } catch {

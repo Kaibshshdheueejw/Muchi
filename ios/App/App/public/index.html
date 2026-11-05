@@ -44,10 +44,173 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,600;8..144,700&display=swap" rel="stylesheet" />
-    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400..600,0..1,0" rel="stylesheet" />
     <meta http-equiv="Cache-Control" content="no-store" />
-    <link rel="stylesheet" href="/styles.css?v=115" />
+    <script src="/icons-shim.js?v=1"></script>
+    <link rel="stylesheet" href="/styles.css?v=116" />
     <style>
+      /* Critical anti-FOUT and anti-ligature overflow defense:
+         When network is slow/offline, web font ligatures ('play_arrow', 'skip_previous', 'library_music')
+         must NEVER spill out as raw overflowing text strings! */
+      .material-symbols-outlined {
+        font-family: 'Material Symbols Outlined', sans-serif;
+        font-weight: normal;
+        font-style: normal;
+        font-size: 24px;
+        line-height: 1;
+        letter-spacing: normal;
+        text-transform: none;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        white-space: nowrap !important;
+        word-wrap: normal !important;
+        direction: ltr !important;
+        -webkit-font-feature-settings: 'liga';
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        font-feature-settings: 'liga';
+        font-display: block;
+        width: 24px;
+        height: 24px;
+        min-width: 24px;
+        min-height: 24px;
+        max-width: 24px;
+        max-height: 24px;
+        overflow: hidden !important;
+        text-overflow: clip !important;
+        contain: layout paint;
+        vertical-align: middle;
+      }
+      .m-svg-ico, .m-ico {
+        width: 24px;
+        height: 24px;
+        min-width: 24px;
+        min-height: 24px;
+        fill: currentColor;
+        display: block;
+        pointer-events: none;
+      }
+      .fab .m-svg-ico, .np-play-fab .m-svg-ico,
+      .fab .material-symbols-outlined, .np-play-fab .material-symbols-outlined {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        min-height: 32px !important;
+        max-width: 32px !important;
+        max-height: 32px !important;
+        font-size: 32px !important;
+      }
+      /* Spotify-style smooth seek bar (zero wiggle, clean progress) */
+      .seek-box {
+        position: relative !important;
+        display: flex !important;
+        align-items: center !important;
+        width: 100% !important;
+        height: 16px !important;
+        cursor: pointer !important;
+      }
+      #seekWave {
+        display: none !important;
+      }
+      #seek, #npSeek {
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        width: 100% !important;
+        height: 4px !important;
+        background: linear-gradient(
+          to right,
+          var(--song-primary, #ffffff) 0%,
+          var(--song-primary, #ffffff) var(--seek-pct, 0%),
+          rgba(255, 255, 255, 0.22) var(--seek-pct, 0%),
+          rgba(255, 255, 255, 0.22) 100%
+        ) !important;
+        border-radius: 2px !important;
+        outline: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        cursor: pointer !important;
+        transition: height 0.15s ease !important;
+      }
+      html[data-theme="light"] #seek, html[data-theme="light"] #npSeek {
+        background: linear-gradient(
+          to right,
+          var(--song-primary, #006b56) 0%,
+          var(--song-primary, #006b56) var(--seek-pct, 0%),
+          rgba(0, 0, 0, 0.18) var(--seek-pct, 0%),
+          rgba(0, 0, 0, 0.18) 100%
+        ) !important;
+      }
+      .seek-box:hover #seek, .np-seek-bar-box:hover #npSeek {
+        height: 6px !important;
+      }
+      #seek::-webkit-slider-thumb, #npSeek::-webkit-slider-thumb {
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        width: 12px !important;
+        height: 12px !important;
+        border-radius: 50% !important;
+        background: #ffffff !important;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4) !important;
+        cursor: pointer !important;
+        transition: transform 0.15s cubic-bezier(0.2, 0, 0, 1), opacity 0.15s ease !important;
+        opacity: 0 !important;
+        transform: scale(0.6) !important;
+      }
+      .seek-box:hover #seek::-webkit-slider-thumb,
+      .seek-box:active #seek::-webkit-slider-thumb,
+      .np-seek-bar-box:hover #npSeek::-webkit-slider-thumb,
+      .np-seek-bar-box:active #npSeek::-webkit-slider-thumb,
+      #seek:active::-webkit-slider-thumb,
+      #npSeek:active::-webkit-slider-thumb {
+        opacity: 1 !important;
+        transform: scale(1) !important;
+      }
+      #seek::-moz-range-thumb, #npSeek::-moz-range-thumb {
+        width: 12px !important;
+        height: 12px !important;
+        border-radius: 50% !important;
+        background: #ffffff !important;
+        border: none !important;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4) !important;
+        cursor: pointer !important;
+        opacity: 0 !important;
+        transform: scale(0.6) !important;
+        transition: transform 0.15s ease, opacity 0.15s ease !important;
+      }
+      .seek-box:hover #seek::-moz-range-thumb,
+      .np-seek-bar-box:hover #npSeek::-moz-range-thumb {
+        opacity: 1 !important;
+        transform: scale(1) !important;
+      }
+      /* Reverted classic red heart like button */
+      .like-btn {
+        position: relative;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      .like-btn .heart-icon {
+        width: 24px;
+        height: 24px;
+        display: block;
+        fill: none;
+        stroke: var(--md-sys-color-on-surface-variant, #b5b6be);
+        stroke-width: 2;
+        transition: transform 0.18s cubic-bezier(0.175, 0.885, 0.32, 1.275), stroke 0.15s ease, fill 0.15s ease;
+      }
+      .like-btn:hover .heart-icon {
+        stroke: var(--md-sys-color-on-surface, #ffffff);
+        transform: scale(1.08);
+      }
+      .like-btn[aria-pressed="true"] .heart-icon,
+      .like-btn.liked .heart-icon {
+        fill: #ef4444 !important;
+        stroke: #ef4444 !important;
+        transform: scale(1.15);
+      }
+      .like-btn:active .heart-icon {
+        transform: scale(0.9);
+      }
       /* Beat stale cached CSS: nothing overlayed may steal clicks */
       [hidden], #scrim, #queuePanel, #toast, #modal, #eqBars {
         display: none !important;
@@ -185,13 +348,9 @@
           </div>
           <button type="button" id="trackArtist" class="artist-link">Pick a song to begin</button>
         </div>
-        <button id="likeBtn" class="icon-btn like-btn apple-watch-like" title="Like" aria-pressed="false">
-          <span class="apple-charge-ripple" aria-hidden="true"></span>
-          <span class="apple-watch-lottie-box" id="likeLottieBox" aria-hidden="true"></span>
-          <svg id="likeHeart" class="apple-charge-svg" viewBox="0 0 24 24" aria-hidden="true">
-            <circle class="apple-charge-track" cx="12" cy="12" r="10" fill="none" />
-            <circle class="apple-charge-ring" cx="12" cy="12" r="10" fill="none" />
-            <path class="apple-charge-icon" d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
+        <button id="likeBtn" class="icon-btn like-btn" title="Like" aria-pressed="false">
+          <svg id="likeHeart" class="heart-icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <path class="heart-path" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
           </svg>
         </button>
       </div>
@@ -217,8 +376,7 @@
         <div class="seek-row">
           <span id="curTime">0:00</span>
           <div class="seek-box">
-            <svg id="seekWave" class="seek-wave" viewBox="0 0 400 16" preserveAspectRatio="none" aria-hidden="true"></svg>
-            <input id="seek" type="range" min="0" max="1000" value="0" />
+            <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Playback seek bar" />
           </div>
           <span id="durTime">0:00</span>
         </div>
@@ -306,13 +464,9 @@
             <button type="button" class="icon-btn np-action-btn" id="npQueueBtn" title="Queue" aria-label="Queue">
               <span class="material-symbols-outlined">queue_music</span>
             </button>
-            <button type="button" class="icon-btn like-btn np-like-btn apple-watch-like" id="npLikeBtn" title="Like">
-              <span class="apple-charge-ripple" aria-hidden="true"></span>
-              <span class="apple-watch-lottie-box" id="npLikeLottieBox" aria-hidden="true"></span>
-              <svg id="npLikeHeart" class="apple-charge-svg" viewBox="0 0 24 24" aria-hidden="true">
-                <circle class="apple-charge-track" cx="12" cy="12" r="10" fill="none" />
-                <circle class="apple-charge-ring" cx="12" cy="12" r="10" fill="none" />
-                <path class="apple-charge-icon" d="M12.1 21.35 10.55 19.94C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
+            <button type="button" class="icon-btn like-btn np-like-btn" id="npLikeBtn" title="Like" aria-pressed="false">
+              <svg id="npLikeHeart" class="heart-icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+                <path class="heart-path" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.44L12.1 21.35Z"/>
               </svg>
             </button>
           </div>
@@ -455,7 +609,6 @@
     <script src="https://www.youtube.com/iframe_api" async onerror="console.warn('YouTube iframe API failed to load')"></script>
     <script src="/meta.js?v=1"></script>
     <script src="/lottie.min.js"></script>
-    <script src="/apple-watch-lottie-data.js"></script>
-    <script src="/app.js?v=119"></script>
+    <script src="/app.js?v=120"></script>
   </body>
 </html>

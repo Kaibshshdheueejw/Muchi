@@ -288,6 +288,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         String candidates = call.getString("candidates", "");
         String isrc = call.getString("isrc", "");
         long duration = readLong(call, "duration", 0L);
+        long sequence = Math.max(0L, readLong(call, "sequence", 0L));
+        Boolean shouldPreload = call.getBoolean("preload", true);
         Intent i = new Intent(getContext(), MuchiAudioService.class);
         i.setAction(MuchiAudioService.ACTION_NEXT_TRACK);
         i.putExtra(MuchiAudioService.EXTRA_URL, url);
@@ -298,6 +300,8 @@ public class MuchiAudioPlugin extends Plugin implements MuchiAudioService.Plugin
         i.putExtra(MuchiAudioService.EXTRA_CANDIDATES, candidates);
         i.putExtra(MuchiAudioService.EXTRA_ISRC, isrc);
         i.putExtra(MuchiAudioService.EXTRA_DURATION_MS, duration);
+        i.putExtra(MuchiAudioService.EXTRA_NEXT_SEQUENCE, sequence);
+        i.putExtra(MuchiAudioService.EXTRA_PRELOAD, shouldPreload == null || shouldPreload);
         startService(i);
         ensureService(() -> {
             if (service != null) service.nextTrackIntent(i);

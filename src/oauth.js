@@ -16,7 +16,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { APP_NAME, APP_VERSION, authConfig, SESSION_TTL_MS } from "./config.js";
 import { json, redirect, corsHeaders } from "./util.js";
 import { decodeIdToken } from "./parse.js";
-import { sidFromToken, sessionToken } from "./auth.js";
+import { sidFromToken, sessionToken, safeCompare } from "./auth.js";
 import { getSession, putSession, deleteSession, putOAuthState, takeOAuthState, getUserLibrary, putUserLibrary } from "./db.js";
 import { getAdminEmails, isUserAdmin } from "./admin.js";
 
@@ -32,28 +32,62 @@ export async function readSession(request, env) {
     if (m) token = decodeURIComponent(m[1]);
   }
   if (!token) return null;
-  const sid = sidFromToken(token, env.MUCHI_SESSION_SECRET) || token;
+  // Raw SIDs are never accepted. Every browser cookie and native bearer token
+  // must use the same sufficiently long configured secret as OAuth issuance.
+  const { sessionSecret } = authConfig(env);
+  if (sessionSecret.length < 32) return null;
+  const sid = sidFromToken(token, sessionSecret);
   if (!sid) return null;
-  let session = await getSession(env, sid);
-  if (!session && sid !== token) {
-    session = await getSession(env, token);
+  return getSession(env, sid);
+}
+
+function isSecureRequest(request) {
+  try {
+    return new URL(request.url).protocol === "https:";
+  } catch {
+    return false;
   }
-  return session;
 }
 
-export function sessionCookie(sid, secret) {
+export function sessionCookie(sid, secret, request) {
   const token = sessionToken(sid, secret);
-  return `muchi_sid=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
+  const secure = request && isSecureRequest(request) ? "; Secure" : "";
+  return `muchi_sid=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
 }
 
-export function clearSessionCookie() {
-  return "muchi_sid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
+export function clearSessionCookie(request) {
+  const secure = request && isSecureRequest(request) ? "; Secure" : "";
+  return `muchi_sid=; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=0`;
+}
+
+function oauthBindingHash(value, secret) {
+  return createHmac("sha256", secret).update(String(value || "")).digest("base64url");
+}
+
+function oauthBindingCookie(value, request) {
+  const secure = request && isSecureRequest(request) ? "; Secure" : "";
+  return `muchi_oauth=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=600`;
+}
+
+function clearOAuthBindingCookie(request) {
+  const secure = request && isSecureRequest(request) ? "; Secure" : "";
+  return `muchi_oauth=; Path=/; HttpOnly; SameSite=Lax${secure}; Max-Age=0`;
+}
+
+function requestCookie(request, name) {
+  const cookies = String(request.headers.get("cookie") || "");
+  const m = cookies.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+function withCookies(res, cookies) {
+  const r = new Response(res.body, res);
+  for (const cookie of cookies.filter(Boolean)) r.headers.append("Set-Cookie", cookie);
+  return r;
 }
 
 function withCookie(res, cookie) {
-  const r = new Response(res.body, res);
-  r.headers.append("Set-Cookie", cookie);
-  return r;
+  return withCookies(res, [cookie]);
 }
 
 // ── Google OAuth plumbing (server.js:151–233) ──
@@ -187,7 +221,7 @@ function revokeGoogle(token) {
   fetch("https://oauth2.googleapis.com/revoke?token=" + encodeURIComponent(token), { method: "POST" }).catch(() => {});
 }
 
-function makeOAuthUrl(scope, state, extra, env) {
+function makeOAuthUrl(scope, state, extra, env, nonce) {
   const { googleClientId, googleRedirectUri } = authConfig(env);
   const p = new URLSearchParams({
     client_id: googleClientId,
@@ -195,7 +229,7 @@ function makeOAuthUrl(scope, state, extra, env) {
     response_type: "code",
     scope,
     state,
-    nonce: randomBytes(8).toString("hex"),
+    nonce: nonce || randomBytes(16).toString("hex"),
   });
   if (extra) {
     for (const k of Object.keys(extra)) if (extra[k]) p.set(k, extra[k]);
@@ -237,8 +271,8 @@ export async function handleAuthStatus(request, env) {
     profile: s ? {
       name: s.name,
       email: s.email,
-      email_verified: !!s.email_verified,
-      role: isAdmin ? "admin" : (s.role || "user"),
+      email_verified: s.email_verified === true || s.email_verified === "true",
+      role: isAdmin ? "admin" : (s.role && s.role !== "admin" ? s.role : "user"),
       picture: s.picture,
     } : null,
     youtube: ytOn ? { connected: true, connectedAt: s.yt.at } : { connected: false },
@@ -246,16 +280,20 @@ export async function handleAuthStatus(request, env) {
 }
 
 export async function handleAuthUrl(request, env, url, path) {
-  const { on } = authConfig(env);
-  if (!on) return json(503, { error: "Google auth not configured on the server" });
+  const { on, sessionSecret } = authConfig(env);
+  if (!on) return json(503, { error: "Google auth not configured on the server" }, request);
   const platform = url.searchParams.get("platform") === "native" ? "native" : "web";
   const s = await readSession(request, env);
   const step = path.indexOf("youtube") >= 0 ? "youtube" : "signin";
-  const state = randomBytes(18).toString("hex");
+  const state = randomBytes(24).toString("hex");
+  const nonce = randomBytes(18).toString("hex");
+  const browserBinding = platform === "web" ? randomBytes(24).toString("hex") : "";
   await putOAuthState(env, state, {
     step,
     sid: s ? s.sid : null,
     platform,
+    nonce,
+    bindingHash: browserBinding ? oauthBindingHash(browserBinding, sessionSecret) : "",
     exp: Date.now() + 10 * 60 * 1000,
   });
   // Request scopes so a connected user can authenticate, read their YouTube
@@ -265,10 +303,40 @@ export async function handleAuthUrl(request, env, url, path) {
   const ytScopes = "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl";
   const scope = "openid email profile " + ytScopes;
   const extra = { access_type: "offline", prompt: "consent" };
-  return json(200, { url: makeOAuthUrl(scope, state, extra, env) });
+  const authUrl = makeOAuthUrl(scope, state, extra, env, nonce);
+  const response = json(200, { url: authUrl }, request);
+  return browserBinding ? withCookie(response, oauthBindingCookie(browserBinding, request)) : response;
+}
+
+function callbackFailure(request, home, _reason = "state") {
+  // Keep the browser-visible callback contract stable and do not reflect
+  // internal OAuth failure details into the URL.
+  return withCookie(redirect(home), clearOAuthBindingCookie(request));
+}
+
+function stateBoundToBrowser(request, env, st) {
+  if (!st || st.platform !== "web") return true;
+  const binding = requestCookie(request, "muchi_oauth");
+  const secret = authConfig(env).sessionSecret;
+  return Boolean(binding && st.bindingHash && safeCompare(oauthBindingHash(binding, secret), st.bindingHash));
+}
+
+function idTokenIsValid(id, env, st) {
+  if (!id) return false;
+  if (env.GOOGLE_CLIENT_ID && id.aud !== env.GOOGLE_CLIENT_ID) return false;
+  if (id.iss && !["https://accounts.google.com", "accounts.google.com"].includes(id.iss)) return false;
+  if (typeof id.exp === "number" && id.exp * 1000 < Date.now()) return false;
+  if (st && st.nonce && !safeCompare(String(id.nonce || ""), String(st.nonce))) return false;
+  return true;
+}
+
+function nativeTokenQuery(platform, sid, secret) {
+  if (platform !== "native") return "";
+  return "?token=" + encodeURIComponent(sessionToken(sid, secret));
 }
 
 export async function handleGoogleCallback(request, env, url) {
+  const { on, sessionSecret } = authConfig(env);
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
   const oauthErr = url.searchParams.get("error") || "";
@@ -276,52 +344,33 @@ export async function handleGoogleCallback(request, env, url) {
   const platform = st ? st.platform : "web";
   const home = platform === "native" ? "muchi://auth/success" : "/?auth=success";
   const errHome = platform === "native" ? "muchi://auth/error" : "/?auth=error";
-  if (oauthErr || !st || st.exp < Date.now() || !code) return redirect(errHome);
+  if (!on) return callbackFailure(request, errHome, "not_configured");
+
+  if (oauthErr) return callbackFailure(request, errHome, "cancelled");
+  if (!st || st.exp < Date.now() || !code) return callbackFailure(request, errHome, "invalid_state");
+  if (!stateBoundToBrowser(request, env, st)) return callbackFailure(request, errHome, "state_mismatch");
+
   const tok = await googleExchange(code, env);
-  if (!tok) return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=exchange_failed");
+  if (!tok) return callbackFailure(request, errHome, "exchange_failed");
   const id = decodeIdToken(tok.id_token);
-  if (!id) return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=invalid_token");
+  if (!id || !idTokenIsValid(id, env, st)) return callbackFailure(request, errHome, "invalid_token");
 
-  // Verify token audience
-  if (env.GOOGLE_CLIENT_ID && id.aud !== env.GOOGLE_CLIENT_ID) {
-    console.error("Google OAuth aud mismatch:", id.aud);
-    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=aud_mismatch");
-  }
-
-  // Verify token issuer
-  const validIssuers = ["https://accounts.google.com", "accounts.google.com"];
-  if (id.iss && !validIssuers.includes(id.iss)) {
-    console.error("Google OAuth invalid issuer:", id.iss);
-    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=invalid_issuer");
-  }
-
-  // Verify expiration
-  if (typeof id.exp === "number" && id.exp * 1000 < Date.now()) {
-    console.error("Google OAuth token expired");
-    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=token_expired");
-  }
-
-  // Mandatory Email Verification: Require verified Google email
   const email = String(id.email || "").trim().toLowerCase();
   const isEmailVerified = id.email_verified === true || id.email_verified === "true";
-  if (!email || !isEmailVerified) {
-    console.warn("Google login rejected because email is unverified:", email);
-    return redirect(errHome + (errHome.includes("?") ? "&" : "?") + "reason=email_not_verified");
-  }
+  if (!email || !isEmailVerified) return callbackFailure(request, errHome, "email_not_verified");
 
-  // Resolve server-side role
   const adminEmails = getAdminEmails(env);
   const isAdmin = adminEmails.includes(email);
   const role = isAdmin ? "admin" : "user";
 
-  // The youtube step lands HERE too: both flows share the single registered
-  // redirect URI (GOOGLE_REDIRECT_URI), so a youtube-scope authorization code
-  // arrives at this callback. Attach the token to the EXISTING session instead
-  // of creating a fresh yt:null one — mirrors handleYoutubeCallback.
+  // The YouTube step may share Google's registered callback URI. It must update
+  // the exact session that initiated the flow; it cannot silently attach to a
+  // different browser/session supplied by an attacker.
   if (st.step === "youtube") {
-    let s = st.sid ? await getSession(env, st.sid) : null;
-    if (!s) s = await readSession(request, env);
-    if (!s) return redirect(errHome);
+    const current = await readSession(request, env);
+    if (st.sid && current && current.sid !== st.sid) return callbackFailure(request, errHome, "session_mismatch");
+    let s = st.sid ? await getSession(env, st.sid) : current;
+    if (!s) return callbackFailure(request, errHome, "session_required");
     s.yt = {
       access: tok.access_token,
       refresh: tok.refresh_token || (s.yt && s.yt.refresh) || "",
@@ -331,11 +380,11 @@ export async function handleGoogleCallback(request, env, url) {
     if (isAdmin) s.role = "admin";
     await putSession(env, s);
     ytCache.delete(s.sid);
-    const tokStr = encodeURIComponent(sessionToken(s.sid, env.MUCHI_SESSION_SECRET));
     const ytHome = platform === "native" ? "muchi://youtube/success" : "/?youtube=success";
-    const dest = ytHome + (ytHome.includes("?") ? "&" : "?") + "token=" + tokStr;
-    return withCookie(redirect(dest), sessionCookie(s.sid, env.MUCHI_SESSION_SECRET));
+    const dest = ytHome + nativeTokenQuery(platform, s.sid, sessionSecret);
+    return withCookies(redirect(dest), [sessionCookie(s.sid, sessionSecret, request), clearOAuthBindingCookie(request)]);
   }
+
   const sid = randomBytes(24).toString("hex");
   const session = {
     sid,
@@ -353,12 +402,12 @@ export async function handleGoogleCallback(request, env, url) {
     } : null,
   };
   await putSession(env, session);
-  const tokStr = encodeURIComponent(sessionToken(sid, env.MUCHI_SESSION_SECRET));
-  const dest = home + (home.includes("?") ? "&" : "?") + "token=" + tokStr;
-  return withCookie(redirect(dest), sessionCookie(sid, env.MUCHI_SESSION_SECRET));
+  const dest = home + nativeTokenQuery(platform, sid, sessionSecret);
+  return withCookies(redirect(dest), [sessionCookie(sid, sessionSecret, request), clearOAuthBindingCookie(request)]);
 }
 
 export async function handleYoutubeCallback(request, env, url) {
+  const { on, sessionSecret } = authConfig(env);
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
   const oauthErr = url.searchParams.get("error") || "";
@@ -366,12 +415,21 @@ export async function handleYoutubeCallback(request, env, url) {
   const platform = st ? st.platform : "web";
   const home = platform === "native" ? "muchi://youtube/success" : "/?youtube=success";
   const errHome = platform === "native" ? "muchi://youtube/error" : "/?youtube=error";
-  if (oauthErr || !st || st.exp < Date.now() || !code) return redirect(errHome);
-  let s = await readSession(request, env);
-  if (!s && st.sid) s = await getSession(env, st.sid);
-  if (!s) return redirect(errHome);
+  if (!on) return callbackFailure(request, errHome, "not_configured");
+  if (oauthErr) return callbackFailure(request, errHome, "cancelled");
+  if (!st || st.exp < Date.now() || !code) return callbackFailure(request, errHome, "invalid_state");
+  if (!stateBoundToBrowser(request, env, st)) return callbackFailure(request, errHome, "state_mismatch");
+
+  const current = await readSession(request, env);
+  if (st.sid && current && current.sid !== st.sid) return callbackFailure(request, errHome, "session_mismatch");
+  const s = st.sid ? await getSession(env, st.sid) : current;
+  if (!s) return callbackFailure(request, errHome, "session_required");
+
   const tok = await googleExchange(code, env);
-  if (!tok) return redirect(errHome);
+  if (!tok) return callbackFailure(request, errHome, "exchange_failed");
+  const id = decodeIdToken(tok.id_token);
+  if (!id || !idTokenIsValid(id, env, st)) return callbackFailure(request, errHome, "invalid_token");
+
   s.yt = {
     access: tok.access_token,
     refresh: tok.refresh_token || (s.yt && s.yt.refresh) || "",
@@ -380,9 +438,8 @@ export async function handleYoutubeCallback(request, env, url) {
   };
   await putSession(env, s);
   ytCache.delete(s.sid);
-  const tokStr = encodeURIComponent(sessionToken(s.sid, env.MUCHI_SESSION_SECRET));
-  const dest = home + (home.includes("?") ? "&" : "?") + "token=" + tokStr;
-  return withCookie(redirect(dest), sessionCookie(s.sid, env.MUCHI_SESSION_SECRET));
+  const dest = home + nativeTokenQuery(platform, s.sid, sessionSecret);
+  return withCookies(redirect(dest), [sessionCookie(s.sid, sessionSecret, request), clearOAuthBindingCookie(request)]);
 }
 
 export async function handleSignout(request, env) {
@@ -394,8 +451,8 @@ export async function handleSignout(request, env) {
   }
   const cookies = String(request.headers.get("cookie") || "");
   const m = cookies.match(/(?:^|;\s*)muchi_sid=([^;]+)/);
-  if (m) return withCookie(json(200, { ok: true }), clearSessionCookie());
-  return json(200, { ok: true });
+  if (m) return withCookie(json(200, { ok: true }, request), clearSessionCookie(request));
+  return json(200, { ok: true }, request);
 }
 
 export async function handleYoutubeDisconnect(request, env) {

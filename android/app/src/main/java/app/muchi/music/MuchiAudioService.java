@@ -96,6 +96,8 @@ public class MuchiAudioService extends Service {
     public static final String EXTRA_ARTIST = "artist";
     public static final String EXTRA_ARTWORK = "artwork";
     public static final String EXTRA_DURATION_MS = "durationMs";
+    public static final String EXTRA_NEXT_SEQUENCE = "nextSequence";
+    public static final String EXTRA_PRELOAD = "preload";
     public static final String EXTRA_POSITION_MS = "positionMs";
     public static final String EXTRA_PLAYING = "playing";
     public static final String EXTRA_VOLUME = "volume";
@@ -126,6 +128,7 @@ public class MuchiAudioService extends Service {
         public void nextTrackIntent(Intent i) { ticker.post(() -> handleNextTrackIntent(i)); }
         public void pausePlayback() {
             ticker.post(() -> {
+                cancelPendingCacheStart();
                 if (mirrorMode) {
                     mirrorPlaying = false;
                     updatePlaybackState(false, mirrorPositionMs);
@@ -186,7 +189,10 @@ public class MuchiAudioService extends Service {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ExecutorService resolveExecutor = Executors.newCachedThreadPool();
     private final Handler ticker = new Handler(Looper.getMainLooper());
-
+    // Main-thread handle for the delayed cache start. Keeping the handle lets
+    // replacement, pause, and stop explicitly cancel the six-second guard
+    // instead of relying only on a stale sequence check at callback time.
+    private Runnable pendingCacheStart;
     private ExoPlayer player;
     private DefaultHttpDataSource.Factory httpFactory;
     private MediaSessionCompat session;
@@ -259,12 +265,17 @@ public class MuchiAudioService extends Service {
         final String artwork;
         final long durationMs;
         final String isrc;
+        final long sequence;
 
         NextTrackInfo(String url, String videoId, String candidates, String title, String artist, String artwork, long durationMs) {
-            this(url, videoId, candidates, title, artist, artwork, durationMs, "");
+            this(url, videoId, candidates, title, artist, artwork, durationMs, "", 0L);
         }
 
         NextTrackInfo(String url, String videoId, String candidates, String title, String artist, String artwork, long durationMs, String isrc) {
+            this(url, videoId, candidates, title, artist, artwork, durationMs, isrc, 0L);
+        }
+
+        NextTrackInfo(String url, String videoId, String candidates, String title, String artist, String artwork, long durationMs, String isrc, long sequence) {
             this.url = url != null ? url : "";
             this.videoId = videoId != null ? videoId : "";
             this.candidates = candidates != null ? candidates : "";
@@ -273,9 +284,14 @@ public class MuchiAudioService extends Service {
             this.artwork = artwork != null ? artwork : "";
             this.durationMs = Math.max(0L, durationMs);
             this.isrc = isrc != null ? isrc.trim() : "";
+            this.sequence = Math.max(0L, sequence);
         }
     }
     private volatile NextTrackInfo queuedNextTrack = null;
+    // JS sends a monotonically increasing token for every queue snapshot. The
+    // service is intentionally conservative: once tokenized updates begin,
+    // unsequenced or older deliveries cannot replace the current next track.
+    private volatile long nextTrackSequence = 0L;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -359,33 +375,10 @@ public class MuchiAudioService extends Service {
         notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         createChannel();
         initLocks();
-        // Purge any < 1.15 MB or 983,040-byte (1-minute) c=IOS/c=ANDROID files in muchi_audio_cache,
-        // and perform a one-time purge (.v193_clean) of any stale remix/wrong-artist files from older builds.
-        sharedResolvePool.execute(() -> {
-            try {
-                File oldDir = new File(getCacheDir(), "muchi_audio_cache");
-                if (oldDir.exists() && oldDir.isDirectory()) {
-                    File cleanMarker = new File(oldDir, ".v193_clean");
-                    boolean wipeAll = !cleanMarker.exists();
-                    File[] oldFiles = oldDir.listFiles();
-                    if (oldFiles != null) {
-                        for (File f : oldFiles) {
-                            if (f != null && f.isFile() && !".v193_clean".equals(f.getName())
-                                    && (wipeAll || f.length() == 983040L || f.length() < 1150000L)) {
-                                //noinspection ResultOfMethodCallIgnored
-                                f.delete();
-                            }
-                        }
-                    }
-                    if (wipeAll) {
-                        try {
-                            //noinspection ResultOfMethodCallIgnored
-                            cleanMarker.createNewFile();
-                        } catch (Exception ignored) {}
-                    }
-                }
-            } catch (Exception ignored) {}
-        });
+        // Phase 3C: perform one serialized startup cleanup. Cache reads and downloads
+        // use the same lock, so stale temporary files cannot be removed underneath an
+        // active download or a final publication.
+        sharedResolvePool.execute(() -> getAudioCacheDir(getApplicationContext()));
     }
 
     private void initLocks() {
@@ -464,6 +457,7 @@ public class MuchiAudioService extends Service {
                 emitControls(mirrorPlaying ? "play" : "pause", mirrorPositionMs);
             } else if (player != null) {
                 if (player.isPlaying()) {
+                    cancelPendingCacheStart();
                     player.pause();
                     emitControls("pause", player.getCurrentPosition());
                 } else {
@@ -626,14 +620,24 @@ public class MuchiAudioService extends Service {
         String candidates = intent.getStringExtra(EXTRA_CANDIDATES);
         String isrc = intent.getStringExtra(EXTRA_ISRC);
         long durationMs = intent.getLongExtra(EXTRA_DURATION_MS, 0L);
+        long sequence = Math.max(0L, intent.getLongExtra(EXTRA_NEXT_SEQUENCE, 0L));
+        boolean shouldPreload = intent.getBooleanExtra(EXTRA_PRELOAD, true);
+        if (sequence > 0L) {
+            if (sequence <= nextTrackSequence) return;
+            nextTrackSequence = sequence;
+        } else if (nextTrackSequence > 0L) {
+            // Do not let an older bundle or an unsequenced duplicate clobber a
+            // queue snapshot after the tokenized bridge has taken ownership.
+            return;
+        }
         if ((url == null || url.isEmpty()) && (videoId == null || videoId.isEmpty()) && (title == null || title.isEmpty())) {
             queuedNextTrack = null;
             return;
         }
-        queuedNextTrack = new NextTrackInfo(url, videoId, candidates, title, artist, artwork, durationMs, isrc);
-        if (videoId != null && !videoId.isEmpty()) {
+        queuedNextTrack = new NextTrackInfo(url, videoId, candidates, title, artist, artwork, durationMs, isrc, sequence);
+        if (shouldPreload && videoId != null && !videoId.isEmpty()) {
             preloadStream(videoId, candidates != null ? candidates : "", title != null ? title : "", artist != null ? artist : "", isrc != null ? isrc : "");
-        } else if (title != null && !title.isEmpty()) {
+        } else if (shouldPreload && title != null && !title.isEmpty()) {
             preloadStream("", candidates != null ? candidates : "", title, artist != null ? artist : "", isrc != null ? isrc : "");
         }
     }
@@ -669,6 +673,7 @@ public class MuchiAudioService extends Service {
 
     @Override
     public void onDestroy() {
+        cancelPendingCacheStart();
         ticker.removeCallbacks(tick);
         updateLocks(false);
         releaseAudioEffects();
@@ -763,7 +768,7 @@ public class MuchiAudioService extends Service {
                 }
                 invalidateResolvedCacheForTrack(currentVideoId, trackTitle, trackArtist, currentUrl);
                 if (currentUrl != null && currentUrl.startsWith("file:")) {
-                    evictCachedAudioFile(MuchiAudioService.this, currentVideoId, trackTitle, trackArtist);
+                    evictCachedAudioFile(MuchiAudioService.this, currentVideoId, trackTitle, trackArtist, trackIsrc);
                     triedOnDeviceResolve = false;
                 }
                 // If the Worker proxy URL, initial stream, or mid-song connection failed (e.g. around ~1 min)
@@ -820,6 +825,7 @@ public class MuchiAudioService extends Service {
                     showNotification();
                     updateLocks(false);
                 } else if (player != null) {
+                    cancelPendingCacheStart();
                     player.pause();
                 }
                 emitControls("pause", 0L);
@@ -934,6 +940,9 @@ public class MuchiAudioService extends Service {
             return;
         }
 
+        // A real replacement invalidates the previous track's delayed cache start
+        // and any stale replacement state before the new load sequence is published.
+        cancelPendingCacheStart();
         lastLoadTrackAtMs = nowMs;
         trackTitle = newTitle;
         trackArtist = newArtist;
@@ -995,9 +1004,11 @@ public class MuchiAudioService extends Service {
         // muchi_audio_cache on disk, play the local cached audio file immediately in 0ms
         // with zero backend or network load!
         if (url != null && !url.startsWith("file:") && !url.startsWith("content:")) {
-            File cachedFile = getCachedAudioFile(this, currentVideoId, trackTitle, trackArtist);
+            File cachedFile = getCachedAudioFile(this, currentVideoId, trackTitle, trackArtist, trackIsrc);
             if (cachedFile != null) {
-                long minFullSongBytes = currentDurationMs >= 90000L ? (currentDurationMs / 1000L) * 9500L : 262144L;
+                long minFullSongBytes = currentDurationMs >= 90000L
+                        ? (currentDurationMs / 1000L) * 9500L
+                        : MIN_UNCAPPED_AUDIO_CACHE_BYTES;
                 if (cachedFile.length() >= minFullSongBytes) {
                     String localFileUri = android.net.Uri.fromFile(cachedFile).toString();
                     resolvingOnDevice = false;
@@ -1006,8 +1017,25 @@ public class MuchiAudioService extends Service {
                     startExoPlayerWithUrl(localFileUri, DEFAULT_UA, currentDurationMs);
                     return;
                 } else {
-                    evictCachedAudioFile(this, currentVideoId, trackTitle, trackArtist);
+                    evictCachedAudioFile(this, currentVideoId, trackTitle, trackArtist, trackIsrc);
                 }
+            }
+        }
+
+        // Check if the provided URL is an expired googlevideo stream URL before attempting playback.
+        // A near-expiry URL is not safe to hand to ExoPlayer: invalidate all matching resolver
+        // entries and force a fresh on-device resolution instead of starting a stream that dies
+        // during startup or shortly after backgrounding.
+        if (url != null && (url.toLowerCase(java.util.Locale.ROOT).contains("googlevideo.com") || url.toLowerCase(java.util.Locale.ROOT).contains("expire="))) {
+            long urlExpireSec = 0L;
+            try {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:[?&]|%26)expire(?:=|%3D)([0-9]+)").matcher(url);
+                if (m.find()) urlExpireSec = Long.parseLong(m.group(1));
+            } catch (Exception ignored) {}
+            if (urlExpireSec > 0 && (urlExpireSec * 1000L) <= (System.currentTimeMillis() + 15000L)) {
+                invalidateResolvedCacheForTrack(currentVideoId, trackTitle, trackArtist, url);
+                url = !currentVideoId.isEmpty() ? ("yt:" + currentVideoId) : "yt:";
+                currentUrl = url;
             }
         }
 
@@ -1072,6 +1100,9 @@ public class MuchiAudioService extends Service {
     }
 
     private void startExoPlayerWithUrl(String streamUrl, String userAgent, long durationMs) {
+        // This also covers mid-song stream recovery: the old URL must not be
+        // cached when the replacement stream becomes the active player.
+        cancelPendingCacheStart();
         ensurePlayer();
         ensureSession();
         if (durationMs <= 0 && streamUrl != null) {
@@ -1113,13 +1144,23 @@ public class MuchiAudioService extends Service {
             final String cacheVid = currentVideoId;
             final String cacheTitle = trackTitle;
             final String cacheArtist = trackArtist;
+            final String cacheIsrc = trackIsrc;
+            final long expectedDurationForCache = Math.max(0L, durationMs);
             final Context appCtx = getApplicationContext();
             // Delay background disk caching by 6 seconds so 100% of network bandwidth and the
             // googlevideo.com stream connection belong exclusively to ExoPlayer during startup.
-            ticker.postDelayed(() -> {
-                if (expectedSeq != loadSeq || player == null || !player.isPlaying()) return;
-                cacheStreamToDiskAsync(appCtx, cacheUrl, effectiveUaForCache, cacheVid, cacheTitle, cacheArtist);
-            }, 6000L);
+            // The handle is retained so pause/stop/replacement can cancel the delayed start.
+            pendingCacheStart = () -> {
+                pendingCacheStart = null;
+                if (expectedSeq != loadSeq
+                        || resolvingOnDevice
+                        || player == null
+                        || player.getPlaybackState() != Player.STATE_READY
+                        || !player.getPlayWhenReady()
+                        || !player.isPlaying()) return;
+                cacheStreamToDiskAsync(appCtx, cacheUrl, effectiveUaForCache, cacheVid, cacheTitle, cacheArtist, cacheIsrc, expectedDurationForCache);
+            };
+            ticker.postDelayed(pendingCacheStart, 6000L);
         }
 
         session.setMetadata(buildMetadata(durationMs));
@@ -1133,6 +1174,7 @@ public class MuchiAudioService extends Service {
     }
 
     private void recoverMidSongStream(final long resumePosMs) {
+        cancelPendingCacheStart();
         triedOnDeviceResolve = true;
         midSongRecoveryCount++;
         resolvingOnDevice = true;
@@ -1141,7 +1183,7 @@ public class MuchiAudioService extends Service {
             failedVideoIds.add(currentVideoId);
         }
         invalidateResolvedCacheForTrack(currentVideoId, trackTitle, trackArtist, currentUrl);
-        evictCachedAudioFile(MuchiAudioService.this, currentVideoId, trackTitle, trackArtist);
+        evictCachedAudioFile(MuchiAudioService.this, currentVideoId, trackTitle, trackArtist, trackIsrc);
         pendingSeekMs = Math.max(0L, resumePosMs);
         pendingSeekSetAtMs = android.os.SystemClock.elapsedRealtime();
         lastKnownPositionMs = pendingSeekMs;
@@ -1411,7 +1453,22 @@ public class MuchiAudioService extends Service {
     private static final long RESOLVED_CACHE_TTL_MS = 20 * 60 * 1000L;
     private static final String AUDIO_CACHE_DIR_NAME = "muchi_audio_cache";
     private static final long MAX_AUDIO_CACHE_BYTES = 250L * 1024L * 1024L;
-    private static final Set<String> activeAudioCacheDownloads = ConcurrentHashMap.newKeySet();
+    private static final Object AUDIO_CACHE_LOCK = new Object();
+    private static final Map<String, AudioCacheDownload> activeAudioCacheDownloads = new HashMap<>();
+    private static final long MIN_UNCAPPED_AUDIO_CACHE_BYTES = 1150000L;
+    private static boolean audioCacheCleanChecked = false;
+
+    private static final class AudioCacheDownload {
+        final String canonicalKey;
+        final Set<String> keys;
+        volatile boolean cancelled = false;
+        volatile HttpURLConnection connection;
+
+        AudioCacheDownload(String canonicalKey, Set<String> keys) {
+            this.canonicalKey = canonicalKey;
+            this.keys = new java.util.HashSet<>(keys);
+        }
+    }
 
     private static boolean isOneMinuteCappedGoogleVideoUrl(String url) {
         if (url == null || url.isEmpty()) return false;
@@ -1430,11 +1487,71 @@ public class MuchiAudioService extends Service {
     private static File getAudioCacheDir(Context ctx) {
         if (ctx == null) return null;
         File dir = new File(ctx.getCacheDir(), AUDIO_CACHE_DIR_NAME);
-        if (!dir.exists()) {
-            //noinspection ResultOfMethodCallIgnored
-            dir.mkdirs();
+        synchronized (AUDIO_CACHE_LOCK) {
+            if (!dir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            if (!audioCacheCleanChecked) {
+                cleanAudioCacheDirOnStartup(dir);
+                audioCacheCleanChecked = true;
+            }
         }
         return dir;
+    }
+
+    private static void cleanAudioCacheDirOnStartup(File dir) {
+        if (dir == null || !dir.exists() || !dir.isDirectory()) return;
+        File marker = new File(dir, ".v193_clean");
+        boolean wipeAll = !marker.exists();
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        if (wipeAll) {
+            for (File file : files) {
+                if (file != null && !file.equals(marker)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    file.delete();
+                }
+            }
+            try {
+                //noinspection ResultOfMethodCallIgnored
+                marker.createNewFile();
+            } catch (Exception ignored) {}
+            return;
+        }
+
+        Set<String> validCanonicalKeys = new java.util.HashSet<>();
+        for (File file : files) {
+            if (file == null || !file.isFile() || !file.getName().endsWith(".m4a")) continue;
+            String key = file.getName().substring(0, file.getName().length() - 4);
+            if (key.isEmpty() || !key.equals(sanitizeAudioCacheKey(key)) || !isCompleteAudioCacheFile(file)) {
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
+            } else {
+                validCanonicalKeys.add(key);
+            }
+        }
+        for (File file : files) {
+            if (file == null || !file.isFile() || file.equals(marker)) continue;
+            String name = file.getName();
+            if (name.endsWith(".meta")) {
+                String key = name.substring(0, name.length() - 5);
+                if (!validCanonicalKeys.contains(key)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    file.delete();
+                }
+            } else if (name.endsWith(".alias")) {
+                String canonicalKey = readAudioCacheAlias(file);
+                if (!validCanonicalKeys.contains(canonicalKey)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    file.delete();
+                }
+            } else if (!name.endsWith(".m4a")) {
+                // Temporary downloads and unknown cache debris are never reusable after restart.
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
+            }
+        }
     }
 
     private static String sanitizeAudioCacheKey(String raw) {
@@ -1446,102 +1563,336 @@ public class MuchiAudioService extends Service {
         return cleaned;
     }
 
+    private static String audioCacheVideoKey(String videoId) {
+        if (videoId == null || videoId.trim().isEmpty()) return "";
+        return sanitizeAudioCacheKey("vid_" + videoId.trim());
+    }
+
+    private static String audioCacheQueryKey(String title, String artist) {
+        String query = queryCacheKey(title, artist);
+        return query.isEmpty() ? "" : sanitizeAudioCacheKey(query);
+    }
+
+    private static String audioCacheIsrcKey(String isrc) {
+        if (isrc == null || isrc.trim().isEmpty()) return "";
+        return sanitizeAudioCacheKey("isrc_" + isrc.trim().toUpperCase(java.util.Locale.ROOT));
+    }
+
+    private static Set<String> audioCacheKeys(String videoId, String title, String artist, String isrc) {
+        Set<String> keys = new java.util.HashSet<>();
+        String vidKey = audioCacheVideoKey(videoId);
+        String queryKey = audioCacheQueryKey(title, artist);
+        String isrcKey = audioCacheIsrcKey(isrc);
+        if (!vidKey.isEmpty()) keys.add(vidKey);
+        if (!queryKey.isEmpty()) keys.add(queryKey);
+        if (!isrcKey.isEmpty()) keys.add(isrcKey);
+        return keys;
+    }
+
+    private static String canonicalAudioCacheKey(String videoId, String title, String artist, String isrc) {
+        String vidKey = audioCacheVideoKey(videoId);
+        if (!vidKey.isEmpty()) return vidKey;
+        String queryKey = audioCacheQueryKey(title, artist);
+        if (!queryKey.isEmpty()) return queryKey;
+        return audioCacheIsrcKey(isrc);
+    }
+
+    private static File audioCacheFile(File dir, String key) {
+        return key == null || key.isEmpty() ? null : new File(dir, key + ".m4a");
+    }
+
+    private static boolean isCompleteAudioCacheFile(File file) {
+        if (file == null || !file.isFile()) return false;
+        long size = file.length();
+        return size >= MIN_UNCAPPED_AUDIO_CACHE_BYTES
+                && size != 983040L;
+    }
+
+    private static File validAudioCacheFile(File file) {
+        if (file == null) return null;
+        if (isCompleteAudioCacheFile(file)) {
+            //noinspection ResultOfMethodCallIgnored
+            file.setLastModified(System.currentTimeMillis());
+            return file;
+        }
+        if (file.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
+        }
+        return null;
+    }
+
+    private static String readAudioCacheAlias(File aliasFile) {
+        if (aliasFile == null || !aliasFile.isFile()) return "";
+        try {
+            return sanitizeAudioCacheKey(readStreamString(new java.io.FileInputStream(aliasFile)).trim());
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static File resolveAudioCacheFile(File dir, String key) {
+        if (dir == null || key == null || key.isEmpty()) return null;
+        File direct = validAudioCacheFile(audioCacheFile(dir, key));
+        if (direct != null) return direct;
+        File aliasFile = new File(dir, key + ".alias");
+        String canonicalKey = readAudioCacheAlias(aliasFile);
+        if (!canonicalKey.isEmpty()) {
+            File aliased = validAudioCacheFile(audioCacheFile(dir, canonicalKey));
+            if (aliased != null) return aliased;
+            deleteAudioCacheArtifact(dir, canonicalKey);
+        } else {
+            //noinspection ResultOfMethodCallIgnored
+            aliasFile.delete();
+        }
+        return null;
+    }
+
     public static File getCachedAudioFile(Context ctx, String videoId, String title, String artist) {
+        return getCachedAudioFile(ctx, videoId, title, artist, "");
+    }
+
+    public static File getCachedAudioFile(Context ctx, String videoId, String title, String artist, String isrc) {
         File dir = getAudioCacheDir(ctx);
         if (dir == null || !dir.exists()) return null;
-        final long minValidBytes = 262144L;
-        final long minUncappedBytes = 1150000L; // >1.15 MB minimum to reject 960KB (983,040-byte) 1-minute capped streams
-        if (videoId != null && !videoId.trim().isEmpty()) {
-            File vf = new File(dir, sanitizeAudioCacheKey("vid_" + videoId.trim()) + ".m4a");
-            if (vf.exists()) {
-                if (vf.length() >= minValidBytes && vf.length() >= minUncappedBytes && vf.length() != 983040L) {
-                    //noinspection ResultOfMethodCallIgnored
-                    vf.setLastModified(System.currentTimeMillis());
-                    return vf;
-                } else {
-                    //noinspection ResultOfMethodCallIgnored
-                    vf.delete();
-                }
-            }
-        }
-        String qKey = queryCacheKey(title, artist);
-        if (!qKey.isEmpty()) {
-            File qf = new File(dir, sanitizeAudioCacheKey(qKey) + ".m4a");
-            if (qf.exists()) {
-                if (qf.length() >= minValidBytes && qf.length() >= minUncappedBytes && qf.length() != 983040L) {
-                    //noinspection ResultOfMethodCallIgnored
-                    qf.setLastModified(System.currentTimeMillis());
-                    return qf;
-                } else {
-                    //noinspection ResultOfMethodCallIgnored
-                    qf.delete();
-                }
+        String[] keys = {
+                audioCacheVideoKey(videoId),
+                audioCacheQueryKey(title, artist),
+                audioCacheIsrcKey(isrc)
+        };
+        synchronized (AUDIO_CACHE_LOCK) {
+            for (String key : keys) {
+                File hit = resolveAudioCacheFile(dir, key);
+                if (hit != null) return hit;
             }
         }
         return null;
     }
 
-    public static void evictCachedAudioFile(Context ctx, String videoId, String title, String artist) {
-        File dir = getAudioCacheDir(ctx);
-        if (dir == null || !dir.exists()) return;
-        if (videoId != null && !videoId.trim().isEmpty()) {
-            File vf = new File(dir, sanitizeAudioCacheKey("vid_" + videoId.trim()) + ".m4a");
-            if (vf.exists()) {
+    private static void removeAliasesForCanonical(File dir, String canonicalKey) {
+        if (dir == null || canonicalKey == null || canonicalKey.isEmpty()) return;
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            if (file == null || !file.isFile() || !file.getName().endsWith(".alias")) continue;
+            if (canonicalKey.equals(readAudioCacheAlias(file))) {
                 //noinspection ResultOfMethodCallIgnored
-                vf.delete();
-            }
-        }
-        String qKey = queryCacheKey(title, artist);
-        if (!qKey.isEmpty()) {
-            File qf = new File(dir, sanitizeAudioCacheKey(qKey) + ".m4a");
-            if (qf.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                qf.delete();
+                file.delete();
             }
         }
     }
 
+    private static void deleteAudioCacheKey(File dir, String key, Set<String> removedCanonicalKeys) {
+        if (dir == null || key == null || key.isEmpty()) return;
+        File aliasFile = new File(dir, key + ".alias");
+        String canonicalKey = readAudioCacheAlias(aliasFile);
+        if (canonicalKey.isEmpty()) canonicalKey = key;
+        if (removedCanonicalKeys.add(canonicalKey)) {
+            File target = audioCacheFile(dir, canonicalKey);
+            if (target != null) {
+                //noinspection ResultOfMethodCallIgnored
+                target.delete();
+            }
+            File metadata = new File(dir, canonicalKey + ".meta");
+            //noinspection ResultOfMethodCallIgnored
+            metadata.delete();
+            removeAliasesForCanonical(dir, canonicalKey);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        aliasFile.delete();
+    }
+
+    public static void evictCachedAudioFile(Context ctx, String videoId, String title, String artist) {
+        evictCachedAudioFile(ctx, videoId, title, artist, "");
+    }
+
+    public static void evictCachedAudioFile(Context ctx, String videoId, String title, String artist, String isrc) {
+        // Invalidation is also a cancellation boundary: a stale worker must not
+        // publish a replacement after this method removes the current artifact.
+        cancelAudioCacheDownload(videoId, title, artist, isrc);
+        File dir = getAudioCacheDir(ctx);
+        if (dir == null || !dir.exists()) return;
+        synchronized (AUDIO_CACHE_LOCK) {
+            Set<String> removedCanonicalKeys = new java.util.HashSet<>();
+            deleteAudioCacheKey(dir, audioCacheVideoKey(videoId), removedCanonicalKeys);
+            deleteAudioCacheKey(dir, audioCacheQueryKey(title, artist), removedCanonicalKeys);
+            deleteAudioCacheKey(dir, audioCacheIsrcKey(isrc), removedCanonicalKeys);
+        }
+    }
+
+    private static void deleteAudioCacheArtifact(File dir, String canonicalKey) {
+        if (dir == null || canonicalKey == null || canonicalKey.isEmpty()) return;
+        File target = audioCacheFile(dir, canonicalKey);
+        if (target != null) {
+            //noinspection ResultOfMethodCallIgnored
+            target.delete();
+        }
+        //noinspection ResultOfMethodCallIgnored
+        new File(dir, canonicalKey + ".meta").delete();
+        removeAliasesForCanonical(dir, canonicalKey);
+    }
+
+    private static boolean isAudioCacheCanonicalActive(String canonicalKey) {
+        if (canonicalKey == null || canonicalKey.isEmpty()) return false;
+        for (AudioCacheDownload state : activeAudioCacheDownloads.values()) {
+            if (state != null && canonicalKey.equals(state.canonicalKey)) return true;
+        }
+        return false;
+    }
+
     private static void pruneAudioCacheDir(File dir) {
         if (dir == null || !dir.exists()) return;
-        File[] files = dir.listFiles();
-        if (files == null || files.length == 0) return;
-        long total = 0L;
-        for (File f : files) {
-            if (f != null && f.isFile()) total += f.length();
-        }
-        if (total <= MAX_AUDIO_CACHE_BYTES) return;
-        Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
-        for (File f : files) {
-            if (f == null || !f.isFile()) continue;
-            long len = f.length();
-            if (f.delete()) {
+        synchronized (AUDIO_CACHE_LOCK) {
+            File[] files = dir.listFiles();
+            if (files == null || files.length == 0) return;
+            List<File> audioFiles = new ArrayList<>();
+            long total = 0L;
+            for (File file : files) {
+                if (file == null || !file.isFile() || !file.getName().endsWith(".m4a")) continue;
+                String name = file.getName();
+                String canonicalKey = name.substring(0, name.length() - 4);
+                if (!isCompleteAudioCacheFile(file)) {
+                    if (!isAudioCacheCanonicalActive(canonicalKey)) deleteAudioCacheArtifact(dir, canonicalKey);
+                    continue;
+                }
+                audioFiles.add(file);
+                total += file.length();
+            }
+            if (total <= MAX_AUDIO_CACHE_BYTES) return;
+            audioFiles.sort((a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (File file : audioFiles) {
+                String name = file.getName();
+                String canonicalKey = name.substring(0, name.length() - 4);
+                if (isAudioCacheCanonicalActive(canonicalKey)) continue;
+                long len = file.length();
+                deleteAudioCacheArtifact(dir, canonicalKey);
                 total -= len;
                 if (total <= (MAX_AUDIO_CACHE_BYTES * 80L) / 100L) break;
             }
         }
     }
 
+    private static boolean writeAudioCacheTextAtomically(File target, String text) {
+        if (target == null || target.getParentFile() == null) return false;
+        File tmp = new File(target.getParentFile(), target.getName() + "." + System.nanoTime() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            if (target.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                target.delete();
+            }
+            return tmp.renameTo(target);
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (tmp.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+        }
+    }
+
+    private static void writeAudioCacheMetadata(File dir, String canonicalKey, Set<String> keys,
+                                                String videoId, String title, String artist, String isrc,
+                                                long expectedDurationMs) {
+        try {
+            JSONObject metadata = new JSONObject();
+            metadata.put("version", 1);
+            metadata.put("canonicalKey", canonicalKey);
+            metadata.put("videoId", videoId != null ? videoId.trim() : "");
+            metadata.put("queryKey", queryCacheKey(title, artist));
+            metadata.put("isrc", isrc != null ? isrc.trim() : "");
+            metadata.put("title", title != null ? title : "");
+            metadata.put("artist", artist != null ? artist : "");
+            metadata.put("expectedDurationMs", Math.max(0L, expectedDurationMs));
+            writeAudioCacheTextAtomically(new File(dir, canonicalKey + ".meta"), metadata.toString());
+            for (String key : keys) {
+                if (key != null && !key.isEmpty() && !key.equals(canonicalKey)) {
+                    writeAudioCacheTextAtomically(new File(dir, key + ".alias"), canonicalKey);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static AudioCacheDownload claimAudioCacheDownload(String canonicalKey, Set<String> keys) {
+        synchronized (AUDIO_CACHE_LOCK) {
+            for (String key : keys) {
+                if (activeAudioCacheDownloads.containsKey(key)) return null;
+            }
+            AudioCacheDownload state = new AudioCacheDownload(canonicalKey, keys);
+            for (String key : state.keys) activeAudioCacheDownloads.put(key, state);
+            return state;
+        }
+    }
+
+    private static void releaseAudioCacheDownload(AudioCacheDownload state) {
+        if (state == null) return;
+        synchronized (AUDIO_CACHE_LOCK) {
+            for (String key : state.keys) {
+                if (activeAudioCacheDownloads.get(key) == state) activeAudioCacheDownloads.remove(key);
+            }
+        }
+    }
+
+    private static void cancelAudioCacheDownload(String videoId, String title, String artist, String isrc) {
+        Set<AudioCacheDownload> states = new java.util.HashSet<>();
+        synchronized (AUDIO_CACHE_LOCK) {
+            for (String key : audioCacheKeys(videoId, title, artist, isrc)) {
+                AudioCacheDownload state = activeAudioCacheDownloads.get(key);
+                if (state != null) {
+                    states.add(state);
+                }
+            }
+        }
+        for (AudioCacheDownload state : states) {
+            HttpURLConnection con;
+            synchronized (state) {
+                state.cancelled = true;
+                con = state.connection;
+            }
+            if (con != null) {
+                try { con.disconnect(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
     private static void cacheStreamToDiskAsync(final Context ctx, final String streamUrl, final String userAgent,
-                                               final String videoId, final String title, final String artist) {
+                                               final String videoId, final String title, final String artist,
+                                               final String isrc, final long expectedDurationMs) {
         if (ctx == null || streamUrl == null || streamUrl.isEmpty()) return;
-        if (getCachedAudioFile(ctx, videoId, title, artist) != null) return;
-        final String primaryKey = (videoId != null && !videoId.trim().isEmpty())
-                ? sanitizeAudioCacheKey("vid_" + videoId.trim())
-                : sanitizeAudioCacheKey(queryCacheKey(title, artist));
-        if (primaryKey.isEmpty()) return;
-        final String secondaryKey = (videoId != null && !videoId.trim().isEmpty() && title != null && !title.trim().isEmpty())
-                ? sanitizeAudioCacheKey(queryCacheKey(title, artist))
-                : "";
-        if (!activeAudioCacheDownloads.add(primaryKey)) return;
+        // Never attempt to cache infinite live radio streams or playlist manifests.
+        // Decode proxy query URLs first so /api/stream?url=...radio... is covered too.
+        String decodedCacheUrl = streamUrl;
+        try {
+            decodedCacheUrl = java.net.URLDecoder.decode(streamUrl, "UTF-8");
+        } catch (Exception ignored) {}
+        String lowCacheUrl = decodedCacheUrl.toLowerCase(java.util.Locale.ROOT);
+        if (lowCacheUrl.contains("/radio/") || lowCacheUrl.contains(":8000/") || lowCacheUrl.contains(":8080/")
+                || lowCacheUrl.contains(".pls") || lowCacheUrl.contains(".m3u")) {
+            return;
+        }
+        if (getCachedAudioFile(ctx, videoId, title, artist, isrc) != null) return;
+        final String canonicalKey = canonicalAudioCacheKey(videoId, title, artist, isrc);
+        final Set<String> cacheKeys = audioCacheKeys(videoId, title, artist, isrc);
+        if (canonicalKey.isEmpty() || cacheKeys.isEmpty()) return;
+        final AudioCacheDownload state = claimAudioCacheDownload(canonicalKey, cacheKeys);
+        if (state == null) return;
 
         sharedResolvePool.execute(() -> {
             File tmpFile = null;
             HttpURLConnection con = null;
             try {
+                if (state.cancelled) return;
                 File dir = getAudioCacheDir(ctx);
                 if (dir == null) return;
-                File targetFile = new File(dir, primaryKey + ".m4a");
-                if (targetFile.exists() && targetFile.length() >= 262144L) return;
+                File targetFile = audioCacheFile(dir, canonicalKey);
+                if (isCompleteAudioCacheFile(targetFile)) return;
+                if (targetFile != null && targetFile.exists()) {
+                    // Remove only an invalid old final; the new bytes still land in a temp file.
+                    //noinspection ResultOfMethodCallIgnored
+                    targetFile.delete();
+                }
                 // Never open a second competing HTTP download connection to googlevideo.com while
                 // ExoPlayer is actively streaming that single-session token (prevents ~1-minute stream cutoffs).
                 if (streamUrl.contains("googlevideo.com") || streamUrl.toLowerCase().contains("googlevideo.com") || isOneMinuteCappedGoogleVideoUrl(streamUrl)) {
@@ -1550,12 +1901,15 @@ public class MuchiAudioService extends Service {
                 long urlClen = 0L;
                 try {
                     java.util.regex.Matcher mClen = java.util.regex.Pattern.compile("(?:[?&]|%26)clen(?:=|%3D)([0-9]+)").matcher(streamUrl);
-                    if (mClen.find()) {
-                        urlClen = Long.parseLong(mClen.group(1));
-                    }
+                    if (mClen.find()) urlClen = Long.parseLong(mClen.group(1));
                 } catch (Exception ignored) {}
-                tmpFile = new File(dir, primaryKey + "." + System.currentTimeMillis() + ".tmp");
+                tmpFile = new File(dir, canonicalKey + "." + System.currentTimeMillis() + ".tmp");
                 con = (HttpURLConnection) new URL(streamUrl).openConnection();
+                state.connection = con;
+                if (state.cancelled) {
+                    con.disconnect();
+                    return;
+                }
                 con.setConnectTimeout(10000);
                 con.setReadTimeout(20000);
                 con.setInstanceFollowRedirects(true);
@@ -1567,7 +1921,7 @@ public class MuchiAudioService extends Service {
                     con.setRequestProperty("Referer", "https://www.youtube.com/");
                 }
                 int code = con.getResponseCode();
-                if (code >= 200 && code < 300) {
+                if (code >= 200 && code < 300 && !state.cancelled) {
                     long headerLen = con.getContentLengthLong();
                     long expectedBytes = headerLen > 0 ? headerLen : urlClen;
                     long written = 0L;
@@ -1575,45 +1929,49 @@ public class MuchiAudioService extends Service {
                          FileOutputStream fos = new FileOutputStream(tmpFile)) {
                         byte[] buf = new byte[32768];
                         int n;
-                        while ((n = in.read(buf)) > 0) {
+                        while (!state.cancelled && (n = in.read(buf)) > 0) {
                             fos.write(buf, 0, n);
                             written += n;
                             if (written > 45L * 1024L * 1024L) break;
                         }
                         fos.flush();
                     }
-                    boolean completeEnough = written >= 1150000L && written != 983040L
+                    boolean completeEnough = !state.cancelled
+                            && written >= MIN_UNCAPPED_AUDIO_CACHE_BYTES
+                            && written < 45L * 1024L * 1024L
+                            && written != 983040L
                             && (expectedBytes <= 0L || written >= (expectedBytes * 98L) / 100L);
-                    if (completeEnough) {
-                        if (targetFile.exists()) {
-                            //noinspection ResultOfMethodCallIgnored
-                            targetFile.delete();
-                        }
-                        if (tmpFile.renameTo(targetFile)) {
-                            tmpFile = null;
-                            if (!secondaryKey.isEmpty() && !secondaryKey.equals(primaryKey)) {
-                                File secFile = new File(dir, secondaryKey + ".m4a");
-                                if (!secFile.exists()) {
-                                    try (InputStream fis = new java.io.FileInputStream(targetFile);
-                                         FileOutputStream sfos = new FileOutputStream(secFile)) {
-                                        byte[] buf = new byte[32768];
-                                        int n;
-                                        while ((n = fis.read(buf)) > 0) sfos.write(buf, 0, n);
-                                    } catch (Exception ignored) {}
+                    if (completeEnough && targetFile != null) {
+                        boolean published = false;
+                        synchronized (state) {
+                            if (!state.cancelled && !isCompleteAudioCacheFile(targetFile)) {
+                                if (targetFile.exists()) {
+                                    //noinspection ResultOfMethodCallIgnored
+                                    targetFile.delete();
+                                }
+                                // Same-directory rename publishes the only completed artifact atomically;
+                                // aliases are metadata pointers, never copied audio files.
+                                if (tmpFile.renameTo(targetFile)) {
+                                    tmpFile = null;
+                                    published = true;
                                 }
                             }
+                        }
+                        if (published) {
+                            writeAudioCacheMetadata(dir, canonicalKey, cacheKeys, videoId, title, artist, isrc, expectedDurationMs);
                             pruneAudioCacheDir(dir);
                         }
                     }
                 }
             } catch (Exception ignored) {
             } finally {
+                state.connection = null;
                 if (con != null) con.disconnect();
                 if (tmpFile != null && tmpFile.exists()) {
                     //noinspection ResultOfMethodCallIgnored
                     tmpFile.delete();
                 }
-                activeAudioCacheDownloads.remove(primaryKey);
+                releaseAudioCacheDownload(state);
             }
         });
     }
@@ -2668,7 +3026,18 @@ public class MuchiAudioService extends Service {
         return new String(out.toByteArray(), StandardCharsets.UTF_8);
     }
 
+    private void cancelPendingCacheStart() {
+        if (pendingCacheStart != null) {
+            ticker.removeCallbacks(pendingCacheStart);
+            pendingCacheStart = null;
+        }
+        // Phase 3B: also stop an already-running cache connection for the
+        // current track; its temp file is discarded by the worker finally block.
+        cancelAudioCacheDownload(currentVideoId, trackTitle, trackArtist, trackIsrc);
+    }
+
     private synchronized void stopPlaybackInternal(boolean notifyJs) {
+        cancelPendingCacheStart();
         loadSeq++;
         ticker.removeCallbacks(tick);
         mirrorMode = false;
@@ -2848,34 +3217,56 @@ public class MuchiAudioService extends Service {
         if (l != null) l.onControls(message, positionMs);
     }
 
-    /** Download notification/session artwork off the main thread. */
+    /** Download notification/session artwork off the main thread with asset fallback. */
     private void fetchArtwork(String artworkUrl) {
         io.execute(() -> {
             Bitmap bmp = null;
-            HttpURLConnection con = null;
-            try {
-                con = (HttpURLConnection) new URL(artworkUrl).openConnection();
-                con.setConnectTimeout(8000);
-                con.setReadTimeout(8000);
-                con.setInstanceFollowRedirects(true);
-                con.setRequestProperty("User-Agent", DEFAULT_UA);
-                if (con.getResponseCode() == 200) {
-                    InputStream in = con.getInputStream();
-                    byte[] buf = new byte[256 * 1024];
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    int n, total = 0;
-                    while ((n = in.read(buf)) > 0 && total < 2 * 1024 * 1024) {
-                        out.write(buf, 0, n);
-                        total += n;
-                    }
-                    in.close();
-                    bmp = BitmapFactory.decodeByteArray(out.toByteArray(), 0, out.size());
-                }
-            } catch (Exception ignored) {
-                // Artwork is cosmetic — never fail playback over it.
-            } finally {
-                if (con != null) con.disconnect();
+            // 1. Fast path: use the bundled default for missing, local, or relative artwork.
+            if (artworkUrl == null || artworkUrl.isEmpty()
+                    || artworkUrl.contains("localhost")
+                    || artworkUrl.contains("cover-default")
+                    || artworkUrl.startsWith("/")) {
+                try (InputStream in = getAssets().open("public/cover-default.jpg")) {
+                    bmp = BitmapFactory.decodeStream(in);
+                } catch (Exception ignored) {}
             }
+
+            // 2. Remote artwork is cosmetic and stays off the playback thread.
+            if (bmp == null && artworkUrl != null
+                    && (artworkUrl.startsWith("http://") || artworkUrl.startsWith("https://"))) {
+                HttpURLConnection con = null;
+                try {
+                    con = (HttpURLConnection) new URL(artworkUrl).openConnection();
+                    con.setConnectTimeout(8000);
+                    con.setReadTimeout(8000);
+                    con.setInstanceFollowRedirects(true);
+                    con.setRequestProperty("User-Agent", DEFAULT_UA);
+                    if (con.getResponseCode() == 200) {
+                        InputStream in = con.getInputStream();
+                        byte[] buf = new byte[256 * 1024];
+                        ByteArrayOutputStream out = new ByteArrayOutputStream();
+                        int n, total = 0;
+                        while ((n = in.read(buf)) > 0 && total < 2 * 1024 * 1024) {
+                            out.write(buf, 0, n);
+                            total += n;
+                        }
+                        in.close();
+                        bmp = BitmapFactory.decodeByteArray(out.toByteArray(), 0, out.size());
+                    }
+                } catch (Exception ignored) {
+                    // Remote artwork failed — fall back to the bundled cover.
+                } finally {
+                    if (con != null) con.disconnect();
+                }
+            }
+
+            // 3. Always provide a valid native metadata image when remote artwork fails.
+            if (bmp == null) {
+                try (InputStream in = getAssets().open("public/cover-default.jpg")) {
+                    bmp = BitmapFactory.decodeStream(in);
+                } catch (Exception ignored) {}
+            }
+
             final Bitmap finalBmp = bmp;
             ticker.post(() -> {
                 if (finalBmp == null) return;
